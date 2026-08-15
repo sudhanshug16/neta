@@ -40,8 +40,13 @@ export function leaderLayout(leader: ProcessSpec): string {
 		'            plugin location="zellij:status-bar"',
 		"        }",
 		"    }",
-		`    pane name=${kdlString("neta leader")} close_on_exit=true command=${kdlString(leader.command)} {`,
-		args ? `        args ${args}` : undefined,
+		// The leader has to sit inside an explicit `tab`. A pane declared at the top
+		// level becomes a tab that skips the template, which is why the leader's
+		// tab had no tab bar while every worker tab did.
+		`    tab name=${kdlString("leader")} {`,
+		`        pane name=${kdlString("neta leader")} close_on_exit=true command=${kdlString(leader.command)} {`,
+		args ? `            args ${args}` : undefined,
+		"        }",
 		"    }",
 		"}",
 		"",

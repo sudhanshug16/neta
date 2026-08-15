@@ -71,6 +71,18 @@ describe("zellij", () => {
 		expect(layout).toContain("default_tab_template");
 	});
 
+	// Checked against a running session with `zellij action dump-layout`: a pane
+	// declared at the top level becomes a tab that skips the template, so the
+	// leader's own tab had no tab bar while every worker tab had one — you could
+	// only see the tabs existed once you had already left the leader.
+	it("puts the leader inside a tab, so the template reaches it", () => {
+		const layout = leaderLayout(leader);
+
+		expect(layout).toContain('tab name="leader"');
+		const tabStart = layout.indexOf('tab name="leader"');
+		expect(layout.indexOf('name="neta leader"')).toBeGreaterThan(tabStart);
+	});
+
 	// Quitting the leader should end the session, not leave a dead pane behind.
 	it("closes the leader's pane when the leader exits", () => {
 		expect(leaderLayout(leader)).toContain("close_on_exit=true");
