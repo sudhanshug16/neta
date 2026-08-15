@@ -60,6 +60,36 @@ describe("zellij", () => {
 		expect(layout).toContain('args "--append-system-prompt" "be a lead"');
 	});
 
+	// A custom layout replaces zellij's own UI. Without these the user gets
+	// worker tabs with no tab bar to see them and no status bar telling them how
+	// to quit — which is how someone ends up trapped in a multiplexer.
+	it("keeps zellij's tab bar and status bar", () => {
+		const layout = leaderLayout(leader);
+
+		expect(layout).toContain('plugin location="zellij:tab-bar"');
+		expect(layout).toContain('plugin location="zellij:status-bar"');
+		expect(layout).toContain("default_tab_template");
+	});
+
+	// Quitting the leader should end the session, not leave a dead pane behind.
+	it("closes the leader's pane when the leader exits", () => {
+		expect(leaderLayout(leader)).toContain("close_on_exit=true");
+	});
+
+	// Otherwise `zellij list-sessions` fills up with "EXITED - attach to
+	// resurrect" entries the user has to delete by hand.
+	it("does not leave the finished session lying around to be resurrected", () => {
+		expect(newSessionArgs("neta-1", "/tmp/layout.kdl")).toEqual([
+			"--session",
+			"neta-1",
+			"--new-session-with-layout",
+			"/tmp/layout.kdl",
+			"options",
+			"--session-serialization",
+			"false",
+		]);
+	});
+
 	it("escapes quotes rather than breaking the layout", () => {
 		const layout = leaderLayout({ command: "/bin/agent", args: ['say "hi"'] });
 
@@ -94,7 +124,12 @@ describe("zellij", () => {
 
 		const wrapped = new ZellijAdapter().wrapLeader(leader, "neta-1", dir);
 
-		expect(wrapped?.args).toEqual(["--session", "neta-1", "--new-session-with-layout", join(dir, "layout.kdl")]);
+		expect(wrapped?.args.slice(0, 4)).toEqual([
+			"--session",
+			"neta-1",
+			"--new-session-with-layout",
+			join(dir, "layout.kdl"),
+		]);
 		expect(readFileSync(join(dir, "layout.kdl"), "utf-8")).toContain("neta leader");
 	});
 
@@ -105,7 +140,7 @@ describe("zellij", () => {
 	it("asks for a new session, not a tab in one that does not exist", () => {
 		const args = newSessionArgs("neta-1", "/tmp/layout.kdl");
 
-		expect(args).toEqual(["--session", "neta-1", "--new-session-with-layout", "/tmp/layout.kdl"]);
+		expect(args.slice(0, 4)).toEqual(["--session", "neta-1", "--new-session-with-layout", "/tmp/layout.kdl"]);
 		expect(args).not.toContain("--layout");
 	});
 });

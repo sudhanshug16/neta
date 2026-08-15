@@ -17,6 +17,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
+import { sanitizeInheritedEnv } from "./acp/connection.ts";
 import { adapterFor } from "./adapters/index.ts";
 import { createChannelAddress } from "./channel/protocol.ts";
 import { resolveSelfInvocation } from "./cli-shim.ts";
@@ -135,11 +136,24 @@ export async function launchLeader(options: LaunchOptions): Promise<number> {
 			: launch;
 
 	for (const warning of launch.warnings) process.stderr.write(`${APP_NAME}: ${warning}\n`);
+	const showing = config.mux.panes && mux.id !== "none";
 	process.stderr.write(
-		`${APP_NAME}: leading with ${backend.name}; workers ${config.mux.panes && mux.id !== "none" ? `in ${mux.id} panes` : "headless"}.\n`,
+		`${APP_NAME}: leading with ${backend.name} · workers ${showing ? `in ${mux.id} tabs` : "headless"}` +
+			// Being dropped inside a multiplexer you did not choose, with no idea how
+			// to leave, is its own kind of trap.
+			`${wrapped !== launch ? " · quitting the leader ends the session" : ""}\n`,
 	);
 
-	const env = { ...process.env, ...launch.env, NETA_MUX: mux.id, NETA_PANES: config.mux.panes ? "1" : "0" };
+	// The leader is a fresh session of that vendor's CLI, exactly like a worker
+	// is, so it must not inherit the runtime of whatever agent session Neta was
+	// started from — running `neta` inside Claude Code otherwise hands the new
+	// leader its parent's session variables and job directory.
+	const env = {
+		...sanitizeInheritedEnv(process.env),
+		...launch.env,
+		NETA_MUX: mux.id,
+		NETA_PANES: config.mux.panes ? "1" : "0",
+	};
 	const run = (spec: { command: string; args: string[] }) =>
 		new Promise<number>((resolve) => {
 			// The control plane is the process that opens panes, and it is a child

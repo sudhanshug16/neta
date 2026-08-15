@@ -17,11 +17,30 @@ function kdlString(value: string): string {
 	return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
 }
 
+/**
+ * The layout the leader's session starts from.
+ *
+ * Two things here are not decoration. The tab template restores zellij's own
+ * tab bar and status bar: a custom layout replaces them, and without them a
+ * user gets worker tabs they cannot see and no on-screen hint for how to quit.
+ * And `close_on_exit` on the leader means quitting the leader closes its pane,
+ * which lets the session end on its own instead of stranding the user inside a
+ * multiplexer they did not ask to be in.
+ */
 export function leaderLayout(leader: ProcessSpec): string {
 	const args = leader.args.map(kdlString).join(" ");
 	const lines = [
 		"layout {",
-		`    pane name=${kdlString("neta leader")} command=${kdlString(leader.command)} {`,
+		"    default_tab_template {",
+		"        pane size=1 borderless=true {",
+		'            plugin location="zellij:tab-bar"',
+		"        }",
+		"        children",
+		"        pane size=2 borderless=true {",
+		'            plugin location="zellij:status-bar"',
+		"        }",
+		"    }",
+		`    pane name=${kdlString("neta leader")} close_on_exit=true command=${kdlString(leader.command)} {`,
 		args ? `        args ${args}` : undefined,
 		"    }",
 		"}",
@@ -39,7 +58,19 @@ export function leaderLayout(leader: ProcessSpec): string {
  * no active session!". `--new-session-with-layout` always creates one.
  */
 export function newSessionArgs(sessionName: string, layoutPath: string): string[] {
-	return ["--session", sessionName, "--new-session-with-layout", layoutPath];
+	return [
+		"--session",
+		sessionName,
+		"--new-session-with-layout",
+		layoutPath,
+		// Otherwise every finished session stays in `zellij list-sessions` as
+		// "EXITED - attach to resurrect", and a few days of Neta leaves a list of
+		// dead sessions the user has to clean up by hand. There is nothing to
+		// resurrect: the leader and its workers are gone.
+		"options",
+		"--session-serialization",
+		"false",
+	];
 }
 
 /**
