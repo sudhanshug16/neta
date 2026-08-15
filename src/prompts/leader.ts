@@ -127,6 +127,20 @@ export function buildLeaderPrompt(options: LeaderPromptOptions): string {
 		.join(", ");
 	const s = surface(control, toolName);
 
+	// A user with no charter and no tier mappings never chose a policy, so the
+	// first staffing plan is where they learn one exists and how to change it.
+	const disclosure =
+		!options.charter && !mapping
+			? `
+
+No charter and no tier mappings are configured, so the user is running on
+defaults they never chose. The first staffing plan of the session must state
+the assignment policy in effect — unconfigured tiers spread round-robin across
+installed backends; reviewer/debater diversity rule on — and how to change it:
+a CHARTER.md in this repo or in ~/.neta/, or persisted tier overrides in
+.neta/settings.json via neta_remember.`
+			: "";
+
 	// Embedded rather than referenced: the leader runs in someone else's CLI, so
 	// there is no guarantee it would read a path we merely pointed at.
 	const charter = options.charter
@@ -184,7 +198,7 @@ and present them to the user as a numbered staffing plan. Then proceed
 immediately without waiting for approval. The user may request changes
 conversationally ("use codex for the reviewer", "remember that senior scouts run
 on opencode"). Apply requested changes as explicit backend overrides when you
-spawn.
+spawn.${disclosure}
 
 When the user says "remember" after a backend override, use neta_remember to
 persist the change to .neta/settings.json so future sessions use the updated

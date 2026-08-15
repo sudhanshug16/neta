@@ -119,6 +119,32 @@ describe("leader prompt", () => {
 
 		expect(prompt).toContain("(none — all tiers use spread policy)");
 	});
+
+	// Defaults the user never chose have to be announced, or the first session
+	// silently runs on a policy they do not know exists.
+	it("tells the leader to disclose the policy when nothing is configured", () => {
+		const prompt = buildLeaderPrompt({ tiers: DEFAULT_TIERS });
+
+		expect(prompt).toContain("first staffing plan of the session must state");
+		expect(prompt).toContain("round-robin across\ninstalled backends; reviewer/debater diversity rule on");
+		expect(prompt).toContain("a CHARTER.md in this repo or in ~/.neta/");
+		expect(prompt).toContain(".neta/settings.json via neta_remember");
+	});
+
+	it("skips the policy disclosure when a charter exists", () => {
+		const prompt = buildLeaderPrompt({
+			tiers: DEFAULT_TIERS,
+			charter: { path: "/repo/CHARTER.md", text: "Merge PRs on my behalf." },
+		});
+
+		expect(prompt).not.toContain("first staffing plan of the session");
+	});
+
+	it("skips the policy disclosure when a tier mapping is configured", () => {
+		const prompt = buildLeaderPrompt({ tiers: { senior: { backend: "codex" } } });
+
+		expect(prompt).not.toContain("first staffing plan of the session");
+	});
 });
 
 describe("charter loading", () => {
