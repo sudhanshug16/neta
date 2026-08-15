@@ -79,7 +79,7 @@ each **vendor's own mechanisms**, kernel sandbox where available.
 | CLI router, launcher, backend detection | `src/cli.ts`, `src/launch.ts`, `src/detect.ts` |
 | Leader adapters (Claude Code, Codex, OpenCode) | `src/adapters/` |
 | MCP control plane and worker bridge | `src/mcp/` |
-| Orchestrator: tiers, assignment policy, writer slot, rooms, logs, usage | `src/orchestrator/` |
+| Orchestrator: tiers, assignment policy, writer slot, writer queue, notes ledger, rooms, logs, usage | `src/orchestrator/` |
 | ACP worker transport and permission gate | `src/acp/` |
 | Worker channel: protocol, socket server, CLI | `src/channel/` |
 | Multiplexer adapters and panes | `src/mux/` |
@@ -121,7 +121,7 @@ construction is unit-tested only.
 | `neta` drops the user into the vendor UI with `neta_*` tools and no write access | built; launch path tested end to end with a fixture vendor CLI |
 | Worker completion wakes the leader through blocking `neta_wait` with the worker's own summary | verified in the end-to-end test |
 | A read-only worker's edits are rejected; the writer's are allowed | verified against a real ACP worker process |
-| Second writer refused; junior `ask` refused | verified |
+| Second writer queued; starts automatically when slot frees; junior `ask` refused | verified |
 | Workers visible in panes; headless fallback | tmux verified live; zellij unit-tested |
 | Delegation failure reported honestly rather than faked | prompt rule in place; no scripted model test (needs a paid run) |
 | `neta workers` shows per-worker token usage | verified |

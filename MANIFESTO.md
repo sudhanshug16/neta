@@ -118,6 +118,9 @@ keystrokes typed into someone else's terminal:
   `.neta/settings.json` (JSON rewrite; comments not preserved).
 - `neta_wait` — blocks the leader until named workers reach a terminal state,
   and returns what they said.
+- `neta_note` — open-notes ledger for recording parked work, pending decisions,
+  and promised follow-ups. Workers can be linked to notes; when a worker
+  finishes, its state lands on the note. Close when verified done.
 
 Two doors reach the same orchestrator: MCP tools, which the leader uses because
 they run outside its sandbox, and a Unix socket with the `neta` CLI, which
@@ -132,8 +135,10 @@ All workers run in the directory they were spawned in.
   discipline — protocol enforcement, identical across backends. A worker's
   *shell* is only sandboxed where its backend supports it; that gap is
   documented rather than assumed away.
-- **Single writer slot.** The spawn tool errors if a writer is already active.
-  Reads and thinking parallelize; repo writes serialize.
+- **Single writer slot.** When a writer is already active, additional writer
+  spawns queue automatically (FIFO) and start when the slot frees. Queued
+  workers can be killed. The spawn result says queued vs running. Reads and
+  thinking parallelize; repo writes serialize.
 - **Commit on handoff.** A writer commits everything before finishing, with a
   message stating what was done and why. The next writer is briefed from
   `git log` — cheap, durable context transfer.
