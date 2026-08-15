@@ -73,6 +73,8 @@ interface WorkerRecord {
 	mode?: string;
 	/** Note this worker is linked to. */
 	noteId?: string;
+	/** Writer holding the slot this worker is queued behind. */
+	queuedBehind?: string;
 	/** Messages sent while queued, delivered when started. */
 	pendingBrief: string[];
 }
@@ -235,12 +237,20 @@ export class WorkerManager implements ChannelHandler {
 		this.workers.set(id, record);
 		if (request.room) this.ensureRoom(request.room);
 
-		// If queued, add to queue and return early
+		// Linked at spawn, not at finish: the ledger shows the note as being
+		// worked while the worker runs, instead of "(unworked)".
+		if (record.noteId) {
+			this.notes.get(record.noteId)?.workers.push({ workerId: id, state: record.state });
+		}
+
+		// If queued, add to queue and return early. The queue notice is
+		// spawn-response text, not a result: an earlier version stored it in
+		// record.result and every listing showed it as the worker's output.
 		if (shouldQueue) {
 			this.writerQueue.push(id);
 			const queuedBehind = this.activeWriter;
 			const holderInfo = queuedBehind ? this.workers.get(queuedBehind) : undefined;
-			record.result = `Queued ${id} (writer) behind ${queuedBehind}; starts automatically when the writer slot frees.`;
+			record.queuedBehind = queuedBehind;
 			this.appendLog(
 				record,
 				"status",
@@ -581,7 +591,10 @@ export class WorkerManager implements ChannelHandler {
 					});
 					const access = summary.writer ? "writer" : "read-only";
 					if (summary.state === "queued") {
-						return { ok: true, text: summary.result ?? `Queued ${summary.id}` };
+						return {
+							ok: true,
+							text: `Queued ${summary.id} (writer) behind ${summary.queuedBehind}; starts automatically when the writer slot frees.`,
+						};
 					}
 					return {
 						ok: true,
@@ -762,6 +775,10 @@ export class WorkerManager implements ChannelHandler {
 
 	private setState(record: WorkerRecord, state: WorkerState): void {
 		record.state = state;
+		if (record.noteId) {
+			const link = this.notes.get(record.noteId)?.workers.find((w) => w.workerId === record.id);
+			if (link) link.state = state;
+		}
 	}
 
 	private enqueue(record: WorkerRecord, message: string): void {
@@ -799,7 +816,7 @@ export class WorkerManager implements ChannelHandler {
 	}
 
 	private finish(record: WorkerRecord, state: WorkerState, result: string): void {
-		record.state = state;
+		this.setState(record, state);
 		record.endedAt = Date.now();
 		record.result = result;
 		if (record.driver) record.driver.markTerminal();
@@ -808,14 +825,6 @@ export class WorkerManager implements ChannelHandler {
 		// every pane. The state is the news; the text is not. Failures still carry
 		// their reason, which did not stream.
 		this.appendLog(record, state === "done" ? "status" : "error", state === "done" ? "done" : `${state}: ${result}`);
-
-		// Link worker terminal state to note if present
-		if (record.noteId) {
-			const note = this.notes.get(record.noteId);
-			if (note) {
-				note.workers.push({ workerId: record.id, state });
-			}
-		}
 
 		const wasActiveWriter = this.activeWriter === record.id;
 		if (wasActiveWriter) this.activeWriter = undefined;
@@ -969,6 +978,7 @@ export class WorkerManager implements ChannelHandler {
 			startedAt: record.startedAt,
 			endedAt: record.endedAt,
 			result: record.result,
+			queuedBehind: record.state === "queued" ? record.queuedBehind : undefined,
 			pendingQuestion: record.pendingAsk?.question,
 			scratchDir: record.scratchDir,
 			usage: record.usage,

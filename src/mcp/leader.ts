@@ -12,7 +12,7 @@
 
 import type { WorkerManager } from "../orchestrator/manager.ts";
 import { roleNames } from "../prompts/roles.ts";
-import { formatUsage, isTier, TIERS, type WorkerLogEntry, type WorkerSummary } from "../types.ts";
+import { formatUsage, isTier, type Note, TIERS, type WorkerLogEntry, type WorkerSummary } from "../types.ts";
 import {
 	type McpTool,
 	optionalBoolean,
@@ -78,16 +78,18 @@ function statusReport(summaries: WorkerSummary[], maxResultChars = MAX_RESULT_CH
 		.join("\n\n");
 }
 
+/** "(unworked)", or the linked workers with their progress: "(w7 in progress, w8 queued)". */
+function noteWorkersLabel(note: Note): string {
+	if (note.workers.length === 0) return " (unworked)";
+	return ` (${note.workers.map((w) => `${w.workerId} ${w.state === "running" ? "in progress" : w.state}`).join(", ")})`;
+}
+
 function formatOpenNotes(manager: WorkerManager): string {
 	const openNotes = manager.getOpenNotes();
 	if (openNotes.length === 0) return "";
 	const lines = openNotes.map((note) => {
 		const textClipped = note.text.length > 80 ? `${note.text.slice(0, 77)}...` : note.text;
-		const workersText =
-			note.workers.length > 0
-				? ` (${note.workers.map((w) => `${w.workerId} ${w.state}`).join(", ")})`
-				: " (unworked)";
-		return `${note.id} "${textClipped}"${workersText}`;
+		return `${note.id} "${textClipped}"${noteWorkersLabel(note)}`;
 	});
 	return `\n\nOpen notes: ${lines.join(" | ")}`;
 }
@@ -163,9 +165,11 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 					room: optionalString(args, "room"),
 					note: optionalString(args, "note"),
 				});
-				return text(
-					`${summary.state === "running" ? "Spawned" : summary.result}\n${describe(summary)}\nScratch: ${summary.scratchDir}`,
-				);
+				const headline =
+					summary.state === "queued"
+						? `Queued behind ${summary.queuedBehind}; starts automatically when the writer slot frees.`
+						: "Spawned";
+				return text(`${headline}\n${describe(summary)}\nScratch: ${summary.scratchDir}`);
 			},
 		},
 		{
@@ -339,7 +343,10 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 		},
 		{
 			name: "neta_send",
-			description: "Send a follow-up instruction to a worker that has finished its current turn.",
+			description:
+				"Send a follow-up instruction to a worker: a running worker receives it as its next prompt turn when " +
+				"the current turn ends; a queued worker gets it appended to its pending brief, delivered when it " +
+				"starts. A finished worker errors; spawn a new worker instead.",
 			inputSchema: {
 				type: "object",
 				properties: { workerId: { type: "string" }, message: { type: "string" } },
@@ -405,8 +412,8 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 			description:
 				"Record parked work, pending decisions, or promised follow-ups in the open-notes ledger. " +
 				"Create a note with {text}, close it with {close: noteId}. Call with no args to list all open notes. " +
-				"Link workers to notes via the note param on spawn; when a worker reaches a terminal state, " +
-				"its state is recorded on the note. Notes are session-scoped and in-memory.",
+				"Link workers to notes via the note param on spawn; each linked worker's state is tracked on the " +
+				"note from spawn to finish. Notes are session-scoped and in-memory.",
 			inputSchema: {
 				type: "object",
 				properties: {
@@ -435,17 +442,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 				// List all open notes
 				const openNotes = manager.getOpenNotes();
 				if (openNotes.length === 0) return text("No open notes.");
-				return text(
-					openNotes
-						.map((note) => {
-							const workersText =
-								note.workers.length > 0
-									? ` (${note.workers.map((w) => `${w.workerId} ${w.state}`).join(", ")})`
-									: " (unworked)";
-							return `${note.id} "${note.text}"${workersText}`;
-						})
-						.join("\n"),
-				);
+				return text(openNotes.map((note) => `${note.id} "${note.text}"${noteWorkersLabel(note)}`).join("\n"));
 			},
 		},
 		{

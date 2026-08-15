@@ -134,6 +134,8 @@ export interface WorkerSummary {
 	endedAt?: number;
 	/** Set once the worker reaches a terminal state. */
 	result?: string;
+	/** Writer holding the slot, while this worker's state is "queued". */
+	queuedBehind?: string;
 	/** Question the worker is blocked on, when state is "waiting". */
 	pendingQuestion?: string;
 	scratchDir: string;
@@ -153,7 +155,7 @@ export interface WorkerSummary {
 	mode?: string;
 }
 
-/** A worker that finished and landed on a note. */
+/** A worker linked to a note, tracked from spawn through its terminal state. */
 export interface NoteWorkerLink {
 	workerId: string;
 	state: WorkerState;
@@ -166,7 +168,7 @@ export interface Note {
 	open: boolean;
 	createdAt: number;
 	closedAt?: number;
-	/** Workers linked to this note, with their terminal state. */
+	/** Workers linked to this note, with their current state. */
 	workers: NoteWorkerLink[];
 }
 

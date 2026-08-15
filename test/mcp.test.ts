@@ -121,6 +121,41 @@ describe("leader MCP tools", () => {
 		expect(bodyOf(second)).toContain("Queued");
 	});
 
+	it("shows linked worker progress in the open-notes footer", async () => {
+		await call("neta_note", { text: "auth work" });
+		await call("neta_spawn", { role: "worker", tier: "senior", task: "auth", writer: true, note: "n1" });
+		await call("neta_note", { text: "docs pass" });
+		await call("neta_spawn", { role: "worker", tier: "senior", task: "docs", writer: true, note: "n2" });
+		await call("neta_note", { text: "cost estimate" });
+
+		const body = bodyOf(await call("neta_workers"));
+		expect(body).toContain('n1 "auth work" (w1 in progress)');
+		expect(body).toContain('n2 "docs pass" (w2 queued)');
+		expect(body).toContain('n3 "cost estimate" (unworked)');
+
+		// neta_wait carries the same footer.
+		const waited = bodyOf(await call("neta_wait", { workerIds: ["w1"], timeoutSeconds: 0 }));
+		expect(waited).toContain('n1 "auth work" (w1 in progress)');
+	});
+
+	it("keeps the done form in the footer once a linked worker finishes", async () => {
+		await call("neta_note", { text: "auth work" });
+		await call("neta_spawn", { role: "worker", tier: "senior", task: "auth", note: "n1" });
+		transports[0].finish({ ok: true, summary: "done" });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		expect(bodyOf(await call("neta_workers"))).toContain('n1 "auth work" (w1 done)');
+	});
+
+	it("shows no result line for workers that have not finished", async () => {
+		await call("neta_spawn", { role: "worker", tier: "senior", task: "first", writer: true });
+		await call("neta_spawn", { role: "worker", tier: "senior", task: "second", writer: true });
+
+		const body = bodyOf(await call("neta_workers"));
+		expect(body).not.toContain("result:");
+		expect(body).not.toContain("starts automatically");
+	});
+
 	it("rejects an unknown tier before spawning anything", async () => {
 		const result = await call("neta_spawn", { role: "scout", tier: "principal", task: "x" });
 

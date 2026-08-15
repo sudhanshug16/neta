@@ -140,8 +140,7 @@ describe("WorkerManager", () => {
 
 		const second = await manager.spawn({ role: "worker", tier: "senior", task: "other change", writer: true });
 		expect(second.state).toBe("queued");
-		expect(second.result).toContain(`Queued ${second.id}`);
-		expect(second.result).toContain(first.id);
+		expect(second.queuedBehind).toBe(first.id);
 
 		// A read-only worker alongside the writer is fine.
 		await manager.spawn({ role: "scout", tier: "junior", task: "read the tests" });
@@ -319,6 +318,28 @@ describe("WorkerManager", () => {
 			expect(transports[1].prompts[0]).toContain("and update docs");
 		});
 
+		// The spawn-time queue notice used to be stored in record.result, so every
+		// listing showed it as the worker's output long after the worker started.
+		it("keeps result empty until a queued worker actually finishes", async () => {
+			const first = await manager.spawn({ role: "worker", tier: "senior", task: "first", writer: true });
+			const second = await manager.spawn({ role: "worker", tier: "senior", task: "second", writer: true });
+
+			expect(second.result).toBeUndefined();
+
+			transports[0].finish({ ok: true, summary: "first done" });
+			await manager.waitFor([first.id], 5000);
+			await flush();
+
+			const running = manager.get(second.id);
+			expect(running.state).toBe("running");
+			expect(running.result).toBeUndefined();
+			expect(running.queuedBehind).toBeUndefined();
+
+			transports[1].finish({ ok: true, summary: "second done" });
+			await manager.waitFor([second.id], 5000);
+			expect(manager.get(second.id).result).toBe("second done");
+		});
+
 		it("allows read-only workers to spawn while queue exists", async () => {
 			await manager.spawn({ role: "worker", tier: "senior", task: "first", writer: true });
 			await manager.spawn({ role: "worker", tier: "senior", task: "second", writer: true });
@@ -373,6 +394,33 @@ describe("WorkerManager", () => {
 			const updatedNote = manager.listNotes().find((n) => n.id === note.id);
 			expect(updatedNote?.workers).toHaveLength(1);
 			expect(updatedNote?.workers[0]).toEqual({ workerId: summary.id, state: "done" });
+		});
+
+		it("links worker to note at spawn and tracks its live state", async () => {
+			const note = manager.createNote("implement auth");
+			const summary = await manager.spawn({
+				role: "worker",
+				tier: "senior",
+				task: "implement auth flow",
+				note: note.id,
+			});
+
+			expect(manager.getOpenNotes()[0].workers).toEqual([{ workerId: summary.id, state: "running" }]);
+		});
+
+		it("shows a queued linked worker as queued on the note", async () => {
+			await manager.spawn({ role: "worker", tier: "senior", task: "hold the slot", writer: true });
+			const note = manager.createNote("follow-up change");
+			const queued = await manager.spawn({
+				role: "worker",
+				tier: "senior",
+				task: "next change",
+				writer: true,
+				note: note.id,
+			});
+
+			expect(queued.state).toBe("queued");
+			expect(manager.getOpenNotes()[0].workers).toEqual([{ workerId: queued.id, state: "queued" }]);
 		});
 
 		it("errors when spawning with unknown note id", async () => {
