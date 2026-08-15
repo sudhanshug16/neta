@@ -84,9 +84,10 @@ The tier-to-backend mapping lives in settings and may be left unconfigured.
 Unconfigured tiers are assigned deterministically: spread round-robin across
 installed backends, with reviewer/debater roles preferring a different backend
 than the most recent writer when multiple backends are installed (diversity
-rule). Explicit overrides pass through `backend` on spawn; `neta_remember`
-persists them to `.neta/settings.json`. `neta_plan` computes assignments
-without spawning, so the leader can present a staffing plan before proceeding.
+rule). Debaters in one room are spread across different vendors automatically.
+Explicit overrides pass through `backend` on spawn; `neta_remember` persists
+them to `.neta/settings.json`. `neta_plan` computes assignments without
+spawning, so the leader can present a staffing plan before proceeding.
 
 ### Roles
 

@@ -176,7 +176,8 @@ Backend assignments are computed deterministically from tier mappings and the
 spread/diversity policy. Configured mappings: ${mapping || "(none — all tiers use spread policy)"}. Unconfigured tiers
 are spread across installed backends via round-robin; reviewer/debater roles
 default to a different backend than the most recent writer when multiple
-backends are installed (diversity rule).
+backends are installed (diversity rule). Debaters in one room are automatically
+spread across different vendors.
 
 Before spawning workers for a task, use neta_plan to compute backend assignments
 and present them to the user as a numbered staffing plan. Then proceed

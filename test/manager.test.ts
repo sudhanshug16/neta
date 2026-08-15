@@ -805,5 +805,410 @@ describe("WorkerManager", () => {
 			await multiManager.dispose();
 			rmSync("/tmp/neta-test-diversity-plan.sock", { force: true });
 		});
+
+		it("assigns debaters in one room to different backends automatically", async () => {
+			const multiConfig = new NetaConfig();
+			const mockInstalledBackends = () => ["claude", "codex"];
+			multiConfig.installedBackends = mockInstalledBackends;
+
+			const multiManager = new WorkerManager({
+				cwd: process.cwd(),
+				agentDir: "/nonexistent-agent-dir",
+				config: multiConfig,
+				channelAddress: "/tmp/neta-test-room-mix.sock",
+				onEvent: () => {},
+				createTransport: (options) => {
+					const transport = new FakeTransport(options);
+					transports.push(transport);
+					return transport;
+				},
+			});
+
+			// Spawn two debaters in the same room
+			const debater1 = await multiManager.spawn({
+				role: "debater",
+				tier: "staff",
+				task: "argue for postgres",
+				room: "db-debate",
+			});
+			const debater2 = await multiManager.spawn({
+				role: "debater",
+				tier: "staff",
+				task: "argue for sqlite",
+				room: "db-debate",
+			});
+
+			// They should be on different backends
+			expect(debater1.backend).not.toBe(debater2.backend);
+			expect([debater1.backend, debater2.backend].sort()).toEqual(["claude", "codex"]);
+
+			await multiManager.dispose();
+			rmSync("/tmp/neta-test-room-mix.sock", { force: true });
+		});
+
+		it("cycles backends when all are used by debaters in one room", async () => {
+			const multiConfig = new NetaConfig();
+			const mockInstalledBackends = () => ["claude", "codex"];
+			multiConfig.installedBackends = mockInstalledBackends;
+
+			const multiManager = new WorkerManager({
+				cwd: process.cwd(),
+				agentDir: "/nonexistent-agent-dir",
+				config: multiConfig,
+				channelAddress: "/tmp/neta-test-room-cycle.sock",
+				onEvent: () => {},
+				createTransport: (options) => {
+					const transport = new FakeTransport(options);
+					transports.push(transport);
+					return transport;
+				},
+			});
+
+			// Spawn three debaters in the same room (more than available backends)
+			const debater1 = await multiManager.spawn({
+				role: "debater",
+				tier: "staff",
+				task: "first",
+				room: "multi-debate",
+			});
+			const debater2 = await multiManager.spawn({
+				role: "debater",
+				tier: "staff",
+				task: "second",
+				room: "multi-debate",
+			});
+			const debater3 = await multiManager.spawn({
+				role: "debater",
+				tier: "staff",
+				task: "third",
+				room: "multi-debate",
+			});
+
+			// First two should use different backends
+			expect(debater1.backend).not.toBe(debater2.backend);
+
+			// Third cycles back
+			expect(debater3.backend).toBe(debater1.backend);
+
+			await multiManager.dispose();
+			rmSync("/tmp/neta-test-room-cycle.sock", { force: true });
+		});
+
+		it("tracks room debater backends independently for different rooms", async () => {
+			const multiConfig = new NetaConfig();
+			const mockInstalledBackends = () => ["claude", "codex"];
+			multiConfig.installedBackends = mockInstalledBackends;
+
+			const multiManager = new WorkerManager({
+				cwd: process.cwd(),
+				agentDir: "/nonexistent-agent-dir",
+				config: multiConfig,
+				channelAddress: "/tmp/neta-test-room-independent.sock",
+				onEvent: () => {},
+				createTransport: (options) => {
+					const transport = new FakeTransport(options);
+					transports.push(transport);
+					return transport;
+				},
+			});
+
+			// Spawn debaters in room A
+			const roomA1 = await multiManager.spawn({
+				role: "debater",
+				tier: "staff",
+				task: "a1",
+				room: "room-a",
+			});
+			const roomA2 = await multiManager.spawn({
+				role: "debater",
+				tier: "staff",
+				task: "a2",
+				room: "room-a",
+			});
+
+			// Spawn debaters in room B
+			const roomB1 = await multiManager.spawn({
+				role: "debater",
+				tier: "staff",
+				task: "b1",
+				room: "room-b",
+			});
+			const roomB2 = await multiManager.spawn({
+				role: "debater",
+				tier: "staff",
+				task: "b2",
+				room: "room-b",
+			});
+
+			// Room A debaters should use different backends
+			expect(roomA1.backend).not.toBe(roomA2.backend);
+
+			// Room B debaters should use different backends
+			expect(roomB1.backend).not.toBe(roomB2.backend);
+
+			// Both rooms should have gotten both backends (independent mixing)
+			expect([roomA1.backend, roomA2.backend].sort()).toEqual(["claude", "codex"]);
+			expect([roomB1.backend, roomB2.backend].sort()).toEqual(["claude", "codex"]);
+
+			await multiManager.dispose();
+			rmSync("/tmp/neta-test-room-independent.sock", { force: true });
+		});
+
+		it("respects explicit backend override for debaters over room mixing", async () => {
+			const multiConfig = new NetaConfig();
+			const mockInstalledBackends = () => ["claude", "codex"];
+			multiConfig.installedBackends = mockInstalledBackends;
+
+			const multiManager = new WorkerManager({
+				cwd: process.cwd(),
+				agentDir: "/nonexistent-agent-dir",
+				config: multiConfig,
+				channelAddress: "/tmp/neta-test-room-override.sock",
+				onEvent: () => {},
+				createTransport: (options) => {
+					const transport = new FakeTransport(options);
+					transports.push(transport);
+					return transport;
+				},
+			});
+
+			// First debater gets explicit override
+			const debater1 = await multiManager.spawn({
+				role: "debater",
+				tier: "staff",
+				task: "first",
+				room: "override-room",
+				backend: "codex",
+			});
+
+			// Second debater uses room mixing
+			const debater2 = await multiManager.spawn({
+				role: "debater",
+				tier: "staff",
+				task: "second",
+				room: "override-room",
+			});
+
+			// First should use the override
+			expect(debater1.backend).toBe("codex");
+
+			// Second may still end up on codex (explicit override doesn't affect room state)
+			// but should follow normal assignment logic
+			expect(["claude", "codex"]).toContain(debater2.backend);
+
+			await multiManager.dispose();
+			rmSync("/tmp/neta-test-room-override.sock", { force: true });
+		});
+
+		it("respects tier-configured backend for debaters over room mixing", async () => {
+			const multiConfig = new NetaConfig();
+			const mockInstalledBackends = () => ["claude", "codex"];
+			multiConfig.installedBackends = mockInstalledBackends;
+			// Configure staff tier to always use codex
+			multiConfig.tierMapping = () => ({ staff: { backend: "codex" } });
+
+			const multiManager = new WorkerManager({
+				cwd: process.cwd(),
+				agentDir: "/nonexistent-agent-dir",
+				config: multiConfig,
+				channelAddress: "/tmp/neta-test-room-tier-config.sock",
+				onEvent: () => {},
+				createTransport: (options) => {
+					const transport = new FakeTransport(options);
+					transports.push(transport);
+					return transport;
+				},
+			});
+
+			// Both debaters should use configured tier backend
+			const debater1 = await multiManager.spawn({
+				role: "debater",
+				tier: "staff",
+				task: "first",
+				room: "tier-room",
+			});
+			const debater2 = await multiManager.spawn({
+				role: "debater",
+				tier: "staff",
+				task: "second",
+				room: "tier-room",
+			});
+
+			// Both should use codex (tier config wins)
+			expect(debater1.backend).toBe("codex");
+			expect(debater2.backend).toBe("codex");
+
+			await multiManager.dispose();
+			rmSync("/tmp/neta-test-room-tier-config.sock", { force: true });
+		});
+
+		it("degrades gracefully with single installed backend for debaters", async () => {
+			// Single backend installed
+			const singleConfig = new NetaConfig();
+			const mockSingleBackend = () => ["claude"];
+			singleConfig.installedBackends = mockSingleBackend;
+
+			const singleManager = new WorkerManager({
+				cwd: process.cwd(),
+				agentDir: "/nonexistent-agent-dir",
+				config: singleConfig,
+				channelAddress: "/tmp/neta-test-room-single.sock",
+				onEvent: () => {},
+				createTransport: (options) => {
+					const transport = new FakeTransport(options);
+					transports.push(transport);
+					return transport;
+				},
+			});
+
+			const debater1 = await singleManager.spawn({
+				role: "debater",
+				tier: "staff",
+				task: "first",
+				room: "single-room",
+			});
+			const debater2 = await singleManager.spawn({
+				role: "debater",
+				tier: "staff",
+				task: "second",
+				room: "single-room",
+			});
+
+			// Both should use the only available backend
+			expect(debater1.backend).toBe("claude");
+			expect(debater2.backend).toBe("claude");
+
+			await singleManager.dispose();
+			rmSync("/tmp/neta-test-room-single.sock", { force: true });
+		});
+
+		it("does not apply room mixing to non-debater roles in a room", async () => {
+			const multiConfig = new NetaConfig();
+			const mockInstalledBackends = () => ["claude", "codex"];
+			multiConfig.installedBackends = mockInstalledBackends;
+
+			const multiManager = new WorkerManager({
+				cwd: process.cwd(),
+				agentDir: "/nonexistent-agent-dir",
+				config: multiConfig,
+				channelAddress: "/tmp/neta-test-room-non-debater.sock",
+				onEvent: () => {},
+				createTransport: (options) => {
+					const transport = new FakeTransport(options);
+					transports.push(transport);
+					return transport;
+				},
+			});
+
+			// Spawn a scout and a worker in a room (not debaters)
+			const scout = await multiManager.spawn({
+				role: "scout",
+				tier: "senior",
+				task: "explore",
+				room: "mixed-room",
+			});
+			const worker = await multiManager.spawn({
+				role: "worker",
+				tier: "senior",
+				task: "implement",
+				room: "mixed-room",
+			});
+
+			// They may end up on same or different backends (regular spread policy)
+			expect(["claude", "codex"]).toContain(scout.backend);
+			expect(["claude", "codex"]).toContain(worker.backend);
+
+			await multiManager.dispose();
+			rmSync("/tmp/neta-test-room-non-debater.sock", { force: true });
+		});
+
+		it("plan/spawn parity: planning and spawning debaters in same room produces identical backends", async () => {
+			const multiConfig = new NetaConfig();
+			const mockInstalledBackends = () => ["claude", "codex"];
+			multiConfig.installedBackends = mockInstalledBackends;
+
+			const multiManager = new WorkerManager({
+				cwd: process.cwd(),
+				agentDir: "/nonexistent-agent-dir",
+				config: multiConfig,
+				channelAddress: "/tmp/neta-test-room-parity.sock",
+				onEvent: () => {},
+				createTransport: (options) => {
+					const transport = new FakeTransport(options);
+					transports.push(transport);
+					return transport;
+				},
+			});
+
+			const requestList = [
+				{ role: "debater", tier: "staff" as const, room: "debate-x" },
+				{ role: "debater", tier: "staff" as const, room: "debate-x" },
+				{ role: "debater", tier: "senior" as const, room: "debate-y" },
+				{ role: "debater", tier: "senior" as const, room: "debate-y" },
+			];
+
+			// Plan the assignments
+			const plan = multiManager.planAssignments(requestList);
+
+			// Spawn the exact same list
+			const spawned = [];
+			for (const request of requestList) {
+				spawned.push(
+					await multiManager.spawn({
+						...request,
+						task: "task",
+					}),
+				);
+			}
+
+			// Verify backends match position by position
+			for (let i = 0; i < plan.length; i++) {
+				expect(spawned[i].backend).toBe(plan[i].backend);
+			}
+
+			// Verify room mixing worked: room-x debaters differ, room-y debaters differ
+			expect(plan[0].backend).not.toBe(plan[1].backend);
+			expect(plan[2].backend).not.toBe(plan[3].backend);
+
+			await multiManager.dispose();
+			rmSync("/tmp/neta-test-room-parity.sock", { force: true });
+		});
+
+		it("planAssignments is idempotent for debaters with rooms", async () => {
+			const multiConfig = new NetaConfig();
+			const mockInstalledBackends = () => ["claude", "codex"];
+			multiConfig.installedBackends = mockInstalledBackends;
+
+			const multiManager = new WorkerManager({
+				cwd: process.cwd(),
+				agentDir: "/nonexistent-agent-dir",
+				config: multiConfig,
+				channelAddress: "/tmp/neta-test-room-idempotent.sock",
+				onEvent: () => {},
+				createTransport: (options) => {
+					const transport = new FakeTransport(options);
+					transports.push(transport);
+					return transport;
+				},
+			});
+
+			const requestList = [
+				{ role: "debater", tier: "staff" as const, room: "room-z" },
+				{ role: "debater", tier: "staff" as const, room: "room-z" },
+			];
+
+			// Call planAssignments twice
+			const plan1 = multiManager.planAssignments(requestList);
+			const plan2 = multiManager.planAssignments(requestList);
+
+			// Verify both plans are identical
+			expect(plan1).toEqual(plan2);
+
+			// Verify room mixing worked
+			expect(plan1[0].backend).not.toBe(plan1[1].backend);
+
+			await multiManager.dispose();
+			rmSync("/tmp/neta-test-room-idempotent.sock", { force: true });
+		});
 	});
 });

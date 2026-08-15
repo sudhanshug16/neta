@@ -136,6 +136,8 @@ export class WorkerManager implements ChannelHandler {
 	private activeWriter: string | undefined;
 	/** Backend of the most recent writer, for diversity rule. Never cleared. */
 	private lastWriterBackend: string | undefined;
+	/** Per-room debater backend assignments, for room-scoped vendor mixing. */
+	private readonly roomDebaterBackends = new Map<string, string[]>();
 	/** Authorizes leader channel commands. Given only to the leader's own process. */
 	readonly leaderToken: string;
 	/** Open-notes ledger. */
@@ -193,6 +195,7 @@ export class WorkerManager implements ChannelHandler {
 		const backendName = this.computeBackendAssignment(request, {
 			cursors: this.spreadCursors,
 			lastWriterBackend: this.lastWriterBackend,
+			roomDebaterBackends: this.roomDebaterBackends,
 		});
 		const backend = this.options.config.resolve(request.tier, backendName, writer);
 		const runtimeEnv = (await this.options.prepareEnv?.()) ?? {};
@@ -283,6 +286,13 @@ export class WorkerManager implements ChannelHandler {
 		if (writer) {
 			this.activeWriter = id;
 			this.lastWriterBackend = backend.name;
+		}
+
+		// Track debater assignments in room state for room-scoped mixing
+		if (request.role === "debater" && request.room) {
+			const roomBackends = this.roomDebaterBackends.get(request.room) ?? [];
+			roomBackends.push(backend.name);
+			this.roomDebaterBackends.set(request.room, roomBackends);
 		}
 
 		try {
@@ -440,12 +450,15 @@ export class WorkerManager implements ChannelHandler {
 	 * will produce.
 	 */
 	planAssignments(
-		requests: Array<{ role: string; tier: Tier; writer?: boolean; backend?: string }>,
+		requests: Array<{ role: string; tier: Tier; writer?: boolean; backend?: string; room?: string }>,
 	): Array<{ role: string; tier: Tier; backend: string; writer: boolean }> {
-		// Deep copy state so planning never mutates live cursors
+		// Deep copy state so planning never mutates live cursors or room assignments
 		const simulatedState = {
 			cursors: new Map(this.spreadCursors),
 			lastWriterBackend: this.lastWriterBackend,
+			roomDebaterBackends: new Map(
+				[...this.roomDebaterBackends.entries()].map(([room, backends]) => [room, [...backends]]),
+			),
 		};
 
 		return requests.map((request) => {
@@ -462,6 +475,13 @@ export class WorkerManager implements ChannelHandler {
 			// Thread planned writers through the simulation
 			if (writer) {
 				simulatedState.lastWriterBackend = backendName;
+			}
+
+			// Thread planned debaters through room state simulation
+			if (request.role === "debater" && request.room) {
+				const roomBackends = simulatedState.roomDebaterBackends.get(request.room) ?? [];
+				roomBackends.push(backendName);
+				simulatedState.roomDebaterBackends.set(request.room, roomBackends);
 			}
 
 			return {
@@ -618,15 +638,21 @@ export class WorkerManager implements ChannelHandler {
 	 * pass to config.resolve(). Assignment logic:
 	 * 1. Explicit backend override (from user) takes precedence
 	 * 2. Tier's configured backend (from settings)
-	 * 3. Spread policy across installed backends (deterministic round-robin)
-	 * 4. Diversity rule: reviewer/debater roles prefer a different backend than
-	 *    the last writer when another backend is installed
+	 * 3. Room-scoped diversity for debaters: prefer an installed backend not yet
+	 *    used by that room's debaters
+	 * 4. Writer diversity rule: reviewer/debater roles prefer a different backend
+	 *    than the last writer when another backend is installed
+	 * 5. Spread policy across installed backends (deterministic round-robin)
 	 *
 	 * State object allows planning to simulate without mutating live state.
 	 */
 	private computeBackendAssignment(
 		request: SpawnRequest,
-		state: { cursors: Map<Tier, number>; lastWriterBackend: string | undefined },
+		state: {
+			cursors: Map<Tier, number>;
+			lastWriterBackend: string | undefined;
+			roomDebaterBackends: Map<string, string[]>;
+		},
 	): string {
 		// 1. Explicit backend override
 		if (request.backend) return request.backend;
@@ -636,7 +662,7 @@ export class WorkerManager implements ChannelHandler {
 		// 2. Tier's configured backend
 		if (mapping?.backend) return mapping.backend;
 
-		// 3. Spread policy with diversity rule
+		// 3. Spread policy with diversity rules
 		const installed = this.options.config.installedBackends();
 		if (installed.length === 0) {
 			throw new Error("No backends are installed. Install at least one backend (claude, codex, or opencode).");
@@ -645,8 +671,29 @@ export class WorkerManager implements ChannelHandler {
 		// Single backend: use it
 		if (installed.length === 1) return installed[0];
 
-		// Diversity rule: reviewer/debater roles prefer a different backend than
-		// the last writer when another backend is installed
+		// Room-scoped diversity rule for debaters: prefer an installed backend
+		// not yet used by this room's debaters. Cycles when all backends are used.
+		if (request.role === "debater" && request.room && installed.length > 1) {
+			const roomBackends = state.roomDebaterBackends.get(request.room) ?? [];
+			const unusedBackends = installed.filter((name) => !roomBackends.includes(name));
+			if (unusedBackends.length > 0) {
+				// Pick the first unused backend (deterministic)
+				const backend = unusedBackends[0];
+				// Track this assignment in state
+				const updated = [...roomBackends, backend];
+				state.roomDebaterBackends.set(request.room, updated);
+				return backend;
+			}
+			// All backends used; cycle round-robin
+			const cursor = roomBackends.length;
+			const backend = installed[cursor % installed.length];
+			const updated = [...roomBackends, backend];
+			state.roomDebaterBackends.set(request.room, updated);
+			return backend;
+		}
+
+		// Writer diversity rule: reviewer/debater roles prefer a different backend
+		// than the last writer when another backend is installed
 		const isDiversityRole = request.role === "reviewer" || request.role === "debater";
 		if (isDiversityRole && state.lastWriterBackend && installed.length > 1) {
 			const otherBackends = installed.filter((name) => name !== state.lastWriterBackend);

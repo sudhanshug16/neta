@@ -173,7 +173,8 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 			description:
 				"Compute backend assignments for proposed workers without spawning them. Returns a numbered staffing " +
 				"plan showing which backend each worker would run on, given current tier mappings and the spread/diversity " +
-				"policy. Use this to present the plan to the user before spawning.",
+				"policy. Debaters in the same room are automatically spread across different vendors. Use this to present " +
+				"the plan to the user before spawning.",
 			inputSchema: {
 				type: "object",
 				properties: {
@@ -186,6 +187,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 								tier: { type: "string", enum: [...TIERS], description: "How much judgement the task needs." },
 								writer: { type: "boolean", description: "Whether this worker needs the writer slot." },
 								backend: { type: "string", description: "Override the backend for this worker." },
+								room: { type: "string", description: "Room name for workers that will share a room." },
 							},
 							required: ["role", "tier"],
 						},
@@ -205,6 +207,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 					tier: tier(w),
 					writer: optionalBoolean(w, "writer"),
 					backend: optionalString(w, "backend"),
+					room: optionalString(w, "room"),
 				}));
 
 				const assignments = manager.planAssignments(requests);

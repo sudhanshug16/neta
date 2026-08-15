@@ -52,9 +52,10 @@ picks tiers and never sees model names; this is where the names live.
 spread policy applies: Neta assigns workers deterministically round-robin across
 installed backends (stable per session), and reviewer/debater roles prefer a
 different backend than the most recent writer when multiple backends are
-installed (diversity rule). Explicit overrides pass through `backend` on spawn;
-use `neta_remember` to persist an override to `.neta/settings.json` (JSON
-rewrite; comments not preserved). Point a tier at another vendor:
+installed (diversity rule). Debaters in one room are spread across different
+vendors automatically. Explicit overrides pass through `backend` on spawn; use
+`neta_remember` to persist an override to `.neta/settings.json` (JSON rewrite;
+comments not preserved). Point a tier at another vendor:
 
 ```json
 { "tiers": { "staff": { "backend": "codex" } } }
