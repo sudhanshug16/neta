@@ -143,12 +143,12 @@ describe("a leader session, end to end", () => {
 		expect(stdout).toContain("── w1 done");
 	});
 
-	it("refuses a second writer while one is still working", async () => {
+	it("queues a second writer while one is working", async () => {
 		await call("neta_spawn", { role: "worker", tier: "senior", task: "hold the slot", writer: true });
 
 		const second = await call("neta_spawn", { role: "worker", tier: "senior", task: "also write", writer: true });
 
-		expect(second.isError).toBe(true);
-		expect(bodyOf(second)).toContain("already holds the writer slot");
+		expect(second.isError).toBe(false);
+		expect(bodyOf(second)).toContain("Queued");
 	});
 });

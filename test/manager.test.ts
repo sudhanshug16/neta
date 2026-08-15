@@ -131,13 +131,15 @@ describe("WorkerManager", () => {
 		expect(updated.mode).toBe("negotiated-mode");
 	});
 
-	it("allows only one writer at a time and releases the slot when it finishes", async () => {
+	it("queues a second writer and starts it automatically when the first finishes", async () => {
 		const first = await manager.spawn({ role: "worker", tier: "senior", task: "fix the bug", writer: true });
 		expect(first.writer).toBe(true);
+		expect(first.state).toBe("running");
 
-		await expect(
-			manager.spawn({ role: "worker", tier: "senior", task: "other change", writer: true }),
-		).rejects.toThrow(/already holds the writer slot/);
+		const second = await manager.spawn({ role: "worker", tier: "senior", task: "other change", writer: true });
+		expect(second.state).toBe("queued");
+		expect(second.result).toContain(`Queued ${second.id}`);
+		expect(second.result).toContain(first.id);
 
 		// A read-only worker alongside the writer is fine.
 		await manager.spawn({ role: "scout", tier: "junior", task: "read the tests" });
@@ -146,10 +148,15 @@ describe("WorkerManager", () => {
 		// A finishing writer is checked for uncommitted changes before the slot is
 		// released, so wait for the worker to actually reach a terminal state.
 		await manager.waitFor([first.id], 5000);
+		await flush();
 
-		await expect(
-			manager.spawn({ role: "worker", tier: "senior", task: "next change", writer: true }),
-		).resolves.toMatchObject({ writer: true });
+		// Second worker should now be running (it gets the second transport, after the read-only worker)
+		const secondUpdated = manager.get(second.id);
+		expect(secondUpdated.state).toBe("running");
+		// transports[1] is the read-only worker, transports[2] is the dequeued second writer
+		expect(transports[2].started).toBe(true);
+		expect(transports[2].prompts[0]).toContain("queued behind another writer");
+		expect(transports[2].prompts[0]).toContain("other change");
 	});
 
 	it("pushes a done event when a worker finishes", async () => {
@@ -225,6 +232,169 @@ describe("WorkerManager", () => {
 		const summary = await manager.spawn({ role: "scout", tier: "senior", task: "look" });
 
 		expect(manager.say(summary.id, "hello")).toEqual({ ok: false, error: "You are not in a room." });
+	});
+
+	describe("writer queue", () => {
+		it("queues third writer in FIFO order", async () => {
+			const first = await manager.spawn({ role: "worker", tier: "senior", task: "first", writer: true });
+			const second = await manager.spawn({ role: "worker", tier: "senior", task: "second", writer: true });
+			const third = await manager.spawn({ role: "worker", tier: "senior", task: "third", writer: true });
+
+			expect(first.state).toBe("running");
+			expect(second.state).toBe("queued");
+			expect(third.state).toBe("queued");
+
+			// Finish first
+			transports[0].finish({ ok: true, summary: "first done" });
+			await manager.waitFor([first.id], 5000);
+			await flush();
+
+			// Second should be running now
+			expect(manager.get(second.id).state).toBe("running");
+			expect(manager.get(third.id).state).toBe("queued");
+
+			// Finish second
+			transports[1].finish({ ok: true, summary: "second done" });
+			await manager.waitFor([second.id], 5000);
+			await flush();
+
+			// Third should be running now
+			expect(manager.get(third.id).state).toBe("running");
+		});
+
+		it("starts next queued worker when active writer is killed", async () => {
+			const first = await manager.spawn({ role: "worker", tier: "senior", task: "first", writer: true });
+			const second = await manager.spawn({ role: "worker", tier: "senior", task: "second", writer: true });
+
+			expect(second.state).toBe("queued");
+
+			await manager.kill(first.id);
+			await flush();
+
+			expect(manager.get(second.id).state).toBe("running");
+		});
+
+		it("cancels queued worker when killed without starting it", async () => {
+			const first = await manager.spawn({ role: "worker", tier: "senior", task: "first", writer: true });
+			const second = await manager.spawn({ role: "worker", tier: "senior", task: "second", writer: true });
+
+			expect(second.state).toBe("queued");
+
+			await manager.kill(second.id);
+
+			expect(manager.get(second.id).state).toBe("killed");
+			expect(transports.length).toBe(1); // Only first transport started
+
+			// Now finish first and nothing should dequeue
+			transports[0].finish({ ok: true, summary: "first done" });
+			await manager.waitFor([first.id], 5000);
+			await flush();
+
+			// No second transport should have started
+			expect(transports.length).toBe(1);
+		});
+
+		it("delivers messages to queued worker as pending brief", async () => {
+			const first = await manager.spawn({ role: "worker", tier: "senior", task: "first", writer: true });
+			const second = await manager.spawn({ role: "worker", tier: "senior", task: "second", writer: true });
+
+			expect(second.state).toBe("queued");
+
+			// Send messages to queued worker
+			manager.send(second.id, "also fix the tests");
+			manager.send(second.id, "and update docs");
+
+			// Finish first to dequeue second
+			transports[0].finish({ ok: true, summary: "first done" });
+			await manager.waitFor([first.id], 5000);
+			await flush();
+
+			// Second should be running with messages delivered in the first prompt
+			expect(manager.get(second.id).state).toBe("running");
+			expect(transports[1].prompts).toHaveLength(1);
+			expect(transports[1].prompts[0]).toContain("second");
+			expect(transports[1].prompts[0]).toContain("also fix the tests");
+			expect(transports[1].prompts[0]).toContain("and update docs");
+		});
+
+		it("allows read-only workers to spawn while queue exists", async () => {
+			await manager.spawn({ role: "worker", tier: "senior", task: "first", writer: true });
+			await manager.spawn({ role: "worker", tier: "senior", task: "second", writer: true });
+
+			const reader = await manager.spawn({ role: "scout", tier: "senior", task: "read" });
+
+			expect(reader.state).toBe("running");
+			expect(reader.writer).toBe(false);
+		});
+	});
+
+	describe("notes ledger", () => {
+		it("creates and lists open notes", () => {
+			const note1 = manager.createNote("models.dev cost estimate");
+			const _note2 = manager.createNote("docs pass");
+
+			expect(note1.id).toBe("n1");
+			expect(note1.text).toBe("models.dev cost estimate");
+			expect(note1.open).toBe(true);
+
+			const openNotes = manager.getOpenNotes();
+			expect(openNotes).toHaveLength(2);
+			expect(openNotes.map((n) => n.id)).toEqual(["n1", "n2"]);
+		});
+
+		it("closes a note and removes it from open list", () => {
+			const note = manager.createNote("pending work");
+			manager.closeNote(note.id);
+
+			const closed = manager.listNotes().find((n) => n.id === note.id);
+			expect(closed?.open).toBe(false);
+			expect(closed?.closedAt).toBeDefined();
+			expect(manager.getOpenNotes()).toHaveLength(0);
+		});
+
+		it("errors on unknown note id when closing", () => {
+			expect(() => manager.closeNote("n99")).toThrow(/Unknown note id/);
+		});
+
+		it("links worker to note and records terminal state", async () => {
+			const note = manager.createNote("implement auth");
+			const summary = await manager.spawn({
+				role: "worker",
+				tier: "senior",
+				task: "implement auth flow",
+				note: note.id,
+			});
+
+			transports[0].finish({ ok: true, summary: "done" });
+			await manager.waitFor([summary.id], 5000);
+
+			const updatedNote = manager.listNotes().find((n) => n.id === note.id);
+			expect(updatedNote?.workers).toHaveLength(1);
+			expect(updatedNote?.workers[0]).toEqual({ workerId: summary.id, state: "done" });
+		});
+
+		it("errors when spawning with unknown note id", async () => {
+			await expect(manager.spawn({ role: "worker", tier: "senior", task: "do it", note: "n99" })).rejects.toThrow(
+				/Unknown note id/,
+			);
+		});
+
+		it("records worker state on note even when worker fails", async () => {
+			const note = manager.createNote("risky task");
+			const _summary = await manager.spawn({
+				role: "worker",
+				tier: "senior",
+				task: "try something",
+				note: note.id,
+			});
+
+			transports[0].finish({ ok: false, summary: "backend error" });
+			await flush();
+
+			const updatedNote = manager.listNotes().find((n) => n.id === note.id);
+			expect(updatedNote?.workers).toHaveLength(1);
+			expect(updatedNote?.workers[0].state).toBe("failed");
+		});
 	});
 
 	it("kills a worker, releases the slot and reports it", async () => {
@@ -359,7 +529,7 @@ describe("WorkerManager", () => {
 			expect(transports).toHaveLength(0);
 		});
 
-		it("turns a spawn failure into an error response rather than throwing", async () => {
+		it("queues a second writer through the channel and reports queued status", async () => {
 			await manager.spawn({ role: "worker", tier: "senior", task: "first", writer: true });
 
 			const response = await manager.leader(
@@ -367,8 +537,9 @@ describe("WorkerManager", () => {
 				signal,
 			);
 
-			expect(response.ok).toBe(false);
-			expect(response.ok === false && response.error).toContain("already holds the writer slot");
+			expect(response.ok).toBe(true);
+			expect(response.ok && response.text).toContain("Queued");
+			expect(response.ok && response.text).toContain("w1");
 		});
 
 		it("lists workers, drains a log, and answers a blocked worker", async () => {

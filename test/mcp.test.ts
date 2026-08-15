@@ -90,6 +90,7 @@ describe("leader MCP tools", () => {
 			"neta_answer",
 			"neta_kill",
 			"neta_log",
+			"neta_note",
 			"neta_plan",
 			"neta_remember",
 			"neta_room",
@@ -109,13 +110,13 @@ describe("leader MCP tools", () => {
 		expect(transports[0].options.systemPrompt).toContain("You are a scout");
 	});
 
-	it("returns the refusal as a readable result rather than a protocol error", async () => {
+	it("queues a second writer and reports queued status", async () => {
 		await call("neta_spawn", { role: "worker", tier: "senior", task: "first", writer: true });
 
 		const second = await call("neta_spawn", { role: "worker", tier: "senior", task: "second", writer: true });
 
-		expect(second.isError).toBe(true);
-		expect(bodyOf(second)).toContain("already holds the writer slot");
+		expect(second.isError).toBe(false);
+		expect(bodyOf(second)).toContain("Queued");
 	});
 
 	it("rejects an unknown tier before spawning anything", async () => {
