@@ -33,6 +33,10 @@ panes you can read; the leader collects their results and reports once.
 
 ## Install
 
+```
+npm install -g @intervene/neta
+```
+
 Neta needs Node 22.19+ and at least one agent CLI on PATH:
 
 ```
@@ -41,7 +45,7 @@ npm install -g @openai/codex               # or
 npm install -g opencode-ai
 ```
 
-Then, from a checkout:
+From a checkout instead:
 
 ```
 npm install --ignore-scripts
