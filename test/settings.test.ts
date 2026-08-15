@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CONFIG_DIR_NAME } from "../src/config.ts";
@@ -69,6 +69,30 @@ describe("NetaConfig", () => {
 		expect(typeof config.installedBackends).toBe("function");
 	});
 
+	it("excludes disabled backends from automatic selection and rejects explicit use", () => {
+		const binDir = mkdtempSync(join(tmpdir(), "neta-backend-bin-"));
+		const command = "fixture-backend";
+		const executable = join(binDir, command);
+		writeFileSync(executable, "#!/bin/sh\n", "utf-8");
+		chmodSync(executable, 0o755);
+		const config = new NetaConfig({
+			backends: {
+				enabled: { command },
+				opencode: { disabled: true },
+			},
+		});
+
+		try {
+			expect(config.backendNames()).toContain("enabled");
+			expect(config.backendNames()).not.toContain("opencode");
+			expect(config.installedBackends({ PATH: binDir })).toEqual(["enabled"]);
+			expect(() => config.launcher("opencode")).toThrow('Backend "opencode" is disabled in settings.');
+			expect(() => config.resolve("senior", "opencode")).toThrow('Backend "opencode" is disabled in settings.');
+		} finally {
+			rmSync(binDir, { recursive: true, force: true });
+		}
+	});
+
 	it("launches a backend without a tier, and therefore without a model", () => {
 		const launcher = new NetaConfig().launcher("codex");
 
@@ -110,6 +134,22 @@ describe("loadNetaSettings", () => {
 		const settings = loadNetaSettings(cwd, agentDir);
 
 		expect(settings.tiers).toEqual({ junior: { backend: "opencode" }, staff: { backend: "codex" } });
+	});
+
+	it("lets a project re-enable a backend disabled in user settings", () => {
+		const agentDir = scratch();
+		const cwd = scratch();
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ backends: { opencode: { disabled: true } } }));
+		mkdirSync(join(cwd, CONFIG_DIR_NAME));
+		writeFileSync(
+			join(cwd, CONFIG_DIR_NAME, "settings.json"),
+			JSON.stringify({ backends: { opencode: { disabled: false } } }),
+		);
+
+		const settings = loadNetaSettings(cwd, agentDir);
+
+		expect(settings.backends).toEqual({ opencode: { disabled: false } });
+		expect(new NetaConfig(settings).backendNames()).toContain("opencode");
 	});
 
 	// A broken settings file must not stop the leader from starting; the defaults

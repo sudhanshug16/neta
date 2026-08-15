@@ -96,7 +96,12 @@ export async function launchLeader(options: LaunchOptions): Promise<number> {
 	const cwd = options.cwd;
 	const agentDir = options.agentDir ?? getAgentDir();
 	const config = loadConfig(cwd, agentDir);
-	const backend = await chooseBackend(detectLeaderBackends(), options.leader, config.leader.backend);
+	const preferredLeader = options.leader ?? config.leader.backend;
+	if (preferredLeader && config.isBackendDisabled(preferredLeader)) {
+		throw new LaunchError(`Backend "${preferredLeader}" is disabled in settings.`);
+	}
+	const detected = detectLeaderBackends().filter(({ id }) => config.backendNames().includes(id));
+	const backend = await chooseBackend(detected, options.leader, config.leader.backend);
 
 	const sessionId = `${process.pid}-${randomBytes(3).toString("hex")}`;
 	const sessionDir = await mkdtemp(join(tmpdir(), `${APP_NAME}-session-`));

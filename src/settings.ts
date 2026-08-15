@@ -8,13 +8,15 @@
  * the shipped defaults are opinions, not facts.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir } from "./config.ts";
 import { findOnPath } from "./detect.ts";
 import { TIERS, type Tier } from "./types.ts";
 
 export interface NetaBackendSettings {
+	/** Exclude this backend from automatic selection and reject explicit use. */
+	disabled?: boolean;
 	/** Executable that speaks ACP over stdio. */
 	command?: string;
 	args?: string[];
@@ -159,7 +161,13 @@ export class NetaConfig {
 	}
 
 	backendNames(): string[] {
-		return Object.keys(this.backends);
+		return Object.entries(this.backends)
+			.filter(([, backend]) => !backend.disabled)
+			.map(([name]) => name);
+	}
+
+	isBackendDisabled(name: string): boolean {
+		return this.backends[name]?.disabled === true;
 	}
 
 	/**
@@ -198,6 +206,7 @@ export class NetaConfig {
 		if (!backend) {
 			throw new Error(`Unknown backend "${name}". Configured backends: ${this.backendNames().join(", ")}.`);
 		}
+		if (backend.disabled) throw new Error(`Backend "${name}" is disabled in settings.`);
 		return {
 			name,
 			command: backend.command,
@@ -221,6 +230,7 @@ export class NetaConfig {
 				`Unknown worker backend "${backendName}". Configured backends: ${this.backendNames().join(", ")}.`,
 			);
 		}
+		if (backend.disabled) throw new Error(`Backend "${backendName}" is disabled in settings.`);
 
 		// If the backend differs from the tier's configured backend, drop the
 		// tier's model (it belongs to a different backend's naming scheme) — but
@@ -280,7 +290,6 @@ export function loadConfig(cwd: string, agentDir: string = getAgentDir()): NetaC
  * are not preserved, as the settings files are JSON, not JSONC.
  */
 export async function persistTierOverride(cwd: string, tier: Tier, override: NetaTierSettings): Promise<void> {
-	const { mkdirSync, writeFileSync } = await import("node:fs");
 	const settingsDir = join(cwd, CONFIG_DIR_NAME);
 	const settingsPath = join(settingsDir, "settings.json");
 

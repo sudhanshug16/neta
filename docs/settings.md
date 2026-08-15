@@ -90,6 +90,7 @@ How a worker process is launched. Every worker speaks ACP over stdio.
 
 | Key | Meaning |
 | --- | --- |
+| `disabled` | Set `true` to remove this backend from automatic assignment and leader selection. An explicit request for it fails with a disabled-backend error; set `false` in project settings to re-enable a user-level disable. |
 | `command` | Executable that speaks ACP. |
 | `args` | Its arguments. |
 | `modelArgs` | Appended when a model is requested; `{model}` is substituted. |

@@ -166,4 +166,17 @@ describe("neta (launching a leader)", () => {
 			}),
 		).rejects.toThrow(/asked for "codex".*Installed: claude/s);
 	});
+
+	it("refuses an explicitly requested disabled leader backend", async () => {
+		const binDir = fakeBackend("opencode");
+		const agentDir = scratch("neta-home-");
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ backends: { opencode: { disabled: true } } }));
+
+		await expect(
+			run(process.execPath, [CLI, "--leader", "opencode", "--mux", "none"], {
+				cwd: scratch("neta-repo-"),
+				env: { ...process.env, PATH: binDir, NETA_DIR: agentDir },
+			}),
+		).rejects.toThrow('Backend "opencode" is disabled in settings.');
+	});
 });

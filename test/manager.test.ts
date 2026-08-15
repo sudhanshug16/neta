@@ -714,6 +714,19 @@ describe("WorkerManager", () => {
 			expect(transports[transports.length - 1].options.model).toBe("gpt-5.6-terra[high]");
 		});
 
+		it("rejects an explicit override for a disabled backend without starting a worker", async () => {
+			manager.configure({
+				cwd: process.cwd(),
+				agentDir: "/nonexistent-agent-dir",
+				config: new NetaConfig({ backends: { opencode: { disabled: true } } }),
+			});
+
+			await expect(
+				manager.spawn({ role: "scout", tier: "senior", task: "look", backend: "opencode" }),
+			).rejects.toThrow('Backend "opencode" is disabled in settings.');
+			expect(transports).toHaveLength(0);
+		});
+
 		it("resolves unconfigured tiers when only one backend is installed", async () => {
 			// This should not throw even though DEFAULT_TIERS is empty
 			const summary = await manager.spawn({ role: "scout", tier: "senior", task: "look" });
