@@ -106,10 +106,14 @@ conversation, so `neta attach` says so before it opens.
 ## Panes
 
 With Zellij or tmux available, each worker gets a pane running `neta watch
-<id>`, which streams that worker's log. The pane is a window onto the worker,
-not the worker itself — the agent process stays under Neta's control. Panes
-read the log without consuming it, so nothing a pane shows is stolen from the
-leader.
+<id>`: the worker's prose rendered as markdown, tool calls as one-liners,
+file changes as colored diffs, and an input line at the bottom. Typing there
+talks to the worker — a message queues as its next turn, and when the worker
+is blocked on a question, the same input answers it. The pane is a window onto
+the worker, not the worker itself — the agent process stays under Neta's
+control. Panes read the log without consuming it, so nothing a pane shows is
+stolen from the leader, and `neta watch <id> --plain` prints the same stream
+as bare lines for piping.
 
 If you are already inside a multiplexer session, Neta uses it. If you are not,
 it starts one around the leader. With neither installed, workers run headless

@@ -28,6 +28,7 @@ import { runControlPlane, runWorkerBridge } from "./mcp/run.ts";
 import { listBackendModels } from "./models.ts";
 import { listSessions } from "./session.ts";
 import { watchWorker } from "./watch.ts";
+import { watchWorkerTui } from "./watch-tui.ts";
 
 const LEADER_WORDS = new Set(["spawn", "workers", "log", "wait", "send", "answer", "kill"]);
 
@@ -39,7 +40,7 @@ const HELP = `${APP_NAME} ${VERSION} — a leader agent that delegates to worker
 
   ${APP_NAME} workers                   List this session's workers and what they cost.
   ${APP_NAME} log <id>                  Read a worker's new log lines.
-  ${APP_NAME} watch <id>                Follow a worker's log until it finishes.
+  ${APP_NAME} watch <id>                Watch a worker and type to it (--plain for bare log lines).
   ${APP_NAME} attach <id>               Open a worker in its own CLI (Claude Code,
                                         Codex) to read it there and take over.
   ${APP_NAME} kill <id>                 Stop a worker.
@@ -98,17 +99,20 @@ async function main(argv: string[]): Promise<void> {
 		case "watch": {
 			const workerId = args[1];
 			if (!workerId) {
-				console.error(`Usage: ${APP_NAME} watch <worker-id> [--session <id>] [--dir <neta-dir>]`);
+				console.error(`Usage: ${APP_NAME} watch <worker-id> [--session <id>] [--dir <neta-dir>] [--plain]`);
 				process.exitCode = 1;
 				return;
 			}
-			process.exitCode = await watchWorker({
-				workerId,
-				sessionId: flagValue(args, "--session"),
-				// Worker tabs are started by the multiplexer's own server process,
-				// which does not have our environment, so they say where to look.
-				agentDir: flagValue(args, "--dir"),
-			});
+			const sessionId = flagValue(args, "--session");
+			// Worker tabs are started by the multiplexer's own server process,
+			// which does not have our environment, so they say where to look.
+			const agentDir = flagValue(args, "--dir");
+			// The interactive view needs a real terminal on both ends; piped
+			// output gets the plain line renderer, as does --plain by request.
+			const interactive = !args.includes("--plain") && process.stdin.isTTY === true && process.stdout.isTTY === true;
+			process.exitCode = interactive
+				? await watchWorkerTui({ workerId, sessionId, agentDir })
+				: await watchWorker({ workerId, sessionId, agentDir });
 			return;
 		}
 		case "attach": {

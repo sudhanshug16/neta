@@ -87,7 +87,7 @@ neta --mux none            # no panes; workers run headless
 neta -- --model opus       # pass arguments through to the agent CLI
 
 neta workers               # what is running, and what it has cost
-neta watch w1              # follow one worker's log until it finishes
+neta watch w1              # watch one worker, and type to talk to it
 neta attach w1             # open that worker in its own CLI and take over
 neta log w1                # its new lines since you last looked
 neta send w1 <message>     # give a running worker more instructions

@@ -40,10 +40,14 @@ export function isTerminalState(state: WorkerState): boolean {
 /**
  * One line of worker output the leader can pull. Workers narrate freely into
  * this log; nothing here wakes the leader.
+ *
+ * "text" and "thought" carry the worker's own streamed prose and reasoning,
+ * flushed a paragraph at a time; "tool" is one tool call; "diff" is a file
+ * change a tool call reported, pre-rendered as unified-diff lines.
  */
 export interface WorkerLogEntry {
 	at: number;
-	kind: "notify" | "say" | "status" | "output" | "error";
+	kind: "notify" | "say" | "status" | "tool" | "text" | "thought" | "diff" | "error";
 	text: string;
 }
 

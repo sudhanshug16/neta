@@ -34,6 +34,19 @@ function formatLine(entry: WorkerLogEntry): string {
 			return `· ${entry.text}`;
 		case "error":
 			return `! ${entry.text}`;
+		case "text":
+			// The worker's own prose reads as prose: no prefix, air around it.
+			return `\n${entry.text}\n`;
+		case "thought":
+			return entry.text
+				.split("\n")
+				.map((line) => `~ ${line}`)
+				.join("\n");
+		case "diff":
+			return entry.text
+				.split("\n")
+				.map((line) => `  ${line}`)
+				.join("\n");
 		default:
 			return `  ${entry.text}`;
 	}

@@ -9,6 +9,9 @@
  *   THINK - emits a thought chunk before the assistant message
  *   USAGE - emits a usage_update and returns per-turn token usage
  *   MCP   - reports the MCP servers it was given at session/new
+ *   STREAM - streams an assistant message in mid-paragraph chunks
+ *   DIFF  - emits a tool call whose content is a file diff, then repeats the
+ *           same content in a tool_call_update, the way real bridges do
  * Anything else is echoed back as the assistant message.
  */
 
@@ -58,6 +61,35 @@ async function prompt(params, cx) {
 
 	if (text.includes("MCP")) {
 		await say(cx, sessionId, `mcp:${JSON.stringify(mcpServers)}`);
+		return { stopReason: "end_turn" };
+	}
+
+	if (text.includes("STREAM")) {
+		await say(cx, sessionId, "First paragraph");
+		await say(cx, sessionId, " continues.\n\nSecond");
+		await say(cx, sessionId, " paragraph.");
+		return { stopReason: "end_turn" };
+	}
+
+	if (text.includes("DIFF")) {
+		const toolCallId = `call_${++counter}`;
+		const diff = { type: "diff", path: "/repo/config.json", oldText: "a\nb\nc\n", newText: "a\nB\nc\n" };
+		await cx.notify(acp.methods.client.session.update, {
+			sessionId,
+			update: {
+				sessionUpdate: "tool_call",
+				toolCallId,
+				title: "Edit config.json",
+				kind: "edit",
+				status: "in_progress",
+				content: [diff],
+			},
+		});
+		await cx.notify(acp.methods.client.session.update, {
+			sessionId,
+			update: { sessionUpdate: "tool_call_update", toolCallId, status: "completed", content: [diff] },
+		});
+		await say(cx, sessionId, "edited");
 		return { stopReason: "end_turn" };
 	}
 

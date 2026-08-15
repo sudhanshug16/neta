@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chooseModel, sanitizeInheritedEnv } from "../src/acp/connection.ts";
-import { AcpWorkerTransport, describeToolCall } from "../src/acp/transport.ts";
+import { AcpWorkerTransport, describeToolCall, paragraphFlushIndex, renderDiffText } from "../src/acp/transport.ts";
 import type { TransportOptions, WorkerMcpServer } from "../src/orchestrator/transport.ts";
 import type { WorkerLogEntry, WorkerUsage } from "../src/types.ts";
 
@@ -98,7 +98,44 @@ describe("AcpWorkerTransport", () => {
 		await transport.start();
 		await transport.prompt("EDIT the config");
 
-		expect(log.some((entry) => entry.kind === "output" && entry.text === "Edit config.json")).toBe(true);
+		expect(log.some((entry) => entry.kind === "tool" && entry.text === "Edit config.json")).toBe(true);
+	});
+
+	// A pane that showed tool calls but never the worker's own words made every
+	// worker look like it was grinding silently until the final result appeared.
+	it("streams the worker's prose into the log a paragraph at a time", async () => {
+		const log: WorkerLogEntry[] = [];
+		const transport = createTransport(false, log);
+		await transport.start();
+
+		await transport.prompt("STREAM");
+
+		const prose = log.filter((entry) => entry.kind === "text").map((entry) => entry.text);
+		expect(prose).toEqual(["First paragraph continues.", "Second paragraph."]);
+	});
+
+	it("logs thought chunks as thoughts", async () => {
+		const log: WorkerLogEntry[] = [];
+		const transport = createTransport(false, log);
+		await transport.start();
+
+		await transport.prompt("THINK about it");
+
+		expect(log.some((entry) => entry.kind === "thought" && entry.text === "weighing options")).toBe(true);
+	});
+
+	it("logs a tool call's diff once, even when an update repeats it", async () => {
+		const log: WorkerLogEntry[] = [];
+		const transport = createTransport(true, log);
+		await transport.start();
+
+		await transport.prompt("DIFF the config");
+
+		const diffs = log.filter((entry) => entry.kind === "diff");
+		expect(diffs).toHaveLength(1);
+		expect(diffs[0].text).toContain("/repo/config.json");
+		expect(diffs[0].text).toContain("-b");
+		expect(diffs[0].text).toContain("+B");
 	});
 
 	// Cost was invisible in the first version of Neta: workers spent real money
@@ -209,6 +246,49 @@ describe("describing a worker's tool calls", () => {
 
 	it("says just the title when there is nothing to add", () => {
 		expect(describeToolCall("Thinking")).toBe("Thinking");
+	});
+});
+
+describe("flushing streamed prose by paragraph", () => {
+	it("flushes up to the last completed paragraph", () => {
+		const buffer = "First paragraph.\n\nSecond still going";
+		const flushAt = paragraphFlushIndex(buffer);
+
+		expect(buffer.slice(0, flushAt)).toBe("First paragraph.\n\n");
+		expect(buffer.slice(flushAt)).toBe("Second still going");
+	});
+
+	it("holds back a buffer with no completed paragraph", () => {
+		expect(paragraphFlushIndex("still one paragraph\nwith a line break")).toBe(0);
+	});
+
+	// A blank line inside a code fence is layout, not a paragraph break; a
+	// flush there would hand the renderer half a code block.
+	it("does not flush inside a fenced code block", () => {
+		expect(paragraphFlushIndex("```ts\nconst a = 1;\n\nconst b = 2;\n")).toBe(0);
+
+		const closed = "```ts\nconst a = 1;\n```\n\nafter";
+		expect(closed.slice(0, paragraphFlushIndex(closed))).toBe("```ts\nconst a = 1;\n```\n\n");
+	});
+});
+
+describe("rendering a tool call's diff", () => {
+	it("prints the path, hunk headers and changed lines", () => {
+		const text = renderDiffText("/repo/a.ts", "one\ntwo\nthree\n", "one\n2\nthree\n");
+
+		const lines = text.split("\n");
+		expect(lines[0]).toBe("/repo/a.ts");
+		expect(lines[1]).toStartWith("@@");
+		expect(lines).toContain("-two");
+		expect(lines).toContain("+2");
+	});
+
+	it("caps a huge diff instead of flooding the log", () => {
+		const oldText = Array.from({ length: 400 }, (_, i) => `line ${i}`).join("\n");
+		const text = renderDiffText("/repo/big.ts", oldText, "");
+
+		expect(text.split("\n").length).toBeLessThan(130);
+		expect(text).toContain("more lines");
 	});
 });
 
