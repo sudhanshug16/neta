@@ -24,6 +24,21 @@ function bodyOf(result: CallToolResult): string {
 	return result.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
 }
 
+function pidFrom(text: string): number {
+	const match = /pid:(\d+)/.exec(text);
+	if (!match) throw new Error(`Fixture process id missing from: ${text}`);
+	return Number(match[1]);
+}
+
+function isRunning(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 describe("a leader session, end to end", () => {
 	let agentDir: string;
 	let repo: string;
@@ -50,7 +65,9 @@ describe("a leader session, end to end", () => {
 			command: process.execPath,
 			args: [CLI, "mcp"],
 			cwd: repo,
-			env: { ...process.env, NETA_DIR: agentDir, NETA_SESSION_ID: "e2e" } as Record<string, string>,
+			// A test can itself run under Neta, whose socket belongs to the parent
+			// control plane. The fixture must own its own socket.
+			env: { ...process.env, NETA_DIR: agentDir, NETA_SESSION_ID: "e2e", NETA_SOCKET: "" } as Record<string, string>,
 			stderr: "ignore",
 		});
 		client = new Client({ name: "vendor-cli", version: "0.0.0" });
@@ -110,27 +127,44 @@ describe("a leader session, end to end", () => {
 		expect(bodyOf(waited)).toContain("permission=allow");
 	});
 
-	// A harness can background a long-running command, let the worker end its
-	// turn, and re-invoke the same session when the command finishes. The worker
-	// is already done by then, so a write permission request landing outside any
-	// turn must still be denied — even for a worker that held the writer slot.
-	it("denies a write permission request that arrives after the worker is done", async () => {
-		await call("neta_spawn", { role: "worker", tier: "senior", task: "DELAYED_EDIT the config", writer: true });
+	// A turn ending is not enough: a backend can have a backgrounded command
+	// that reawakens its session later. Neta only reports done after the ACP
+	// process itself is gone.
+	it("kills the fixture process before reporting a worker done", async () => {
+		await call("neta_spawn", { role: "worker", tier: "senior", task: "REPORT_PID", writer: true });
 		const waited = await call("neta_wait", { workerIds: ["w1"], timeoutSeconds: 30 });
+		const pid = pidFrom(bodyOf(waited));
 
-		// The turn itself never asked for permission.
-		expect(bodyOf(waited)).toContain("armed");
-		expect(bodyOf(waited)).not.toContain("permission=");
+		expect(isRunning(pid)).toBe(false);
+	});
 
-		// The delayed request arrives after done; the gate must deny it and say
-		// why in the worker's log.
-		const deadline = Date.now() + 3000;
-		let logged = bodyOf(await call("neta_log", { workerId: "w1" }));
-		while (!logged.includes("this worker has finished") && Date.now() < deadline) {
-			await new Promise((resolve) => setTimeout(resolve, 100));
-			logged = bodyOf(await call("neta_log", { workerId: "w1" }));
+	it("starts a queued writer only after the previous fixture process dies", async () => {
+		await call("neta_spawn", { role: "worker", tier: "senior", task: "REPORT_PID TRAP_SIGTERM", writer: true });
+
+		const firstDeadline = Date.now() + 3000;
+		let firstLog = bodyOf(await call("neta_log", { workerId: "w1" }));
+		while (!firstLog.includes("pid:") && Date.now() < firstDeadline) {
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			firstLog = bodyOf(await call("neta_log", { workerId: "w1" }));
 		}
-		expect(logged).toContain("this worker has finished");
+		const firstPid = pidFrom(firstLog);
+
+		const queued = await call("neta_spawn", { role: "worker", tier: "senior", task: "REPORT_PID", writer: true });
+		expect(bodyOf(queued)).toContain("Queued");
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		expect(bodyOf(await call("neta_workers"))).toContain("w2 worker/senior | backend=fake | queued | writer");
+
+		await call("neta_wait", { workerIds: ["w1"], timeoutSeconds: 30 });
+		expect(isRunning(firstPid)).toBe(false);
+
+		const secondDeadline = Date.now() + 3000;
+		let secondLog = bodyOf(await call("neta_log", { workerId: "w2" }));
+		while (!secondLog.includes("pid:") && Date.now() < secondDeadline) {
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			secondLog = bodyOf(await call("neta_log", { workerId: "w2" }));
+		}
+		expect(pidFrom(secondLog)).toBeGreaterThan(0);
+		expect(isRunning(firstPid)).toBe(false);
 	});
 
 	it("hands the worker an MCP server pointing back at this session", async () => {

@@ -136,6 +136,8 @@ export class AcpConnection {
 	private child: ChildProcess | undefined;
 	private connection: acp.ClientConnection | undefined;
 	private sessionId: string | undefined;
+	/** Shared so concurrent terminal paths wait for the same process-group exit. */
+	private killPromise: Promise<void> | undefined;
 	/** What this backend offered when the session opened. */
 	offered: { models: string[]; currentModel?: string; modes: string[]; currentMode?: string } = {
 		models: [],
@@ -290,21 +292,33 @@ export class AcpConnection {
 		this.cancel();
 		this.connection?.close();
 		this.connection = undefined;
+		if (this.killPromise) return this.killPromise;
 		const child = this.child;
 		this.child = undefined;
-		if (!child || child.exitCode !== null) return;
+		// A failed spawn has no process id and will never emit the exit event we
+		// wait for below. There is no process group to stop in that case.
+		if (!child || child.exitCode !== null || child.pid === undefined) return;
 
-		return new Promise<void>((resolve) => {
+		this.killPromise = new Promise<void>((resolve) => {
+			let termTimer: ReturnType<typeof setTimeout> | undefined;
+			let killTimer: ReturnType<typeof setTimeout> | undefined;
 			const onExit = () => {
-				clearTimeout(termTimer);
-				clearTimeout(killTimer);
+				if (termTimer) clearTimeout(termTimer);
+				if (killTimer) clearTimeout(killTimer);
 				resolve();
 			};
 			child.once("exit", onExit);
+			// `close()` above can race a backend that is already exiting. Register the
+			// handler first, then re-check so that an exit between the earlier check
+			// and listener registration cannot leave this promise pending forever.
+			if (child.exitCode !== null) {
+				onExit();
+				return;
+			}
 
 			// Signal the whole process group (npx and the bridge it spawned).
 			// On platforms where -pid fails, fall back to signaling just the parent.
-			const termTimer = setTimeout(() => {
+			termTimer = setTimeout(() => {
 				try {
 					if (child.pid) process.kill(-child.pid, "SIGTERM");
 				} catch {
@@ -313,7 +327,7 @@ export class AcpConnection {
 			}, 0);
 
 			// Escalate to SIGKILL if not exited within 3s.
-			const killTimer = setTimeout(() => {
+			killTimer = setTimeout(() => {
 				if (child.exitCode === null) {
 					try {
 						if (child.pid) process.kill(-child.pid, "SIGKILL");
@@ -323,6 +337,7 @@ export class AcpConnection {
 				}
 			}, 3000);
 		});
+		return this.killPromise;
 	}
 
 	private requestPermission(params: acp.RequestPermissionRequest): acp.RequestPermissionResponse {

@@ -11,7 +11,10 @@ class FakeTransport implements WorkerTransportDriver {
 	readonly prompts: string[] = [];
 	started = false;
 	killed = false;
+	markedTerminal = false;
 	private pending: Array<(outcome: PromptOutcome) => void> = [];
+	private killGate: Promise<void> | undefined;
+	private unblockKill: (() => void) | undefined;
 
 	constructor(options: TransportOptions) {
 		this.options = options;
@@ -29,15 +32,28 @@ class FakeTransport implements WorkerTransportDriver {
 
 	async kill(): Promise<void> {
 		this.killed = true;
+		const killGate = this.killGate;
+		this.killGate = undefined;
+		if (killGate) await killGate;
 	}
 
-	markTerminal(): void {}
+	markTerminal(): void {
+		this.markedTerminal = true;
+	}
 
 	/** Finish the worker's current turn the way a real backend would. */
 	finish(outcome: PromptOutcome): void {
 		const resolve = this.pending.shift();
 		if (!resolve) throw new Error("No prompt is running");
 		resolve(outcome);
+	}
+
+	/** Hold process death until the test explicitly releases it. */
+	delayKill(): () => void {
+		this.killGate = new Promise<void>((resolve) => {
+			this.unblockKill = resolve;
+		});
+		return () => this.unblockKill?.();
 	}
 }
 
@@ -154,10 +170,31 @@ describe("WorkerManager", () => {
 		// Second worker should now be running (it gets the second transport, after the read-only worker)
 		const secondUpdated = manager.get(second.id);
 		expect(secondUpdated.state).toBe("running");
+		expect(transports[0].markedTerminal).toBe(true);
+		expect(transports[0].killed).toBe(true);
 		// transports[1] is the read-only worker, transports[2] is the dequeued second writer
 		expect(transports[2].started).toBe(true);
 		expect(transports[2].prompts[0]).toContain("queued behind another writer");
 		expect(transports[2].prompts[0]).toContain("other change");
+	});
+
+	it("keeps the writer slot until the finished worker's process is dead", async () => {
+		const first = await manager.spawn({ role: "worker", tier: "senior", task: "first", writer: true });
+		const second = await manager.spawn({ role: "worker", tier: "senior", task: "second", writer: true });
+		const releaseKill = transports[0].delayKill();
+
+		transports[0].finish({ ok: true, summary: "first done" });
+		await flush();
+
+		expect(manager.get(first.id).state).toBe("running");
+		expect(manager.get(second.id).state).toBe("queued");
+		expect(transports).toHaveLength(1);
+
+		releaseKill();
+		await manager.waitFor([first.id], 5000);
+		await flush();
+
+		expect(manager.get(second.id).state).toBe("running");
 	});
 
 	it("pushes a done event when a worker finishes", async () => {
@@ -176,6 +213,8 @@ describe("WorkerManager", () => {
 
 		expect(events).toEqual([{ type: "failed", workerId: summary.id, error: "backend not installed" }]);
 		expect(manager.get(summary.id).state).toBe("failed");
+		expect(transports[0].markedTerminal).toBe(true);
+		expect(transports[0].killed).toBe(true);
 	});
 
 	it("collects notify lines into a log the leader drains once", async () => {

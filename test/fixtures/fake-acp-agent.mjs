@@ -45,6 +45,8 @@ async function prompt(params, cx) {
 		return { stopReason: "refusal" };
 	}
 
+	if (text.includes("REPORT_PID")) await say(cx, sessionId, `pid:${process.pid}\n\n`);
+
 	if (text.includes("DELAYED_EDIT")) {
 		await say(cx, sessionId, "armed");
 		setTimeout(async () => {

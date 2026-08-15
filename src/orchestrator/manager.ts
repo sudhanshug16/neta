@@ -66,6 +66,8 @@ interface WorkerRecord {
 	queue: Promise<void>;
 	/** Prompts queued or running. The worker is only done when the last one ends. */
 	queuedPrompts: number;
+	/** Terminal result is captured and its ACP process is being stopped. */
+	finishing?: Promise<void>;
 	waiters: Array<() => void>;
 	usage?: WorkerUsage;
 	vendorSessionId?: string;
@@ -310,7 +312,7 @@ export class WorkerManager implements ChannelHandler {
 		try {
 			await record.driver.start();
 		} catch (error) {
-			this.finish(record, "failed", error instanceof Error ? error.message : String(error));
+			await this.finish(record, "failed", error instanceof Error ? error.message : String(error));
 			throw error;
 		}
 
@@ -330,6 +332,9 @@ export class WorkerManager implements ChannelHandler {
 		const record = this.require(workerId);
 		if (isTerminalState(record.state)) {
 			throw new Error(`Worker ${workerId} already finished (${record.state}). Spawn a new worker instead.`);
+		}
+		if (record.finishing) {
+			throw new Error(`Worker ${workerId} is finishing. Spawn a new worker instead.`);
 		}
 		if (record.state === "queued") {
 			// Append to pending brief for delivery when started
@@ -360,10 +365,10 @@ export class WorkerManager implements ChannelHandler {
 				// Remove from queue and mark killed without starting driver
 				const index = this.writerQueue.indexOf(workerId);
 				if (index >= 0) this.writerQueue.splice(index, 1);
-				this.finish(record, "killed", "Killed by the leader.");
+				await this.finish(record, "killed", "Killed by the leader.");
 			} else {
 				await record.driver.kill();
-				this.finish(record, "killed", "Killed by the leader.");
+				await this.finish(record, "killed", "Killed by the leader.");
 			}
 		}
 		return this.summarize(record);
@@ -469,7 +474,7 @@ export class WorkerManager implements ChannelHandler {
 			if (!isTerminalState(record.state)) {
 				// Fire-and-forget during shutdown: we're tearing down everything anyway.
 				void record.driver.kill();
-				this.finish(record, "killed", "Leader shut down.");
+				void this.finish(record, "killed", "Leader shut down.");
 			}
 			await rm(record.scratchDir, { recursive: true, force: true }).catch(() => {});
 		}
@@ -814,12 +819,11 @@ export class WorkerManager implements ChannelHandler {
 		record.queuedPrompts += 1;
 		record.queue = record.queue.then(async () => {
 			try {
-				if (isTerminalState(record.state)) return;
+				if (isTerminalState(record.state) || record.finishing) return;
 				const outcome = await record.driver.prompt(message);
-				if (isTerminalState(record.state)) return;
+				if (isTerminalState(record.state) || record.finishing) return;
 				if (!outcome.ok) {
-					this.finish(record, "failed", outcome.summary);
-					this.options.onEvent({ type: "failed", workerId: record.id, error: outcome.summary });
+					await this.finish(record, "failed", outcome.summary);
 					return;
 				}
 				// A follow-up arrived while this turn ran. An earlier version
@@ -830,44 +834,67 @@ export class WorkerManager implements ChannelHandler {
 					this.appendLog(record, "status", `turn ended: ${outcome.summary}`);
 					return;
 				}
-				const dirtyFiles = record.writer ? await gitDirtyFiles(this.options.cwd) : [];
-				this.finish(record, "done", outcome.summary);
-				this.options.onEvent({
-					type: "done",
-					workerId: record.id,
-					summary: outcome.summary,
-					dirtyFiles: dirtyFiles.length > 0 ? dirtyFiles : undefined,
-				});
+				// The turn result is immutable now, but a backend can still reawaken a
+				// session. Stop its process before we make this worker terminal or hand
+				// the writer slot to anyone else.
+				await this.finish(record, "done", outcome.summary);
 			} finally {
 				record.queuedPrompts -= 1;
 			}
 		});
 	}
 
-	private finish(record: WorkerRecord, state: WorkerState, result: string): void {
-		this.setState(record, state);
-		record.endedAt = Date.now();
-		record.result = result;
-		if (record.driver) record.driver.markTerminal();
-		// A finished worker's prose already streamed into the log, so logging the
-		// full result here printed the whole final message a second time, raw, in
-		// every pane. The state is the news; the text is not. Failures still carry
-		// their reason, which did not stream.
-		this.appendLog(record, state === "done" ? "status" : "error", state === "done" ? "done" : `${state}: ${result}`);
+	private finish(record: WorkerRecord, state: WorkerState, result: string): Promise<void> {
+		if (record.finishing) return record.finishing;
+		// This is the backstop during shutdown: a late ACP write is rejected while
+		// the process-group kill below is still waiting for its exit event.
+		record.driver?.markTerminal();
+		const finishing = (async () => {
+			if (state !== "killed") {
+				await record.driver?.kill();
+			}
+			const dirtyFiles = state === "done" && record.writer ? await gitDirtyFiles(this.options.cwd) : [];
 
-		const wasActiveWriter = this.activeWriter === record.id;
-		if (wasActiveWriter) this.activeWriter = undefined;
+			this.setState(record, state);
+			record.endedAt = Date.now();
+			record.result = result;
+			// A finished worker's prose already streamed into the log, so logging the
+			// full result here printed the whole final message a second time, raw, in
+			// every pane. The state is the news; the text is not. Failures still carry
+			// their reason, which did not stream.
+			this.appendLog(
+				record,
+				state === "done" ? "status" : "error",
+				state === "done" ? "done" : `${state}: ${result}`,
+			);
 
-		record.pendingAsk?.resolve({ ok: false, error: `Worker ${state}.` });
-		record.pendingAsk = undefined;
-		const waiters = record.waiters;
-		record.waiters = [];
-		for (const waiter of waiters) waiter();
+			if (state === "done") {
+				this.options.onEvent({
+					type: "done",
+					workerId: record.id,
+					summary: result,
+					dirtyFiles: dirtyFiles.length > 0 ? dirtyFiles : undefined,
+				});
+			} else if (state === "failed") {
+				this.options.onEvent({ type: "failed", workerId: record.id, error: result });
+			}
 
-		// Dequeue next writer if this was the active writer
-		if (wasActiveWriter) {
-			void this.dequeueNextWriter();
-		}
+			const wasActiveWriter = this.activeWriter === record.id;
+			if (wasActiveWriter) this.activeWriter = undefined;
+
+			record.pendingAsk?.resolve({ ok: false, error: `Worker ${state}.` });
+			record.pendingAsk = undefined;
+			const waiters = record.waiters;
+			record.waiters = [];
+			for (const waiter of waiters) waiter();
+
+			// Dequeue next writer if this was the active writer
+			if (wasActiveWriter) {
+				void this.dequeueNextWriter();
+			}
+		})();
+		record.finishing = finishing;
+		return finishing;
 	}
 
 	// =========================================================================
@@ -970,7 +997,7 @@ export class WorkerManager implements ChannelHandler {
 		try {
 			await record.driver.start();
 		} catch (error) {
-			this.finish(record, "failed", error instanceof Error ? error.message : String(error));
+			await this.finish(record, "failed", error instanceof Error ? error.message : String(error));
 			return;
 		}
 
