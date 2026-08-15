@@ -2,16 +2,15 @@ import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EnvStub, waitFor } from "./helpers.ts";
-
-const env = new EnvStub();
-
 import { handleWorkerChannelCommand, sendChannelRequest } from "../src/channel/client.ts";
 import { handleLeaderChannelCommand } from "../src/channel/leader-cli.ts";
 import type { ChannelResponse, LeaderChannelRequest } from "../src/channel/protocol.ts";
 import { NETA_LEADER_ENV, NETA_SOCKET_ENV, NETA_WORKER_ENV } from "../src/channel/protocol.ts";
 import type { ChannelHandler } from "../src/channel/server.ts";
 import { ChannelServer } from "../src/channel/server.ts";
+import { EnvStub, waitFor } from "./helpers.ts";
+
+const env = new EnvStub();
 
 describe("worker channel", () => {
 	let tempDir: string;
@@ -59,6 +58,10 @@ describe("worker channel", () => {
 		await server.stop();
 		rmSync(tempDir, { recursive: true, force: true });
 		env.restore();
+		// These tests drive CLI handlers that set a failing exit code on purpose.
+		// The test runner shares this process, so leaving it set makes the whole
+		// run exit non-zero with every test passing — which is exactly how it hid.
+		process.exitCode = 0;
 	});
 
 	it("answers notify immediately", async () => {
@@ -123,7 +126,6 @@ describe("worker channel", () => {
 
 		it("fails with a message when the leader rejects the request", async () => {
 			const error = spyOn(console, "error").mockImplementation(() => {});
-			const previousExitCode = process.exitCode;
 
 			const handled = handleWorkerChannelCommand(["ask", "anything"]);
 			await waitFor(() => expect(asked).toHaveLength(1));
@@ -132,7 +134,6 @@ describe("worker channel", () => {
 
 			expect(error).toHaveBeenCalledWith("Junior workers cannot ask the leader.");
 			expect(process.exitCode).toBe(1);
-			process.exitCode = previousExitCode;
 			error.mockRestore();
 		});
 	});
@@ -219,7 +220,6 @@ describe("worker channel", () => {
 
 		it("rejects a spawn with no task instead of sending it", async () => {
 			const error = spyOn(console, "error").mockImplementation(() => {});
-			const previousExitCode = process.exitCode;
 
 			await expect(handleLeaderChannelCommand(["spawn", "--role", "worker", "--tier", "senior"])).resolves.toBe(
 				true,
@@ -227,7 +227,6 @@ describe("worker channel", () => {
 
 			expect(leaderRequests).toEqual([]);
 			expect(process.exitCode).toBe(1);
-			process.exitCode = previousExitCode;
 			error.mockRestore();
 		});
 
