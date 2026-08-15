@@ -11,6 +11,7 @@
 
 import { sendChannelRequest } from "./channel/client.ts";
 import { NETA_LEADER_ENV, NETA_SOCKET_ENV } from "./channel/protocol.ts";
+import { getAgentDir } from "./config.ts";
 import { findSession, listSessions } from "./session.ts";
 import { formatUsage, isTerminalState, type WorkerLogEntry, type WorkerLogPage, type WorkerSummary } from "./types.ts";
 
@@ -42,8 +43,9 @@ function formatLine(entry: WorkerLogEntry): string {
 function header(worker: WorkerSummary): string[] {
 	const access = worker.writer ? "writer" : "read-only";
 	const room = worker.room ? ` · room ${worker.room}` : "";
+	const named = worker.name === worker.role ? worker.id : `${worker.id} ${worker.name}`;
 	return [
-		`${worker.id} · ${worker.role}/${worker.tier} · ${worker.backend} · ${access}${room}`,
+		`${named} · ${worker.role}/${worker.tier} · ${worker.backend} · ${access}${room}`,
 		`task: ${worker.task.replace(/\s+/g, " ").trim().slice(0, 300)}`,
 		"─".repeat(60),
 	];
@@ -61,11 +63,17 @@ export interface WatchTarget {
 }
 
 /** Env first (we are inside the session), then the registry (we are not). */
-export function resolveTarget(sessionId?: string, cwd: string = process.cwd()): WatchTarget | undefined {
+export function resolveTarget(
+	sessionId?: string,
+	cwd: string = process.cwd(),
+	agentDir: string = getAgentDir(),
+): WatchTarget | undefined {
 	const address = process.env[NETA_SOCKET_ENV];
 	const token = process.env[NETA_LEADER_ENV];
 	if (!sessionId && address && token) return { address, token };
-	const record = sessionId ? listSessions().find((entry) => entry.id === sessionId) : findSession(cwd);
+	const record = sessionId
+		? listSessions(agentDir).find((entry) => entry.id === sessionId)
+		: findSession(cwd, agentDir);
 	return record ? { address: record.socket, token: record.token } : undefined;
 }
 
@@ -94,6 +102,8 @@ export interface WatchOptions {
 	workerId: string;
 	sessionId?: string;
 	cwd?: string;
+	/** Where the session registry lives, for panes started without our env. */
+	agentDir?: string;
 	/** Read once and return, instead of following. */
 	once?: boolean;
 	/** Keep the view open after the worker finishes. Defaults to true on a terminal. */
@@ -103,7 +113,7 @@ export interface WatchOptions {
 
 export async function watchWorker(options: WatchOptions): Promise<number> {
 	const write = options.write ?? ((line: string) => process.stdout.write(`${line}\n`));
-	const target = resolveTarget(options.sessionId, options.cwd);
+	const target = resolveTarget(options.sessionId, options.cwd, options.agentDir);
 	if (!target) {
 		write("No Neta session found. Start one with `neta`, or pass --session <id>.");
 		return 1;

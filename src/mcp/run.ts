@@ -69,6 +69,18 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 	const token = process.env[NETA_LEADER_ENV] || randomBytes(16).toString("hex");
 	const sessionId = options.sessionId ?? process.env.NETA_SESSION_ID ?? `s${process.pid}`;
 
+	const wantsPanes = (process.env.NETA_PANES ?? (config.mux.panes ? "1" : "0")) === "1";
+	const mux = selectMux(muxMode(config.mux.mode));
+	const panes = wantsPanes ? createPaneHost(mux, invocation, sessionId, cwd, agentDir, note) : undefined;
+	if (wantsPanes && !panes) {
+		// Silence here reads as "panes are broken". Usually it just means the
+		// leader is not running inside a multiplexer, which is fine and worth
+		// saying once rather than leaving the user to wonder where the tabs are.
+		note(
+			`workers run headless: ${mux.id === "none" ? "no multiplexer available" : `not inside a ${mux.id} session`}`,
+		);
+	}
+
 	let shimDir: string | undefined;
 	const manager: WorkerManager = new WorkerManager({
 		cwd,
@@ -90,10 +102,7 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 			},
 		],
 		// `--mux` at launch decided this; settings answer when nobody did.
-		panes:
-			(process.env.NETA_PANES ?? (config.mux.panes ? "1" : "0")) === "1"
-				? createPaneHost(selectMux(muxMode(config.mux.mode)), invocation, sessionId, cwd, note)
-				: undefined,
+		panes: wantsPanes ? panes : undefined,
 	});
 
 	const server = new ChannelServer(address, manager);
@@ -141,7 +150,7 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 	);
 	mcp.onclose = exit;
 	await mcp.connect(new StdioServerTransport());
-	note(`control plane ready on ${address} (session ${sessionId})`);
+	note(`control plane ready on ${address} (session ${sessionId}) · worker views: ${panes ? mux.id : "headless"}`);
 }
 
 export async function runWorkerBridge(): Promise<void> {

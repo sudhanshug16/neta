@@ -95,6 +95,12 @@ export interface SpawnRequest {
 	role: string;
 	tier: Tier;
 	task: string;
+	/**
+	 * Two or three words naming this worker's job. Five workers all called
+	 * "scout" are indistinguishable in a tab bar; "auth flow" and "rails cable"
+	 * are not. The leader writes it, because the leader is what knows.
+	 */
+	name?: string;
 	/** Grants edit/write access. Only one writer may be active at a time. */
 	writer?: boolean;
 	/** Explicit backend override; normally the tier decides. */
@@ -105,6 +111,8 @@ export interface SpawnRequest {
 
 export interface WorkerSummary {
 	id: string;
+	/** Short label for this worker's job; falls back to its role. */
+	name: string;
 	role: string;
 	tier: Tier;
 	backend: string;

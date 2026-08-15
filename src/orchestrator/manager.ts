@@ -42,6 +42,7 @@ const MAX_LOG_ENTRIES = 500;
 
 interface WorkerRecord {
 	id: string;
+	name: string;
 	role: string;
 	tier: SpawnRequest["tier"];
 	backend: string;
@@ -180,6 +181,7 @@ export class WorkerManager implements ChannelHandler {
 
 		const record: WorkerRecord = {
 			id,
+			name: (request.name ?? request.role).trim() || request.role,
 			role: request.role,
 			tier: request.tier,
 			backend: backend.name,
@@ -569,6 +571,7 @@ export class WorkerManager implements ChannelHandler {
 	private summarize(record: WorkerRecord): WorkerSummary {
 		return {
 			id: record.id,
+			name: record.name,
 			role: record.role,
 			tier: record.tier,
 			backend: record.backend,

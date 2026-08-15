@@ -111,8 +111,9 @@ export class ZellijAdapter implements MuxAdapter {
 		if (!this.inSession()) return false;
 		const result = spawnSync("zellij", newTabArgs(title, spec, cwd), {
 			env: { ...process.env, ...spec.env },
-			stdio: "ignore",
+			encoding: "utf-8",
 		});
-		return result.status === 0;
+		if (result.status === 0) return true;
+		throw new Error(`zellij: ${(result.stderr || result.error?.message || `exit ${result.status}`).trim()}`);
 	}
 }

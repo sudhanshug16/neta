@@ -42,7 +42,8 @@ function clip(text: string, limit: number): string {
 }
 
 function describe(summary: WorkerSummary): string {
-	const parts = [`${summary.id} ${summary.role}/${summary.tier}`, `backend=${summary.backend}`, summary.state];
+	const named = summary.name === summary.role ? summary.id : `${summary.id} "${summary.name}"`;
+	const parts = [`${named} ${summary.role}/${summary.tier}`, `backend=${summary.backend}`, summary.state];
 	if (summary.writer) parts.push("writer");
 	if (summary.room) parts.push(`room=${summary.room}`);
 	const usage = formatUsage(summary.usage);
@@ -89,6 +90,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 			role: { type: "string", description: `Role prompt to run. Built-in: ${roles}.` },
 			tier: { type: "string", enum: [...TIERS], description: "junior, senior or staff." },
 			task: { type: "string", description: "Self-contained instructions for this member." },
+			name: { type: "string", description: "Two or three words naming this member's job, for its tab." },
 			writer: { type: "boolean", description: "Grant this member the writer slot." },
 		},
 		required: ["role", "tier", "task"],
@@ -110,6 +112,12 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 						type: "string",
 						description: "Self-contained instructions: files, acceptance criteria, what done means.",
 					},
+					name: {
+						type: "string",
+						description:
+							"Two or three words naming this worker's job, e.g. 'auth flow' or 'rails cable'. It labels the " +
+							"worker's tab, so five scouts are told apart at a glance. Defaults to the role.",
+					},
 					writer: {
 						type: "boolean",
 						description: "Grant the writer slot (edit/write access). Only one writer at a time.",
@@ -124,6 +132,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 					role: requireString(args, "role"),
 					tier: tier(args),
 					task: requireString(args, "task"),
+					name: optionalString(args, "name"),
 					writer: optionalBoolean(args, "writer"),
 					backend: optionalString(args, "backend"),
 					room: optionalString(args, "room"),
@@ -162,6 +171,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 								role: requireString(raw, "role"),
 								tier: tier(raw),
 								task: requireString(raw, "task"),
+								name: optionalString(raw, "name"),
 								writer: optionalBoolean(raw, "writer"),
 								room,
 							}),

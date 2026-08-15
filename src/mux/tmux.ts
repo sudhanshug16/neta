@@ -46,8 +46,11 @@ export class TmuxAdapter implements MuxAdapter {
 		if (!this.inSession()) return false;
 		const result = spawnSync("tmux", newWindowArgs(title, spec, cwd), {
 			env: { ...process.env, ...spec.env },
-			stdio: "ignore",
+			encoding: "utf-8",
 		});
-		return result.status === 0;
+		if (result.status === 0) return true;
+		// tmux explains itself on stderr; throwing that away leaves a user with a
+		// missing window and no reason for it.
+		throw new Error(`tmux: ${(result.stderr || result.error?.message || `exit ${result.status}`).trim()}`);
 	}
 }

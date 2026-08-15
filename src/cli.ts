@@ -94,11 +94,17 @@ async function main(argv: string[]): Promise<void> {
 		case "watch": {
 			const workerId = args[1];
 			if (!workerId) {
-				console.error(`Usage: ${APP_NAME} watch <worker-id> [--session <id>]`);
+				console.error(`Usage: ${APP_NAME} watch <worker-id> [--session <id>] [--dir <neta-dir>]`);
 				process.exitCode = 1;
 				return;
 			}
-			process.exitCode = await watchWorker({ workerId, sessionId: flagValue(args, "--session") });
+			process.exitCode = await watchWorker({
+				workerId,
+				sessionId: flagValue(args, "--session"),
+				// Worker tabs are started by the multiplexer's own server process,
+				// which does not have our environment, so they say where to look.
+				agentDir: flagValue(args, "--dir"),
+			});
 			return;
 		}
 		case "sessions":

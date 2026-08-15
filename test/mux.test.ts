@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NoMux, selectMux } from "../src/mux/index.ts";
+import { createPaneHost, tabTitle } from "../src/mux/panes.ts";
 import { newWindowArgs, TmuxAdapter, newSessionArgs as tmuxSessionArgs } from "../src/mux/tmux.ts";
 import type { MuxAdapter, ProcessSpec } from "../src/mux/types.ts";
 import { leaderLayout, newSessionArgs, newTabArgs, ZellijAdapter } from "../src/mux/zellij.ts";
@@ -154,6 +155,101 @@ describe("zellij", () => {
 
 		expect(args.slice(0, 4)).toEqual(["--session", "neta-1", "--new-session-with-layout", "/tmp/layout.kdl"]);
 		expect(args).not.toContain("--layout");
+	});
+});
+
+describe("worker views", () => {
+	const worker = {
+		id: "w1",
+		name: "auth flow",
+		role: "scout",
+		tier: "senior" as const,
+		backend: "claude",
+		writer: false,
+		state: "running" as const,
+		task: "map it",
+		startedAt: 0,
+		scratchDir: "/tmp/x",
+	};
+
+	function recordingMux(): { mux: MuxAdapter; calls: Array<{ title: string; args: string[] }> } {
+		const calls: Array<{ title: string; args: string[] }> = [];
+		return {
+			calls,
+			mux: {
+				id: "tmux",
+				available: () => true,
+				inSession: () => true,
+				wrapLeader: () => undefined,
+				openPane: (title, spec) => {
+					calls.push({ title, args: spec.args });
+					return true;
+				},
+			},
+		};
+	}
+
+	// The tab title is the only place a person sees which worker is which, and
+	// five tabs called "scout" say nothing.
+	it("titles the tab with the worker's id and name", () => {
+		expect(tabTitle("w1", "auth flow")).toBe("w1 auth flow");
+		expect(tabTitle("w1", "scout")).toBe("w1 scout");
+	});
+
+	it("keeps a long name short enough for a tab bar", () => {
+		const title = tabTitle("w12", "the entire websocket reconnect subsystem");
+
+		expect(title.length).toBeLessThanOrEqual(22);
+		expect(title.startsWith("w12 the")).toBe(true);
+		expect(title).toEndWith("…");
+	});
+
+	// Multiplexers start these from their own server process, which does not have
+	// Neta's environment: a pane that cannot find the session dies instantly and
+	// the tab disappears before anyone sees it.
+	it("tells the watcher where to find the session, without relying on env", () => {
+		const { mux, calls } = recordingMux();
+		const host = createPaneHost(
+			mux,
+			{ command: "node", prefixArgs: ["/opt/cli.js"] },
+			"s7",
+			"/repo",
+			"/home/u/.neta",
+			() => {},
+		);
+
+		host?.open(worker);
+
+		expect(calls[0].title).toBe("w1 auth flow");
+		expect(calls[0].args).toEqual(["/opt/cli.js", "watch", "w1", "--session", "s7", "--dir", "/home/u/.neta"]);
+	});
+
+	it("reports why a view could not open rather than losing it", () => {
+		const failures: string[] = [];
+		const mux: MuxAdapter = {
+			id: "tmux",
+			available: () => true,
+			inSession: () => true,
+			wrapLeader: () => undefined,
+			openPane: () => {
+				throw new Error("tmux: no server running");
+			},
+		};
+
+		createPaneHost(mux, { command: "neta", prefixArgs: [] }, "s1", "/repo", "/n", (m) => failures.push(m))?.open(
+			worker,
+		);
+
+		expect(failures[0]).toContain("no server running");
+	});
+
+	it("opens nothing when the leader is not inside a multiplexer", () => {
+		const { mux } = recordingMux();
+		const outside: MuxAdapter = { ...mux, inSession: () => false };
+
+		expect(
+			createPaneHost(outside, { command: "neta", prefixArgs: [] }, "s1", "/repo", "/n", () => {}),
+		).toBeUndefined();
 	});
 });
 

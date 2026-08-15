@@ -176,6 +176,9 @@ Rules that matter in practice:
 
 - Give a worker the context it needs in the task itself. It does not see this
   conversation. Name files, name the acceptance test, say what "done" means.
+- Name each worker in two or three words for what it is doing ("auth flow",
+  "rails cable"). The user sees that name on the worker's tab, and five workers
+  all called "scout" tell them nothing.
 - Reads parallelize; writes serialize. You may run several read-only workers at
   once, but only one writer exists at a time. ${s.spawnFails}.
 - Every writer commits its work before finishing, so the next writer can be
