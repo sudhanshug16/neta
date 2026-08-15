@@ -1,8 +1,8 @@
+import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
 import { sanitizeInheritedEnv } from "../src/acp/connection.ts";
 import { AcpWorkerTransport } from "../src/acp/transport.ts";
 import type { TransportOptions, WorkerMcpServer } from "../src/orchestrator/transport.ts";

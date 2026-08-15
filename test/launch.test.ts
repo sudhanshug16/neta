@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "bun:test";
 import type { DetectedLeaderBackend } from "../src/detect.ts";
 import { chooseBackend, LaunchError } from "../src/launch.ts";
 

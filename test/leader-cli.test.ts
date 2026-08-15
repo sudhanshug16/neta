@@ -5,11 +5,11 @@
  * fake worker transport standing in for the backend CLI.
  */
 
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { spawn } from "node:child_process";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createChannelAddress, NETA_LEADER_ENV, NETA_SOCKET_ENV, NETA_WORKER_ENV } from "../src/channel/protocol.ts";
 import { ChannelServer } from "../src/channel/server.ts";
 import { createLeaderCliShim, prependToPath } from "../src/cli-shim.ts";

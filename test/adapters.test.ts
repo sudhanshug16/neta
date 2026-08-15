@@ -4,10 +4,10 @@
  * where it shows up.
  */
 
+import { afterEach, describe, expect, it } from "bun:test";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
 import { ClaudeAdapter, DENIED_TOOLS } from "../src/adapters/claude.ts";
 import { CodexAdapter, createHomeOverlay, preserveRefreshedAuth } from "../src/adapters/codex.ts";
 import { OpenCodeAdapter } from "../src/adapters/opencode.ts";

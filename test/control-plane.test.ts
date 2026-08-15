@@ -5,6 +5,7 @@
  * no worker is spawned, so no agent CLI is ever launched.
  */
 
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { execFile, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -13,8 +14,8 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { listSessions } from "../src/session.ts";
+import { waitFor } from "./helpers.ts";
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const run = promisify(execFile);
@@ -89,7 +90,7 @@ describe("neta mcp", () => {
 			stdio: ["pipe", "pipe", "ignore"],
 		});
 		try {
-			await vi.waitFor(() => expect(listSessions(home)).toHaveLength(1), { timeout: 5000 });
+			await waitFor(() => expect(listSessions(home)).toHaveLength(1), 5000);
 
 			child.stdin?.end();
 

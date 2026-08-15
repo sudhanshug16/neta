@@ -31,9 +31,14 @@ each **vendor's own mechanisms**, kernel sandbox where available.
 
 ## Settled decisions
 
-- **No TUI of our own. No pi.** Plain TypeScript on Node, two protocol deps
-  pinned exact: `@agentclientprotocol/sdk` (workers) and
-  `@modelcontextprotocol/sdk` (leader control plane).
+- **No TUI of our own. No pi.** Plain TypeScript, two protocol deps pinned
+  exact: `@agentclientprotocol/sdk` (workers) and `@modelcontextprotocol/sdk`
+  (leader control plane).
+- **Bun is the toolchain**: install, test, build. `bun build --target=node`
+  bundles everything into one `dist/cli.js`, so what ships is a single file
+  that runs on Node and pulls in no dependency tree of its own (1 MB, against
+  30 MB across 93 packages when the SDKs were resolved at install time).
+  Typechecking is `tsc --noEmit`, which Bun does not do.
 - **Leader**: native vendor CLI, launched by `neta` with per-vendor config
   injection (instructions, MCP registration, write restrictions).
 - **Workers**: headless over ACP — one transport for every backend.

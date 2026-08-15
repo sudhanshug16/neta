@@ -45,12 +45,15 @@ npm install -g @openai/codex               # or
 npm install -g opencode-ai
 ```
 
-From a checkout instead:
+Neta itself is a single bundled file with no runtime dependencies, so this
+installs one thing, not a tree.
+
+From a checkout instead — the toolchain is [Bun](https://bun.sh):
 
 ```
-npm install --ignore-scripts
-npm run build
-npm link          # puts `neta` on PATH
+bun install
+bun run build
+bun link          # puts `neta` on PATH
 ```
 
 ## Using it
@@ -79,6 +82,15 @@ Write a `CHARTER.md` in your project (see [CHARTER.example.md](CHARTER.example.m
 It says which decisions the leader takes on your behalf and which ones stop and
 ask. Without one, the leader decides routine technical matters and asks before
 anything expensive, destructive, or outward-facing.
+
+## Development
+
+```
+bun install
+bun test          # 161 tests, including real worker processes over a real socket
+bun run check     # biome + tsc --noEmit
+bun run build     # dist/cli.js, one file, runs on Node
+```
 
 ## Documentation
 

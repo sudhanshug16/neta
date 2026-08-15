@@ -1,6 +1,6 @@
 {
 	"name": "@intervene/neta",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"description": "A leader agent that delegates to tiered worker agents behind the coding-agent CLI you already use.",
 	"license": "MIT",
 	"author": "Sudhanshu Gautam",
@@ -40,20 +40,19 @@
 		"access": "public"
 	},
 	"scripts": {
-		"build": "tsc -p tsconfig.build.json && chmod +x dist/cli.js",
+		"build": "bun build src/cli.ts --target=node --outdir=dist --sourcemap=linked && chmod +x dist/cli.js",
 		"clean": "rm -rf dist",
-		"check": "biome check --write --error-on-warnings . && tsc --noEmit",
-		"test": "vitest --run",
-		"prepublishOnly": "npm run clean && npm run build && npm run test"
-	},
-	"dependencies": {
-		"@agentclientprotocol/sdk": "1.3.0",
-		"@modelcontextprotocol/sdk": "1.30.0"
+		"typecheck": "tsc --noEmit",
+		"check": "biome check --write --error-on-warnings . && bun run typecheck",
+		"test": "bun test",
+		"prepublishOnly": "bun run clean && bun run check && bun test && bun run build"
 	},
 	"devDependencies": {
+		"@agentclientprotocol/sdk": "1.3.0",
 		"@biomejs/biome": "2.3.5",
+		"@modelcontextprotocol/sdk": "1.30.0",
+		"@types/bun": "1.3.14",
 		"@types/node": "24.12.4",
-		"typescript": "5.9.3",
-		"vitest": "4.1.10"
+		"typescript": "5.9.3"
 	}
 }

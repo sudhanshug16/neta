@@ -3,10 +3,10 @@
  * every worker pane.
  */
 
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NETA_LEADER_ENV, NETA_SOCKET_ENV } from "../src/channel/protocol.ts";
 import { ChannelServer } from "../src/channel/server.ts";
 import { WorkerManager } from "../src/orchestrator/manager.ts";
@@ -14,6 +14,9 @@ import type { PromptOutcome, TransportOptions, WorkerTransportDriver } from "../
 import { writeSessionRecord } from "../src/session.ts";
 import { NetaConfig } from "../src/settings.ts";
 import { watchWorker } from "../src/watch.ts";
+import { EnvStub } from "./helpers.ts";
+
+const env = new EnvStub();
 
 class FakeTransport implements WorkerTransportDriver {
 	private pending: Array<(outcome: PromptOutcome) => void> = [];
@@ -65,12 +68,12 @@ describe("watch", () => {
 		});
 		server = new ChannelServer(address, manager);
 		await server.start();
-		vi.stubEnv(NETA_SOCKET_ENV, address);
-		vi.stubEnv(NETA_LEADER_ENV, "tok");
+		env.set(NETA_SOCKET_ENV, address);
+		env.set(NETA_LEADER_ENV, "tok");
 	});
 
 	afterEach(async () => {
-		vi.unstubAllEnvs();
+		env.restore();
 		await manager.dispose();
 		await server.stop();
 		rmSync(dir, { recursive: true, force: true });
@@ -125,9 +128,9 @@ describe("watch", () => {
 	it("finds its session in the registry when the environment says nothing", async () => {
 		const worker = await manager.spawn({ role: "scout", tier: "senior", task: "look" });
 		manager.notify(worker.id, "from the registry");
-		vi.stubEnv(NETA_SOCKET_ENV, "");
-		vi.stubEnv(NETA_LEADER_ENV, "");
-		vi.stubEnv("NETA_DIR", agentDir);
+		env.set(NETA_SOCKET_ENV, "");
+		env.set(NETA_LEADER_ENV, "");
+		env.set("NETA_DIR", agentDir);
 		writeSessionRecord(
 			{
 				id: "s7",
@@ -148,9 +151,9 @@ describe("watch", () => {
 	});
 
 	it("says so when there is no session to watch", async () => {
-		vi.stubEnv(NETA_SOCKET_ENV, "");
-		vi.stubEnv(NETA_LEADER_ENV, "");
-		vi.stubEnv("NETA_DIR", agentDir);
+		env.set(NETA_SOCKET_ENV, "");
+		env.set(NETA_LEADER_ENV, "");
+		env.set("NETA_DIR", agentDir);
 
 		const code = await watchWorker({ workerId: "w1", once: true, hold: false, write, cwd: "/nowhere" });
 

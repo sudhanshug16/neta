@@ -8,7 +8,7 @@ import { join } from "node:path";
 /** The command workers and the leader invoke to reach Neta. */
 export const APP_NAME = "neta";
 
-export const VERSION = "0.1.0";
+export const VERSION = "0.1.1";
 
 /** Per-project directory: settings, roles, skills. */
 export const CONFIG_DIR_NAME = ".neta";

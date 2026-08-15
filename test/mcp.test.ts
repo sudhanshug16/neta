@@ -3,13 +3,13 @@
  * client, with a fake worker backend underneath.
  */
 
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createChannelAddress } from "../src/channel/protocol.ts";
 import { ChannelServer } from "../src/channel/server.ts";
 import { leaderTools } from "../src/mcp/leader.ts";

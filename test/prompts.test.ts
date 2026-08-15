@@ -3,10 +3,10 @@
  * behave like a lead. These check the parts that were bought with experience.
  */
 
+import { afterEach, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
 import { loadCharter } from "../src/prompts/charter.ts";
 import { materializeFlavors } from "../src/prompts/flavors.ts";
 import { buildLeaderPrompt } from "../src/prompts/leader.ts";

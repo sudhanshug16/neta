@@ -4,8 +4,8 @@
  * file when its edit tool is gone.
  */
 
+import { describe, expect, it, spyOn } from "bun:test";
 import { Readable } from "node:stream";
-import { describe, expect, it, vi } from "vitest";
 import { inspectBashCommand, runGuard } from "../src/guard.ts";
 
 const allowed = (command: string) => inspectBashCommand(command).decision === "allow";
@@ -83,7 +83,7 @@ describe("bash guard", () => {
 describe("guard hook protocol", () => {
 	async function hook(payload: unknown): Promise<Record<string, unknown>> {
 		const written: string[] = [];
-		const write = vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+		const write = spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
 			written.push(String(chunk));
 			return true;
 		});
@@ -108,7 +108,7 @@ describe("guard hook protocol", () => {
 	// Failing open would silently remove the restriction the user was promised.
 	it("asks rather than allows when the payload is unreadable", async () => {
 		const written: string[] = [];
-		const write = vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+		const write = spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
 			written.push(String(chunk));
 			return true;
 		});

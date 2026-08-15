@@ -1,7 +1,11 @@
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { EnvStub, waitFor } from "./helpers.ts";
+
+const env = new EnvStub();
+
 import { handleWorkerChannelCommand, sendChannelRequest } from "../src/channel/client.ts";
 import { handleLeaderChannelCommand } from "../src/channel/leader-cli.ts";
 import type { ChannelResponse, LeaderChannelRequest } from "../src/channel/protocol.ts";
@@ -54,7 +58,7 @@ describe("worker channel", () => {
 	afterEach(async () => {
 		await server.stop();
 		rmSync(tempDir, { recursive: true, force: true });
-		vi.unstubAllEnvs();
+		env.restore();
 	});
 
 	it("answers notify immediately", async () => {
@@ -66,7 +70,7 @@ describe("worker channel", () => {
 
 	it("keeps an ask open until the leader answers", async () => {
 		const pending = sendChannelRequest(address, { type: "ask", workerId: "w1", text: "which db?" });
-		await vi.waitFor(() => expect(asked).toHaveLength(1));
+		await waitFor(() => expect(asked).toHaveLength(1));
 
 		asked[0].resolve({ ok: true, text: "postgres" });
 
@@ -82,12 +86,12 @@ describe("worker channel", () => {
 
 	describe("CLI subcommands", () => {
 		beforeEach(() => {
-			vi.stubEnv(NETA_SOCKET_ENV, address);
-			vi.stubEnv(NETA_WORKER_ENV, "w7");
+			env.set(NETA_SOCKET_ENV, address);
+			env.set(NETA_WORKER_ENV, "w7");
 		});
 
 		it("sends notify through the channel", async () => {
-			const log = vi.spyOn(console, "log").mockImplementation(() => {});
+			const log = spyOn(console, "log").mockImplementation(() => {});
 
 			await expect(handleWorkerChannelCommand(["notify", "reading", "auth.ts"])).resolves.toBe(true);
 
@@ -97,10 +101,10 @@ describe("worker channel", () => {
 		});
 
 		it("prints the leader's answer to an ask", async () => {
-			const log = vi.spyOn(console, "log").mockImplementation(() => {});
+			const log = spyOn(console, "log").mockImplementation(() => {});
 
 			const handled = handleWorkerChannelCommand(["ask", "which", "db?"]);
-			await vi.waitFor(() => expect(asked).toHaveLength(1));
+			await waitFor(() => expect(asked).toHaveLength(1));
 			asked[0].resolve({ ok: true, text: "postgres" });
 
 			await expect(handled).resolves.toBe(true);
@@ -109,7 +113,7 @@ describe("worker channel", () => {
 		});
 
 		it("passes --tail through to the room transcript", async () => {
-			const log = vi.spyOn(console, "log").mockImplementation(() => {});
+			const log = spyOn(console, "log").mockImplementation(() => {});
 
 			await handleWorkerChannelCommand(["room", "--tail", "5"]);
 
@@ -118,11 +122,11 @@ describe("worker channel", () => {
 		});
 
 		it("fails with a message when the leader rejects the request", async () => {
-			const error = vi.spyOn(console, "error").mockImplementation(() => {});
+			const error = spyOn(console, "error").mockImplementation(() => {});
 			const previousExitCode = process.exitCode;
 
 			const handled = handleWorkerChannelCommand(["ask", "anything"]);
-			await vi.waitFor(() => expect(asked).toHaveLength(1));
+			await waitFor(() => expect(asked).toHaveLength(1));
 			asked[0].resolve({ ok: false, error: "Junior workers cannot ask the leader." });
 			await handled;
 
@@ -134,8 +138,8 @@ describe("worker channel", () => {
 	});
 
 	it("ignores channel words outside a worker so they stay ordinary arguments", async () => {
-		vi.stubEnv(NETA_SOCKET_ENV, "");
-		vi.stubEnv(NETA_WORKER_ENV, "");
+		env.set(NETA_SOCKET_ENV, "");
+		env.set(NETA_WORKER_ENV, "");
 
 		await expect(handleWorkerChannelCommand(["notify", "the team about the outage"])).resolves.toBe(false);
 		expect(notified).toEqual([]);
@@ -143,12 +147,12 @@ describe("worker channel", () => {
 
 	describe("leader CLI subcommands", () => {
 		beforeEach(() => {
-			vi.stubEnv(NETA_SOCKET_ENV, address);
-			vi.stubEnv(NETA_LEADER_ENV, "leader-token");
+			env.set(NETA_SOCKET_ENV, address);
+			env.set(NETA_LEADER_ENV, "leader-token");
 		});
 
 		it("parses spawn flags and keeps the task as the trailing text", async () => {
-			const log = vi.spyOn(console, "log").mockImplementation(() => {});
+			const log = spyOn(console, "log").mockImplementation(() => {});
 
 			await expect(
 				handleLeaderChannelCommand([
@@ -183,7 +187,7 @@ describe("worker channel", () => {
 		});
 
 		it("defaults writer to false and omits an unset room", async () => {
-			const log = vi.spyOn(console, "log").mockImplementation(() => {});
+			const log = spyOn(console, "log").mockImplementation(() => {});
 
 			await handleLeaderChannelCommand(["spawn", "--role", "scout", "--tier", "junior", "map the auth flow"]);
 
@@ -200,7 +204,7 @@ describe("worker channel", () => {
 		});
 
 		it("converts a --timeout in seconds to milliseconds", async () => {
-			const log = vi.spyOn(console, "log").mockImplementation(() => {});
+			const log = spyOn(console, "log").mockImplementation(() => {});
 
 			await handleLeaderChannelCommand(["wait", "w1", "w2", "--timeout", "30"]);
 
@@ -214,7 +218,7 @@ describe("worker channel", () => {
 		});
 
 		it("rejects a spawn with no task instead of sending it", async () => {
-			const error = vi.spyOn(console, "error").mockImplementation(() => {});
+			const error = spyOn(console, "error").mockImplementation(() => {});
 			const previousExitCode = process.exitCode;
 
 			await expect(handleLeaderChannelCommand(["spawn", "--role", "worker", "--tier", "senior"])).resolves.toBe(
@@ -228,7 +232,7 @@ describe("worker channel", () => {
 		});
 
 		it("ignores leader commands without the leader token", async () => {
-			vi.stubEnv(NETA_LEADER_ENV, "");
+			env.set(NETA_LEADER_ENV, "");
 
 			await expect(handleLeaderChannelCommand(["workers"])).resolves.toBe(false);
 			expect(leaderRequests).toEqual([]);
