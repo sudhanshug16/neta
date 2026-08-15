@@ -66,7 +66,7 @@ function header(worker: WorkerSummary): string[] {
 
 /** The line a pane ends on: how it went, and what it cost. */
 function footer(page: WorkerLogPage): string {
-	const usage = formatUsage(page.worker?.usage);
+	const usage = formatUsage(page.worker?.usage, page.worker?.model);
 	return `── ${page.worker?.id ?? "worker"} ${page.state}${usage ? ` · ${usage}` : ""} ──`;
 }
 

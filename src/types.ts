@@ -5,6 +5,8 @@
  * See MANIFESTO.md at the repository root for the design these types encode.
  */
 
+import { estimateCost } from "./pricing.ts";
+
 /**
  * What a worker can be trusted with. Tiers are about trust, not raw model
  * quality: the leader picks a tier from the task shape and never sees model
@@ -148,7 +150,7 @@ export interface WorkerSummary {
 }
 
 /** Human-readable token and cost line, or undefined when the backend reported nothing. */
-export function formatUsage(usage: WorkerUsage | undefined): string | undefined {
+export function formatUsage(usage: WorkerUsage | undefined, modelId?: string): string | undefined {
 	if (!usage) return undefined;
 	const parts: string[] = [];
 	if (usage.totalTokens !== undefined) parts.push(`${usage.totalTokens.toLocaleString("en-US")} tokens`);
@@ -158,6 +160,14 @@ export function formatUsage(usage: WorkerUsage | undefined): string | undefined 
 	if (usage.contextUsed !== undefined && usage.contextSize) {
 		parts.push(`context ${Math.round((usage.contextUsed / usage.contextSize) * 100)}%`);
 	}
-	if (usage.costAmount !== undefined) parts.push(`${usage.costAmount.toFixed(2)} ${usage.costCurrency ?? "USD"}`);
+	if (usage.costAmount !== undefined) {
+		parts.push(`${usage.costAmount.toFixed(2)} ${usage.costCurrency ?? "USD"}`);
+	} else if (modelId) {
+		// When backend does not report cost, try to estimate it from bundled pricing
+		const estimated = estimateCost(modelId, usage);
+		if (estimated !== undefined) {
+			parts.push(`est. $${estimated.toFixed(2)}`);
+		}
+	}
 	return parts.length > 0 ? parts.join(", ") : undefined;
 }

@@ -48,7 +48,7 @@ function describe(summary: WorkerSummary): string {
 	if (summary.room) parts.push(`room=${summary.room}`);
 	if (summary.model) parts.push(`model=${summary.model}`);
 	if (summary.mode) parts.push(`mode=${summary.mode}`);
-	const usage = formatUsage(summary.usage);
+	const usage = formatUsage(summary.usage, summary.model);
 	if (usage) parts.push(usage);
 	if (summary.pendingQuestion) parts.push(`asking: ${summary.pendingQuestion}`);
 	return parts.join(" | ");

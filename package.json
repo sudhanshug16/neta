@@ -45,7 +45,8 @@
 		"typecheck": "tsc --noEmit",
 		"check": "biome check --write --error-on-warnings . && bun run typecheck",
 		"test": "bun test",
-		"prepublishOnly": "bun run clean && bun run check && bun test && bun run build"
+		"prepublishOnly": "bun run clean && bun run check && bun test && bun run build",
+		"refresh-pricing": "bun run scripts/refresh-pricing.ts"
 	},
 	"devDependencies": {
 		"@agentclientprotocol/sdk": "1.3.0",

@@ -184,7 +184,7 @@ function headerText(worker: WorkerSummary): string {
 function footerMessage(page: WorkerLogPage): string {
 	const question = page.worker?.pendingQuestion;
 	if (question) return `waiting — asks: ${question}`;
-	const usage = formatUsage(page.worker?.usage);
+	const usage = formatUsage(page.worker?.usage, page.worker?.model);
 	return usage ? `${page.state} · ${usage}` : page.state;
 }
 
@@ -237,7 +237,7 @@ export async function watchWorkerTui(options: WatchTuiOptions): Promise<number> 
 		finished = true;
 		loader.stop();
 		footerSlot.clear();
-		const usage = formatUsage(finalPage.worker?.usage);
+		const usage = formatUsage(finalPage.worker?.usage, finalPage.worker?.model);
 		footerSlot.addChild(
 			new Text(
 				style.dim(

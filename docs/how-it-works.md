@@ -118,3 +118,13 @@ as bare lines for piping.
 If you are already inside a multiplexer session, Neta uses it. If you are not,
 it starts one around the leader. With neither installed, workers run headless
 and nothing else changes.
+
+## Worker cost estimation
+
+Worker usage (tokens and cost) appears in the pane footer, the `neta workers`
+listing, and the MCP tools' status lines. Most backends report token counts
+but not cost. When cost is missing, Neta estimates it from a bundled snapshot
+of [models.dev](https://models.dev) pricing data, labeled `est.` to
+distinguish it from backend-reported amounts. The snapshot covers Anthropic
+and OpenAI models; estimates for other providers are not available. To refresh
+the snapshot, run `bun run refresh-pricing` from the repository root.

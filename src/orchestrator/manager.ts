@@ -627,7 +627,7 @@ export class WorkerManager implements ChannelHandler {
 				? `, ${summary.model ?? ""}${summary.model && summary.mode ? "/" : ""}${summary.mode ?? ""}`.trim()
 				: "";
 		let line = `${summary.id} [${summary.role}/${summary.tier}, ${access}${room}${session}] ${summary.state} — ${summary.task}`;
-		const usage = formatUsage(summary.usage);
+		const usage = formatUsage(summary.usage, summary.model);
 		if (usage) line += `\n  usage: ${usage}`;
 		if (summary.pendingQuestion) line += `\n  asks: ${summary.pendingQuestion}`;
 		if (summary.result) {
