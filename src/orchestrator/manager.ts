@@ -173,7 +173,10 @@ export class WorkerManager implements ChannelHandler {
 			for (const record of existing) record.archived = true;
 		}
 
-		const backendName = this.computeBackendAssignment(request);
+		const backendName = this.computeBackendAssignment(request, {
+			cursors: this.spreadCursors,
+			lastWriterBackend: this.lastWriterBackend,
+		});
 		const backend = this.options.config.resolve(request.tier, backendName, writer);
 		const runtimeEnv = (await this.options.prepareEnv?.()) ?? {};
 		const id = `w${++this.counter}`;
@@ -382,21 +385,42 @@ export class WorkerManager implements ChannelHandler {
 	 * Compute backend assignments for proposed workers without spawning them.
 	 * Used by the neta_plan tool to present a staffing plan before spawning.
 	 * Returns a list of computed assignments in the same order as the requests.
+	 *
+	 * Operates on a deep copy of the live state so planning never mutates the
+	 * manager's cursors. Threads planned writers through the simulation so
+	 * diversity rules see the same lastWriterBackend the real spawn sequence
+	 * will produce.
 	 */
 	planAssignments(
 		requests: Array<{ role: string; tier: Tier; writer?: boolean; backend?: string }>,
 	): Array<{ role: string; tier: Tier; backend: string; writer: boolean }> {
+		// Deep copy state so planning never mutates live cursors
+		const simulatedState = {
+			cursors: new Map(this.spreadCursors),
+			lastWriterBackend: this.lastWriterBackend,
+		};
+
 		return requests.map((request) => {
-			const backendName = this.computeBackendAssignment({
-				...request,
-				task: "", // Not used for planning
-				writer: request.writer ?? false,
-			});
+			const writer = request.writer ?? false;
+			const backendName = this.computeBackendAssignment(
+				{
+					...request,
+					task: "", // Not used for planning
+					writer,
+				},
+				simulatedState,
+			);
+
+			// Thread planned writers through the simulation
+			if (writer) {
+				simulatedState.lastWriterBackend = backendName;
+			}
+
 			return {
 				role: request.role,
 				tier: request.tier,
 				backend: backendName,
-				writer: request.writer ?? false,
+				writer,
 			};
 		});
 	}
@@ -545,8 +569,13 @@ export class WorkerManager implements ChannelHandler {
 	 * 3. Spread policy across installed backends (deterministic round-robin)
 	 * 4. Diversity rule: reviewer/debater roles prefer a different backend than
 	 *    the last writer when another backend is installed
+	 *
+	 * State object allows planning to simulate without mutating live state.
 	 */
-	private computeBackendAssignment(request: SpawnRequest): string {
+	private computeBackendAssignment(
+		request: SpawnRequest,
+		state: { cursors: Map<Tier, number>; lastWriterBackend: string | undefined },
+	): string {
 		// 1. Explicit backend override
 		if (request.backend) return request.backend;
 
@@ -567,21 +596,21 @@ export class WorkerManager implements ChannelHandler {
 		// Diversity rule: reviewer/debater roles prefer a different backend than
 		// the last writer when another backend is installed
 		const isDiversityRole = request.role === "reviewer" || request.role === "debater";
-		if (isDiversityRole && this.lastWriterBackend && installed.length > 1) {
-			const otherBackends = installed.filter((name) => name !== this.lastWriterBackend);
+		if (isDiversityRole && state.lastWriterBackend && installed.length > 1) {
+			const otherBackends = installed.filter((name) => name !== state.lastWriterBackend);
 			if (otherBackends.length > 0) {
 				// Round-robin among non-writer backends
-				const cursor = this.spreadCursors.get(request.tier) ?? 0;
+				const cursor = state.cursors.get(request.tier) ?? 0;
 				const backend = otherBackends[cursor % otherBackends.length];
-				this.spreadCursors.set(request.tier, cursor + 1);
+				state.cursors.set(request.tier, cursor + 1);
 				return backend;
 			}
 		}
 
 		// Round-robin across all installed backends
-		const cursor = this.spreadCursors.get(request.tier) ?? 0;
+		const cursor = state.cursors.get(request.tier) ?? 0;
 		const backend = installed[cursor % installed.length];
-		this.spreadCursors.set(request.tier, cursor + 1);
+		state.cursors.set(request.tier, cursor + 1);
 		return backend;
 	}
 

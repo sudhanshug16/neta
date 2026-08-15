@@ -500,5 +500,139 @@ describe("WorkerManager", () => {
 			expect(summary.backend).toBeTruthy();
 			expect(["claude", "codex", "opencode"]).toContain(summary.backend);
 		});
+
+		it("planAssignments followed by spawning the exact list yields the same backends per worker", async () => {
+			// Mock multiple backends as installed
+			const multiConfig = new NetaConfig();
+			const mockInstalledBackends = () => ["claude", "codex"];
+			multiConfig.installedBackends = mockInstalledBackends;
+
+			const multiManager = new WorkerManager({
+				cwd: process.cwd(),
+				agentDir: "/nonexistent-agent-dir",
+				config: multiConfig,
+				channelAddress: "/tmp/neta-test-invariant.sock",
+				onEvent: () => {},
+				createTransport: (options) => {
+					const transport = new FakeTransport(options);
+					transports.push(transport);
+					return transport;
+				},
+			});
+
+			const requestList = [
+				{ role: "scout", tier: "senior" as const },
+				{ role: "worker", tier: "senior" as const, writer: true },
+				{ role: "reviewer", tier: "senior" as const },
+				{ role: "worker", tier: "junior" as const },
+			];
+
+			// Plan the assignments
+			const plan = multiManager.planAssignments(requestList);
+
+			// Spawn the exact same list in order
+			const spawned = [];
+			for (const request of requestList) {
+				spawned.push(
+					await multiManager.spawn({
+						...request,
+						task: "task",
+					}),
+				);
+			}
+
+			// Verify each spawned worker's backend matches the plan
+			for (let i = 0; i < plan.length; i++) {
+				expect(spawned[i].backend).toBe(plan[i].backend);
+			}
+
+			await multiManager.dispose();
+			rmSync("/tmp/neta-test-invariant.sock", { force: true });
+		});
+
+		it("planAssignments is idempotent for the same request list", async () => {
+			// Mock multiple backends as installed
+			const multiConfig = new NetaConfig();
+			const mockInstalledBackends = () => ["claude", "codex"];
+			multiConfig.installedBackends = mockInstalledBackends;
+
+			const multiManager = new WorkerManager({
+				cwd: process.cwd(),
+				agentDir: "/nonexistent-agent-dir",
+				config: multiConfig,
+				channelAddress: "/tmp/neta-test-idempotent.sock",
+				onEvent: () => {},
+				createTransport: (options) => {
+					const transport = new FakeTransport(options);
+					transports.push(transport);
+					return transport;
+				},
+			});
+
+			const requestList = [
+				{ role: "scout", tier: "senior" as const },
+				{ role: "worker", tier: "senior" as const, writer: true },
+				{ role: "reviewer", tier: "senior" as const },
+			];
+
+			// Call planAssignments twice with the same list
+			const plan1 = multiManager.planAssignments(requestList);
+			const plan2 = multiManager.planAssignments(requestList);
+
+			// Verify both plans are identical
+			expect(plan1).toEqual(plan2);
+
+			// Verify spawning after planning still matches the first plan
+			const spawned = [];
+			for (const request of requestList) {
+				spawned.push(
+					await multiManager.spawn({
+						...request,
+						task: "task",
+					}),
+				);
+			}
+
+			for (let i = 0; i < plan1.length; i++) {
+				expect(spawned[i].backend).toBe(plan1[i].backend);
+			}
+
+			await multiManager.dispose();
+			rmSync("/tmp/neta-test-idempotent.sock", { force: true });
+		});
+
+		it("planAssignments shows reviewer on different backend than planned writer", async () => {
+			// Mock two backends as installed
+			const multiConfig = new NetaConfig();
+			const mockInstalledBackends = () => ["claude", "codex"];
+			multiConfig.installedBackends = mockInstalledBackends;
+
+			const multiManager = new WorkerManager({
+				cwd: process.cwd(),
+				agentDir: "/nonexistent-agent-dir",
+				config: multiConfig,
+				channelAddress: "/tmp/neta-test-diversity-plan.sock",
+				onEvent: () => {},
+				createTransport: (options) => {
+					const transport = new FakeTransport(options);
+					transports.push(transport);
+					return transport;
+				},
+			});
+
+			const requestList = [
+				{ role: "worker", tier: "senior" as const, writer: true },
+				{ role: "reviewer", tier: "senior" as const },
+			];
+
+			// Plan the assignments
+			const plan = multiManager.planAssignments(requestList);
+
+			// Verify the reviewer is planned on a different backend than the writer
+			expect(plan[1].backend).not.toBe(plan[0].backend);
+
+			await multiManager.dispose();
+			rmSync("/tmp/neta-test-diversity-plan.sock", { force: true });
+		});
 	});
 });
