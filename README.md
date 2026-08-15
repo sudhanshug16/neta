@@ -12,41 +12,53 @@ neta
 ```
 
 That detects the agent CLIs you have, launches one as the leader with Neta's
-instructions and worker tools injected, and stays behind it. Workers appear as
-panes you can read; the leader collects their results and reports once.
+instructions and worker tools injected, and stays behind it. The leader spawns
+workers, collects their results, and reports once.
 
 ## What you get
 
 - **A lead, not an implementer.** The leader reads, decides, delegates and
   verifies. Its edit tools are removed by the vendor's own permission system,
-  and shell writes (`sed -i`, `echo > file`, `git commit`) are blocked by a
-  hook — a leader with an edit tool eventually edits.
+  and shell writes (`sed -i`, `echo > file`, `git commit`) are blocked too — a
+  leader with a way to edit eventually edits.
 - **Workers on your subscription.** Every worker is a real agent CLI driven
   over ACP, so it runs on the login you already have rather than on API credit.
+  All three tiers default to Claude Code; change that in settings.
 - **Tiers, not model names.** The leader asks for a junior, senior or staff
-  worker; you decide which model each tier means.
+  worker; you decide which model each tier means. It never sees model names.
 - **One writer at a time.** Reads parallelize; writes serialize. A second
   writer is refused, not raced.
-- **Panes you can enter.** With Zellij or tmux running, each worker gets a pane
-  streaming its log. Watching one costs nothing and closing one breaks nothing.
-- **Visible spend.** `neta workers` shows tokens and cost per worker.
+- **Panes, if you run a multiplexer.** With Zellij or tmux, each worker gets a
+  pane streaming its log; watching one costs nothing and closing one breaks
+  nothing. Without one, workers run headless and nothing else changes.
+- **Visible spend.** `neta workers` shows tokens and cost per worker, as the
+  backends report them.
+
+How the leader is held to read-only depends on which CLI leads:
+
+| Leader | Typed edit tools | Its shell |
+| --- | --- | --- |
+| Claude Code | denied by permission rules | `neta guard` runs as a PreToolUse hook |
+| Codex | kernel sandbox | same kernel sandbox (`sandbox_mode = "read-only"`) |
+| OpenCode | `permission.edit: deny` | denied bash patterns |
+
+Codex's is the strongest — the kernel refuses the write. The other two rely on
+Neta's guard, which is a denylist, and a denylist can be incomplete.
 
 ## Install
 
 ```
-npm install -g @intervene/neta
+npm install -g @intervene/neta      # or: bun install -g @intervene/neta
 ```
 
-Neta needs Node 22.19+ and at least one agent CLI on PATH:
+One bundled file, no runtime dependencies. Neta needs Node 22.19+ and at least
+one agent CLI on PATH:
 
 ```
 npm install -g @anthropic-ai/claude-code   # or
 npm install -g @openai/codex               # or
 npm install -g opencode-ai
 ```
-
-Neta itself is a single bundled file with no runtime dependencies, so this
-installs one thing, not a tree.
 
 From a checkout instead — the toolchain is [Bun](https://bun.sh):
 
@@ -65,32 +77,37 @@ neta --mux none            # no panes; workers run headless
 neta -- --model opus       # pass arguments through to the agent CLI
 
 neta workers               # what is running, and what it has cost
-neta watch w1              # follow one worker's log
+neta watch w1              # follow one worker's log until it finishes
 neta log w1                # its new lines since you last looked
+neta send w1 <message>     # give a running worker more instructions
+neta answer w1 <text>      # unblock a worker that asked you something
 neta kill w1               # stop it
 neta sessions              # leader sessions running on this machine
+neta --backends            # which agent CLIs are installed
 ```
 
-Inside a session, the leader gets MCP tools: `neta_spawn`, `neta_spawn_group`,
+Those worker commands work from any terminal, not just inside the session:
+Neta records each live session in `~/.neta/sessions/`, so a second window can
+reach the same leader. Add `--session <id>` when more than one is running.
+
+Inside a session the leader gets MCP tools — `neta_spawn`, `neta_spawn_group`,
 `neta_workers`, `neta_log`, `neta_wait`, `neta_send`, `neta_answer`,
-`neta_kill`, `neta_room`. Workers get `neta_notify`, `neta_ask`, `neta_say`,
-`neta_room`, and the same commands as a CLI.
+`neta_kill`, `neta_room` — and workers get `neta_notify`, `neta_ask`,
+`neta_say`, `neta_room`, plus the same commands in their shell.
 
-## Deciding what the leader may decide
+## Configuring it
 
-Write a `CHARTER.md` in your project (see [CHARTER.example.md](CHARTER.example.md)).
-It says which decisions the leader takes on your behalf and which ones stop and
-ask. Without one, the leader decides routine technical matters and asks before
-anything expensive, destructive, or outward-facing.
-
-## Development
-
-```
-bun install
-bun test          # 161 tests, including real worker processes over a real socket
-bun run check     # biome + tsc --noEmit
-bun run build     # dist/cli.js, one file, runs on Node
-```
+- **Settings** live in `~/.neta/settings.json`, overridden per project by
+  `.neta/settings.json`: which CLI leads, which model each tier means, how
+  workers are launched, whether panes open. See [docs/settings.md](docs/settings.md).
+- **CHARTER.md** in your project says which decisions the leader may take on
+  your behalf and which ones stop and ask — see
+  [CHARTER.example.md](CHARTER.example.md). Without one, the leader decides
+  routine technical matters and asks before anything expensive, destructive, or
+  outward-facing.
+- **Roles** are prompts (`scout`, `worker`, `reviewer`, `debater`); **flavors**
+  are playbooks the leader reads when a task fits (`implement`, `decide`,
+  `investigate`). Both are markdown you can override per project.
 
 ## Documentation
 
@@ -99,11 +116,38 @@ bun run build     # dist/cli.js, one file, runs on Node
 - [Settings](docs/settings.md) — tiers, backends, multiplexer, leader options.
 - [MANIFESTO.md](MANIFESTO.md) — the design: tiers, roles, single writer, the
   charter.
-- [PLAN.md](PLAN.md) — what is built and what is deliberately not.
+- [PLAN.md](PLAN.md) — what is built, what was verified how, and what is
+  deliberately missing.
+
+## Development
+
+```
+bun install
+bun test          # 161 tests, incl. real worker processes over a real socket
+bun run check     # biome + tsc --noEmit
+bun run build     # dist/cli.js — one file, targets Node
+```
+
+Tests never call a provider: worker backends are a fixture ACP agent.
 
 ## Status
 
-Working end to end, and young. Every mechanism it relies on was verified
-against the installed CLIs, and the test suite drives real worker processes
-over a real socket with a fake agent — but it has not been through months of
-daily use. Expect rough edges around vendor flags, which change often.
+Working end to end, and young.
+
+Verified: every vendor mechanism was checked against the installed CLI before
+being coded, the test suite drives the real control plane, real worker
+processes and a real socket, and the published package was installed from its
+tarball and driven through a full session.
+
+Not verified, and worth knowing:
+
+- **Worker shells are not sandboxed by default.** A read-only worker's typed
+  edits are rejected by Neta on every backend, but its `bash` can still write
+  unless you set that backend's sandbox flags (`readOnlyArgs` in settings).
+- **Zellij is untested live** — its commands are unit-tested only; tmux was
+  exercised against a real server.
+- **No long-running real-model use yet.** The leader's honesty rule (report a
+  blocker rather than fake delegation) is enforced by prompt and tools, not by
+  a test.
+
+Vendor flags change often; that is where breakage will show up first.
