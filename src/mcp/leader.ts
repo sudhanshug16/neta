@@ -125,7 +125,12 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 						type: "boolean",
 						description: "Grant the writer slot (edit/write access). Only one writer at a time.",
 					},
-					backend: { type: "string", description: "Override the backend. Normally leave this alone." },
+					backend: {
+						type: "string",
+						description:
+							"Explicit backend for this worker. Use it to apply the user's staffing-plan tweaks; otherwise omit " +
+							"and the assignment policy decides.",
+					},
 					room: { type: "string", description: "Join a room and share its transcript with the other members." },
 				},
 				required: ["role", "tier", "task"],

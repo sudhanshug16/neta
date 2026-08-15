@@ -4,8 +4,11 @@
  * Codex has the strongest restriction of the three and the weakest instruction
  * hook, so this adapter is shaped by that trade.
  *
- * - Restriction: `-s read-only -a never` is a kernel sandbox. It covers the
- *   shell, so there is no `sed -i` hole to patch and no hook to install.
+ * - Restriction: `-c sandbox_mode="read-only" -c approval_policy="never"` is a
+ *   kernel sandbox. It covers the shell, so there is no `sed -i` hole to patch
+ *   and no hook to install. The neta MCP tools are pre-approved via
+ *   `-c mcp_servers.neta.default_tools_approval_mode="approve"` so the leader is
+ *   never interrupted for control-plane calls.
  * - MCP: `-c mcp_servers.neta.*` overrides, which is also why the control plane
  *   is reachable at all — the sandbox denies socket connections from the
  *   model's shell, but MCP servers run outside it.
