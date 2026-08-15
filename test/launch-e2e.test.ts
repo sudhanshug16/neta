@@ -104,6 +104,15 @@ describe("neta (launching a leader)", () => {
 		expect(config.mcp.neta.command.at(-1)).toBe("mcp");
 	});
 
+	// Panes are opened by the control plane, which is a child of the leader
+	// rather than of the launcher, so `--mux` has to travel by environment.
+	it("passes the multiplexer choice down to the process that opens panes", async () => {
+		const launched = await launch("claude");
+
+		expect(launched.env.NETA_MUX).toBe("none");
+		expect(launched.env.NETA_PANES).toBe("1");
+	});
+
 	it("passes arguments after -- through to the vendor CLI", async () => {
 		const launched = await launch("claude", ["--", "--model", "opus"]);
 

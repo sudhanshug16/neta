@@ -40,6 +40,8 @@ if (target) {
 				NETA_LEADER_BACKEND: process.env.NETA_LEADER_BACKEND ?? null,
 				CODEX_HOME: process.env.CODEX_HOME ?? null,
 				OPENCODE_CONFIG_CONTENT: process.env.OPENCODE_CONFIG_CONTENT ?? null,
+				NETA_MUX: process.env.NETA_MUX ?? null,
+				NETA_PANES: process.env.NETA_PANES ?? null,
 			},
 		}),
 		"utf-8",

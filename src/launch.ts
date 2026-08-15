@@ -136,7 +136,9 @@ export async function launchLeader(options: LaunchOptions): Promise<number> {
 	const code = await new Promise<number>((resolve) => {
 		const child = spawn(wrapped.command, wrapped.args, {
 			cwd,
-			env: { ...process.env, ...launch.env },
+			// The control plane is the process that opens panes, and it is a child
+			// of the leader rather than of us, so the choice travels by environment.
+			env: { ...process.env, ...launch.env, NETA_MUX: mux.id, NETA_PANES: config.mux.panes ? "1" : "0" },
 			stdio: "inherit",
 		});
 		child.on("error", (error) => {

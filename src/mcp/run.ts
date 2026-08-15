@@ -21,7 +21,7 @@ import { selectMux } from "../mux/index.ts";
 import { createPaneHost } from "../mux/panes.ts";
 import { WorkerManager } from "../orchestrator/manager.ts";
 import { removeSessionRecord, writeSessionRecord } from "../session.ts";
-import { loadConfig } from "../settings.ts";
+import { loadConfig, type MuxMode } from "../settings.ts";
 import type { WorkerEvent } from "../types.ts";
 import { leaderTools } from "./leader.ts";
 import { createMcpServer } from "./serve.ts";
@@ -30,6 +30,11 @@ import { workerTools } from "./worker.ts";
 /** stdout is the MCP transport, so everything human-readable goes to stderr. */
 function note(message: string): void {
 	process.stderr.write(`[neta] ${message}\n`);
+}
+
+function muxMode(configured: MuxMode): MuxMode {
+	const chosen = process.env.NETA_MUX;
+	return chosen === "zellij" || chosen === "tmux" || chosen === "none" || chosen === "auto" ? chosen : configured;
 }
 
 function describeEvent(event: WorkerEvent): string {
@@ -84,9 +89,11 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 				env: { [NETA_SOCKET_ENV]: address, [NETA_WORKER_ENV]: workerId },
 			},
 		],
-		panes: config.mux.panes
-			? createPaneHost(selectMux(config.mux.mode), invocation, sessionId, cwd, note)
-			: undefined,
+		// `--mux` at launch decided this; settings answer when nobody did.
+		panes:
+			(process.env.NETA_PANES ?? (config.mux.panes ? "1" : "0")) === "1"
+				? createPaneHost(selectMux(muxMode(config.mux.mode)), invocation, sessionId, cwd, note)
+				: undefined,
 	});
 
 	const server = new ChannelServer(address, manager);
