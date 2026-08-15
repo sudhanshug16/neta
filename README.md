@@ -114,9 +114,11 @@ Inside a session the leader gets MCP tools — `neta_spawn`, `neta_spawn_group`,
   workers are launched, whether panes open. See [docs/settings.md](docs/settings.md).
 - **CHARTER.md** in your project says which decisions the leader may take on
   your behalf and which ones stop and ask — see
-  [CHARTER.example.md](CHARTER.example.md). Without one, the leader decides
-  routine technical matters and asks before anything expensive, destructive, or
-  outward-facing.
+  [CHARTER.example.md](CHARTER.example.md). Neta also loads
+  `~/.neta/CHARTER.md`; when both exist, it embeds the project charter first,
+  then the user charter, with both source paths labelled. Without either one,
+  the leader decides routine technical matters and asks before anything
+  expensive, destructive, or outward-facing.
 - **Roles** are prompts (`scout`, `worker`, `reviewer`, `debater`); **flavors**
   are playbooks the leader reads when a task fits (`implement`, `decide`,
   `investigate`). Both are markdown you can override per project.

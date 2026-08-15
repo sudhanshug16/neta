@@ -148,13 +148,21 @@ describe("leader prompt", () => {
 });
 
 describe("charter loading", () => {
-	it("prefers the project charter over the user's default", () => {
+	it("appends the user's default after the project charter with both paths attributed", () => {
 		const cwd = scratch();
 		const agentDir = scratch();
-		writeFileSync(join(cwd, "CHARTER.md"), "project rules");
-		writeFileSync(join(agentDir, "CHARTER.md"), "personal rules");
+		const projectPath = join(cwd, "CHARTER.md");
+		const userPath = join(agentDir, "CHARTER.md");
+		writeFileSync(projectPath, "project rules");
+		writeFileSync(userPath, "personal rules");
 
-		expect(loadCharter(cwd, agentDir)?.text).toBe("project rules");
+		const charter = loadCharter(cwd, agentDir);
+		const prompt = buildLeaderPrompt({ tiers: DEFAULT_TIERS, charter });
+
+		expect(charter?.text.indexOf("project rules")).toBeLessThan(charter?.text.indexOf("personal rules") ?? -1);
+		expect(prompt).toContain(`## Charter from ${projectPath}`);
+		expect(prompt).toContain(`## Charter from ${userPath}`);
+		expect(prompt).toContain(`Your charters are ${projectPath} and ${userPath}`);
 	});
 
 	it("falls back to the user's default", () => {

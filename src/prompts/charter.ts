@@ -12,17 +12,31 @@ import { join } from "node:path";
 export interface Charter {
 	path: string;
 	text: string;
+	sources?: CharterSource[];
+}
+
+export interface CharterSource {
+	path: string;
+	text: string;
 }
 
 export function loadCharter(cwd: string, agentDir: string): Charter | undefined {
+	const sources: CharterSource[] = [];
 	for (const path of [join(cwd, "CHARTER.md"), join(agentDir, "CHARTER.md")]) {
 		if (!existsSync(path)) continue;
 		try {
 			const text = readFileSync(path, "utf-8").trim();
-			if (text) return { path, text };
+			if (text) sources.push({ path, text });
 		} catch {
 			// Unreadable is the same as absent: the leader falls back to asking.
 		}
 	}
-	return undefined;
+	if (!sources.length) return undefined;
+	if (sources.length === 1) return sources[0];
+
+	return {
+		path: sources[0].path,
+		text: sources.map((source) => `## Charter from ${source.path}\n\n${source.text}`).join("\n\n"),
+		sources,
+	};
 }

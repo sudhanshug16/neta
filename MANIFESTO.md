@@ -50,9 +50,11 @@ it may take alone (pick a library, merge a PR, close an issue), which need the
 user, and when to interrupt. Example: "open and merge PRs on my behalf; ask
 before anything touching billing."
 
-- Read from the project, then from `~/.neta`, and embedded in the leader's
-  instructions at launch. Embedded rather than referenced: the leader runs
-  inside someone else's CLI, and a path we merely point at may never be read.
+- Read from the project and `~/.neta`, and embedded in the leader's
+  instructions at launch. When both exist, the project charter comes first,
+  followed by the user charter; each section names its source path. Embedded
+  rather than referenced: the leader runs inside someone else's CLI, and a
+  path we merely point at may never be read.
 - The charter is about authority, not plumbing. Model mappings and backend
   config live in settings.
 

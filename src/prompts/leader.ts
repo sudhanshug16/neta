@@ -143,8 +143,10 @@ a CHARTER.md in this repo or in ~/.neta/, or persisted tier overrides in
 
 	// Embedded rather than referenced: the leader runs in someone else's CLI, so
 	// there is no guarantee it would read a path we merely pointed at.
+	const charterPaths =
+		options.charter?.sources?.map((source) => source.path) ?? (options.charter ? [options.charter.path] : []);
 	const charter = options.charter
-		? `Your charter is ${options.charter.path}. It defines what you may decide on the
+		? `Your ${charterPaths.length === 1 ? "charter is" : "charters are"} ${charterPaths.join(" and ")}. ${charterPaths.length === 1 ? "It defines" : "They define"} what you may decide on the
 user's behalf. Treat it as the authority on scope: anything inside it, you do
 and report afterwards. Anything it reserves for the user, you stop and ask.
 When it does not cover a decision, judge by its spirit; if the decision is
