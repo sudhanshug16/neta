@@ -9,7 +9,9 @@ describe("NetaConfig", () => {
 	// A tier means a different model on each vendor, so the backend says what its
 	// junior is. Model ids are the ones the bridges advertise over ACP.
 	it("gives each tier the shipped model for its backend when configured", () => {
-		const config = new NetaConfig({ tiers: { junior: { backend: "claude" }, senior: { backend: "claude" }, staff: { backend: "claude" } } });
+		const config = new NetaConfig({
+			tiers: { junior: { backend: "claude" }, senior: { backend: "claude" }, staff: { backend: "claude" } },
+		});
 
 		expect(config.resolve("junior", "claude")).toMatchObject({ name: "claude", model: "haiku" });
 		expect(config.resolve("senior", "claude")).toMatchObject({ name: "claude", model: "sonnet" });
@@ -60,8 +62,8 @@ describe("NetaConfig", () => {
 	it("returns installed backends filtered by command on PATH", () => {
 		const config = new NetaConfig();
 		// Mock env with npx on PATH (for claude/codex) but not opencode
-		const mockEnv = { PATH: "/usr/bin:/bin" };
-		const mockFindOnPath = (cmd: string) => (cmd === "npx" ? "/usr/bin/npx" : undefined);
+		const _mockEnv = { PATH: "/usr/bin:/bin" };
+		const _mockFindOnPath = (cmd: string) => (cmd === "npx" ? "/usr/bin/npx" : undefined);
 
 		// We can't easily mock findOnPath here, so let's just verify the method exists
 		expect(typeof config.installedBackends).toBe("function");

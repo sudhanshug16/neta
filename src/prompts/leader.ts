@@ -123,7 +123,7 @@ export function buildLeaderPrompt(options: LeaderPromptOptions): string {
 	const { tiers, control = "mcp", toolName = (base) => base } = options;
 	const mapping = (Object.keys(tiers) as Tier[])
 		.filter((tier) => tiers[tier]?.backend)
-		.map((tier) => `${tier} -> ${tiers[tier]!.backend}`)
+		.map((tier) => `${tier} -> ${tiers[tier]?.backend}`)
 		.join(", ");
 	const s = surface(control, toolName);
 

@@ -375,7 +375,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 			name: "neta_remember",
 			description:
 				"Persist a tier's backend assignment to the project's .neta/settings.json file. Use this when the user " +
-				"says \"remember\" after a backend override. This writes to the project settings file and does not " +
+				'says "remember" after a backend override. This writes to the project settings file and does not ' +
 				"preserve JSON comments. The setting will apply to future sessions in this project.",
 			inputSchema: {
 				type: "object",

@@ -210,7 +210,12 @@ describe("AcpWorkerTransport", () => {
 			systemPrompt: "",
 			scratchDir,
 			mcpServers: [],
-			events: { log: (kind, text) => log.push({ at: 0, kind, text }), usage: () => {}, vendorSession: () => {}, session: () => {} },
+			events: {
+				log: (kind, text) => log.push({ at: 0, kind, text }),
+				usage: () => {},
+				vendorSession: () => {},
+				session: () => {},
+			},
 		});
 		started.push(transport);
 

@@ -217,7 +217,9 @@ export class NetaConfig {
 		const mapping = this.tiers[tier];
 		const backend = this.backends[backendName];
 		if (!backend) {
-			throw new Error(`Unknown worker backend "${backendName}". Configured backends: ${this.backendNames().join(", ")}.`);
+			throw new Error(
+				`Unknown worker backend "${backendName}". Configured backends: ${this.backendNames().join(", ")}.`,
+			);
 		}
 
 		// If the backend differs from the tier's configured backend, drop the
@@ -300,5 +302,5 @@ export async function persistTierOverride(cwd: string, tier: Tier, override: Net
 	};
 
 	// Write back with pretty-printing
-	writeFileSync(settingsPath, JSON.stringify(updated, null, 2) + "\n", "utf-8");
+	writeFileSync(settingsPath, `${JSON.stringify(updated, null, 2)}\n`, "utf-8");
 }

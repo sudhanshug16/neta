@@ -106,7 +106,9 @@ describe("leader prompt", () => {
 	});
 
 	it("describes the tier mapping without naming models", () => {
-		const prompt = buildLeaderPrompt({ tiers: { junior: { backend: "claude" }, senior: { backend: "claude" }, staff: { backend: "claude" } } });
+		const prompt = buildLeaderPrompt({
+			tiers: { junior: { backend: "claude" }, senior: { backend: "claude" }, staff: { backend: "claude" } },
+		});
 
 		expect(prompt).toContain("junior -> claude");
 		expect(prompt).not.toContain("haiku");

@@ -19,7 +19,7 @@
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 
-let trapSigterm = false;
+let _trapSigterm = false;
 
 const sessions = new Set();
 let counter = 0;
@@ -127,7 +127,7 @@ async function prompt(params, cx) {
 	}
 
 	if (text.includes("TRAP_SIGTERM")) {
-		trapSigterm = true;
+		_trapSigterm = true;
 		process.on("SIGTERM", () => {
 			// Trap and ignore SIGTERM to test kill escalation to SIGKILL.
 		});

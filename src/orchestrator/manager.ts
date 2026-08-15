@@ -617,7 +617,10 @@ export class WorkerManager implements ChannelHandler {
 	private statusLine(summary: WorkerSummary, resultLimit?: number): string {
 		const access = summary.writer ? "writer" : "read-only";
 		const room = summary.room ? `, room ${summary.room}` : "";
-		const session = summary.model || summary.mode ? `, ${summary.model ?? ""}${summary.model && summary.mode ? "/" : ""}${summary.mode ?? ""}`.trim() : "";
+		const session =
+			summary.model || summary.mode
+				? `, ${summary.model ?? ""}${summary.model && summary.mode ? "/" : ""}${summary.mode ?? ""}`.trim()
+				: "";
 		let line = `${summary.id} [${summary.role}/${summary.tier}, ${access}${room}${session}] ${summary.state} — ${summary.task}`;
 		const usage = formatUsage(summary.usage);
 		if (usage) line += `\n  usage: ${usage}`;

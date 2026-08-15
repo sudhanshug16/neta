@@ -3,7 +3,7 @@ import { rmSync } from "node:fs";
 import { NETA_SOCKET_ENV, NETA_WORKER_ENV } from "../src/channel/protocol.ts";
 import { WorkerManager } from "../src/orchestrator/manager.ts";
 import type { PromptOutcome, TransportOptions, WorkerTransportDriver } from "../src/orchestrator/transport.ts";
-import { DEFAULT_BACKENDS, NetaConfig } from "../src/settings.ts";
+import { NetaConfig } from "../src/settings.ts";
 import type { WorkerEvent } from "../src/types.ts";
 
 class FakeTransport implements WorkerTransportDriver {
@@ -416,7 +416,7 @@ describe("WorkerManager", () => {
 		it("spreads workers across installed backends deterministically within a session", async () => {
 			// Mock multiple backends as installed
 			const multiConfig = new NetaConfig();
-			const mockEnv = { PATH: "/usr/bin:/bin", npx: "/usr/bin/npx", opencode: "/usr/bin/opencode" };
+			const _mockEnv = { PATH: "/usr/bin:/bin", npx: "/usr/bin/npx", opencode: "/usr/bin/opencode" };
 			const mockInstalledBackends = () => ["claude", "codex", "opencode"];
 			multiConfig.installedBackends = mockInstalledBackends;
 
