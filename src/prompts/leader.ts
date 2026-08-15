@@ -106,7 +106,7 @@ export interface FlavorRef {
 }
 
 export interface LeaderPromptOptions {
-	tiers: Record<Tier, NetaTierSettings>;
+	tiers: Partial<Record<Tier, NetaTierSettings>>;
 	/** The user's charter, embedded verbatim when present. */
 	charter?: Charter;
 	flavors?: FlavorRef[];
@@ -121,7 +121,10 @@ export interface LeaderPromptOptions {
 
 export function buildLeaderPrompt(options: LeaderPromptOptions): string {
 	const { tiers, control = "mcp", toolName = (base) => base } = options;
-	const mapping = (Object.keys(tiers) as Tier[]).map((tier) => `${tier} -> ${tiers[tier].backend}`).join(", ");
+	const mapping = (Object.keys(tiers) as Tier[])
+		.filter((tier) => tiers[tier]?.backend)
+		.map((tier) => `${tier} -> ${tiers[tier]!.backend}`)
+		.join(", ");
 	const s = surface(control, toolName);
 
 	// Embedded rather than referenced: the leader runs in someone else's CLI, so
@@ -169,8 +172,26 @@ Spawn a worker with a role, a tier and a task: ${s.spawn}. Roles available: ${ro
 
 ${TIER_LADDER}
 
-Current mapping (yours to describe, not to override): ${mapping}. Do not pick
-models; pick tiers. The user configures the mapping in settings.
+Backend assignments are computed deterministically from tier mappings and the
+spread/diversity policy. Configured mappings: ${mapping || "(none — all tiers use spread policy)"}. Unconfigured tiers
+are spread across installed backends via round-robin; reviewer/debater roles
+default to a different backend than the most recent writer when multiple
+backends are installed (diversity rule).
+
+Before spawning workers for a task, use neta_plan to compute backend assignments
+and present them to the user as a numbered staffing plan. Then proceed
+immediately without waiting for approval. The user may request changes
+conversationally ("use codex for the reviewer", "remember that senior scouts run
+on opencode"). Apply requested changes as explicit backend overrides when you
+spawn.
+
+When the user says "remember" after a backend override, use neta_remember to
+persist the change to .neta/settings.json so future sessions use the updated
+mapping.
+
+You have no stake in which vendor runs a worker. Never favor your own backend
+when describing assignments or applying user overrides. The policy computes
+defaults; you relay them, and the user changes them.
 
 Rules that matter in practice:
 
@@ -187,6 +208,11 @@ Rules that matter in practice:
   Rewrite the spec and respawn rather than escalating by reflex.
 - Verify before you believe. When a worker says it fixed something, check the
   diff or run the test yourself. Reports and reality diverge.
+- Read to verify, not to explore. Reading is for answering a bounded question
+  you already hold — checking a worker's claim, a failing test, a handoff
+  assertion. Building understanding across files (maps, designs, surveys) goes
+  to a scout, even mid-flow. If you are on your third file for one purpose,
+  stop and spawn a scout.
 
 ## Staying informed without interrupting anyone
 

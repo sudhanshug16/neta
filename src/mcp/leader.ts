@@ -144,6 +144,54 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 			},
 		},
 		{
+			name: "neta_plan",
+			description:
+				"Compute backend assignments for proposed workers without spawning them. Returns a numbered staffing " +
+				"plan showing which backend each worker would run on, given current tier mappings and the spread/diversity " +
+				"policy. Use this to present the plan to the user before spawning.",
+			inputSchema: {
+				type: "object",
+				properties: {
+					workers: {
+						type: "array",
+						items: {
+							type: "object",
+							properties: {
+								role: { type: "string", description: `Role prompt to run. Built-in: ${roles}.` },
+								tier: { type: "string", enum: [...TIERS], description: "How much judgement the task needs." },
+								writer: { type: "boolean", description: "Whether this worker needs the writer slot." },
+								backend: { type: "string", description: "Override the backend for this worker." },
+							},
+							required: ["role", "tier"],
+						},
+						description: "Proposed workers to plan assignments for.",
+					},
+				},
+				required: ["workers"],
+			},
+			async run(args) {
+				const workers = args.workers;
+				if (!Array.isArray(workers) || workers.length === 0) {
+					throw new Error('"workers" must be a non-empty list.');
+				}
+
+				const requests = workers.map((w: Record<string, unknown>) => ({
+					role: requireString(w, "role"),
+					tier: tier(w),
+					writer: optionalBoolean(w, "writer"),
+					backend: optionalString(w, "backend"),
+				}));
+
+				const assignments = manager.planAssignments(requests);
+				const lines = assignments.map((assignment, index) => {
+					const access = assignment.writer ? "writer" : "read-only";
+					return `${index + 1}. ${assignment.role}/${assignment.tier} -> ${assignment.backend} (${access})`;
+				});
+
+				return text(lines.join("\n"));
+			},
+		},
+		{
 			name: "neta_spawn_group",
 			description:
 				"Spawn several workers into one room. Members read and post to a shared transcript, so they can argue " +
@@ -321,6 +369,34 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 				const posts = manager.roomTranscript(room, optionalNumber(args, "tail"));
 				if (posts.length === 0) return text(`Room "${room}" is empty.`);
 				return text(posts.map((entry) => `[${entry.label}] ${entry.text}`).join("\n"));
+			},
+		},
+		{
+			name: "neta_remember",
+			description:
+				"Persist a tier's backend assignment to the project's .neta/settings.json file. Use this when the user " +
+				"says \"remember\" after a backend override. This writes to the project settings file and does not " +
+				"preserve JSON comments. The setting will apply to future sessions in this project.",
+			inputSchema: {
+				type: "object",
+				properties: {
+					tier: { type: "string", enum: [...TIERS], description: "The tier to configure." },
+					backend: { type: "string", description: "The backend name to assign to this tier." },
+					model: { type: "string", description: "Optional model override for this tier and backend." },
+				},
+				required: ["tier", "backend"],
+			},
+			async run(args) {
+				const { persistTierOverride } = await import("../settings.ts");
+				const tierValue = tier(args);
+				const backendValue = requireString(args, "backend");
+				const modelValue = optionalString(args, "model");
+
+				const override = modelValue ? { backend: backendValue, model: modelValue } : { backend: backendValue };
+				await persistTierOverride(manager["options"].cwd, tierValue, override);
+
+				const modelText = modelValue ? ` (model: ${modelValue})` : "";
+				return text(`Persisted: ${tierValue} -> ${backendValue}${modelText}\nWritten to .neta/settings.json`);
 			},
 		},
 	];

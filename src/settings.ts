@@ -11,6 +11,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir } from "./config.ts";
+import { findOnPath } from "./detect.ts";
 import { TIERS, type Tier } from "./types.ts";
 
 export interface NetaBackendSettings {
@@ -66,7 +67,7 @@ export interface NetaLeaderSettings {
 }
 
 export interface NetaTierSettings {
-	backend: string;
+	backend?: string;
 	/** Backend-specific model identifier or alias. */
 	model?: string;
 }
@@ -120,16 +121,11 @@ export const DEFAULT_BACKENDS: Record<string, NetaBackendSettings> = {
 };
 
 /**
- * Shipped tier mapping. Workers run on the Claude subscription by default,
- * which is the whole point of driving real CLIs instead of burning API credit.
- * Point a tier at another backend and it picks up that backend's model for the
- * tier, so mixing vendors is one word per tier.
+ * Shipped tier mapping. Tiers are unconfigured by default; the assignment
+ * policy spreads them across installed backends when no explicit configuration
+ * exists. Users can configure specific backends for tiers in settings.
  */
-export const DEFAULT_TIERS: Record<Tier, NetaTierSettings> = {
-	junior: { backend: "claude" },
-	senior: { backend: "claude" },
-	staff: { backend: "claude" },
-};
+export const DEFAULT_TIERS: Partial<Record<Tier, NetaTierSettings>> = {};
 
 export interface ResolvedBackend {
 	name: string;
@@ -140,7 +136,7 @@ export interface ResolvedBackend {
 }
 
 export class NetaConfig {
-	private readonly tiers: Record<Tier, NetaTierSettings>;
+	private readonly tiers: Partial<Record<Tier, NetaTierSettings>>;
 	private readonly backends: Record<string, NetaBackendSettings>;
 	readonly leader: Required<NetaLeaderSettings> | { backend: undefined; strictMcp: boolean };
 	readonly mux: Required<NetaMuxSettings>;
@@ -151,7 +147,10 @@ export class NetaConfig {
 		this.tiers = { ...DEFAULT_TIERS };
 		for (const tier of TIERS) {
 			const override = settings?.tiers?.[tier];
-			if (override) this.tiers[tier] = { ...this.tiers[tier], ...override };
+			if (override) {
+				const base = this.tiers[tier];
+				this.tiers[tier] = base ? { ...base, ...override } : override;
+			}
 		}
 		this.backends = { ...DEFAULT_BACKENDS };
 		for (const [name, override] of Object.entries(settings?.backends ?? {})) {
@@ -163,6 +162,21 @@ export class NetaConfig {
 		return Object.keys(this.backends);
 	}
 
+	/**
+	 * Backend names whose launch commands are actually installed (on PATH).
+	 * For npx-based backends, this checks if npx itself is installed.
+	 */
+	installedBackends(env: Record<string, string | undefined> = process.env): string[] {
+		const installed: string[] = [];
+		for (const name of this.backendNames()) {
+			const backend = this.backends[name];
+			if (backend.command && findOnPath(backend.command, env)) {
+				installed.push(name);
+			}
+		}
+		return installed;
+	}
+
 	/** How to open one of this backend's sessions in its own interface. */
 	resumeCommand(backendName: string, sessionId: string): { command: string; args: string[] } | undefined {
 		const resume = this.backends[backendName]?.resume;
@@ -170,7 +184,7 @@ export class NetaConfig {
 		return { command: resume.command, args: resume.args.map((arg) => arg.replace("{session}", sessionId)) };
 	}
 
-	tierMapping(): Record<Tier, NetaTierSettings> {
+	tierMapping(): Partial<Record<Tier, NetaTierSettings>> {
 		return { ...this.tiers };
 	}
 
@@ -194,22 +208,22 @@ export class NetaConfig {
 	}
 
 	/**
-	 * Turn a tier (plus optional explicit backend) into a launchable backend.
-	 * Throws with the available names when the backend is unknown, so the leader
-	 * gets a usable error instead of a silent fallback.
+	 * Turn a tier and backend name into a launchable backend. The backend name
+	 * should be computed by the caller (via tier mapping, spread policy, or
+	 * explicit override). Throws with the available names when the backend is
+	 * unknown, so the leader gets a usable error instead of a silent fallback.
 	 */
-	resolve(tier: Tier, backendOverride?: string, writer = false): ResolvedBackend {
+	resolve(tier: Tier, backendName: string, writer = false): ResolvedBackend {
 		const mapping = this.tiers[tier];
-		const name = backendOverride ?? mapping.backend;
-		const backend = this.backends[name];
+		const backend = this.backends[backendName];
 		if (!backend) {
-			throw new Error(`Unknown worker backend "${name}". Configured backends: ${this.backendNames().join(", ")}.`);
+			throw new Error(`Unknown worker backend "${backendName}". Configured backends: ${this.backendNames().join(", ")}.`);
 		}
 
-		// An explicit backend override drops the tier's model, which belongs to a
-		// different backend's naming scheme — but the backend's own idea of what
-		// this tier means still applies.
-		const tierModel = backendOverride && backendOverride !== mapping.backend ? undefined : mapping.model;
+		// If the backend differs from the tier's configured backend, drop the
+		// tier's model (it belongs to a different backend's naming scheme) — but
+		// the backend's own idea of what this tier means still applies.
+		const tierModel = mapping?.backend && backendName !== mapping.backend ? undefined : mapping?.model;
 		const model = tierModel ?? backend.tierModels?.[tier];
 		const args = [...(backend.args ?? [])];
 		const env = { ...(backend.env ?? {}) };
@@ -219,7 +233,7 @@ export class NetaConfig {
 		}
 		args.push(...((writer ? backend.writerArgs : backend.readOnlyArgs) ?? []));
 
-		return { name, command: backend.command, args, model, env };
+		return { name: backendName, command: backend.command, args, model, env };
 	}
 }
 
@@ -253,4 +267,38 @@ export function loadNetaSettings(cwd: string, agentDir: string = getAgentDir()):
 /** Everything the process needs from settings, in one call. */
 export function loadConfig(cwd: string, agentDir: string = getAgentDir()): NetaConfig {
 	return new NetaConfig(loadNetaSettings(cwd, agentDir));
+}
+
+/**
+ * Persist a tier override to the project's .neta/settings.json file. Merges
+ * the new tier setting without clobbering other tiers or settings keys.
+ * Creates the .neta directory if it does not exist.
+ *
+ * Note: This writes JSON with pretty-printing (2-space indent). JSON comments
+ * are not preserved, as the settings files are JSON, not JSONC.
+ */
+export async function persistTierOverride(cwd: string, tier: Tier, override: NetaTierSettings): Promise<void> {
+	const { mkdirSync, writeFileSync } = await import("node:fs");
+	const settingsDir = join(cwd, CONFIG_DIR_NAME);
+	const settingsPath = join(settingsDir, "settings.json");
+
+	// Create .neta directory if it does not exist
+	if (!existsSync(settingsDir)) {
+		mkdirSync(settingsDir, { recursive: true });
+	}
+
+	// Read existing settings or start with empty object
+	const existing = readSettingsFile(settingsPath);
+
+	// Merge the new tier setting
+	const updated: NetaSettings = {
+		...existing,
+		tiers: {
+			...existing.tiers,
+			[tier]: override,
+		},
+	};
+
+	// Write back with pretty-printing
+	writeFileSync(settingsPath, JSON.stringify(updated, null, 2) + "\n", "utf-8");
 }

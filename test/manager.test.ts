@@ -3,7 +3,7 @@ import { rmSync } from "node:fs";
 import { NETA_SOCKET_ENV, NETA_WORKER_ENV } from "../src/channel/protocol.ts";
 import { WorkerManager } from "../src/orchestrator/manager.ts";
 import type { PromptOutcome, TransportOptions, WorkerTransportDriver } from "../src/orchestrator/transport.ts";
-import { NetaConfig } from "../src/settings.ts";
+import { DEFAULT_BACKENDS, NetaConfig } from "../src/settings.ts";
 import type { WorkerEvent } from "../src/types.ts";
 
 class FakeTransport implements WorkerTransportDriver {
@@ -409,6 +409,96 @@ describe("WorkerManager", () => {
 
 			expect(response.ok).toBe(false);
 			expect(response.ok === false && response.error).toContain('Unknown worker "w9"');
+		});
+	});
+
+	describe("backend assignment policy", () => {
+		it("spreads workers across installed backends deterministically within a session", async () => {
+			// Mock multiple backends as installed
+			const multiConfig = new NetaConfig();
+			const mockEnv = { PATH: "/usr/bin:/bin", npx: "/usr/bin/npx", opencode: "/usr/bin/opencode" };
+			const mockInstalledBackends = () => ["claude", "codex", "opencode"];
+			multiConfig.installedBackends = mockInstalledBackends;
+
+			const multiManager = new WorkerManager({
+				cwd: process.cwd(),
+				agentDir: "/nonexistent-agent-dir",
+				config: multiConfig,
+				channelAddress: "/tmp/neta-test-spread.sock",
+				onEvent: () => {},
+				createTransport: (options) => {
+					const transport = new FakeTransport(options);
+					transports.push(transport);
+					return transport;
+				},
+			});
+
+			// Spawn 3 workers with same tier, no explicit backend
+			const w1 = await multiManager.spawn({ role: "scout", tier: "senior", task: "task1" });
+			const w2 = await multiManager.spawn({ role: "scout", tier: "senior", task: "task2" });
+			const w3 = await multiManager.spawn({ role: "scout", tier: "senior", task: "task3" });
+
+			// They should spread across backends
+			const backends = [w1.backend, w2.backend, w3.backend];
+			expect(new Set(backends).size).toBeGreaterThan(1); // At least 2 different backends
+
+			// Spawn 3 more workers in the same session - should get the same pattern
+			const w4 = await multiManager.spawn({ role: "scout", tier: "senior", task: "task4" });
+			const w5 = await multiManager.spawn({ role: "scout", tier: "senior", task: "task5" });
+			const w6 = await multiManager.spawn({ role: "scout", tier: "senior", task: "task6" });
+
+			expect(w4.backend).toBe(w1.backend);
+			expect(w5.backend).toBe(w2.backend);
+			expect(w6.backend).toBe(w3.backend);
+
+			await multiManager.dispose();
+			rmSync("/tmp/neta-test-spread.sock", { force: true });
+		});
+
+		it("assigns reviewer/debater roles to a different backend than the writer when multiple backends installed", async () => {
+			// Mock two backends as installed
+			const multiConfig = new NetaConfig();
+			const mockInstalledBackends = () => ["claude", "codex"];
+			multiConfig.installedBackends = mockInstalledBackends;
+
+			const multiManager = new WorkerManager({
+				cwd: process.cwd(),
+				agentDir: "/nonexistent-agent-dir",
+				config: multiConfig,
+				channelAddress: "/tmp/neta-test-diversity.sock",
+				onEvent: () => {},
+				createTransport: (options) => {
+					const transport = new FakeTransport(options);
+					transports.push(transport);
+					return transport;
+				},
+			});
+
+			// Spawn a writer
+			const writer = await multiManager.spawn({ role: "worker", tier: "senior", task: "implement", writer: true });
+
+			// Spawn a reviewer - should get a different backend
+			const reviewer = await multiManager.spawn({ role: "reviewer", tier: "staff", task: "review" });
+
+			expect(reviewer.backend).not.toBe(writer.backend);
+
+			await multiManager.dispose();
+			rmSync("/tmp/neta-test-diversity.sock", { force: true });
+		});
+
+		it("passes explicit backend override to resolve and returns it in spawn result", async () => {
+			const summary = await manager.spawn({ role: "scout", tier: "senior", task: "look", backend: "codex" });
+
+			expect(summary.backend).toBe("codex");
+			expect(transports[transports.length - 1].options.model).toBe("gpt-5.6-terra[high]");
+		});
+
+		it("resolves unconfigured tiers when only one backend is installed", async () => {
+			// This should not throw even though DEFAULT_TIERS is empty
+			const summary = await manager.spawn({ role: "scout", tier: "senior", task: "look" });
+
+			expect(summary.backend).toBeTruthy();
+			expect(["claude", "codex", "opencode"]).toContain(summary.backend);
 		});
 	});
 });

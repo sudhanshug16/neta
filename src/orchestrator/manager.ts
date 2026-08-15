@@ -129,6 +129,8 @@ export class WorkerManager implements ChannelHandler {
 	private readonly createTransport: TransportFactory;
 	private counter = 0;
 	private activeWriter: string | undefined;
+	/** Backend of the most recent writer, for diversity rule. Never cleared. */
+	private lastWriterBackend: string | undefined;
 	/** Authorizes leader channel commands. Given only to the leader's own process. */
 	readonly leaderToken: string;
 
@@ -171,7 +173,8 @@ export class WorkerManager implements ChannelHandler {
 			for (const record of existing) record.archived = true;
 		}
 
-		const backend = this.options.config.resolve(request.tier, request.backend, writer);
+		const backendName = this.computeBackendAssignment(request);
+		const backend = this.options.config.resolve(request.tier, backendName, writer);
 		const runtimeEnv = (await this.options.prepareEnv?.()) ?? {};
 		const id = `w${++this.counter}`;
 		const scratchDir = await mkdtemp(join(tmpdir(), `neta-${id}-`));
@@ -238,7 +241,10 @@ export class WorkerManager implements ChannelHandler {
 
 		record.driver = this.createTransport(transportOptions);
 		this.workers.set(id, record);
-		if (writer) this.activeWriter = id;
+		if (writer) {
+			this.activeWriter = id;
+			this.lastWriterBackend = backend.name;
+		}
 		if (request.room) this.ensureRoom(request.room);
 
 		try {
@@ -372,6 +378,29 @@ export class WorkerManager implements ChannelHandler {
 		this.workers.clear();
 	}
 
+	/**
+	 * Compute backend assignments for proposed workers without spawning them.
+	 * Used by the neta_plan tool to present a staffing plan before spawning.
+	 * Returns a list of computed assignments in the same order as the requests.
+	 */
+	planAssignments(
+		requests: Array<{ role: string; tier: Tier; writer?: boolean; backend?: string }>,
+	): Array<{ role: string; tier: Tier; backend: string; writer: boolean }> {
+		return requests.map((request) => {
+			const backendName = this.computeBackendAssignment({
+				...request,
+				task: "", // Not used for planning
+				writer: request.writer ?? false,
+			});
+			return {
+				role: request.role,
+				tier: request.tier,
+				backend: backendName,
+				writer: request.writer ?? false,
+			};
+		});
+	}
+
 	// =========================================================================
 	// Worker channel (ChannelHandler)
 	// =========================================================================
@@ -500,6 +529,61 @@ export class WorkerManager implements ChannelHandler {
 	// =========================================================================
 	// Internals
 	// =========================================================================
+
+	/**
+	 * Deterministic spread policy: round-robin across installed backends, with a
+	 * stable order per tier within the session. This cursor persists across
+	 * spawns so the same tier + spawn sequence always produces the same backend.
+	 */
+	private spreadCursors = new Map<Tier, number>();
+
+	/**
+	 * Compute which backend to use for a worker. Returns the backend name to
+	 * pass to config.resolve(). Assignment logic:
+	 * 1. Explicit backend override (from user) takes precedence
+	 * 2. Tier's configured backend (from settings)
+	 * 3. Spread policy across installed backends (deterministic round-robin)
+	 * 4. Diversity rule: reviewer/debater roles prefer a different backend than
+	 *    the last writer when another backend is installed
+	 */
+	private computeBackendAssignment(request: SpawnRequest): string {
+		// 1. Explicit backend override
+		if (request.backend) return request.backend;
+
+		const mapping = this.options.config.tierMapping()[request.tier];
+
+		// 2. Tier's configured backend
+		if (mapping?.backend) return mapping.backend;
+
+		// 3. Spread policy with diversity rule
+		const installed = this.options.config.installedBackends();
+		if (installed.length === 0) {
+			throw new Error("No backends are installed. Install at least one backend (claude, codex, or opencode).");
+		}
+
+		// Single backend: use it
+		if (installed.length === 1) return installed[0];
+
+		// Diversity rule: reviewer/debater roles prefer a different backend than
+		// the last writer when another backend is installed
+		const isDiversityRole = request.role === "reviewer" || request.role === "debater";
+		if (isDiversityRole && this.lastWriterBackend && installed.length > 1) {
+			const otherBackends = installed.filter((name) => name !== this.lastWriterBackend);
+			if (otherBackends.length > 0) {
+				// Round-robin among non-writer backends
+				const cursor = this.spreadCursors.get(request.tier) ?? 0;
+				const backend = otherBackends[cursor % otherBackends.length];
+				this.spreadCursors.set(request.tier, cursor + 1);
+				return backend;
+			}
+		}
+
+		// Round-robin across all installed backends
+		const cursor = this.spreadCursors.get(request.tier) ?? 0;
+		const backend = installed[cursor % installed.length];
+		this.spreadCursors.set(request.tier, cursor + 1);
+		return backend;
+	}
 
 	private statusLine(summary: WorkerSummary, resultLimit?: number): string {
 		const access = summary.writer ? "writer" : "read-only";

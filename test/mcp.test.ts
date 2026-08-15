@@ -90,6 +90,8 @@ describe("leader MCP tools", () => {
 			"neta_answer",
 			"neta_kill",
 			"neta_log",
+			"neta_plan",
+			"neta_remember",
 			"neta_room",
 			"neta_send",
 			"neta_spawn",
@@ -182,6 +184,24 @@ describe("leader MCP tools", () => {
 
 		expect(result.isError).toBe(true);
 		expect(bodyOf(result)).toContain('Unknown worker "w9"');
+	});
+
+	it("computes backend assignments without spawning via neta_plan", async () => {
+		const result = await call("neta_plan", {
+			workers: [
+				{ role: "scout", tier: "senior" },
+				{ role: "worker", tier: "senior", writer: true },
+			],
+		});
+
+		const body = bodyOf(result);
+		expect(body).toContain("1. scout/senior ->");
+		expect(body).toContain("2. worker/senior ->");
+		expect(body).toContain("read-only");
+		expect(body).toContain("writer");
+
+		// Should not have spawned any workers
+		expect(transports.length).toBe(0);
 	});
 
 	it("omits tool/diff/thought entries from neta_log by default", async () => {

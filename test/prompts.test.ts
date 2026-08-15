@@ -106,10 +106,16 @@ describe("leader prompt", () => {
 	});
 
 	it("describes the tier mapping without naming models", () => {
-		const prompt = buildLeaderPrompt({ tiers: DEFAULT_TIERS });
+		const prompt = buildLeaderPrompt({ tiers: { junior: { backend: "claude" }, senior: { backend: "claude" }, staff: { backend: "claude" } } });
 
 		expect(prompt).toContain("junior -> claude");
 		expect(prompt).not.toContain("haiku");
+	});
+
+	it("describes unconfigured tiers as using spread policy", () => {
+		const prompt = buildLeaderPrompt({ tiers: DEFAULT_TIERS });
+
+		expect(prompt).toContain("(none — all tiers use spread policy)");
 	});
 });
 

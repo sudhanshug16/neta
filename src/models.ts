@@ -42,8 +42,11 @@ export async function listBackendModels(backendName: string | undefined, cwd: st
 			console.log(`  models: ${models.length === 0 ? "(none advertised)" : ""}`);
 			for (const model of models) console.log(`    ${model}${model === currentModel ? "  (default)" : ""}`);
 			console.log(`  modes: ${modes.map((mode) => (mode === currentMode ? `${mode} (default)` : mode)).join(", ")}`);
-			const mapped = TIERS.filter((tier) => config.resolve(tier).name === name)
-				.map((tier) => `${tier}=${config.resolve(tier).model ?? "backend default"}`)
+			const mapped = TIERS.filter((tier) => {
+				const tierConfig = config.tierMapping()[tier];
+				return tierConfig?.backend === name;
+			})
+				.map((tier) => `${tier}=${config.resolve(tier, name).model ?? "backend default"}`)
 				.join(", ");
 			if (mapped) console.log(`  your tiers: ${mapped}`);
 		} catch (error) {
