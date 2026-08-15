@@ -31,6 +31,8 @@ class FakeTransport implements WorkerTransportDriver {
 		this.killed = true;
 	}
 
+	markTerminal(): void {}
+
 	/** Finish the worker's current turn the way a real backend would. */
 	finish(outcome: PromptOutcome): void {
 		const resolve = this.pending.shift();

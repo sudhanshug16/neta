@@ -33,6 +33,7 @@ class FakeTransport implements WorkerTransportDriver {
 		return new Promise((resolve) => this.pending.push(resolve));
 	}
 	async kill(): Promise<void> {}
+	markTerminal(): void {}
 	finish(outcome: PromptOutcome): void {
 		this.pending.shift()?.(outcome);
 	}

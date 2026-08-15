@@ -802,6 +802,7 @@ export class WorkerManager implements ChannelHandler {
 		record.state = state;
 		record.endedAt = Date.now();
 		record.result = result;
+		if (record.driver) record.driver.markTerminal();
 		// A finished worker's prose already streamed into the log, so logging the
 		// full result here printed the whole final message a second time, raw, in
 		// every pane. The state is the news; the text is not. Failures still carry

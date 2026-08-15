@@ -110,6 +110,29 @@ describe("a leader session, end to end", () => {
 		expect(bodyOf(waited)).toContain("permission=allow");
 	});
 
+	// A harness can background a long-running command, let the worker end its
+	// turn, and re-invoke the same session when the command finishes. The worker
+	// is already done by then, so a write permission request landing outside any
+	// turn must still be denied — even for a worker that held the writer slot.
+	it("denies a write permission request that arrives after the worker is done", async () => {
+		await call("neta_spawn", { role: "worker", tier: "senior", task: "DELAYED_EDIT the config", writer: true });
+		const waited = await call("neta_wait", { workerIds: ["w1"], timeoutSeconds: 30 });
+
+		// The turn itself never asked for permission.
+		expect(bodyOf(waited)).toContain("armed");
+		expect(bodyOf(waited)).not.toContain("permission=");
+
+		// The delayed request arrives after done; the gate must deny it and say
+		// why in the worker's log.
+		const deadline = Date.now() + 3000;
+		let logged = bodyOf(await call("neta_log", { workerId: "w1" }));
+		while (!logged.includes("this worker has finished") && Date.now() < deadline) {
+			await new Promise((resolve) => setTimeout(resolve, 100));
+			logged = bodyOf(await call("neta_log", { workerId: "w1" }));
+		}
+		expect(logged).toContain("this worker has finished");
+	});
+
 	it("hands the worker an MCP server pointing back at this session", async () => {
 		await call("neta_spawn", { role: "scout", tier: "senior", task: "MCP" });
 		const waited = await call("neta_wait", { workerIds: ["w1"], timeoutSeconds: 30 });

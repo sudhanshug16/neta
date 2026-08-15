@@ -5,6 +5,9 @@
  *
  * It reacts to directives in the prompt text:
  *   EDIT  - asks permission for an "edit" tool call and reports the outcome
+ *   DELAYED_EDIT - ends its turn, then asks permission for an "edit" tool call
+ *           after the turn is over, the way a harness re-invokes a session when
+ *           a backgrounded command finishes
  *   FAIL  - returns a "refusal" stop reason
  *   THINK - emits a thought chunk before the assistant message
  *   USAGE - emits a usage_update and returns per-turn token usage
@@ -40,6 +43,26 @@ async function prompt(params, cx) {
 	if (text.includes("FAIL")) {
 		await say(cx, sessionId, "giving up");
 		return { stopReason: "refusal" };
+	}
+
+	if (text.includes("DELAYED_EDIT")) {
+		await say(cx, sessionId, "armed");
+		setTimeout(async () => {
+			try {
+				const toolCallId = `call_${++counter}`;
+				await cx.request(acp.methods.client.session.requestPermission, {
+					sessionId,
+					toolCall: { toolCallId, title: "Edit config.json", kind: "edit", status: "pending" },
+					options: [
+						{ kind: "allow_once", name: "Allow", optionId: "allow" },
+						{ kind: "reject_once", name: "Reject", optionId: "reject" },
+					],
+				});
+			} catch {
+				// The client may have closed the session by then.
+			}
+		}, 300);
+		return { stopReason: "end_turn" };
 	}
 
 	if (text.includes("EDIT")) {

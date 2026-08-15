@@ -119,10 +119,12 @@ export class AcpWorkerTransport implements WorkerTransportDriver {
 			onSession: (description) => this.options.events.log("status", `Running as ${description}.`),
 			onVendorSession: (sessionId) => this.options.events.vendorSession(sessionId),
 			onStderr: (text) => this.options.events.log("error", text),
-			onDenied: (kind, title) =>
+			onDenied: (kind, title, reason) =>
 				this.options.events.log(
 					"error",
-					`Denied ${kind}: ${title} (this worker is read-only; ask the leader for the writer slot)`,
+					reason === "terminal"
+						? `Denied ${kind}: ${title} (this worker has finished; Neta treats the end of a turn as the end of the worker)`
+						: `Denied ${kind}: ${title} (this worker is read-only; ask the leader for the writer slot)`,
 				),
 		});
 		await this.connection.start();
@@ -160,6 +162,10 @@ export class AcpWorkerTransport implements WorkerTransportDriver {
 
 	async kill(): Promise<void> {
 		await this.connection?.kill();
+	}
+
+	markTerminal(): void {
+		this.connection?.markTerminal();
 	}
 
 	private sessionUpdate(update: AcpSessionUpdate): void {

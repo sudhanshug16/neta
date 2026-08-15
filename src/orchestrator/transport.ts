@@ -3,8 +3,8 @@
  *
  * Claude Code, Codex and OpenCode are all driven over ACP, so today there is a
  * single implementation. The interface stays because everything above it works
- * in terms of "start, prompt, kill" and never learns which backend it is
- * talking to — and because tests substitute a fake driver here.
+ * in terms of "start, prompt, kill, markTerminal" and never learns which backend
+ * it is talking to — and because tests substitute a fake driver here.
  */
 
 import type { WorkerLogEntry, WorkerUsage } from "../types.ts";
@@ -60,6 +60,8 @@ export interface WorkerTransportDriver {
 	start(): Promise<void>;
 	prompt(text: string): Promise<PromptOutcome>;
 	kill(): Promise<void>;
+	/** The worker reached a terminal state; its session must stop being honored. */
+	markTerminal(): void;
 }
 
 /** Text of the first prompt: role prompt, then the task. */

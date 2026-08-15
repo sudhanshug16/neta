@@ -132,6 +132,7 @@ export function workingAgreement(options: WorkingAgreementOptions): string {
 		"# Finishing",
 		"",
 		"- Your final message is the whole handoff. Assume nobody reads your intermediate output.",
+		"- Never end your turn while a command you started is still running in the background. Wait for it and report only when the work is actually complete: Neta treats the end of your turn as the end of the worker and captures your final message as the result.",
 	);
 
 	return lines.join("\n");

@@ -89,7 +89,7 @@ export interface AcpConnectionOptions {
 	model?: string;
 	onUpdate: (update: AcpSessionUpdate) => void;
 	onStderr: (text: string) => void;
-	onDenied: (kind: string, title: string) => void;
+	onDenied: (kind: string, title: string, reason: "read-only" | "terminal") => void;
 	/** What the session ended up running as, once negotiated. */
 	onSession?: (description: string) => void;
 	/**
@@ -142,9 +142,15 @@ export class AcpConnection {
 		modes: [],
 	};
 	killed = false;
+	/** The worker reached a terminal state; permission requests are denied from here on. */
+	terminal = false;
 
 	constructor(options: AcpConnectionOptions) {
 		this.options = options;
+	}
+
+	markTerminal(): void {
+		this.terminal = true;
 	}
 
 	async start(): Promise<void> {
@@ -322,15 +328,16 @@ export class AcpConnection {
 	private requestPermission(params: acp.RequestPermissionRequest): acp.RequestPermissionResponse {
 		const kind = params.toolCall.kind ?? "other";
 		const title = params.toolCall.title ?? params.toolCall.toolCallId;
-		// Once killed, deny all permissions regardless of allowMutations.
-		const denied = this.killed || (!this.options.allowMutations && MUTATING_TOOL_KINDS.has(kind));
+		// Once terminal (done, failed or killed), deny all permissions regardless of allowMutations.
+		const terminal = this.terminal || this.killed;
+		const denied = terminal || (!this.options.allowMutations && MUTATING_TOOL_KINDS.has(kind));
 
 		const option = denied
 			? pickOption(params.options, ["reject_once", "reject_always"])
 			: pickOption(params.options, ["allow_always", "allow_once"]);
 
 		if (!option) return { outcome: { outcome: "cancelled" } };
-		if (denied) this.options.onDenied(kind, title);
+		if (denied) this.options.onDenied(kind, title, terminal ? "terminal" : "read-only");
 		return { outcome: { outcome: "selected", optionId: option.optionId } };
 	}
 
