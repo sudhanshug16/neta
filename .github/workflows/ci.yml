@@ -34,7 +34,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write # push the version tag
-      id-token: write # npm provenance
+      id-token: write # npm trusted publishing, and the provenance it generates
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -44,6 +44,8 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
+      # Trusted publishing needs npm 11.5.1+, newer than the runner ships.
+      - run: npm install -g npm@latest
 
       - id: version
         name: Is this version already published?
@@ -64,12 +66,14 @@ jobs:
       - if: steps.version.outputs.publish == 'true'
         run: bun run build
 
+      # No token: npm trusts this workflow through OIDC, configured once in the
+      # package's settings on npmjs.com. Nothing here expires or needs rotating,
+      # and provenance is attached automatically.
+      #
       # --ignore-scripts because the checks above are the release gate; running
       # prepublishOnly here would repeat them under a second toolchain.
       - if: steps.version.outputs.publish == 'true'
-        run: npm publish --provenance --access public --ignore-scripts
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --ignore-scripts
 
       - if: steps.version.outputs.publish == 'true'
         name: Tag the release
