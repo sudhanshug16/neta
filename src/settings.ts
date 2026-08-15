@@ -38,6 +38,12 @@ export interface NetaBackendSettings {
 	readOnlyArgs?: string[];
 	/** The same, for the worker that holds the writer slot. */
 	writerArgs?: string[];
+	/**
+	 * How to open one of this backend's sessions in its own interface.
+	 * `{session}` is replaced with the backend's session id. This is what
+	 * `neta attach` runs.
+	 */
+	resume?: { command: string; args: string[] };
 }
 
 /** Which multiplexer worker panes open in. `auto` prefers zellij, then tmux, then none. */
@@ -91,6 +97,8 @@ export const DEFAULT_BACKENDS: Record<string, NetaBackendSettings> = {
 		command: "npx",
 		args: ["-y", "@zed-industries/claude-code-acp"],
 		tierModels: { junior: "haiku", senior: "sonnet", staff: "default" },
+		// A worker is an ordinary Claude Code session, filed under the same id.
+		resume: { command: "claude", args: ["--resume", "{session}"] },
 	},
 	codex: {
 		command: "npx",
@@ -100,12 +108,14 @@ export const DEFAULT_BACKENDS: Record<string, NetaBackendSettings> = {
 			senior: "gpt-5.6-terra[high]",
 			staff: "gpt-5.6-sol[xhigh]",
 		},
+		resume: { command: "codex", args: ["resume", "{session}"] },
 	},
 	// OpenCode fronts many providers, so there is no honest default here: the
 	// user says which model each tier means, in settings.
 	opencode: {
 		command: "opencode",
 		args: ["acp"],
+		resume: { command: "opencode", args: ["--session", "{session}"] },
 	},
 };
 
@@ -151,6 +161,13 @@ export class NetaConfig {
 
 	backendNames(): string[] {
 		return Object.keys(this.backends);
+	}
+
+	/** How to open one of this backend's sessions in its own interface. */
+	resumeCommand(backendName: string, sessionId: string): { command: string; args: string[] } | undefined {
+		const resume = this.backends[backendName]?.resume;
+		if (!resume) return undefined;
+		return { command: resume.command, args: resume.args.map((arg) => arg.replace("{session}", sessionId)) };
 	}
 
 	tierMapping(): Record<Tier, NetaTierSettings> {

@@ -43,6 +43,7 @@ describe("AcpWorkerTransport", () => {
 			events: {
 				log: (kind, text) => log.push({ at: 0, kind, text }),
 				usage: (usage) => usageReports.push(usage),
+				vendorSession: () => {},
 			},
 		};
 		const transport = new AcpWorkerTransport(options);
@@ -152,7 +153,7 @@ describe("AcpWorkerTransport", () => {
 			systemPrompt: "",
 			scratchDir,
 			mcpServers: [],
-			events: { log: (kind, text) => log.push({ at: 0, kind, text }), usage: () => {} },
+			events: { log: (kind, text) => log.push({ at: 0, kind, text }), usage: () => {}, vendorSession: () => {} },
 		});
 		started.push(transport);
 

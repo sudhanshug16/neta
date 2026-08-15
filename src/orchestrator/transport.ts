@@ -14,6 +14,8 @@ export interface TransportEvents {
 	log(kind: WorkerLogEntry["kind"], text: string): void;
 	/** Tokens and cost the backend has reported so far. */
 	usage(usage: WorkerUsage): void;
+	/** The backend's own id for this session, once it has one. */
+	vendorSession(sessionId: string): void;
 }
 
 /**

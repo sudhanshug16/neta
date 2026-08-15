@@ -92,6 +92,12 @@ export interface AcpConnectionOptions {
 	onDenied: (kind: string, title: string) => void;
 	/** What the session ended up running as, once negotiated. */
 	onSession?: (description: string) => void;
+	/**
+	 * The backend's own session id. Claude Code and Codex both hand back the id
+	 * they file the conversation under, so this is what a person needs to open
+	 * the worker in that CLI's own interface.
+	 */
+	onVendorSession?: (sessionId: string) => void;
 }
 
 /**
@@ -187,6 +193,7 @@ export class AcpConnection {
 				mcpServers,
 			});
 			this.sessionId = session.sessionId;
+			this.options.onVendorSession?.(session.sessionId);
 			await this.negotiate(session);
 		} catch (error) {
 			this.kill();

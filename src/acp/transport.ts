@@ -69,6 +69,7 @@ export class AcpWorkerTransport implements WorkerTransportDriver {
 			model: this.options.model,
 			onUpdate: (update) => this.sessionUpdate(update),
 			onSession: (description) => this.options.events.log("status", `Running as ${description}.`),
+			onVendorSession: (sessionId) => this.options.events.vendorSession(sessionId),
 			onStderr: (text) => this.options.events.log("error", text),
 			onDenied: (kind, title) =>
 				this.options.events.log(

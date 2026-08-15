@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+
 /**
  * The `neta` command.
  *
@@ -16,6 +17,7 @@
  * real session, so those words stay ordinary arguments everywhere else.
  */
 
+import { attachWorker } from "./attach.ts";
 import { handleWorkerChannelCommand } from "./channel/client.ts";
 import { handleLeaderChannelCommand } from "./channel/leader-cli.ts";
 import { APP_NAME, VERSION } from "./config.ts";
@@ -38,6 +40,8 @@ const HELP = `${APP_NAME} ${VERSION} — a leader agent that delegates to worker
   ${APP_NAME} workers                   List this session's workers and what they cost.
   ${APP_NAME} log <id>                  Read a worker's new log lines.
   ${APP_NAME} watch <id>                Follow a worker's log until it finishes.
+  ${APP_NAME} attach <id>               Open a worker in its own CLI (Claude Code,
+                                        Codex) to read it there and take over.
   ${APP_NAME} kill <id>                 Stop a worker.
   ${APP_NAME} sessions                  List running leader sessions.
   ${APP_NAME} models [backend]          Show the models a worker backend offers,
@@ -104,6 +108,21 @@ async function main(argv: string[]): Promise<void> {
 				// Worker tabs are started by the multiplexer's own server process,
 				// which does not have our environment, so they say where to look.
 				agentDir: flagValue(args, "--dir"),
+			});
+			return;
+		}
+		case "attach": {
+			const workerId = args[1];
+			if (!workerId) {
+				console.error(`Usage: ${APP_NAME} attach <worker-id> [--session <id>] [--dir <neta-dir>] [--print]`);
+				process.exitCode = 1;
+				return;
+			}
+			process.exitCode = await attachWorker({
+				workerId,
+				sessionId: flagValue(args, "--session"),
+				agentDir: flagValue(args, "--dir"),
+				dryRun: args.includes("--print"),
 			});
 			return;
 		}

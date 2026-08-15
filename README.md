@@ -33,6 +33,10 @@ workers, collects their results, and reports once.
   while the rest stay on Claude. `neta models` lists what each backend offers.
 - **One writer at a time.** Reads parallelize; writes serialize. A second
   writer is refused, not raced.
+- **Workers you can take over.** A worker is an ordinary Claude Code or Codex
+  session — same history, same id — so `neta attach w1` opens it in that CLI's
+  own interface, where you can read what it did and keep talking to it
+  yourself. Neta drove it; you can finish it.
 - **A tab per worker, if you run a multiplexer.** With Zellij or tmux, each
   worker opens its own tab streaming its log, so the leader you are typing into
   keeps its window. Finished tabs stay until the leader starts new workers,
@@ -84,6 +88,7 @@ neta -- --model opus       # pass arguments through to the agent CLI
 
 neta workers               # what is running, and what it has cost
 neta watch w1              # follow one worker's log until it finishes
+neta attach w1             # open that worker in its own CLI and take over
 neta log w1                # its new lines since you last looked
 neta send w1 <message>     # give a running worker more instructions
 neta answer w1 <text>      # unblock a worker that asked you something

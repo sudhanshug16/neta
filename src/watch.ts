@@ -156,7 +156,9 @@ export async function watchWorker(options: WatchOptions): Promise<number> {
 	// itself once the leader starts a new batch — or sooner, on a keypress.
 	const hold = options.hold ?? (process.stdin.isTTY === true && !options.once);
 	if (hold) {
-		write("(stays until the leader starts new workers · press enter to close now)");
+		// This view is read-only by design. The worker's conversation lives in its
+		// own CLI's history, so say how to open it there and talk to it.
+		write(`(neta attach ${options.workerId} to open this in its own CLI · enter to close)`);
 		await Promise.race([
 			new Promise<void>((resolve) => {
 				process.stdin.resume();

@@ -63,6 +63,7 @@ interface WorkerRecord {
 	queue: Promise<void>;
 	waiters: Array<() => void>;
 	usage?: WorkerUsage;
+	vendorSessionId?: string;
 	/** Finished, and superseded by a later batch: its view can close. */
 	archived?: boolean;
 }
@@ -219,6 +220,9 @@ export class WorkerManager implements ChannelHandler {
 				log: (kind, text) => this.appendLog(record, kind, text),
 				usage: (usage) => {
 					record.usage = usage;
+				},
+				vendorSession: (sessionId) => {
+					record.vendorSessionId = sessionId;
 				},
 			},
 		};
@@ -585,6 +589,7 @@ export class WorkerManager implements ChannelHandler {
 			pendingQuestion: record.pendingAsk?.question,
 			scratchDir: record.scratchDir,
 			usage: record.usage,
+			vendorSessionId: record.vendorSessionId,
 		};
 	}
 }

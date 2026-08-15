@@ -83,6 +83,26 @@ CLI differently, because the CLIs differ:
   still live in your real home through those links, and a refreshed
   `auth.json` is copied back when the session ends.
 
+## Taking a worker over
+
+A worker driven over ACP is not a special kind of session. The id the ACP
+handshake returns is the id the vendor files the conversation under — verified
+against both bridges:
+
+| Backend | Where the worker's conversation lives |
+| --- | --- |
+| Claude Code | `~/.claude/projects/<cwd>/<session-id>.jsonl` |
+| Codex | `~/.codex/sessions/<date>/rollout-…-<session-id>.jsonl` |
+
+So `neta attach w1` runs that CLI's own resume command — `claude --resume <id>`,
+`codex resume <id>` — and you are inside the worker's conversation in the
+interface you already know, able to read it properly and keep talking to it.
+
+There is no second mode to opt into and nothing is given up to get this: Neta
+still drove the worker, still gated its edits, still counted its tokens. If you
+attach while a worker is still running, you and Neta are both prompting one
+conversation, so `neta attach` says so before it opens.
+
 ## Panes
 
 With Zellij or tmux available, each worker gets a pane running `neta watch

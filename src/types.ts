@@ -128,6 +128,15 @@ export interface WorkerSummary {
 	pendingQuestion?: string;
 	scratchDir: string;
 	usage?: WorkerUsage;
+	/**
+	 * The backend's own session id for this worker.
+	 *
+	 * A worker driven over ACP is not a special kind of session — it is an
+	 * ordinary Claude Code or Codex session, stored where that CLI stores its
+	 * own. Knowing the id is what lets a person open the worker in the vendor's
+	 * real UI and carry on the conversation by hand.
+	 */
+	vendorSessionId?: string;
 }
 
 /** Human-readable token and cost line, or undefined when the backend reported nothing. */
