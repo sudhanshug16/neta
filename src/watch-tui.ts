@@ -93,6 +93,19 @@ export function colorDiff(text: string): string {
 		.join("\n");
 }
 
+const CLAMP_LINES = 12;
+
+/**
+ * Cut a wall of text down to something a pane can carry. The worker's own
+ * prose is never clamped — it is the content — but a status line or an error
+ * that arrives as two hundred lines of dump collapses to its head.
+ */
+function clamp(text: string): string {
+	const lines = text.split("\n");
+	if (lines.length <= CLAMP_LINES + 3) return text;
+	return [...lines.slice(0, CLAMP_LINES), `… ${lines.length - CLAMP_LINES} more lines`].join("\n");
+}
+
 /**
  * The transcript: log entries mapped onto renderable blocks.
  *
@@ -103,7 +116,8 @@ export function colorDiff(text: string): string {
 export class TranscriptView extends Container {
 	private tail: { component: Markdown; text: string } | undefined;
 
-	append(entry: WorkerLogEntry): void {
+	append(raw: WorkerLogEntry): void {
+		const entry = raw.kind === "text" || raw.kind === "diff" ? raw : { ...raw, text: clamp(raw.text) };
 		if (entry.kind !== "text") this.tail = undefined;
 		switch (entry.kind) {
 			case "text":

@@ -579,7 +579,11 @@ export class WorkerManager implements ChannelHandler {
 		record.state = state;
 		record.endedAt = Date.now();
 		record.result = result;
-		this.appendLog(record, state === "done" ? "status" : "error", `${state}: ${result}`);
+		// A finished worker's prose already streamed into the log, so logging the
+		// full result here printed the whole final message a second time, raw, in
+		// every pane. The state is the news; the text is not. Failures still carry
+		// their reason, which did not stream.
+		this.appendLog(record, state === "done" ? "status" : "error", state === "done" ? "done" : `${state}: ${result}`);
 		if (this.activeWriter === record.id) this.activeWriter = undefined;
 		record.pendingAsk?.resolve({ ok: false, error: `Worker ${state}.` });
 		record.pendingAsk = undefined;

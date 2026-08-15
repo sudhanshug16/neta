@@ -57,6 +57,20 @@ describe("TranscriptView", () => {
 		expect(text).not.toContain("**wrong**");
 	});
 
+	// A status line or error that arrives as a wall of text must not bury the
+	// pane; the worker's own prose is the one thing never clamped.
+	it("collapses an oversized non-prose entry and leaves prose alone", () => {
+		const wall = Array.from({ length: 200 }, (_, i) => `line ${i}`).join("\n");
+		const view = new TranscriptView();
+		view.append(entry("status", wall));
+		view.append(entry("text", wall));
+
+		const [status, prose] = view.children.map((child) => child.render(WIDTH).length);
+		expect(status).toBeLessThan(15);
+		expect(rendered(view)).toContain("… 188 more lines");
+		expect(prose).toBeGreaterThan(150);
+	});
+
 	it("keeps every entry kind visible", () => {
 		const view = new TranscriptView();
 		view.append(entry("notify", "halfway"));

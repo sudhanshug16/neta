@@ -113,7 +113,18 @@ export class ZellijAdapter implements MuxAdapter {
 			env: { ...process.env, ...spec.env },
 			encoding: "utf-8",
 		});
-		if (result.status === 0) return true;
-		throw new Error(`zellij: ${(result.stderr || result.error?.message || `exit ${result.status}`).trim()}`);
+		if (result.status !== 0) {
+			throw new Error(`zellij: ${(result.stderr || result.error?.message || `exit ${result.status}`).trim()}`);
+		}
+		// `action new-tab` has no background option, so every spawn yanked the user
+		// off the leader and onto the new worker. Workers open behind you: hand
+		// focus back to the leader's tab, which sessions Neta started always name
+		// "leader". In a session Neta did not start there is no such tab, so fall
+		// back to the positionally-previous one. Cosmetic either way, never fatal.
+		const back = spawnSync("zellij", ["action", "go-to-tab-name", "leader"], { env: process.env, encoding: "utf-8" });
+		if (back.status !== 0) {
+			spawnSync("zellij", ["action", "go-to-previous-tab"], { env: process.env, encoding: "utf-8" });
+		}
+		return true;
 	}
 }
