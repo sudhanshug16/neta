@@ -146,6 +146,11 @@ export class WorkerManager implements ChannelHandler {
 		this.options = { ...this.options, ...options };
 	}
 
+	/** Current working directory. */
+	get cwd(): string {
+		return this.options.cwd;
+	}
+
 	// =========================================================================
 	// Leader-facing API
 	// =========================================================================
