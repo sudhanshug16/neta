@@ -153,6 +153,7 @@ export class AcpConnection {
 			cwd: this.options.cwd,
 			env: { ...sanitizeInheritedEnv(process.env), ...this.options.env },
 			stdio: ["pipe", "pipe", "pipe"],
+			detached: true,
 		});
 		this.child = child;
 
@@ -196,7 +197,8 @@ export class AcpConnection {
 			this.options.onVendorSession?.(session.sessionId);
 			await this.negotiate(session);
 		} catch (error) {
-			this.kill();
+			// Fire-and-forget during startup failure: we're re-throwing anyway.
+			void this.kill();
 			throw this.describeStartupError(command, error);
 		}
 	}
@@ -276,24 +278,52 @@ export class AcpConnection {
 		void connection.agent.notify(acp.methods.agent.session.cancel, { sessionId }).catch(() => {});
 	}
 
-	kill(): void {
+	async kill(): Promise<void> {
 		this.killed = true;
+		// Best-effort ACP cancel before killing the process.
+		this.cancel();
 		this.connection?.close();
 		this.connection = undefined;
 		const child = this.child;
 		this.child = undefined;
-		if (!child) return;
-		child.kill("SIGTERM");
-		const timer = setTimeout(() => {
-			if (!child.killed) child.kill("SIGKILL");
-		}, 5000);
-		timer.unref();
+		if (!child || child.exitCode !== null) return;
+
+		return new Promise<void>((resolve) => {
+			const onExit = () => {
+				clearTimeout(termTimer);
+				clearTimeout(killTimer);
+				resolve();
+			};
+			child.once("exit", onExit);
+
+			// Signal the whole process group (npx and the bridge it spawned).
+			// On platforms where -pid fails, fall back to signaling just the parent.
+			const termTimer = setTimeout(() => {
+				try {
+					if (child.pid) process.kill(-child.pid, "SIGTERM");
+				} catch {
+					child.kill("SIGTERM");
+				}
+			}, 0);
+
+			// Escalate to SIGKILL if not exited within 3s.
+			const killTimer = setTimeout(() => {
+				if (child.exitCode === null) {
+					try {
+						if (child.pid) process.kill(-child.pid, "SIGKILL");
+					} catch {
+						child.kill("SIGKILL");
+					}
+				}
+			}, 3000);
+		});
 	}
 
 	private requestPermission(params: acp.RequestPermissionRequest): acp.RequestPermissionResponse {
 		const kind = params.toolCall.kind ?? "other";
 		const title = params.toolCall.title ?? params.toolCall.toolCallId;
-		const denied = !this.options.allowMutations && MUTATING_TOOL_KINDS.has(kind);
+		// Once killed, deny all permissions regardless of allowMutations.
+		const denied = this.killed || (!this.options.allowMutations && MUTATING_TOOL_KINDS.has(kind));
 
 		const option = denied
 			? pickOption(params.options, ["reject_once", "reject_always"])

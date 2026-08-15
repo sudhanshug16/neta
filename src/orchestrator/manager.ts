@@ -281,10 +281,10 @@ export class WorkerManager implements ChannelHandler {
 		return this.summarize(record);
 	}
 
-	kill(workerId: string): WorkerSummary {
+	async kill(workerId: string): Promise<WorkerSummary> {
 		const record = this.require(workerId);
 		if (!isTerminalState(record.state)) {
-			record.driver.kill();
+			await record.driver.kill();
 			this.finish(record, "killed", "Killed by the leader.");
 		}
 		return this.summarize(record);
@@ -363,7 +363,8 @@ export class WorkerManager implements ChannelHandler {
 	async dispose(): Promise<void> {
 		for (const record of this.workers.values()) {
 			if (!isTerminalState(record.state)) {
-				record.driver.kill();
+				// Fire-and-forget during shutdown: we're tearing down everything anyway.
+				void record.driver.kill();
 				this.finish(record, "killed", "Leader shut down.");
 			}
 			await rm(record.scratchDir, { recursive: true, force: true }).catch(() => {});
@@ -489,7 +490,7 @@ export class WorkerManager implements ChannelHandler {
 				case "answer":
 					return { ok: true, text: this.statusLine(this.answer(request.workerId, request.text), 200) };
 				case "kill":
-					return { ok: true, text: this.statusLine(this.kill(request.workerId), 200) };
+					return { ok: true, text: this.statusLine(await this.kill(request.workerId), 200) };
 			}
 		} catch (error) {
 			return { ok: false, error: error instanceof Error ? error.message : String(error) };

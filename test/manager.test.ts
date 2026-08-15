@@ -27,7 +27,7 @@ class FakeTransport implements WorkerTransportDriver {
 		return new Promise((resolve) => this.pending.push(resolve));
 	}
 
-	kill(): void {
+	async kill(): Promise<void> {
 		this.killed = true;
 	}
 
@@ -230,7 +230,7 @@ describe("WorkerManager", () => {
 	it("kills a worker, releases the slot and reports it", async () => {
 		const summary = await manager.spawn({ role: "worker", tier: "senior", task: "do it", writer: true });
 
-		const killed = manager.kill(summary.id);
+		const killed = await manager.kill(summary.id);
 
 		expect(killed.state).toBe("killed");
 		expect(transports[0].killed).toBe(true);

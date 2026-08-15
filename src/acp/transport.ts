@@ -158,8 +158,8 @@ export class AcpWorkerTransport implements WorkerTransportDriver {
 		}
 	}
 
-	kill(): void {
-		this.connection?.kill();
+	async kill(): Promise<void> {
+		await this.connection?.kill();
 	}
 
 	private sessionUpdate(update: AcpSessionUpdate): void {

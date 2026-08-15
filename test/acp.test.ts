@@ -14,8 +14,8 @@ describe("AcpWorkerTransport", () => {
 	const started: AcpWorkerTransport[] = [];
 	const tempDirs: string[] = [];
 
-	afterEach(() => {
-		for (const transport of started.splice(0)) transport.kill();
+	afterEach(async () => {
+		for (const transport of started.splice(0)) await transport.kill();
 		for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 		usageReports.length = 0;
 		sessionReports.length = 0;
@@ -215,6 +215,39 @@ describe("AcpWorkerTransport", () => {
 		started.push(transport);
 
 		await expect(transport.start()).rejects.toThrow(/definitely-not-installed/);
+	});
+
+	it("waits for the process to exit and escalates to SIGKILL if needed", async () => {
+		const log: WorkerLogEntry[] = [];
+		const transport = createTransport(false, log);
+		await transport.start();
+		// Have the fake agent trap SIGTERM so kill escalates to SIGKILL.
+		await transport.prompt("TRAP_SIGTERM");
+
+		const killStart = Date.now();
+		await transport.kill();
+		const killDuration = Date.now() - killStart;
+
+		// Kill should have waited for actual exit (escalated to SIGKILL after 3s).
+		expect(killDuration).toBeGreaterThanOrEqual(2900);
+		expect(killDuration).toBeLessThan(4000);
+	});
+
+	it("kill() waits for process exit before resolving", async () => {
+		const transport = createTransport(true, []);
+		await transport.start();
+
+		// Kill should not resolve until the process actually exits.
+		let killResolved = false;
+		const killPromise = transport.kill().then(() => {
+			killResolved = true;
+		});
+
+		// Give it a moment - it should not resolve immediately.
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		expect(killResolved).toBe(true);
+
+		await killPromise;
 	});
 });
 

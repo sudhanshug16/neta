@@ -59,7 +59,7 @@ export interface PromptOutcome {
 export interface WorkerTransportDriver {
 	start(): Promise<void>;
 	prompt(text: string): Promise<PromptOutcome>;
-	kill(): void;
+	kill(): Promise<void>;
 }
 
 /** Text of the first prompt: role prompt, then the task. */

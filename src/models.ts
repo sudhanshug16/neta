@@ -49,7 +49,7 @@ export async function listBackendModels(backendName: string | undefined, cwd: st
 		} catch (error) {
 			console.log(`\n${name}\n  could not start: ${error instanceof Error ? error.message : String(error)}`);
 		} finally {
-			connection.kill();
+			await connection.kill();
 		}
 	}
 	return 0;

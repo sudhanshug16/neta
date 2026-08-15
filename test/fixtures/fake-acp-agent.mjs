@@ -12,11 +12,14 @@
  *   STREAM - streams an assistant message in mid-paragraph chunks
  *   DIFF  - emits a tool call whose content is a file diff, then repeats the
  *           same content in a tool_call_update, the way real bridges do
+ *   TRAP_SIGTERM - traps SIGTERM and ignores it (to test kill escalation)
  * Anything else is echoed back as the assistant message.
  */
 
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
+
+let trapSigterm = false;
 
 const sessions = new Set();
 let counter = 0;
@@ -121,6 +124,15 @@ async function prompt(params, cx) {
 			sessionId,
 			update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "weighing options" } },
 		});
+	}
+
+	if (text.includes("TRAP_SIGTERM")) {
+		trapSigterm = true;
+		process.on("SIGTERM", () => {
+			// Trap and ignore SIGTERM to test kill escalation to SIGKILL.
+		});
+		await say(cx, sessionId, "sigterm trapped");
+		return { stopReason: "end_turn" };
 	}
 
 	await say(cx, sessionId, `echo:${text.trim().split("\n").pop()}`);

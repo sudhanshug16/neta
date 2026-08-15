@@ -299,7 +299,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 				required: ["workerId"],
 			},
 			async run(args) {
-				return text(`Killed ${describe(manager.kill(requireString(args, "workerId")))}`);
+				return text(`Killed ${describe(await manager.kill(requireString(args, "workerId")))}`);
 			},
 		},
 		{
