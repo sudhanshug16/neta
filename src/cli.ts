@@ -30,7 +30,7 @@ import { listSessions } from "./session.ts";
 import { watchWorker } from "./watch.ts";
 import { watchWorkerTui } from "./watch-tui.ts";
 
-const LEADER_WORDS = new Set(["spawn", "workers", "log", "wait", "send", "answer", "kill"]);
+const LEADER_WORDS = new Set(["spawn", "workers", "status", "log", "wait", "send", "answer", "kill"]);
 
 const HELP = `${APP_NAME} ${VERSION} — a leader agent that delegates to worker agents.
 
@@ -39,6 +39,7 @@ const HELP = `${APP_NAME} ${VERSION} — a leader agent that delegates to worker
       passed through to it.
 
   ${APP_NAME} workers                   List this session's workers and what they cost.
+  ${APP_NAME} status                    Show the writer slot, worker states and open notes.
   ${APP_NAME} log <id>                  Read a worker's new log lines.
   ${APP_NAME} watch <id>                Watch a worker and type to it (--plain for bare log lines).
   ${APP_NAME} attach <id>               Open a worker in its own CLI (Claude Code,

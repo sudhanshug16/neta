@@ -222,6 +222,16 @@ describe("worker channel", () => {
 			log.mockRestore();
 		});
 
+		it("sends status through the leader channel", async () => {
+			const log = spyOn(console, "log").mockImplementation(() => {});
+
+			await handleLeaderChannelCommand(["status"]);
+
+			expect(leaderRequests).toEqual([{ type: "status", token: "leader-token" }]);
+			expect(log).toHaveBeenCalledWith("handled:status");
+			log.mockRestore();
+		});
+
 		it("rejects a spawn with no task instead of sending it", async () => {
 			const error = spyOn(console, "error").mockImplementation(() => {});
 

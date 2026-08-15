@@ -34,9 +34,11 @@ import {
 	type WorkerLogEntry,
 	type WorkerLogPage,
 	type WorkerState,
+	type WorkerStatusSnapshot,
 	type WorkerSummary,
 	type WorkerUsage,
 } from "../types.ts";
+import { formatStatusSnapshot } from "./status.ts";
 import type { TransportOptions, WorkerMcpServer, WorkerTransportDriver } from "./transport.ts";
 
 const MAX_LOG_ENTRIES = 500;
@@ -375,6 +377,31 @@ export class WorkerManager implements ChannelHandler {
 		return this.summarize(this.require(workerId));
 	}
 
+	/** One complete, point-in-time view for the MCP and socket status commands. */
+	statusSnapshot(): WorkerStatusSnapshot {
+		const summaries = this.list();
+		const byId = new Map(summaries.map((summary) => [summary.id, summary]));
+		return {
+			writerSlot: this.activeWriter ? byId.get(this.activeWriter) : undefined,
+			writerQueue: this.writerQueue.flatMap((workerId) => {
+				const summary = byId.get(workerId);
+				return summary ? [summary] : [];
+			}),
+			workers: {
+				running: summaries.filter((summary) => summary.state === "starting" || summary.state === "running"),
+				queued: summaries.filter((summary) => summary.state === "queued"),
+				waiting: summaries.filter((summary) => summary.state === "waiting"),
+				terminal: summaries.filter((summary) => isTerminalState(summary.state)),
+			},
+			openNotes: this.getOpenNotes(),
+		};
+	}
+
+	/** Render the shared status snapshot for the socket channel. */
+	status(): string {
+		return formatStatusSnapshot(this.statusSnapshot());
+	}
+
 	/** New log lines since the last drain, oldest first. */
 	drainLog(workerId: string): WorkerLogEntry[] {
 		const record = this.require(workerId);
@@ -606,6 +633,8 @@ export class WorkerManager implements ChannelHandler {
 					if (workers.length === 0) return { ok: true, text: "No workers." };
 					return { ok: true, text: workers.map((worker) => this.statusLine(worker, 200)).join("\n") };
 				}
+				case "status":
+					return { ok: true, text: this.status() };
 				case "log": {
 					const entries = this.drainLog(request.workerId);
 					if (entries.length === 0) return { ok: true, text: "(no new log entries)" };

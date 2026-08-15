@@ -99,6 +99,7 @@ describe("leader MCP tools", () => {
 			"neta_send",
 			"neta_spawn",
 			"neta_spawn_group",
+			"neta_status",
 			"neta_wait",
 			"neta_workers",
 		]);
@@ -136,6 +137,19 @@ describe("leader MCP tools", () => {
 		// neta_wait carries the same footer.
 		const waited = bodyOf(await call("neta_wait", { workerIds: ["w1"], timeoutSeconds: 0 }));
 		expect(waited).toContain('n1 "auth work" (w1 in progress)');
+	});
+
+	it("returns the consolidated status through the real MCP client", async () => {
+		await call("neta_note", { text: "auth work" });
+		await call("neta_spawn", { role: "worker", tier: "senior", task: "auth", writer: true, note: "n1" });
+		await call("neta_spawn", { role: "worker", tier: "senior", task: "docs", writer: true });
+
+		const body = bodyOf(await call("neta_status"));
+
+		expect(body).toContain("Writer slot:\n  w1 worker/senior | backend=claude | running | writer");
+		expect(body).toContain("Writer queue:\n  w2 worker/senior | backend=codex | queued | writer");
+		expect(body).toContain("Waiting (blocked on leader answer):\n  (none)");
+		expect(body).toContain('Open notes:\n  n1 "auth work" (w1 running)');
 	});
 
 	it("keeps the done form in the footer once a linked worker finishes", async () => {

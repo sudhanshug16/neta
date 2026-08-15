@@ -172,6 +172,23 @@ export interface Note {
 	workers: NoteWorkerLink[];
 }
 
+/** A point-in-time view of the writer slot, workers and open-notes ledger. */
+export interface WorkerStatusSnapshot {
+	/** The writer currently holding exclusive write access, if any. */
+	writerSlot?: WorkerSummary;
+	/** Writers waiting for the slot, in the order they will start. */
+	writerQueue: WorkerSummary[];
+	/** Every worker, partitioned into the states useful for a status check. */
+	workers: {
+		running: WorkerSummary[];
+		queued: WorkerSummary[];
+		waiting: WorkerSummary[];
+		terminal: WorkerSummary[];
+	};
+	/** Notes that still need follow-through, including each linked worker's state. */
+	openNotes: Note[];
+}
+
 /** Human-readable token and cost line, or undefined when the backend reported nothing. */
 export function formatUsage(usage: WorkerUsage | undefined, modelId?: string): string | undefined {
 	if (!usage) return undefined;

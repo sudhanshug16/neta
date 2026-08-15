@@ -47,7 +47,7 @@ describe("leader prompt", () => {
 			toolName: (base) => `mcp__neta__${base}`,
 		});
 
-		for (const tool of ["neta_spawn", "neta_wait", "neta_workers", "neta_log", "neta_answer"]) {
+		for (const tool of ["neta_spawn", "neta_wait", "neta_workers", "neta_status", "neta_log", "neta_answer"]) {
 			expect(prompt).toContain(`mcp__neta__${tool}`);
 		}
 		// No bare name survives to be copied by mistake.

@@ -88,6 +88,7 @@ neta --mux none            # no panes; workers run headless
 neta -- --model opus       # pass arguments through to the agent CLI
 
 neta workers               # what is running, and what it has cost
+neta status                # writer slot, worker states, queue and open notes
 neta watch w1              # watch one worker, and type to talk to it
 neta attach w1             # open that worker in its own CLI and take over
 neta log w1                # its new lines since you last looked
@@ -103,7 +104,7 @@ Neta records each live session in `~/.neta/sessions/`, so a second window can
 reach the same leader. Add `--session <id>` when more than one is running.
 
 Inside a session the leader gets MCP tools — `neta_spawn`, `neta_spawn_group`,
-`neta_workers`, `neta_log`, `neta_wait`, `neta_send`, `neta_answer`,
+`neta_workers`, `neta_status`, `neta_log`, `neta_wait`, `neta_send`, `neta_answer`,
 `neta_kill`, `neta_room` — and workers get `neta_notify`, `neta_ask`,
 `neta_say`, `neta_room`, plus the same commands in their shell.
 

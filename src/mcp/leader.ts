@@ -11,8 +11,9 @@
  */
 
 import type { WorkerManager } from "../orchestrator/manager.ts";
+import { formatWorkerSummary } from "../orchestrator/status.ts";
 import { roleNames } from "../prompts/roles.ts";
-import { formatUsage, isTier, type Note, TIERS, type WorkerLogEntry, type WorkerSummary } from "../types.ts";
+import { isTier, type Note, TIERS, type WorkerLogEntry, type WorkerSummary } from "../types.ts";
 import {
 	type McpTool,
 	optionalBoolean,
@@ -42,16 +43,7 @@ function clip(text: string, limit: number): string {
 }
 
 function describe(summary: WorkerSummary): string {
-	const named = summary.name === summary.role ? summary.id : `${summary.id} "${summary.name}"`;
-	const parts = [`${named} ${summary.role}/${summary.tier}`, `backend=${summary.backend}`, summary.state];
-	if (summary.writer) parts.push("writer");
-	if (summary.room) parts.push(`room=${summary.room}`);
-	if (summary.model) parts.push(`model=${summary.model}`);
-	if (summary.mode) parts.push(`mode=${summary.mode}`);
-	const usage = formatUsage(summary.usage, summary.model);
-	if (usage) parts.push(usage);
-	if (summary.pendingQuestion) parts.push(`asking: ${summary.pendingQuestion}`);
-	return parts.join(" | ");
+	return formatWorkerSummary(summary);
 }
 
 function formatLog(entries: WorkerLogEntry[], full: boolean): string {
@@ -286,6 +278,17 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 				if (summaries.length === 0) return text("No workers have been spawned.");
 				const maxChars = workerId ? 20000 : MAX_RESULT_CHARS;
 				return text(statusReport(summaries, maxChars) + formatOpenNotes(manager));
+			},
+		},
+		{
+			name: "neta_status",
+			description:
+				"Show one consolidated snapshot: the current writer slot, the writer queue in start order, workers grouped " +
+				"by state, and open notes with linked-worker progress. Safe to call whenever you need the complete current " +
+				"picture; it does not interrupt workers.",
+			inputSchema: { type: "object" },
+			async run() {
+				return text(manager.status());
 			},
 		},
 		{

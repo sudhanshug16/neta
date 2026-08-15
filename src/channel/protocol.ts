@@ -52,6 +52,7 @@ export type LeaderChannelRequest =
 			note?: string;
 	  }
 	| { type: "workers"; token: string }
+	| { type: "status"; token: string }
 	| { type: "log"; token: string; workerId: string }
 	/**
 	 * Read a worker's log without consuming it. `log` moves the leader's cursor;
@@ -66,7 +67,17 @@ export type LeaderChannelRequest =
 
 export type ChannelRequest = WorkerChannelRequest | LeaderChannelRequest;
 
-export const LEADER_REQUEST_TYPES = new Set(["spawn", "workers", "log", "tail", "wait", "send", "answer", "kill"]);
+export const LEADER_REQUEST_TYPES = new Set([
+	"spawn",
+	"workers",
+	"status",
+	"log",
+	"tail",
+	"wait",
+	"send",
+	"answer",
+	"kill",
+]);
 
 /** `data` carries a structured payload for callers that parse rather than print. */
 export type ChannelResponse = { ok: true; text?: string; data?: unknown } | { ok: false; error: string };

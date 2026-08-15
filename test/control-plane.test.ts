@@ -71,6 +71,16 @@ describe("neta mcp", () => {
 		expect(stdout.trim()).toBe("No workers.");
 	});
 
+	it("answers `neta status` through the real socket from an unrelated process", async () => {
+		const { stdout } = await run(process.execPath, [CLI, "status", "--session", "smoke"], {
+			env: { ...process.env, NETA_DIR: agentDir, NETA_SOCKET: "", NETA_LEADER_TOKEN: "" },
+		});
+
+		expect(stdout).toContain("Neta status");
+		expect(stdout).toContain("Writer slot:\n  (none)");
+		expect(stdout).toContain("Open notes:\n  (none)");
+	});
+
 	it("refuses a worker command from someone without the session token", async () => {
 		const session = listSessions(agentDir)[0];
 		await expect(

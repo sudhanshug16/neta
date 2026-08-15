@@ -27,13 +27,13 @@ Every worker operation exists twice, over one manager:
 
 | Door | Who uses it | How |
 | --- | --- | --- |
-| MCP tools | the leader | `neta_spawn`, `neta_wait`, … in the vendor's tool loop |
-| Unix socket | workers, and you | `neta notify`, `neta workers`, `neta watch` |
+| MCP tools | the leader | `neta_spawn`, `neta_status`, `neta_wait`, … in the vendor's tool loop |
+| Unix socket | workers, and you | `neta notify`, `neta workers`, `neta status`, `neta watch` |
 
 The socket door is authorized by a token. Workers get their own id and can only
 report; the token that authorizes spawning and killing goes to the leader's
 process and to the session file in `~/.neta/sessions/`, which is readable only
-by you. That file is how `neta workers` in a second terminal finds the session
+by you. That file is how `neta workers` or `neta status` in a second terminal finds the session
 you are running.
 
 ## Waking the leader

@@ -1,5 +1,5 @@
 /**
- * Leader side of the channel: the `neta spawn|workers|log|wait|send|answer|kill`
+ * Leader side of the channel: the `neta spawn|workers|status|log|wait|send|answer|kill`
  * subcommands.
  *
  * The leader normally drives workers through MCP tools, which run in its own
@@ -13,13 +13,14 @@ import { findSession, listSessions } from "../session.ts";
 import { sendChannelRequest } from "./client.ts";
 import { type LeaderChannelRequest, NETA_LEADER_ENV, NETA_SOCKET_ENV } from "./protocol.ts";
 
-const LEADER_COMMANDS = new Set(["spawn", "workers", "log", "wait", "send", "answer", "kill"]);
+const LEADER_COMMANDS = new Set(["spawn", "workers", "status", "log", "wait", "send", "answer", "kill"]);
 
 const LEADER_HELP = `Leader channel commands (available where the leader token is set):
 
   ${APP_NAME} spawn --role <role> --tier <tier> [--writer] [--room <name>] [--backend <name>] <task>
       Start a worker. Roles: scout, worker, reviewer, debater. Tiers: junior, senior, staff.
   ${APP_NAME} workers               List every worker and its state.
+  ${APP_NAME} status                Show the writer slot, worker states and open notes.
   ${APP_NAME} log <id>              Read a worker's new log lines since you last looked.
   ${APP_NAME} wait <id> [<id>...] [--timeout <seconds>]
       Block until the listed workers finish (default timeout 600s).
@@ -78,6 +79,8 @@ function buildRequest(command: string, token: string, rest: string[]): LeaderCha
 		}
 		case "workers":
 			return { type: "workers", token };
+		case "status":
+			return { type: "status", token };
 		case "log": {
 			const workerId = rest[0];
 			if (!workerId) return `Usage: ${APP_NAME} log <worker-id>`;
