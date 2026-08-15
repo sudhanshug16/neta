@@ -168,6 +168,15 @@ describe("leader MCP tools", () => {
 		expect(bodyOf(await call("neta_workers"))).toContain("12,345 tokens, 0.31 USD");
 	});
 
+	it("shows the worker's negotiated model and mode when the backend reports them", async () => {
+		await call("neta_spawn", { role: "scout", tier: "senior", task: "look" });
+		transports[0].options.events.session("test-model", "test-mode");
+
+		const workers = bodyOf(await call("neta_workers"));
+		expect(workers).toContain("model=test-model");
+		expect(workers).toContain("mode=test-mode");
+	});
+
 	it("names the workers that exist when asked about one that does not", async () => {
 		const result = await call("neta_kill", { workerId: "w9" });
 

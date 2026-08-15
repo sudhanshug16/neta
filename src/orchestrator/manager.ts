@@ -68,6 +68,8 @@ interface WorkerRecord {
 	vendorSessionId?: string;
 	/** Finished, and superseded by a later batch: its view can close. */
 	archived?: boolean;
+	model?: string;
+	mode?: string;
 }
 
 /** Opens a pane per worker, when a multiplexer is running. */
@@ -226,6 +228,10 @@ export class WorkerManager implements ChannelHandler {
 				},
 				vendorSession: (sessionId) => {
 					record.vendorSessionId = sessionId;
+				},
+				session: (model, mode) => {
+					record.model = model;
+					record.mode = mode;
 				},
 			},
 		};
@@ -497,7 +503,8 @@ export class WorkerManager implements ChannelHandler {
 	private statusLine(summary: WorkerSummary, resultLimit?: number): string {
 		const access = summary.writer ? "writer" : "read-only";
 		const room = summary.room ? `, room ${summary.room}` : "";
-		let line = `${summary.id} [${summary.role}/${summary.tier}, ${access}${room}] ${summary.state} — ${summary.task}`;
+		const session = summary.model || summary.mode ? `, ${summary.model ?? ""}${summary.model && summary.mode ? "/" : ""}${summary.mode ?? ""}`.trim() : "";
+		let line = `${summary.id} [${summary.role}/${summary.tier}, ${access}${room}${session}] ${summary.state} — ${summary.task}`;
 		const usage = formatUsage(summary.usage);
 		if (usage) line += `\n  usage: ${usage}`;
 		if (summary.pendingQuestion) line += `\n  asks: ${summary.pendingQuestion}`;
@@ -610,6 +617,8 @@ export class WorkerManager implements ChannelHandler {
 			scratchDir: record.scratchDir,
 			usage: record.usage,
 			vendorSessionId: record.vendorSessionId,
+			model: record.model,
+			mode: record.mode,
 		};
 	}
 }

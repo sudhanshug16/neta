@@ -122,6 +122,15 @@ describe("WorkerManager", () => {
 		expect(transports[0].options.model).toBe("sonnet");
 	});
 
+	it("surfaces the negotiated model and mode in the worker summary", async () => {
+		const summary = await manager.spawn({ role: "scout", tier: "senior", task: "look" });
+		transports[0].options.events.session("negotiated-model", "negotiated-mode");
+
+		const updated = manager.get(summary.id);
+		expect(updated.model).toBe("negotiated-model");
+		expect(updated.mode).toBe("negotiated-mode");
+	});
+
 	it("allows only one writer at a time and releases the slot when it finishes", async () => {
 		const first = await manager.spawn({ role: "worker", tier: "senior", task: "fix the bug", writer: true });
 		expect(first.writer).toBe(true);

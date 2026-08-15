@@ -124,7 +124,17 @@ acp.agent({ name: "fake-acp-agent" })
 		mcpServers = ctx.params.mcpServers ?? [];
 		const sessionId = `s${sessions.size + 1}`;
 		sessions.add(sessionId);
-		return { sessionId };
+		return {
+			sessionId,
+			models: {
+				availableModels: [{ modelId: "test-model" }],
+				currentModelId: "test-model",
+			},
+			modes: {
+				availableModes: [{ id: "test-mode" }],
+				currentModeId: "test-mode",
+			},
+		};
 	})
 	.onRequest("authenticate", () => ({}))
 	.onRequest("session/prompt", (ctx) => prompt(ctx.params, ctx.client))

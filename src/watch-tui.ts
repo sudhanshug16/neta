@@ -170,9 +170,10 @@ export class TranscriptView extends Container {
 function headerText(worker: WorkerSummary): string {
 	const access = worker.writer ? "writer" : "read-only";
 	const room = worker.room ? ` · room ${worker.room}` : "";
+	const session = worker.model || worker.mode ? ` · ${worker.model ?? ""}${worker.model && worker.mode ? "/" : ""}${worker.mode ?? ""}`.trim() : "";
 	const named = worker.name === worker.role ? worker.id : `${worker.id} ${worker.name}`;
 	return [
-		`${style.bold(named)} ${style.dim(`· ${worker.role}/${worker.tier} · ${worker.backend} · ${access}${room}`)}`,
+		`${style.bold(named)} ${style.dim(`· ${worker.role}/${worker.tier} · ${worker.backend} · ${access}${room}${session}`)}`,
 		style.dim(`task: ${worker.task.replace(/\s+/g, " ").trim().slice(0, 300)}`),
 	].join("\n");
 }

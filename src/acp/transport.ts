@@ -126,6 +126,7 @@ export class AcpWorkerTransport implements WorkerTransportDriver {
 				),
 		});
 		await this.connection.start();
+		this.options.events.session(this.connection.offered.currentModel, this.connection.offered.currentMode);
 	}
 
 	async prompt(text: string): Promise<PromptOutcome> {

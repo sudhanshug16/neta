@@ -18,9 +18,11 @@ describe("AcpWorkerTransport", () => {
 		for (const transport of started.splice(0)) transport.kill();
 		for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 		usageReports.length = 0;
+		sessionReports.length = 0;
 	});
 
 	const usageReports: WorkerUsage[] = [];
+	const sessionReports: Array<{ model?: string; mode?: string }> = [];
 
 	function createTransport(
 		writer: boolean,
@@ -44,6 +46,7 @@ describe("AcpWorkerTransport", () => {
 				log: (kind, text) => log.push({ at: 0, kind, text }),
 				usage: (usage) => usageReports.push(usage),
 				vendorSession: () => {},
+				session: (model, mode) => sessionReports.push({ model, mode }),
 			},
 		};
 		const transport = new AcpWorkerTransport(options);
@@ -175,6 +178,14 @@ describe("AcpWorkerTransport", () => {
 		expect(outcome.summary).toContain('{"name":"NETA_WORKER_ID","value":"w1"}');
 	});
 
+	it("reports the negotiated model and mode from the backend", async () => {
+		const transport = createTransport(false, []);
+		await transport.start();
+
+		expect(sessionReports).toHaveLength(1);
+		expect(sessionReports[0]).toEqual({ model: "test-model", mode: "test-mode" });
+	});
+
 	it("explains which backend failed when the command does not exist", async () => {
 		const log: WorkerLogEntry[] = [];
 		const scratchDir = mkdtempSync(join(tmpdir(), "neta-acp-"));
@@ -190,7 +201,7 @@ describe("AcpWorkerTransport", () => {
 			systemPrompt: "",
 			scratchDir,
 			mcpServers: [],
-			events: { log: (kind, text) => log.push({ at: 0, kind, text }), usage: () => {}, vendorSession: () => {} },
+			events: { log: (kind, text) => log.push({ at: 0, kind, text }), usage: () => {}, vendorSession: () => {}, session: () => {} },
 		});
 		started.push(transport);
 

@@ -141,6 +141,10 @@ export interface WorkerSummary {
 	 * real UI and carry on the conversation by hand.
 	 */
 	vendorSessionId?: string;
+	/** The model this worker negotiated and is running on, if reported by the backend. */
+	model?: string;
+	/** The mode this worker negotiated and is running in, if reported by the backend. */
+	mode?: string;
 }
 
 /** Human-readable token and cost line, or undefined when the backend reported nothing. */

@@ -46,6 +46,8 @@ function describe(summary: WorkerSummary): string {
 	const parts = [`${named} ${summary.role}/${summary.tier}`, `backend=${summary.backend}`, summary.state];
 	if (summary.writer) parts.push("writer");
 	if (summary.room) parts.push(`room=${summary.room}`);
+	if (summary.model) parts.push(`model=${summary.model}`);
+	if (summary.mode) parts.push(`mode=${summary.mode}`);
 	const usage = formatUsage(summary.usage);
 	if (usage) parts.push(usage);
 	if (summary.pendingQuestion) parts.push(`asking: ${summary.pendingQuestion}`);

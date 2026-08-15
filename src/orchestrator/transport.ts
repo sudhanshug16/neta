@@ -16,6 +16,8 @@ export interface TransportEvents {
 	usage(usage: WorkerUsage): void;
 	/** The backend's own id for this session, once it has one. */
 	vendorSession(sessionId: string): void;
+	/** The model and mode the backend negotiated and is running. */
+	session(model: string | undefined, mode: string | undefined): void;
 }
 
 /**
