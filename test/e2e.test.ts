@@ -128,7 +128,7 @@ describe("a leader session, end to end", () => {
 			env: { ...process.env, NETA_DIR: agentDir, NETA_SOCKET: "", NETA_LEADER_TOKEN: "" },
 		});
 
-		expect(stdout).toContain("w1 [scout/senior, read-only]");
+		expect(stdout).toContain("w1 [scout/senior, read-only, test-model/test-mode]");
 		expect(stdout).toContain("look around");
 	});
 

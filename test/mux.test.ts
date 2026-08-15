@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -50,8 +50,17 @@ describe("tmux", () => {
 
 describe("zellij", () => {
 	const dirs: string[] = [];
+	const savedZellij = process.env.ZELLIJ;
+	beforeEach(() => {
+		delete process.env.ZELLIJ;
+	});
 	afterEach(() => {
 		for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+		if (savedZellij !== undefined) {
+			process.env.ZELLIJ = savedZellij;
+		} else {
+			delete process.env.ZELLIJ;
+		}
 	});
 
 	it("writes a layout whose single pane is the leader", () => {
