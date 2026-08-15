@@ -139,6 +139,7 @@ describe("Codex adapter", () => {
 		expect(launch.args).toContain('approval_policy="never"');
 		expect(launch.args).toContain('mcp_servers.neta.command="/usr/bin/node"');
 		expect(launch.args).toContain('mcp_servers.neta.args=["/opt/neta/cli.js", "mcp"]');
+		expect(launch.args).toContain('mcp_servers.neta.default_tools_approval_mode="approve"');
 		expect(launch.args.find((arg) => arg.startsWith("mcp_servers.neta.env="))).toContain(
 			'NETA_SOCKET = "/tmp/neta-s1.sock"',
 		);

@@ -47,6 +47,8 @@ export function configOverrides(context: LeaderLaunchContext): string[] {
 		"-c",
 		`mcp_servers.${MCP_SERVER_NAME}.env={ ${env} }`,
 		"-c",
+		`mcp_servers.${MCP_SERVER_NAME}.default_tools_approval_mode="approve"`,
+		"-c",
 		'sandbox_mode="read-only"',
 		"-c",
 		'approval_policy="never"',

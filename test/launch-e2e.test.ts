@@ -93,6 +93,7 @@ describe("neta (launching a leader)", () => {
 
 		expect(launched.argv).toContain('sandbox_mode="read-only"');
 		expect(launched.argv).toContain('approval_policy="never"');
+		expect(launched.argv).toContain('mcp_servers.neta.default_tools_approval_mode="approve"');
 		expect(launched.env.CODEX_HOME).toContain("codex-home");
 		expect(launched.files[join(launched.env.CODEX_HOME ?? "", "AGENTS.md")]).toContain("You are Neta");
 	});
