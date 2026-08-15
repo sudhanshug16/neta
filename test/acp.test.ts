@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { chooseModel, sanitizeInheritedEnv } from "../src/acp/connection.ts";
+import { AcpConnection, chooseModel, sanitizeInheritedEnv } from "../src/acp/connection.ts";
 import { AcpWorkerTransport, describeToolCall, paragraphFlushIndex, renderDiffText } from "../src/acp/transport.ts";
 import type { TransportOptions, WorkerMcpServer } from "../src/orchestrator/transport.ts";
 import type { WorkerLogEntry, WorkerUsage } from "../src/types.ts";
@@ -272,6 +272,46 @@ describe("choosing a worker's model", () => {
 
 	it("returns nothing for a model this backend does not have", () => {
 		expect(chooseModel(available, "opus")).toBeUndefined();
+	});
+});
+
+describe("terminal permission gate", () => {
+	it("denies terminal writes loudly without blocking reads", () => {
+		const denials: string[] = [];
+		const connection = new AcpConnection({
+			command: process.execPath,
+			args: [],
+			cwd: process.cwd(),
+			env: {},
+			allowMutations: true,
+			onUpdate: () => {},
+			onStderr: () => {},
+			onDenied: (kind, _title, reason) => denials.push(`${kind}:${reason}`),
+		});
+		const requestPermission = Reflect.get(connection, "requestPermission") as (params: {
+			toolCall: { toolCallId: string; title: string; kind: string; status: "pending" };
+			options: Array<{ kind: "allow_once" | "reject_once"; name: string; optionId: string }>;
+		}) => unknown;
+
+		connection.markTerminal();
+		const write = requestPermission.call(connection, {
+			toolCall: { toolCallId: "write", title: "Write config.json", kind: "write", status: "pending" },
+			options: [
+				{ kind: "allow_once", name: "Allow", optionId: "allow" },
+				{ kind: "reject_once", name: "Reject", optionId: "reject" },
+			],
+		});
+		const read = requestPermission.call(connection, {
+			toolCall: { toolCallId: "read", title: "Read config.json", kind: "read", status: "pending" },
+			options: [
+				{ kind: "allow_once", name: "Allow", optionId: "allow" },
+				{ kind: "reject_once", name: "Reject", optionId: "reject" },
+			],
+		});
+
+		expect(write).toEqual({ outcome: { outcome: "selected", optionId: "reject" } });
+		expect(read).toEqual({ outcome: { outcome: "selected", optionId: "allow" } });
+		expect(denials).toEqual(["write:terminal"]);
 	});
 });
 

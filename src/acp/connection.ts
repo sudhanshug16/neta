@@ -22,7 +22,7 @@ import * as acp from "@agentclientprotocol/sdk";
 import { VERSION } from "../config.ts";
 
 /** Tool kinds a read-only agent may not perform. */
-export const MUTATING_TOOL_KINDS = new Set(["edit", "delete", "move"]);
+export const MUTATING_TOOL_KINDS = new Set(["edit", "write", "delete", "move"]);
 
 const AUTH_REQUIRED_CODE = -32000;
 
@@ -328,9 +328,11 @@ export class AcpConnection {
 	private requestPermission(params: acp.RequestPermissionRequest): acp.RequestPermissionResponse {
 		const kind = params.toolCall.kind ?? "other";
 		const title = params.toolCall.title ?? params.toolCall.toolCallId;
-		// Once terminal (done, failed or killed), deny all permissions regardless of allowMutations.
+		// Once terminal (done, failed or killed), deny mutations regardless of
+		// allowMutations. Reads stay available until the ACP process dies.
 		const terminal = this.terminal || this.killed;
-		const denied = terminal || (!this.options.allowMutations && MUTATING_TOOL_KINDS.has(kind));
+		const mutation = MUTATING_TOOL_KINDS.has(kind);
+		const denied = mutation && (terminal || !this.options.allowMutations);
 
 		const option = denied
 			? pickOption(params.options, ["reject_once", "reject_always"])
