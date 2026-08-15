@@ -96,7 +96,7 @@ export interface NetaSettings {
 export const DEFAULT_BACKENDS: Record<string, NetaBackendSettings> = {
 	claude: {
 		command: "npx",
-		args: ["-y", "@zed-industries/claude-code-acp"],
+		args: ["-y", "@agentclientprotocol/claude-agent-acp@0.68.0"],
 		tierModels: { junior: "haiku", senior: "sonnet", staff: "default" },
 		// A worker is an ordinary Claude Code session, filed under the same id.
 		resume: { command: "claude", args: ["--resume", "{session}"] },
