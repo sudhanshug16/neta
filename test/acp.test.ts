@@ -186,6 +186,15 @@ describe("AcpWorkerTransport", () => {
 		expect(sessionReports[0]).toEqual({ model: "test-model", mode: "test-mode" });
 	});
 
+	it("returns only text after the last tool call as the result", async () => {
+		const transport = createTransport(false, []);
+		await transport.start();
+
+		const outcome = await transport.prompt("TOOL_STREAM");
+
+		expect(outcome).toEqual({ ok: true, summary: "After tool call." });
+	});
+
 	it("explains which backend failed when the command does not exist", async () => {
 		const log: WorkerLogEntry[] = [];
 		const scratchDir = mkdtempSync(join(tmpdir(), "neta-acp-"));

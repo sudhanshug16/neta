@@ -183,6 +183,64 @@ describe("leader MCP tools", () => {
 		expect(result.isError).toBe(true);
 		expect(bodyOf(result)).toContain('Unknown worker "w9"');
 	});
+
+	it("omits tool/diff/thought entries from neta_log by default", async () => {
+		await call("neta_spawn", { role: "scout", tier: "senior", task: "look" });
+		transports[0].options.events.log("tool", "Read File auth.ts");
+		transports[0].options.events.log("text", "Found the issue");
+		transports[0].options.events.log("thought", "considering options");
+		transports[0].options.events.log("diff", "patch content");
+		transports[0].options.events.log("notify", "done reading");
+
+		const log = await call("neta_log", { workerId: "w1" });
+
+		const body = bodyOf(log);
+		expect(body).toContain("[text] Found the issue");
+		expect(body).toContain("[notify] done reading");
+		expect(body).not.toContain("[tool]");
+		expect(body).not.toContain("[thought]");
+		expect(body).not.toContain("[diff]");
+	});
+
+	it("includes all entry kinds in neta_log when full=true", async () => {
+		await call("neta_spawn", { role: "scout", tier: "senior", task: "look" });
+		transports[0].options.events.log("tool", "Read File auth.ts");
+		transports[0].options.events.log("text", "Found the issue");
+		transports[0].options.events.log("thought", "considering options");
+
+		const log = await call("neta_log", { workerId: "w1", full: true });
+
+		const body = bodyOf(log);
+		expect(body).toContain("[tool] Read File auth.ts");
+		expect(body).toContain("[text] Found the issue");
+		expect(body).toContain("[thought] considering options");
+	});
+
+	it("returns the full result for a single-worker neta_workers query", async () => {
+		await call("neta_spawn", { role: "scout", tier: "senior", task: "look" });
+		const longResult = "x".repeat(15000);
+		transports[0].finish({ ok: true, summary: longResult });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		const single = await call("neta_workers", { workerId: "w1" });
+
+		const body = bodyOf(single);
+		expect(body).toContain("x".repeat(15000));
+		expect(body).not.toContain("more characters");
+	});
+
+	it("clips results in the list view of neta_workers", async () => {
+		await call("neta_spawn", { role: "scout", tier: "senior", task: "look" });
+		const longResult = "x".repeat(15000);
+		transports[0].finish({ ok: true, summary: longResult });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		const list = await call("neta_workers");
+
+		const body = bodyOf(list);
+		expect(body).toContain("more characters");
+		expect(body.includes("x".repeat(15000))).toBe(false);
+	});
 });
 
 describe("worker MCP tools", () => {

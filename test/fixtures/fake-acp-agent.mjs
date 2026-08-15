@@ -64,6 +64,17 @@ async function prompt(params, cx) {
 		return { stopReason: "end_turn" };
 	}
 
+	if (text.includes("TOOL_STREAM")) {
+		await say(cx, sessionId, "Before tool call.");
+		const toolCallId = `call_${++counter}`;
+		await cx.notify(acp.methods.client.session.update, {
+			sessionId,
+			update: { sessionUpdate: "tool_call", toolCallId, title: "Read File", kind: "read", status: "completed" },
+		});
+		await say(cx, sessionId, "After tool call.");
+		return { stopReason: "end_turn" };
+	}
+
 	if (text.includes("STREAM")) {
 		await say(cx, sessionId, "First paragraph");
 		await say(cx, sessionId, " continues.\n\nSecond");

@@ -54,10 +54,11 @@ function describe(summary: WorkerSummary): string {
 	return parts.join(" | ");
 }
 
-function formatLog(entries: WorkerLogEntry[]): string {
+function formatLog(entries: WorkerLogEntry[], full: boolean): string {
 	if (entries.length === 0) return "(no new output)";
-	const shown = entries.slice(-MAX_LOG_ENTRIES);
-	const dropped = entries.length - shown.length;
+	const filtered = full ? entries : entries.filter((entry) => !["tool", "diff", "thought"].includes(entry.kind));
+	const shown = filtered.slice(-MAX_LOG_ENTRIES);
+	const dropped = filtered.length - shown.length;
 	const body = clip(shown.map((entry) => `[${entry.kind}] ${entry.text}`).join("\n"), MAX_LOG_CHARS);
 	return dropped > 0 ? `… ${dropped} earlier lines not shown\n${body}` : body;
 }
@@ -67,11 +68,11 @@ function formatLog(entries: WorkerLogEntry[]): string {
  * A worker's final message is the handoff, so that is worth carrying; its
  * running commentary is not, and `neta_log` exists for when it is.
  */
-function statusReport(summaries: WorkerSummary[]): string {
+function statusReport(summaries: WorkerSummary[], maxResultChars = MAX_RESULT_CHARS): string {
 	return summaries
 		.map((summary) => {
 			const lines = [describe(summary)];
-			if (summary.result) lines.push(`  result: ${clip(summary.result, MAX_RESULT_CHARS)}`);
+			if (summary.result) lines.push(`  result: ${clip(summary.result, maxResultChars)}`);
 			return lines.join("\n");
 		})
 		.join("\n\n");
@@ -192,7 +193,8 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 			description:
 				"List workers with their state, token usage and final results. Cheap and safe to call whenever you want " +
 				"to know what is happening; it does not interrupt the workers. For a worker's running commentary, use " +
-				"neta_log.",
+				"neta_log. When called with a specific workerId, the full result is returned unclipped; when listing all " +
+				"workers, results are clipped to 3000 characters.",
 			inputSchema: {
 				type: "object",
 				properties: { workerId: { type: "string", description: "Only this worker. Omit for all." } },
@@ -201,27 +203,35 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 				const workerId = optionalString(args, "workerId");
 				const summaries = workerId ? [manager.get(workerId)] : manager.list();
 				if (summaries.length === 0) return text("No workers have been spawned.");
-				return text(statusReport(summaries));
+				const maxChars = workerId ? 20000 : MAX_RESULT_CHARS;
+				return text(statusReport(summaries, maxChars));
 			},
 		},
 		{
 			name: "neta_log",
-			description: "Read a worker's new log lines since you last looked. Each line is shown once.",
+			description:
+				"Read a worker's new log lines since you last looked. Each line is shown once. By default, omits " +
+				"low-level details (tool calls, diffs, thoughts) to reduce context waste; use full=true to see everything.",
 			inputSchema: {
 				type: "object",
-				properties: { workerId: { type: "string" } },
+				properties: {
+					workerId: { type: "string" },
+					full: { type: "boolean", description: "Include all entries (tool, diff, thought). Default false." },
+				},
 				required: ["workerId"],
 			},
 			async run(args) {
 				const entries = manager.drainLog(requireString(args, "workerId"));
-				return text(entries.length === 0 ? "(no new log entries)" : formatLog(entries));
+				const full = optionalBoolean(args, "full") ?? false;
+				return text(entries.length === 0 ? "(no new log entries)" : formatLog(entries, full));
 			},
 		},
 		{
 			name: "neta_wait",
 			description:
 				"Block until the named workers finish, then return their results. This is how you collect work: end your " +
-				"turn with it rather than polling. Returns early with current state if the timeout expires.",
+				"turn with it rather than polling. Returns early with current state if the timeout expires. Results are " +
+				"clipped to 3000 characters; use neta_workers with a specific workerId to retrieve the full result.",
 			inputSchema: {
 				type: "object",
 				properties: {

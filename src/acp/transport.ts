@@ -178,6 +178,8 @@ export class AcpWorkerTransport implements WorkerTransportDriver {
 				this.flushStreaming();
 				this.options.events.log("tool", describeToolCall(update.title, update.locations, update.rawInput));
 				this.logDiffs(update.toolCallId, update.content);
+				// Reset assistantText so the result is only the final message after the last tool call.
+				this.assistantText = "";
 				break;
 			case "tool_call_update":
 				this.logDiffs(update.toolCallId, update.content);
