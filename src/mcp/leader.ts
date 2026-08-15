@@ -1,0 +1,277 @@
+/**
+ * The leader's tools.
+ *
+ * Everything the leader can do to a worker goes through here: spawn, look,
+ * wait, talk, answer, kill. Anything cleverer belongs in a flavor, where the
+ * user can read and change it.
+ *
+ * `neta_wait` is the one that matters for how a leader behaves. It blocks until
+ * the workers it names finish, which is how an idle leader wakes up with real
+ * results instead of polling.
+ */
+
+import type { WorkerManager } from "../orchestrator/manager.ts";
+import { roleNames } from "../prompts/roles.ts";
+import { formatUsage, isTier, TIERS, type WorkerLogEntry, type WorkerSummary } from "../types.ts";
+import {
+	type McpTool,
+	optionalBoolean,
+	optionalNumber,
+	optionalString,
+	optionalStringArray,
+	requireString,
+	text,
+} from "./serve.ts";
+
+const DEFAULT_WAIT_SECONDS = 300;
+/** Vendor hosts time long tool calls out; staying under that is better than being killed mid-wait. */
+const MAX_WAIT_SECONDS = 900;
+
+function describe(summary: WorkerSummary): string {
+	const parts = [`${summary.id} ${summary.role}/${summary.tier}`, `backend=${summary.backend}`, summary.state];
+	if (summary.writer) parts.push("writer");
+	if (summary.room) parts.push(`room=${summary.room}`);
+	const usage = formatUsage(summary.usage);
+	if (usage) parts.push(usage);
+	if (summary.pendingQuestion) parts.push(`asking: ${summary.pendingQuestion}`);
+	return parts.join(" | ");
+}
+
+function formatLog(entries: WorkerLogEntry[]): string {
+	if (entries.length === 0) return "  (no new output)";
+	return entries.map((entry) => `  [${entry.kind}] ${entry.text}`).join("\n");
+}
+
+function report(manager: WorkerManager, summaries: WorkerSummary[]): string {
+	return summaries
+		.map((summary) => {
+			const lines = [describe(summary), formatLog(manager.drainLog(summary.id))];
+			if (summary.result) lines.push(`  result: ${summary.result}`);
+			return lines.join("\n");
+		})
+		.join("\n\n");
+}
+
+function tier(args: Record<string, unknown>, name = "tier") {
+	const value = requireString(args, name);
+	if (!isTier(value)) throw new Error(`Unknown tier "${value}". Tiers: ${TIERS.join(", ")}.`);
+	return value;
+}
+
+export function leaderTools(manager: WorkerManager): McpTool[] {
+	const roles = roleNames().join(", ");
+
+	const memberSchema = {
+		type: "object",
+		properties: {
+			role: { type: "string", description: `Role prompt to run. Built-in: ${roles}.` },
+			tier: { type: "string", enum: [...TIERS], description: "junior, senior or staff." },
+			task: { type: "string", description: "Self-contained instructions for this member." },
+			writer: { type: "boolean", description: "Grant this member the writer slot." },
+		},
+		required: ["role", "tier", "task"],
+	};
+
+	return [
+		{
+			name: "neta_spawn",
+			description:
+				"Spawn a worker agent to do a piece of work. Give it everything it needs in the task: it cannot see this " +
+				`conversation. Roles: ${roles}. Tiers: junior (exact spec), senior (scoped work), staff (ambiguity). ` +
+				"Returns immediately; use neta_wait to collect the result.",
+			inputSchema: {
+				type: "object",
+				properties: {
+					role: { type: "string", description: `Role prompt to run. Built-in: ${roles}.` },
+					tier: { type: "string", enum: [...TIERS], description: "How much judgement the task needs." },
+					task: {
+						type: "string",
+						description: "Self-contained instructions: files, acceptance criteria, what done means.",
+					},
+					writer: {
+						type: "boolean",
+						description: "Grant the writer slot (edit/write access). Only one writer at a time.",
+					},
+					backend: { type: "string", description: "Override the backend. Normally leave this alone." },
+					room: { type: "string", description: "Join a room and share its transcript with the other members." },
+				},
+				required: ["role", "tier", "task"],
+			},
+			async run(args) {
+				const summary = await manager.spawn({
+					role: requireString(args, "role"),
+					tier: tier(args),
+					task: requireString(args, "task"),
+					writer: optionalBoolean(args, "writer"),
+					backend: optionalString(args, "backend"),
+					room: optionalString(args, "room"),
+				});
+				return text(`Spawned ${describe(summary)}\nScratch: ${summary.scratchDir}`);
+			},
+		},
+		{
+			name: "neta_spawn_group",
+			description:
+				"Spawn several workers into one room. Members read and post to a shared transcript, so they can argue " +
+				"with each other without routing every message through you. Use it for debates and for scouts that must " +
+				"not duplicate work.",
+			inputSchema: {
+				type: "object",
+				properties: {
+					room: { type: "string", description: "Room name, e.g. 'auth-debate'." },
+					members: { type: "array", items: memberSchema, description: "Workers to spawn into the room." },
+					seed: { type: "string", description: "Opening message posted before the members start." },
+				},
+				required: ["room", "members"],
+			},
+			async run(args) {
+				const room = requireString(args, "room");
+				const members = args.members;
+				if (!Array.isArray(members) || members.length === 0) throw new Error('"members" must be a non-empty list.');
+				const seed = optionalString(args, "seed");
+				if (seed) manager.postToRoom(room, "leader", "leader", seed);
+
+				const spawned: WorkerSummary[] = [];
+				const failures: string[] = [];
+				for (const raw of members as Record<string, unknown>[]) {
+					try {
+						spawned.push(
+							await manager.spawn({
+								role: requireString(raw, "role"),
+								tier: tier(raw),
+								task: requireString(raw, "task"),
+								writer: optionalBoolean(raw, "writer"),
+								room,
+							}),
+						);
+					} catch (error) {
+						failures.push(`${raw.role}: ${error instanceof Error ? error.message : String(error)}`);
+					}
+				}
+				const lines = spawned.map(describe);
+				if (failures.length > 0) lines.push(`Failed to spawn: ${failures.join("; ")}`);
+				return text(`Room "${room}"\n${lines.join("\n")}`, spawned.length === 0);
+			},
+		},
+		{
+			name: "neta_workers",
+			description:
+				"List workers with their state, token usage and new log lines. Cheap and safe to call whenever you want " +
+				"to know what is happening; it does not interrupt the workers.",
+			inputSchema: {
+				type: "object",
+				properties: { workerId: { type: "string", description: "Only this worker. Omit for all." } },
+			},
+			async run(args) {
+				const workerId = optionalString(args, "workerId");
+				const summaries = workerId ? [manager.get(workerId)] : manager.list();
+				if (summaries.length === 0) return text("No workers have been spawned.");
+				return text(report(manager, summaries));
+			},
+		},
+		{
+			name: "neta_log",
+			description: "Read a worker's new log lines since you last looked. Each line is shown once.",
+			inputSchema: {
+				type: "object",
+				properties: { workerId: { type: "string" } },
+				required: ["workerId"],
+			},
+			async run(args) {
+				const entries = manager.drainLog(requireString(args, "workerId"));
+				return text(entries.length === 0 ? "(no new log entries)" : formatLog(entries));
+			},
+		},
+		{
+			name: "neta_wait",
+			description:
+				"Block until the named workers finish, then return their results. This is how you collect work: end your " +
+				"turn with it rather than polling. Returns early with current state if the timeout expires.",
+			inputSchema: {
+				type: "object",
+				properties: {
+					workerIds: { type: "array", items: { type: "string" }, description: "Omit to wait for all running." },
+					timeoutSeconds: {
+						type: "number",
+						description: `Default ${DEFAULT_WAIT_SECONDS}, max ${MAX_WAIT_SECONDS}.`,
+					},
+				},
+			},
+			async run(args) {
+				const ids =
+					optionalStringArray(args, "workerIds") ??
+					manager
+						.list()
+						.filter((summary) => !["done", "failed", "killed"].includes(summary.state))
+						.map((summary) => summary.id);
+				if (ids.length === 0) return text("Nothing to wait for.");
+				const seconds = Math.min(optionalNumber(args, "timeoutSeconds") ?? DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS);
+				const summaries = await manager.waitFor(ids, seconds * 1000);
+				return text(report(manager, summaries));
+			},
+		},
+		{
+			name: "neta_send",
+			description: "Send a follow-up instruction to a worker that has finished its current turn.",
+			inputSchema: {
+				type: "object",
+				properties: { workerId: { type: "string" }, message: { type: "string" } },
+				required: ["workerId", "message"],
+			},
+			async run(args) {
+				const summary = manager.send(requireString(args, "workerId"), requireString(args, "message"));
+				return text(`Sent to ${describe(summary)}`);
+			},
+		},
+		{
+			name: "neta_answer",
+			description: "Answer a worker that is blocked on a question, unblocking it.",
+			inputSchema: {
+				type: "object",
+				properties: {
+					workerId: { type: "string" },
+					answer: { type: "string", description: "Be specific; the worker acts on it directly." },
+				},
+				required: ["workerId", "answer"],
+			},
+			async run(args) {
+				const summary = manager.answer(requireString(args, "workerId"), requireString(args, "answer"));
+				return text(`Answered ${describe(summary)}`);
+			},
+		},
+		{
+			name: "neta_kill",
+			description:
+				"Terminate a worker. Use it when the task changed or the worker is stuck; it releases the writer slot.",
+			inputSchema: {
+				type: "object",
+				properties: { workerId: { type: "string" } },
+				required: ["workerId"],
+			},
+			async run(args) {
+				return text(`Killed ${describe(manager.kill(requireString(args, "workerId")))}`);
+			},
+		},
+		{
+			name: "neta_room",
+			description: "Read a room's transcript, and optionally post to it yourself.",
+			inputSchema: {
+				type: "object",
+				properties: {
+					room: { type: "string" },
+					post: { type: "string", description: "Message to post before reading." },
+					tail: { type: "number", description: "Only the last N posts." },
+				},
+				required: ["room"],
+			},
+			async run(args) {
+				const room = requireString(args, "room");
+				const post = optionalString(args, "post");
+				if (post) manager.postToRoom(room, "leader", "leader", post);
+				const posts = manager.roomTranscript(room, optionalNumber(args, "tail"));
+				if (posts.length === 0) return text(`Room "${room}" is empty.`);
+				return text(posts.map((entry) => `[${entry.label}] ${entry.text}`).join("\n"));
+			},
+		},
+	];
+}

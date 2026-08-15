@@ -1,0 +1,191 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterEach, describe, expect, it } from "vitest";
+import { sanitizeInheritedEnv } from "../src/acp/connection.ts";
+import { AcpWorkerTransport } from "../src/acp/transport.ts";
+import type { TransportOptions, WorkerMcpServer } from "../src/orchestrator/transport.ts";
+import type { WorkerLogEntry, WorkerUsage } from "../src/types.ts";
+
+const fakeAgent = fileURLToPath(new URL("./fixtures/fake-acp-agent.mjs", import.meta.url));
+
+describe("AcpWorkerTransport", () => {
+	const started: AcpWorkerTransport[] = [];
+	const tempDirs: string[] = [];
+
+	afterEach(() => {
+		for (const transport of started.splice(0)) transport.kill();
+		for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+		usageReports.length = 0;
+	});
+
+	const usageReports: WorkerUsage[] = [];
+
+	function createTransport(
+		writer: boolean,
+		log: WorkerLogEntry[],
+		mcpServers: WorkerMcpServer[] = [],
+	): AcpWorkerTransport {
+		const scratchDir = mkdtempSync(join(tmpdir(), "neta-acp-"));
+		tempDirs.push(scratchDir);
+		const options: TransportOptions = {
+			workerId: "w1",
+			cwd: process.cwd(),
+			env: {},
+			command: process.execPath,
+			args: [fakeAgent],
+			model: undefined,
+			writer,
+			systemPrompt: "You are a test worker.",
+			scratchDir,
+			mcpServers,
+			events: {
+				log: (kind, text) => log.push({ at: 0, kind, text }),
+				usage: (usage) => usageReports.push(usage),
+			},
+		};
+		const transport = new AcpWorkerTransport(options);
+		started.push(transport);
+		return transport;
+	}
+
+	it("prepends the role prompt to the first message only", async () => {
+		const transport = createTransport(false, []);
+		await transport.start();
+
+		const first = await transport.prompt("hello");
+		expect(first).toEqual({ ok: true, summary: "echo:hello" });
+
+		// The fake agent echoes the last line, so a second turn without the role
+		// prompt echoes the message itself.
+		const second = await transport.prompt("again");
+		expect(second).toEqual({ ok: true, summary: "echo:again" });
+	});
+
+	it("rejects file-mutating tool calls for a read-only worker", async () => {
+		const log: WorkerLogEntry[] = [];
+		const transport = createTransport(false, log);
+		await transport.start();
+
+		const outcome = await transport.prompt("EDIT the config");
+
+		expect(outcome).toEqual({ ok: true, summary: "permission=reject" });
+		expect(log.some((entry) => entry.text.includes("this worker is read-only"))).toBe(true);
+	});
+
+	it("allows file-mutating tool calls for the writer", async () => {
+		const transport = createTransport(true, []);
+		await transport.start();
+
+		expect(await transport.prompt("EDIT the config")).toEqual({ ok: true, summary: "permission=allow" });
+	});
+
+	it("reports a turn that stopped early as a failure", async () => {
+		const transport = createTransport(false, []);
+		await transport.start();
+
+		const outcome = await transport.prompt("FAIL please");
+
+		expect(outcome.ok).toBe(false);
+		expect(outcome.summary).toContain("Stopped early (refusal)");
+	});
+
+	it("streams tool call titles into the worker log", async () => {
+		const log: WorkerLogEntry[] = [];
+		const transport = createTransport(true, log);
+		await transport.start();
+		await transport.prompt("EDIT the config");
+
+		expect(log.some((entry) => entry.kind === "output" && entry.text === "Edit config.json")).toBe(true);
+	});
+
+	// Cost was invisible in the first version of Neta: workers spent real money
+	// and nothing anywhere said how much.
+	it("reports tokens and cost the backend sends", async () => {
+		const transport = createTransport(false, []);
+		await transport.start();
+
+		await transport.prompt("USAGE please");
+
+		const latest = usageReports.at(-1);
+		expect(latest).toMatchObject({
+			totalTokens: 1500,
+			inputTokens: 1000,
+			outputTokens: 500,
+			contextUsed: 1200,
+			contextSize: 200000,
+			costAmount: 0.42,
+			costCurrency: "USD",
+		});
+	});
+
+	// A sandboxed worker cannot open our socket from its shell, so the backend
+	// starts Neta's MCP server for it instead.
+	it("hands the backend the worker's MCP server at session start", async () => {
+		const transport = createTransport(
+			false,
+			[],
+			[{ name: "neta", command: "/usr/bin/neta", args: ["mcp", "--worker"], env: { NETA_WORKER_ID: "w1" } }],
+		);
+		await transport.start();
+
+		const outcome = await transport.prompt("MCP list");
+
+		expect(outcome.summary).toContain('"name":"neta"');
+		expect(outcome.summary).toContain('"args":["mcp","--worker"]');
+		expect(outcome.summary).toContain('{"name":"NETA_WORKER_ID","value":"w1"}');
+	});
+
+	it("explains which backend failed when the command does not exist", async () => {
+		const log: WorkerLogEntry[] = [];
+		const scratchDir = mkdtempSync(join(tmpdir(), "neta-acp-"));
+		tempDirs.push(scratchDir);
+		const transport = new AcpWorkerTransport({
+			workerId: "w2",
+			cwd: process.cwd(),
+			env: {},
+			command: join(scratchDir, "definitely-not-installed"),
+			args: [],
+			model: undefined,
+			writer: false,
+			systemPrompt: "",
+			scratchDir,
+			mcpServers: [],
+			events: { log: (kind, text) => log.push({ at: 0, kind, text }), usage: () => {} },
+		});
+		started.push(transport);
+
+		await expect(transport.start()).rejects.toThrow(/definitely-not-installed/);
+	});
+});
+
+describe("sanitizeInheritedEnv", () => {
+	// Claude Code refuses to start when it sees another session's variables, and
+	// it is right to: they point at a different session's runtime. Neta launches
+	// these CLIs the way an editor does, so an ancestor session's plumbing must
+	// not be forwarded into a fresh one.
+	it("drops an ancestor agent session's own runtime variables", () => {
+		const clean = sanitizeInheritedEnv({
+			CLAUDECODE: "1",
+			CLAUDE_CODE_ENTRYPOINT: "cli",
+			CLAUDE_CODE_MESSAGING_SOCKET: "/tmp/other.sock",
+			CLAUDE_PID: "123",
+			CLAUDE_EFFORT: "high",
+		});
+
+		expect(clean).toEqual({});
+	});
+
+	it("keeps everything else, including the model settings we set ourselves", () => {
+		const clean = sanitizeInheritedEnv({
+			PATH: "/usr/bin",
+			ANTHROPIC_MODEL: "haiku",
+			ANTHROPIC_API_KEY: "sk-test",
+			CLAUDECODE: "1",
+			UNSET: undefined,
+		});
+
+		expect(clean).toEqual({ PATH: "/usr/bin", ANTHROPIC_MODEL: "haiku", ANTHROPIC_API_KEY: "sk-test" });
+	});
+});

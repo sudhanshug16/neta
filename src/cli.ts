@@ -1,0 +1,149 @@
+#!/usr/bin/env node
+/**
+ * The `neta` command.
+ *
+ * One binary, four callers:
+ *
+ * - a person runs `neta` to start a leader session, or `neta workers` to look
+ *   in on one from another terminal;
+ * - the leader's vendor CLI runs `neta mcp`, the control plane that owns the
+ *   workers;
+ * - a worker's backend runs `neta mcp --worker`, and the worker itself runs
+ *   `neta notify|ask|say|room` from its shell;
+ * - Claude Code runs `neta guard` as a hook before every bash command.
+ *
+ * Worker and leader subcommands are dispatched first and gated on being in a
+ * real session, so those words stay ordinary arguments everywhere else.
+ */
+
+import { handleWorkerChannelCommand } from "./channel/client.ts";
+import { handleLeaderChannelCommand } from "./channel/leader-cli.ts";
+import { APP_NAME, VERSION } from "./config.ts";
+import { detectLeaderBackends } from "./detect.ts";
+import { runGuard } from "./guard.ts";
+import { LaunchError, launchLeader } from "./launch.ts";
+import { runControlPlane, runWorkerBridge } from "./mcp/run.ts";
+import { listSessions } from "./session.ts";
+import { watchWorker } from "./watch.ts";
+
+const LEADER_WORDS = new Set(["spawn", "workers", "log", "wait", "send", "answer", "kill"]);
+
+const HELP = `${APP_NAME} ${VERSION} — a leader agent that delegates to worker agents.
+
+  ${APP_NAME} [--leader <claude|codex|opencode>] [--mux <zellij|tmux|none>] [-- <args>]
+      Start a leader session in that agent's own UI. Arguments after -- are
+      passed through to it.
+
+  ${APP_NAME} workers                   List this session's workers and what they cost.
+  ${APP_NAME} log <id>                  Read a worker's new log lines.
+  ${APP_NAME} watch <id>                Follow a worker's log until it finishes.
+  ${APP_NAME} kill <id>                 Stop a worker.
+  ${APP_NAME} sessions                  List running leader sessions.
+  ${APP_NAME} --backends                Show the agent CLIs found on PATH.
+
+Worker commands (inside a worker): notify, ask, say, room.
+Plumbing: ${APP_NAME} mcp [--worker], ${APP_NAME} guard.
+`;
+
+function listBackends(): void {
+	const detected = detectLeaderBackends();
+	if (detected.length === 0) {
+		console.log("No agent CLIs found on PATH. Install one of: claude, codex, opencode.");
+		return;
+	}
+	for (const backend of detected) console.log(`${backend.id}\t${backend.name}\t${backend.path}`);
+}
+
+function printSessions(): void {
+	const sessions = listSessions();
+	if (sessions.length === 0) {
+		console.log("No leader sessions are running.");
+		return;
+	}
+	for (const session of sessions) {
+		console.log(`${session.id}\t${session.leader}\tpid ${session.pid}\t${session.cwd}`);
+	}
+}
+
+function flagValue(args: string[], name: string): string | undefined {
+	const index = args.indexOf(name);
+	return index === -1 ? undefined : args[index + 1];
+}
+
+async function main(argv: string[]): Promise<void> {
+	// Everything after `--` belongs to the vendor CLI, not to us.
+	const separator = argv.indexOf("--");
+	const args = separator === -1 ? argv : argv.slice(0, separator);
+	const passthrough = separator === -1 ? [] : argv.slice(separator + 1);
+	const command = args[0];
+
+	if (await handleWorkerChannelCommand(args)) return;
+	if (await handleLeaderChannelCommand(args)) return;
+
+	switch (command) {
+		case "mcp":
+			if (args.includes("--worker")) await runWorkerBridge();
+			else await runControlPlane();
+			return;
+		case "guard":
+			await runGuard();
+			return;
+		case "watch": {
+			const workerId = args[1];
+			if (!workerId) {
+				console.error(`Usage: ${APP_NAME} watch <worker-id> [--session <id>]`);
+				process.exitCode = 1;
+				return;
+			}
+			process.exitCode = await watchWorker({ workerId, sessionId: flagValue(args, "--session") });
+			return;
+		}
+		case "sessions":
+			printSessions();
+			return;
+		case "--backends":
+			listBackends();
+			return;
+		case "--version":
+		case "-v":
+			console.log(VERSION);
+			return;
+		case "--help":
+		case "-h":
+			console.log(HELP);
+			return;
+	}
+
+	if (command && LEADER_WORDS.has(command)) {
+		// The word was a worker command, but nothing is running to receive it.
+		console.error(`No Neta session found here. Start one with \`${APP_NAME}\`, or name one with --session <id>.`);
+		process.exitCode = 1;
+		return;
+	}
+
+	if (command?.startsWith("-") && command !== "--leader" && command !== "--mux") {
+		console.error(`Unknown option "${command}".\n\n${HELP}`);
+		process.exitCode = 1;
+		return;
+	}
+	if (command && !command.startsWith("-")) {
+		console.error(`Unknown command "${command}".\n\n${HELP}`);
+		process.exitCode = 1;
+		return;
+	}
+
+	try {
+		process.exitCode = await launchLeader({
+			cwd: process.cwd(),
+			leader: flagValue(args, "--leader"),
+			mux: flagValue(args, "--mux"),
+			extraArgs: passthrough,
+		});
+	} catch (error) {
+		if (!(error instanceof LaunchError)) throw error;
+		console.error(error.message);
+		process.exitCode = 1;
+	}
+}
+
+await main(process.argv.slice(2));
