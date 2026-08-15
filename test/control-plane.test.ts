@@ -5,7 +5,7 @@
  * no worker is spawned, so no agent CLI is ever launched.
  */
 
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { listSessions } from "../src/session.ts";
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
@@ -77,6 +77,29 @@ describe("neta mcp", () => {
 				env: { ...process.env, NETA_DIR: agentDir, NETA_SOCKET: session.socket, NETA_LEADER_TOKEN: "guessed" },
 			}),
 		).rejects.toThrow(/Invalid leader token/);
+	});
+
+	// The MCP SDK's stdio transport never reports the end of the stream, so a
+	// leader that exits without killing its child would otherwise leave this
+	// process running forever with its workers still spending tokens.
+	it("exits by itself when the leader closes the stream", async () => {
+		const home = mkdtempSync(join(tmpdir(), "neta-orphan-"));
+		const child = spawn(process.execPath, [CLI, "mcp"], {
+			env: { ...process.env, NETA_DIR: home, NETA_SESSION_ID: "orphan" },
+			stdio: ["pipe", "pipe", "ignore"],
+		});
+		try {
+			await vi.waitFor(() => expect(listSessions(home)).toHaveLength(1), { timeout: 5000 });
+
+			child.stdin?.end();
+
+			const code = await new Promise<number | null>((resolve) => child.on("close", resolve));
+			expect(code).toBe(0);
+			expect(listSessions(home)).toEqual([]);
+		} finally {
+			child.kill("SIGKILL");
+			rmSync(home, { recursive: true, force: true });
+		}
 	});
 
 	it("cleans up its session and socket when the leader goes away", async () => {

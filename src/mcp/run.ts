@@ -120,11 +120,17 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 		await server.stop();
 		if (shimDir) await rm(shimDir, { recursive: true, force: true }).catch(() => {});
 	};
-	for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
-		process.on(signal, () => {
-			void shutdown().then(() => process.exit(0));
-		});
-	}
+	const exit = () => {
+		void shutdown().then(() => process.exit(0));
+	};
+	for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(signal, exit);
+
+	// The MCP stdio transport reports data and errors but never the end of the
+	// stream, so without these a leader that simply exits would leave this
+	// process — and every worker it owns — running forever, spending tokens for
+	// a conversation that no longer exists.
+	process.stdin.on("end", exit);
+	process.stdin.on("close", exit);
 
 	const mcp = createMcpServer(
 		"neta",
@@ -133,9 +139,7 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 			"workers with neta_answer. If these tools fail, report the failure — never do the work yourself and never " +
 			"substitute this backend's own subagents.",
 	);
-	mcp.onclose = () => {
-		void shutdown().then(() => process.exit(0));
-	};
+	mcp.onclose = exit;
 	await mcp.connect(new StdioServerTransport());
 	note(`control plane ready on ${address} (session ${sessionId})`);
 }
