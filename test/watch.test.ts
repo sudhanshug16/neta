@@ -84,14 +84,20 @@ describe("watch", () => {
 		lines.push(line);
 	};
 
-	it("prints a worker's log", async () => {
-		const worker = await manager.spawn({ role: "scout", tier: "senior", task: "look" });
+	// A pane is read at a glance: it has to say who this worker is and what it
+	// was asked to do, not just stream unlabelled lines.
+	it("introduces the worker, then prints its log", async () => {
+		const worker = await manager.spawn({ role: "scout", tier: "senior", task: "map the auth flow" });
 		manager.notify(worker.id, "reading auth.ts");
 
 		const code = await watchWorker({ workerId: worker.id, once: true, hold: false, write });
 
 		expect(code).toBe(0);
-		expect(lines).toContain("[notify] reading auth.ts");
+		expect(lines[0]).toBe(`${worker.id} · scout/senior · claude · read-only`);
+		expect(lines[1]).toBe("task: map the auth flow");
+		expect(lines).toContain("» reading auth.ts");
+		// The tag-per-line noise is gone.
+		expect(lines.join("\n")).not.toContain("[notify]");
 	});
 
 	// The leader reads its log by draining it. If a pane drained the same log,
@@ -112,8 +118,8 @@ describe("watch", () => {
 		transports[0].finish({ ok: true, summary: "done looking" });
 
 		expect(await watching).toBe(0);
-		expect(lines).toContain("[notify] halfway");
-		expect(lines.at(-1)).toBe(`-- worker ${worker.id} done --`);
+		expect(lines).toContain("» halfway");
+		expect(lines.at(-1)).toBe(`── ${worker.id} done ──`);
 	});
 
 	it("reports an unknown worker instead of hanging", async () => {
@@ -147,7 +153,7 @@ describe("watch", () => {
 		const code = await watchWorker({ workerId: worker.id, sessionId: "s7", once: true, hold: false, write });
 
 		expect(code).toBe(0);
-		expect(lines).toContain("[notify] from the registry");
+		expect(lines).toContain("» from the registry");
 	});
 
 	it("says so when there is no session to watch", async () => {

@@ -79,6 +79,8 @@ export interface WorkerLogPage {
 	/** Index to pass as `since` next time. */
 	cursor: number;
 	state: WorkerState;
+	/** Who this worker is, so a watcher can say so without a second request. */
+	worker?: WorkerSummary;
 }
 
 /** Events that wake the leader. */

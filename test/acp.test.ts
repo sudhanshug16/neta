@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sanitizeInheritedEnv } from "../src/acp/connection.ts";
-import { AcpWorkerTransport } from "../src/acp/transport.ts";
+import { AcpWorkerTransport, describeToolCall } from "../src/acp/transport.ts";
 import type { TransportOptions, WorkerMcpServer } from "../src/orchestrator/transport.ts";
 import type { WorkerLogEntry, WorkerUsage } from "../src/types.ts";
 
@@ -157,6 +157,38 @@ describe("AcpWorkerTransport", () => {
 		started.push(transport);
 
 		await expect(transport.start()).rejects.toThrow(/definitely-not-installed/);
+	});
+});
+
+// Worker panes were a wall of "Read File", twenty times over, because that is
+// all some backends put in a tool call's title.
+describe("describing a worker's tool calls", () => {
+	it("names the file a call touches", () => {
+		expect(describeToolCall("Read File", [{ path: "/repo/src/auth.ts" }])).toBe("Read File /repo/src/auth.ts");
+	});
+
+	it("falls back to the argument that says what it did", () => {
+		expect(describeToolCall("Bash", undefined, { command: "npm test -- --watch=false" })).toBe(
+			"Bash npm test -- --watch=false",
+		);
+		expect(describeToolCall("grep", null, { pattern: "WebSocket|cable" })).toBe("grep WebSocket|cable");
+	});
+
+	it("does not repeat an argument the title already carries", () => {
+		expect(describeToolCall("grep WebSocket|cable", undefined, { pattern: "WebSocket|cable" })).toBe(
+			"grep WebSocket|cable",
+		);
+	});
+
+	it("keeps a long argument short enough to read in a pane", () => {
+		const long = describeToolCall("Bash", undefined, { command: "x".repeat(400) });
+
+		expect(long.length).toBeLessThan(140);
+		expect(long).toEndWith("…");
+	});
+
+	it("says just the title when there is nothing to add", () => {
+		expect(describeToolCall("Thinking")).toBe("Thinking");
 	});
 });
 

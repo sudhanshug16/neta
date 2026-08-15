@@ -26,6 +26,9 @@ import {
 /** Typed tools a leader must not have. */
 export const DENIED_TOOLS = ["Edit", "Write", "NotebookEdit", "MultiEdit"];
 
+/** Room for the longest `neta_wait` Neta will run, plus a margin. */
+const MAX_WAIT_MS = 960_000;
+
 export function mcpConfig(context: LeaderLaunchContext): string {
 	const { command, args } = controlPlaneCommand(context);
 	return JSON.stringify(
@@ -81,6 +84,18 @@ export class ClaudeAdapter implements LeaderAdapter {
 			...context.extraArgs,
 		];
 
-		return { command: context.backend.path, args, env: controlPlaneEnv(context), warnings: [] };
+		return {
+			command: context.backend.path,
+			args,
+			env: {
+				...controlPlaneEnv(context),
+				// `neta_wait` blocks on purpose — it is how an idle leader wakes with
+				// results. Claude Code's default MCP tool timeout is two minutes, after
+				// which it backgrounds the call and tells the leader to carry on, which
+				// is the opposite of what a wait is for.
+				MCP_TOOL_TIMEOUT: String(MAX_WAIT_MS),
+			},
+			warnings: [],
+		};
 	}
 }

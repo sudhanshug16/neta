@@ -83,9 +83,24 @@ describe("a leader session, end to end", () => {
 		await call("neta_spawn", { role: "scout", tier: "senior", task: "EDIT the config" });
 
 		const waited = await call("neta_wait", { workerIds: ["w1"], timeoutSeconds: 30 });
-
 		expect(bodyOf(waited)).toContain("permission=reject");
-		expect(bodyOf(waited)).toContain("this worker is read-only");
+
+		// Why it was rejected is in the worker's log, which the leader reads
+		// deliberately — a wait carries results, not running commentary.
+		expect(bodyOf(await call("neta_log", { workerId: "w1" }))).toContain("this worker is read-only");
+	});
+
+	// Five chatty workers once returned 120,000 characters from one status call
+	// and buried the leader's context. Status is a status view now.
+	it("keeps a status listing small, whatever the workers have been saying", async () => {
+		await call("neta_spawn", { role: "scout", tier: "senior", task: "look around" });
+		await call("neta_wait", { workerIds: ["w1"], timeoutSeconds: 30 });
+
+		const listed = bodyOf(await call("neta_workers"));
+
+		expect(listed).toContain("w1 scout/senior");
+		expect(listed.length).toBeLessThan(4000);
+		expect(listed).not.toContain("[output]");
 	});
 
 	it("lets the writer through", async () => {
@@ -125,7 +140,7 @@ describe("a leader session, end to end", () => {
 			env: { ...process.env, NETA_DIR: agentDir, NETA_SOCKET: "", NETA_LEADER_TOKEN: "" },
 		});
 
-		expect(stdout).toContain("-- worker w1 done --");
+		expect(stdout).toContain("── w1 done");
 	});
 
 	it("refuses a second writer while one is still working", async () => {

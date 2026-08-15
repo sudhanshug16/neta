@@ -23,9 +23,23 @@ import {
 	text,
 } from "./serve.ts";
 
-const DEFAULT_WAIT_SECONDS = 300;
+const DEFAULT_WAIT_SECONDS = 240;
 /** Vendor hosts time long tool calls out; staying under that is better than being killed mid-wait. */
 const MAX_WAIT_SECONDS = 900;
+
+/**
+ * Tool results land in the leader's context, and five chatty workers can bury
+ * it: one observed `neta_workers` call returned 120,000 characters and the
+ * leader had to go read a file to find out what its own workers were doing.
+ * Status views stay small; logs are read deliberately, through `neta_log`.
+ */
+const MAX_RESULT_CHARS = 3000;
+const MAX_LOG_ENTRIES = 60;
+const MAX_LOG_CHARS = 8000;
+
+function clip(text: string, limit: number): string {
+	return text.length <= limit ? text : `${text.slice(0, limit)}\n… ${text.length - limit} more characters`;
+}
 
 function describe(summary: WorkerSummary): string {
 	const parts = [`${summary.id} ${summary.role}/${summary.tier}`, `backend=${summary.backend}`, summary.state];
@@ -38,15 +52,23 @@ function describe(summary: WorkerSummary): string {
 }
 
 function formatLog(entries: WorkerLogEntry[]): string {
-	if (entries.length === 0) return "  (no new output)";
-	return entries.map((entry) => `  [${entry.kind}] ${entry.text}`).join("\n");
+	if (entries.length === 0) return "(no new output)";
+	const shown = entries.slice(-MAX_LOG_ENTRIES);
+	const dropped = entries.length - shown.length;
+	const body = clip(shown.map((entry) => `[${entry.kind}] ${entry.text}`).join("\n"), MAX_LOG_CHARS);
+	return dropped > 0 ? `… ${dropped} earlier lines not shown\n${body}` : body;
 }
 
-function report(manager: WorkerManager, summaries: WorkerSummary[]): string {
+/**
+ * What a worker is and what it has said so far — deliberately without its log.
+ * A worker's final message is the handoff, so that is worth carrying; its
+ * running commentary is not, and `neta_log` exists for when it is.
+ */
+function statusReport(summaries: WorkerSummary[]): string {
 	return summaries
 		.map((summary) => {
-			const lines = [describe(summary), formatLog(manager.drainLog(summary.id))];
-			if (summary.result) lines.push(`  result: ${summary.result}`);
+			const lines = [describe(summary)];
+			if (summary.result) lines.push(`  result: ${clip(summary.result, MAX_RESULT_CHARS)}`);
 			return lines.join("\n");
 		})
 		.join("\n\n");
@@ -156,8 +178,9 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 		{
 			name: "neta_workers",
 			description:
-				"List workers with their state, token usage and new log lines. Cheap and safe to call whenever you want " +
-				"to know what is happening; it does not interrupt the workers.",
+				"List workers with their state, token usage and final results. Cheap and safe to call whenever you want " +
+				"to know what is happening; it does not interrupt the workers. For a worker's running commentary, use " +
+				"neta_log.",
 			inputSchema: {
 				type: "object",
 				properties: { workerId: { type: "string", description: "Only this worker. Omit for all." } },
@@ -166,7 +189,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 				const workerId = optionalString(args, "workerId");
 				const summaries = workerId ? [manager.get(workerId)] : manager.list();
 				if (summaries.length === 0) return text("No workers have been spawned.");
-				return text(report(manager, summaries));
+				return text(statusReport(summaries));
 			},
 		},
 		{
@@ -207,7 +230,12 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 				if (ids.length === 0) return text("Nothing to wait for.");
 				const seconds = Math.min(optionalNumber(args, "timeoutSeconds") ?? DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS);
 				const summaries = await manager.waitFor(ids, seconds * 1000);
-				return text(report(manager, summaries));
+				const stillRunning = summaries.filter((summary) => !["done", "failed", "killed"].includes(summary.state));
+				const note = stillRunning.length
+					? `\n\nStill running after ${seconds}s: ${stillRunning.map((s) => s.id).join(", ")}. ` +
+						"Call neta_wait again to keep waiting; they are not lost."
+					: "";
+				return text(statusReport(summaries) + note);
 			},
 		},
 		{

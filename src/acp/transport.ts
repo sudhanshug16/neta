@@ -16,6 +16,34 @@ import {
 import type { WorkerUsage } from "../types.ts";
 import { AcpConnection, type AcpSessionUpdate } from "./connection.ts";
 
+/** Fields agents commonly put in a tool call, in the order that reads best. */
+const DETAIL_KEYS = ["command", "pattern", "query", "file_path", "path", "url", "description"];
+
+/**
+ * What a tool call was actually about.
+ *
+ * Backends often send a title alone — "Read File", twenty times in a row — and
+ * a pane full of that tells a watcher nothing. Where the call names a file or
+ * carries an argument, say which.
+ */
+export function describeToolCall(title: string, locations?: { path: string }[] | null, rawInput?: unknown): string {
+	const location = locations?.[0]?.path;
+	if (location) return `${title} ${location}`;
+
+	if (rawInput && typeof rawInput === "object") {
+		const input = rawInput as Record<string, unknown>;
+		for (const key of DETAIL_KEYS) {
+			const value = input[key];
+			if (typeof value !== "string" || value.trim() === "") continue;
+			const flat = value.replace(/\s+/g, " ").trim();
+			// A title that already contains the argument does not need it twice.
+			if (title.includes(flat.slice(0, 40))) break;
+			return `${title} ${flat.length > 120 ? `${flat.slice(0, 120)}…` : flat}`;
+		}
+	}
+	return title;
+}
+
 export class AcpWorkerTransport implements WorkerTransportDriver {
 	private readonly options: TransportOptions;
 	private connection: AcpConnection | undefined;
@@ -86,7 +114,7 @@ export class AcpWorkerTransport implements WorkerTransportDriver {
 				if (update.content.type === "text") this.assistantText += update.content.text;
 				break;
 			case "tool_call":
-				this.options.events.log("output", `${update.title}`);
+				this.options.events.log("output", describeToolCall(update.title, update.locations, update.rawInput));
 				break;
 			case "usage_update":
 				this.usage.contextUsed = update.used;

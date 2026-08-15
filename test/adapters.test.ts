@@ -105,6 +105,14 @@ describe("Claude Code adapter", () => {
 		expect(hook.hooks[0].command).toBe("'/usr/bin/node' '/opt/neta/cli.js' 'guard'");
 	});
 
+	// Observed: Claude Code timed a 900s neta_wait out after 120s, backgrounded
+	// it, and told the leader to carry on — the opposite of what a wait is for.
+	it("gives the host a tool timeout long enough for a blocking wait", async () => {
+		const launch = await new ClaudeAdapter().prepare(context());
+
+		expect(Number(launch.env.MCP_TOOL_TIMEOUT)).toBeGreaterThanOrEqual(900_000);
+	});
+
 	it("only hides the user's own MCP servers when asked to", async () => {
 		expect((await new ClaudeAdapter().prepare(context())).args).not.toContain("--strict-mcp-config");
 		expect((await new ClaudeAdapter().prepare(context({ strictMcp: true }))).args).toContain("--strict-mcp-config");

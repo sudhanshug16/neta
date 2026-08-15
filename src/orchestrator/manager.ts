@@ -289,7 +289,12 @@ export class WorkerManager implements ChannelHandler {
 	tailLog(workerId: string, since = 0): WorkerLogPage {
 		const record = this.require(workerId);
 		const from = Math.max(0, Math.min(since, record.log.length));
-		return { entries: record.log.slice(from), cursor: record.log.length, state: record.state };
+		return {
+			entries: record.log.slice(from),
+			cursor: record.log.length,
+			state: record.state,
+			worker: this.summarize(record),
+		};
 	}
 
 	roomTranscript(room: string, tail?: number): RoomPost[] {
