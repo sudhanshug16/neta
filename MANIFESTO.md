@@ -80,9 +80,13 @@ The descriptions go in the leader's prompt verbatim:
 - **senior** — well-scoped features, bug fixes with tests, code review.
 - **staff** — ambiguity: unknown-cause debugging, design work, debates.
 
-The tier-to-model mapping (e.g. junior=Haiku, senior=Sonnet/Codex, staff=Opus)
-lives in settings with shipped defaults and is user-editable. The leader never
-sees model names.
+The tier-to-backend mapping lives in settings and may be left unconfigured.
+Unconfigured tiers are assigned deterministically: spread round-robin across
+installed backends, with reviewer/debater roles preferring a different backend
+than the most recent writer when multiple backends are installed (diversity
+rule). Explicit overrides pass through `backend` on spawn; `neta_remember`
+persists them to `.neta/settings.json`. `neta_plan` computes assignments
+without spawning, so the leader can present a staffing plan before proceeding.
 
 ### Roles
 
@@ -108,6 +112,10 @@ keystrokes typed into someone else's terminal:
 - `neta ask <question>` — blocks the worker until the leader answers.
   Tier-gated: juniors do not get `ask` — a blocked junior fails fast with a
   report and the leader respawns it with a better spec.
+- `neta_plan` — computes backend assignments for proposed workers without
+  spawning them, so the leader can present a staffing plan.
+- `neta_remember` — persists a tier-to-backend override to the project's
+  `.neta/settings.json` (JSON rewrite; comments not preserved).
 - `neta_wait` — blocks the leader until named workers reach a terminal state,
   and returns what they said.
 

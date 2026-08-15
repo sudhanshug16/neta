@@ -34,6 +34,13 @@ each **vendor's own mechanisms**, kernel sandbox where available.
 - **No TUI of our own. No pi.** Plain TypeScript, two protocol deps pinned
   exact: `@agentclientprotocol/sdk` (workers) and `@modelcontextprotocol/sdk`
   (leader control plane).
+- **Backend assignment policy**: tiers default to unconfigured; spread policy
+  applies deterministically (round-robin across installed backends, stable per
+  session); reviewer/debater roles default to a different backend than the most
+  recent writer when another backend is installed (diversity rule). Explicit
+  user overrides pass through `backend` on spawn; `neta_plan` computes
+  assignments without spawning for a staffing-plan review touchpoint;
+  `neta_remember` persists overrides to `.neta/settings.json`.
 - **Bun is the toolchain**: install, test, build. `bun build --target=node`
   bundles everything into one `dist/cli.js`, so what ships is a single file
   that runs on Node and pulls in no dependency tree of its own (1 MB, against
@@ -62,6 +69,8 @@ each **vendor's own mechanisms**, kernel sandbox where available.
   report the blocker; never substitute the backend's internal subagents.
 - **Cost visibility**: per-worker usage aggregated from ACP, shown in
   `neta workers`.
+- **neta_kill awaits real process-group death** before releasing the writer
+  slot, so killed workers cannot write after the slot is released.
 
 ## What is built
 
@@ -70,14 +79,14 @@ each **vendor's own mechanisms**, kernel sandbox where available.
 | CLI router, launcher, backend detection | `src/cli.ts`, `src/launch.ts`, `src/detect.ts` |
 | Leader adapters (Claude Code, Codex, OpenCode) | `src/adapters/` |
 | MCP control plane and worker bridge | `src/mcp/` |
-| Orchestrator: tiers, writer slot, rooms, logs, usage | `src/orchestrator/` |
+| Orchestrator: tiers, assignment policy, writer slot, rooms, logs, usage | `src/orchestrator/` |
 | ACP worker transport and permission gate | `src/acp/` |
 | Worker channel: protocol, socket server, CLI | `src/channel/` |
 | Multiplexer adapters and panes | `src/mux/` |
 | Bash guard (Claude hook, OpenCode patterns) | `src/guard.ts` |
 | Session registry (`~/.neta/sessions`) | `src/session.ts` |
 | Prompts: leader, roles, flavors, charter | `src/prompts/` |
-| Settings | `src/settings.ts` |
+| Settings: tier overrides, backend configs, persistTierOverride | `src/settings.ts` |
 
 ## Verified how
 

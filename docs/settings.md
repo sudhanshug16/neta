@@ -46,14 +46,22 @@ picks tiers and never sees model names; this is where the names live.
 
 - `backend` — a key from `backends`.
 - `model` — that backend's own model id. Omit it and the backend's own idea of
-  the tier applies, so pointing a tier at another vendor is one word:
+  the tier applies.
+
+**Tiers may be left unconfigured.** The shipped defaults are unconfigured, so
+spread policy applies: Neta assigns workers deterministically round-robin across
+installed backends (stable per session), and reviewer/debater roles prefer a
+different backend than the most recent writer when multiple backends are
+installed (diversity rule). Explicit overrides pass through `backend` on spawn;
+use `neta_remember` to persist an override to `.neta/settings.json` (JSON
+rewrite; comments not preserved). Point a tier at another vendor:
 
 ```json
 { "tiers": { "staff": { "backend": "codex" } } }
 ```
 
-gives you `gpt-5.6-sol[xhigh]` for staff work while juniors and seniors stay on
-Claude. Shipped mappings:
+gives you `gpt-5.6-sol[xhigh]` for staff work while the rest use spread policy.
+Shipped mappings:
 
 | Tier | claude | codex |
 | --- | --- | --- |

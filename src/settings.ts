@@ -2,10 +2,10 @@
  * Neta settings: how tiers map onto worker backends, and how each backend is
  * launched.
  *
- * The leader never sees model names. It asks for a tier; this module turns that
- * into a concrete backend command plus model argument. Everything here is
- * user-editable in `~/.neta/settings.json`, and per project in
- * `.neta/settings.json`, because the shipped defaults are opinions, not facts.
+ * The leader asks for a tier; this module turns that into a concrete backend
+ * command plus model argument. Everything here is user-editable in
+ * `~/.neta/settings.json`, and per project in `.neta/settings.json`, because
+ * the shipped defaults are opinions, not facts.
  */
 
 import { existsSync, readFileSync } from "node:fs";

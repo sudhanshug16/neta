@@ -26,7 +26,8 @@ workers, collects their results, and reports once.
   leader with a way to edit eventually edits.
 - **Workers on your subscription.** Every worker is a real agent CLI driven
   over ACP, so it runs on the login you already have rather than on API credit.
-  All three tiers default to Claude Code; change that in settings.
+  Tiers are unconfigured by default and spread deterministically across
+  installed backends; configure them in settings.
 - **Tiers, not model names.** The leader asks for a junior, senior or staff
   worker; you decide which model each tier means, and can mix vendors —
   `"staff": { "backend": "codex" }` puts staff work on `gpt-5.6-sol[xhigh]`
