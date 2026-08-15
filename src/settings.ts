@@ -103,7 +103,7 @@ export const DEFAULT_BACKENDS: Record<string, NetaBackendSettings> = {
 	},
 	codex: {
 		command: "npx",
-		args: ["-y", "@agentclientprotocol/codex-acp"],
+		args: ["-y", "@agentclientprotocol/codex-acp@1.3.0"],
 		tierModels: {
 			junior: "gpt-5.6-luna[medium]",
 			senior: "gpt-5.6-terra[high]",

@@ -16,7 +16,7 @@ file should not stop you leading a session.
   },
   "backends": {
     "claude":   { "command": "npx", "args": ["-y", "@agentclientprotocol/claude-agent-acp@0.68.0"], "modelEnv": "ANTHROPIC_MODEL" },
-    "codex":    { "command": "npx", "args": ["-y", "@agentclientprotocol/codex-acp"], "modelArgs": ["--model", "{model}"] },
+    "codex":    { "command": "npx", "args": ["-y", "@agentclientprotocol/codex-acp@1.3.0"], "modelArgs": ["--model", "{model}"] },
     "opencode": { "command": "opencode", "args": ["acp"], "modelArgs": ["--model", "{model}"] }
   }
 }

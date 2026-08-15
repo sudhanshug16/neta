@@ -72,7 +72,7 @@ describe("NetaConfig", () => {
 	it("launches a backend without a tier, and therefore without a model", () => {
 		const launcher = new NetaConfig().launcher("codex");
 
-		expect(launcher.args).toEqual(["-y", "@agentclientprotocol/codex-acp"]);
+		expect(launcher.args).toEqual(["-y", "@agentclientprotocol/codex-acp@1.3.0"]);
 		expect(launcher.model).toBeUndefined();
 	});
 });
