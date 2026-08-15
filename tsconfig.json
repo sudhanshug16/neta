@@ -1,4 +1,7 @@
 {
+	// Nothing is emitted from here: `bun build` produces the bundle. This file
+	// exists so `bun run typecheck` and your editor agree on what the rules are,
+	// since Bun itself does not check types.
 	"compilerOptions": {
 		"target": "ES2022",
 		"lib": ["ES2022"],
@@ -6,11 +9,11 @@
 		"moduleResolution": "Node16",
 		"types": ["node", "bun"],
 		"strict": true,
-		"noUncheckedIndexedAccess": false,
+		// Keeps the source runnable by a stripper as well as a bundler: no enums,
+		// no parameter properties, no namespaces.
 		"erasableSyntaxOnly": true,
 		"verbatimModuleSyntax": true,
 		"allowImportingTsExtensions": true,
-		"rewriteRelativeImportExtensions": true,
 		"esModuleInterop": true,
 		"forceConsistentCasingInFileNames": true,
 		"skipLibCheck": true,
