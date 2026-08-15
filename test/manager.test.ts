@@ -250,6 +250,30 @@ describe("WorkerManager", () => {
 		expect(() => manager.send(summary.id, "one more thing")).toThrow(/already finished/);
 	});
 
+	// A message sent to a running worker used to be logged, queued behind the
+	// current turn, and then dropped: the turn's end marked the worker done, and
+	// the queued prompt hit the terminal-state check and returned without ever
+	// reaching the model.
+	it("delivers a message sent mid-turn instead of finishing the worker under it", async () => {
+		const summary = await manager.spawn({ role: "worker", tier: "senior", task: "do it" });
+		manager.send(summary.id, "also update the docs");
+
+		transports[0].finish({ ok: true, summary: "code done" });
+		await flush();
+
+		// The first turn ended, but the worker has a queued instruction: still running.
+		expect(manager.get(summary.id).state).toBe("running");
+		expect(events).toHaveLength(0);
+		expect(transports[0].prompts.at(-1)).toBe("also update the docs");
+
+		transports[0].finish({ ok: true, summary: "docs done" });
+		await flush();
+
+		expect(manager.get(summary.id).state).toBe("done");
+		expect(manager.get(summary.id).result).toBe("docs done");
+		expect(events).toEqual([{ type: "done", workerId: summary.id, summary: "docs done", dirtyFiles: undefined }]);
+	});
+
 	// The channel is opened on demand rather than at startup, so a leader session
 	// that never delegates never creates a socket. Deduplication is the caller's
 	// job; the manager just asks before every spawn.

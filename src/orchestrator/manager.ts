@@ -61,6 +61,8 @@ interface WorkerRecord {
 	pendingAsk?: { question: string; resolve: (response: ChannelResponse) => void };
 	/** Serializes prompts for this worker. */
 	queue: Promise<void>;
+	/** Prompts queued or running. The worker is only done when the last one ends. */
+	queuedPrompts: number;
 	waiters: Array<() => void>;
 	usage?: WorkerUsage;
 	vendorSessionId?: string;
@@ -195,6 +197,7 @@ export class WorkerManager implements ChannelHandler {
 			log: [],
 			logCursor: 0,
 			queue: Promise.resolve(),
+			queuedPrompts: 0,
 			waiters: [],
 			driver: undefined as unknown as WorkerTransportDriver,
 		};
@@ -539,11 +542,25 @@ export class WorkerManager implements ChannelHandler {
 	}
 
 	private enqueue(record: WorkerRecord, message: string): void {
+		record.queuedPrompts += 1;
 		record.queue = record.queue.then(async () => {
-			if (isTerminalState(record.state)) return;
-			const outcome = await record.driver.prompt(message);
-			if (isTerminalState(record.state)) return;
-			if (outcome.ok) {
+			try {
+				if (isTerminalState(record.state)) return;
+				const outcome = await record.driver.prompt(message);
+				if (isTerminalState(record.state)) return;
+				if (!outcome.ok) {
+					this.finish(record, "failed", outcome.summary);
+					this.options.onEvent({ type: "failed", workerId: record.id, error: outcome.summary });
+					return;
+				}
+				// A follow-up arrived while this turn ran. An earlier version
+				// finished the worker here anyway, which silently dropped every
+				// message sent to a running worker: it was logged, queued, and then
+				// thrown away by the terminal-state check above.
+				if (record.queuedPrompts > 1) {
+					this.appendLog(record, "status", `turn ended: ${outcome.summary}`);
+					return;
+				}
 				const dirtyFiles = record.writer ? await gitDirtyFiles(this.options.cwd) : [];
 				this.finish(record, "done", outcome.summary);
 				this.options.onEvent({
@@ -552,9 +569,8 @@ export class WorkerManager implements ChannelHandler {
 					summary: outcome.summary,
 					dirtyFiles: dirtyFiles.length > 0 ? dirtyFiles : undefined,
 				});
-			} else {
-				this.finish(record, "failed", outcome.summary);
-				this.options.onEvent({ type: "failed", workerId: record.id, error: outcome.summary });
+			} finally {
+				record.queuedPrompts -= 1;
 			}
 		});
 	}
