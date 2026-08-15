@@ -4,11 +4,13 @@
 
 import { homedir } from "node:os";
 import { join } from "node:path";
+import pkg from "../package.json" with { type: "json" };
 
 /** The command workers and the leader invoke to reach Neta. */
 export const APP_NAME = "neta";
 
-export const VERSION = "0.1.1";
+/** Read from package.json so a release is one edit, not two that can disagree. */
+export const VERSION: string = pkg.version;
 
 /** Per-project directory: settings, roles, skills. */
 export const CONFIG_DIR_NAME = ".neta";

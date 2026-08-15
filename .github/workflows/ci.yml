@@ -1,0 +1,78 @@
+name: ci
+
+# Every push to main and every pull request is checked. A push to main also
+# publishes, but only when package.json names a version npm does not have yet,
+# so ordinary pushes are a no-op and a re-run never double-publishes.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bunx biome check --error-on-warnings .
+      - run: bun test
+      - run: bun run build
+      # What ships is the bundle, so prove the bundle runs before publishing it.
+      - run: node dist/cli.js --version
+
+  publish:
+    needs: check
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the version tag
+      id-token: write # npm provenance
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - id: version
+        name: Is this version already published?
+        run: |
+          version=$(node -p "require('./package.json').version")
+          name=$(node -p "require('./package.json').name")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "Nothing to do: $name@$version is already on npm."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Publishing $name@$version."
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.version.outputs.publish == 'true'
+        run: bun install --frozen-lockfile
+      - if: steps.version.outputs.publish == 'true'
+        run: bun run build
+
+      # --ignore-scripts because the checks above are the release gate; running
+      # prepublishOnly here would repeat them under a second toolchain.
+      - if: steps.version.outputs.publish == 'true'
+        run: npm publish --provenance --access public --ignore-scripts
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - if: steps.version.outputs.publish == 'true'
+        name: Tag the release
+        run: |
+          git tag "v${{ steps.version.outputs.version }}"
+          git push origin "v${{ steps.version.outputs.version }}"

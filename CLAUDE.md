@@ -42,6 +42,12 @@ so users need neither Bun nor our dependency tree.
   changes as reviewed code.
 - Install with `bun install`.
 
+## Releases
+
+Bump `version` in `package.json` and push to main; CI publishes it if npm does
+not have that version yet. Never publish by hand, and never bump the version in
+more than one place — the CLI reads it from `package.json`.
+
 ## Git
 
 - Never commit unless the user asks. Stage explicit paths; never

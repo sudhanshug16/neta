@@ -1,5 +1,8 @@
 # Neta
 
+[![ci](https://github.com/sudhanshug16/neta/actions/workflows/ci.yml/badge.svg)](https://github.com/sudhanshug16/neta/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/@intervene/neta)](https://www.npmjs.com/package/@intervene/neta)
+
 Neta is a leader agent. You talk to a leader; it delegates work to tiered
 worker agents and drives them until the problem is done. The leader never
 edits files — that restriction is enforced, not suggested.
@@ -129,6 +132,11 @@ bun run build     # dist/cli.js — one file, targets Node
 ```
 
 Tests never call a provider: worker backends are a fixture ACP agent.
+
+To release, bump `version` in `package.json` and push to `main`. CI publishes
+that version to npm if the registry does not already have it, and tags the
+commit; ordinary pushes just run the checks. The CLI reads its version from
+`package.json`, so there is nothing else to bump.
 
 ## Status
 
