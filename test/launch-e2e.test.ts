@@ -127,6 +127,34 @@ describe("neta (launching a leader)", () => {
 		expect(existsSync(launched.argv[launched.argv.indexOf("--mcp-config") + 1])).toBe(false);
 	});
 
+	// The first real launch died here: zellij refused the arguments Neta gave it
+	// and the user got no session at all. Panes are a convenience; losing them
+	// must cost the panes, not the work.
+	it("still starts the leader when the multiplexer fails to start", async () => {
+		const binDir = fakeBackend("claude");
+		const brokenMux = join(binDir, "zellij");
+		writeFileSync(brokenMux, "#!/bin/sh\necho 'There is no active session!' >&2\nexit 1\n", "utf-8");
+		chmodSync(brokenMux, 0o755);
+		const agentDir = scratch("neta-home-");
+		const record = join(scratch("neta-record-"), "launch.json");
+
+		const { stderr } = await run(process.execPath, [CLI, "--leader", "claude", "--mux", "zellij"], {
+			cwd: scratch("neta-repo-"),
+			env: {
+				...process.env,
+				PATH: binDir,
+				ZELLIJ: "",
+				NETA_DIR: agentDir,
+				FAKE_LEADER_RECORD: record,
+			},
+		});
+
+		expect(stderr).toContain("zellij exited immediately");
+		expect(stderr).toContain("without panes");
+		const launched = JSON.parse(readFileSync(record, "utf-8")) as LaunchRecord;
+		expect(launched.argv).toContain("--append-system-prompt");
+	});
+
 	it("refuses to lead with a CLI that is not installed", async () => {
 		const agentDir = scratch("neta-home-");
 		await expect(

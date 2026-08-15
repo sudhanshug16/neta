@@ -3,9 +3,9 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NoMux, selectMux } from "../src/mux/index.ts";
-import { newSessionArgs, splitWindowArgs, TmuxAdapter } from "../src/mux/tmux.ts";
+import { splitWindowArgs, TmuxAdapter, newSessionArgs as tmuxSessionArgs } from "../src/mux/tmux.ts";
 import type { MuxAdapter, ProcessSpec } from "../src/mux/types.ts";
-import { leaderLayout, newPaneArgs, ZellijAdapter } from "../src/mux/zellij.ts";
+import { leaderLayout, newPaneArgs, newSessionArgs, ZellijAdapter } from "../src/mux/zellij.ts";
 
 const leader: ProcessSpec = { command: "/usr/local/bin/claude", args: ["--append-system-prompt", "be a lead"] };
 
@@ -13,7 +13,7 @@ describe("tmux", () => {
 	// Command and arguments stay separate argv entries, so a task containing
 	// quotes or spaces cannot turn into extra shell words.
 	it("starts a session running the leader without a shell", () => {
-		expect(newSessionArgs("neta-1", leader)).toEqual([
+		expect(tmuxSessionArgs("neta-1", leader)).toEqual([
 			"new-session",
 			"-s",
 			"neta-1",
@@ -86,8 +86,19 @@ describe("zellij", () => {
 
 		const wrapped = new ZellijAdapter().wrapLeader(leader, "neta-1", dir);
 
-		expect(wrapped?.args).toEqual(["--session", "neta-1", "--layout", join(dir, "layout.kdl")]);
+		expect(wrapped?.args).toEqual(["--session", "neta-1", "--new-session-with-layout", join(dir, "layout.kdl")]);
 		expect(readFileSync(join(dir, "layout.kdl"), "utf-8")).toContain("neta leader");
+	});
+
+	// Verified against zellij 0.44.3: with --session, plain --layout means "add
+	// this layout as a tab to that session", so zellij looks for a session that
+	// does not exist yet and dies with "There is no active session!". This is
+	// what broke the first real launch, so it is pinned rather than described.
+	it("asks for a new session, not a tab in one that does not exist", () => {
+		const args = newSessionArgs("neta-1", "/tmp/layout.kdl");
+
+		expect(args).toEqual(["--session", "neta-1", "--new-session-with-layout", "/tmp/layout.kdl"]);
+		expect(args).not.toContain("--layout");
 	});
 });
 

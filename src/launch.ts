@@ -41,6 +41,9 @@ export interface LaunchOptions {
 
 export class LaunchError extends Error {}
 
+/** Below this, a multiplexer exiting non-zero means it never got a session up. */
+const MUX_STARTUP_MS = 5000;
+
 /**
  * Which CLI leads. An explicit choice wins, then settings, then the only one
  * installed; with several installed and no preference, ask.
@@ -133,20 +136,32 @@ export async function launchLeader(options: LaunchOptions): Promise<number> {
 		`${APP_NAME}: leading with ${backend.name}; workers ${config.mux.panes && mux.id !== "none" ? `in ${mux.id} panes` : "headless"}.\n`,
 	);
 
-	const code = await new Promise<number>((resolve) => {
-		const child = spawn(wrapped.command, wrapped.args, {
-			cwd,
+	const env = { ...process.env, ...launch.env, NETA_MUX: mux.id, NETA_PANES: config.mux.panes ? "1" : "0" };
+	const run = (spec: { command: string; args: string[] }) =>
+		new Promise<number>((resolve) => {
 			// The control plane is the process that opens panes, and it is a child
 			// of the leader rather than of us, so the choice travels by environment.
-			env: { ...process.env, ...launch.env, NETA_MUX: mux.id, NETA_PANES: config.mux.panes ? "1" : "0" },
-			stdio: "inherit",
+			const child = spawn(spec.command, spec.args, { cwd, env, stdio: "inherit" });
+			child.on("error", (error) => {
+				process.stderr.write(`${APP_NAME}: could not start ${spec.command}: ${error.message}\n`);
+				resolve(1);
+			});
+			child.on("close", (status, signal) => resolve(signal ? 1 : (status ?? 0)));
 		});
-		child.on("error", (error) => {
-			process.stderr.write(`${APP_NAME}: could not start ${backend.name}: ${error.message}\n`);
-			resolve(1);
-		});
-		child.on("close", (status, signal) => resolve(signal ? 1 : (status ?? 0)));
-	});
+
+	const startedAt = Date.now();
+	let code = await run(wrapped);
+
+	// Panes are a convenience and must never cost the user their session. A
+	// multiplexer that fails this fast never started one: when the leader itself
+	// exits, the multiplexer keeps its session open rather than returning an
+	// error in a second.
+	if (wrapped !== launch && code !== 0 && Date.now() - startedAt < MUX_STARTUP_MS) {
+		process.stderr.write(
+			`${APP_NAME}: ${mux.id} exited immediately (${code}); starting ${backend.name} without panes.\n`,
+		);
+		code = await run(launch);
+	}
 
 	await launch.cleanup?.().catch(() => {});
 	await rm(sessionDir, { recursive: true, force: true }).catch(() => {});

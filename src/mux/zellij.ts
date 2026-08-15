@@ -30,6 +30,18 @@ export function leaderLayout(leader: ProcessSpec): string {
 	return lines.filter((line) => line !== undefined).join("\n");
 }
 
+/**
+ * Start a new session running the layout.
+ *
+ * It has to be `--new-session-with-layout`, not `--layout`: combined with
+ * `--session`, `--layout` means "add this layout as a tab to that session", so
+ * zellij looks for a session that does not exist yet and exits with "There is
+ * no active session!". `--new-session-with-layout` always creates one.
+ */
+export function newSessionArgs(sessionName: string, layoutPath: string): string[] {
+	return ["--session", sessionName, "--new-session-with-layout", layoutPath];
+}
+
 /** `zellij action new-pane --name <title> --cwd <cwd> -- cmd args…` */
 export function newPaneArgs(title: string, spec: ProcessSpec, cwd: string): string[] {
 	return ["action", "new-pane", "--name", title, "--cwd", cwd, "--", spec.command, ...spec.args];
@@ -50,7 +62,7 @@ export class ZellijAdapter implements MuxAdapter {
 		if (this.inSession()) return undefined;
 		const layoutPath = join(sessionDir, "layout.kdl");
 		writeFileSync(layoutPath, leaderLayout(leader), "utf-8");
-		return { command: "zellij", args: ["--session", sessionName, "--layout", layoutPath], env: leader.env };
+		return { command: "zellij", args: newSessionArgs(sessionName, layoutPath), env: leader.env };
 	}
 
 	openPane(title: string, spec: ProcessSpec, cwd: string): boolean {
