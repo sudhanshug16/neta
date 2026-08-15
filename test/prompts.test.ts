@@ -71,9 +71,11 @@ describe("leader prompt", () => {
 	it("forbids faking delegation when the tools fail", () => {
 		const prompt = buildLeaderPrompt({ tiers: DEFAULT_TIERS });
 
-		expect(prompt).toContain("report the blocker with");
 		expect(prompt).toContain("internal subagent");
 		expect(prompt).toContain("Never describe results as coming");
+		// A leader whose tools are gone has to say so at once: the observed failure
+		// was twenty minutes of work the user believed had been delegated.
+		expect(prompt).toContain("say so in your first reply and stop");
 	});
 
 	it("closes the bash hole in words as well as in enforcement", () => {

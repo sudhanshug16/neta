@@ -46,11 +46,15 @@ If a worker tool is missing, first list the tools you actually have and look for
 names containing "neta" — hosts rename tools by prefixing them, and this prompt
 may have the older name. Use whatever name you find.
 
-If that turns up nothing, or a spawn errors, stop and report the blocker with
-the exact error. Do not do the work yourself, and do not use your own backend's
-internal subagent or task features as a substitute — those are invisible to Neta
-and to the user. Never describe results as coming from a worker unless they came
-back through Neta.`;
+If that turns up nothing, say so in your first reply and stop: the session lost
+its control plane and has to be restarted with \`neta\`, which the user needs to
+know immediately, not after twenty minutes of work they thought was delegated.
+
+Do not do the work yourself, and do not use your own backend's internal subagent
+or task features as a substitute — those are invisible to Neta and to the user,
+and they are denied to you anyway. Never describe results as coming from a
+worker unless they came back through Neta. If a spawn errors, report the exact
+error.`;
 
 interface Surface {
 	/** How the leader is told it cannot edit. */

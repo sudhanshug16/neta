@@ -23,8 +23,16 @@ import {
 	MCP_SERVER_NAME,
 } from "./types.ts";
 
-/** Typed tools a leader must not have. */
-export const DENIED_TOOLS = ["Edit", "Write", "NotebookEdit", "MultiEdit"];
+/**
+ * Typed tools a leader must not have.
+ *
+ * The subagent tools are here for the same reason as the edit tools. A leader
+ * whose worker tools go missing has been observed spawning Claude Code's own
+ * `Agent` instead — work that Neta cannot see, cannot gate, and cannot report
+ * honestly, done under the name of delegation. Denying it turns that failure
+ * back into what it should be: the leader stops and says the tools are gone.
+ */
+export const DENIED_TOOLS = ["Edit", "Write", "NotebookEdit", "Agent", "Task"];
 
 /** Room for the longest `neta_wait` Neta will run, plus a margin. */
 const MAX_WAIT_MS = 960_000;

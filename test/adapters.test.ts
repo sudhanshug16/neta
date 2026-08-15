@@ -100,6 +100,10 @@ describe("Claude Code adapter", () => {
 
 		const settings = JSON.parse(readFileSync(launch.args[launch.args.indexOf("--settings") + 1], "utf-8"));
 		expect(settings.permissions.deny).toEqual(DENIED_TOOLS);
+		// Denying the backend's own subagents is what stops a leader with no worker
+		// tools from quietly delegating somewhere Neta cannot see.
+		expect(settings.permissions.deny).toContain("Agent");
+		expect(settings.permissions.deny).toContain("Task");
 		const hook = settings.hooks.PreToolUse[0];
 		expect(hook.matcher).toBe("Bash");
 		expect(hook.hooks[0].command).toBe("'/usr/bin/node' '/opt/neta/cli.js' 'guard'");
