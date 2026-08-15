@@ -23,6 +23,7 @@ import {
 	type LeaderAdapter,
 	type LeaderLaunch,
 	type LeaderLaunchContext,
+	MCP_SERVER_NAME,
 } from "./types.ts";
 
 /** Shell shapes that edit files. Denied outright for a leader. */
@@ -49,7 +50,7 @@ export function openCodeConfig(context: LeaderLaunchContext, instructionsPath: s
 			instructions: [instructionsPath],
 			permission: { edit: "deny", bash },
 			mcp: {
-				neta: {
+				[MCP_SERVER_NAME]: {
 					type: "local",
 					command: [command, ...args],
 					enabled: true,
@@ -64,6 +65,11 @@ export function openCodeConfig(context: LeaderLaunchContext, instructionsPath: s
 
 export class OpenCodeAdapter implements LeaderAdapter {
 	readonly id = "opencode" as const;
+
+	// Verified against OpenCode, which joins with one underscore and no prefix.
+	toolName(base: string): string {
+		return `${MCP_SERVER_NAME}_${base}`;
+	}
 
 	async prepare(context: LeaderLaunchContext): Promise<LeaderLaunch> {
 		const instructionsPath = join(context.sessionDir, "leader.md");

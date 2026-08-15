@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { ClaudeAdapter, DENIED_TOOLS } from "../src/adapters/claude.ts";
 import { CodexAdapter, createHomeOverlay, preserveRefreshedAuth } from "../src/adapters/codex.ts";
 import { OpenCodeAdapter } from "../src/adapters/opencode.ts";
-import type { LeaderLaunchContext } from "../src/adapters/types.ts";
+import { type LeaderLaunchContext, MCP_SERVER_NAME } from "../src/adapters/types.ts";
 
 const dirs: string[] = [];
 
@@ -47,6 +47,28 @@ afterEach(() => {
 	for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
+// A leader can only call a tool by the name its own host uses. These were read
+// off each CLI by asking it to list its tools, after a session where the leader
+// called `neta_spawn`, got "No such tool available", and could not delegate at
+// all. Change them only against a running CLI.
+describe("what each host calls our tools", () => {
+	it("namespaces per vendor", () => {
+		expect(new ClaudeAdapter().toolName("neta_spawn")).toBe("mcp__neta__neta_spawn");
+		expect(new CodexAdapter().toolName("neta_spawn")).toBe("mcp__neta__neta_spawn");
+		expect(new OpenCodeAdapter().toolName("neta_spawn")).toBe("neta_neta_spawn");
+	});
+
+	// The prefix is derived from the server name, so registering the server under
+	// one name and telling the leader another is not possible.
+	it("derives the prefix from the name the server is registered under", async () => {
+		const launch = await new ClaudeAdapter().prepare(context());
+		const mcp = JSON.parse(readFileSync(launch.args[launch.args.indexOf("--mcp-config") + 1], "utf-8"));
+
+		expect(Object.keys(mcp.mcpServers)).toEqual([MCP_SERVER_NAME]);
+		expect(new ClaudeAdapter().toolName("x")).toContain(MCP_SERVER_NAME);
+	});
+});
+
 describe("Claude Code adapter", () => {
 	it("passes the instructions, the control plane and the restrictions", async () => {
 		const ctx = context();
@@ -61,6 +83,16 @@ describe("Claude Code adapter", () => {
 		expect(mcp.mcpServers.neta.args).toEqual(["/opt/neta/cli.js", "mcp"]);
 		expect(mcp.mcpServers.neta.env.NETA_SOCKET).toBe("/tmp/neta-s1.sock");
 		expect(mcp.mcpServers.neta.env.NETA_LEADER_TOKEN).toBe("tok");
+	});
+
+	// Observed with a real leader: without this, Claude Code stops and asks the
+	// user to approve each worker tool — including during a blocking wait, where
+	// nobody is watching to answer.
+	it("pre-approves the worker tools so delegation never waits on a prompt", async () => {
+		const launch = await new ClaudeAdapter().prepare(context());
+
+		const settings = JSON.parse(readFileSync(launch.args[launch.args.indexOf("--settings") + 1], "utf-8"));
+		expect(settings.permissions.allow).toEqual([`mcp__${MCP_SERVER_NAME}`]);
 	});
 
 	it("denies the edit tools and guards bash", async () => {

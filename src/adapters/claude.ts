@@ -20,6 +20,7 @@ import {
 	type LeaderAdapter,
 	type LeaderLaunch,
 	type LeaderLaunchContext,
+	MCP_SERVER_NAME,
 } from "./types.ts";
 
 /** Typed tools a leader must not have. */
@@ -28,7 +29,7 @@ export const DENIED_TOOLS = ["Edit", "Write", "NotebookEdit", "MultiEdit"];
 export function mcpConfig(context: LeaderLaunchContext): string {
 	const { command, args } = controlPlaneCommand(context);
 	return JSON.stringify(
-		{ mcpServers: { neta: { type: "stdio", command, args, env: controlPlaneEnv(context) } } },
+		{ mcpServers: { [MCP_SERVER_NAME]: { type: "stdio", command, args, env: controlPlaneEnv(context) } } },
 		null,
 		2,
 	);
@@ -38,7 +39,14 @@ export function settingsConfig(context: LeaderLaunchContext): string {
 	const guard = [context.invocation.command, ...context.invocation.prefixArgs, "guard"].map(shellQuote).join(" ");
 	return JSON.stringify(
 		{
-			permissions: { deny: DENIED_TOOLS },
+			permissions: {
+				// Without this, Claude Code asks the user to approve every worker tool
+				// the first time the leader reaches for it — including inside a
+				// blocking wait, where there is nobody watching to say yes. Delegation
+				// is the point of the session; it is not a thing to approve.
+				allow: [`mcp__${MCP_SERVER_NAME}`],
+				deny: DENIED_TOOLS,
+			},
 			hooks: {
 				PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: guard }] }],
 			},
@@ -50,6 +58,11 @@ export function settingsConfig(context: LeaderLaunchContext): string {
 
 export class ClaudeAdapter implements LeaderAdapter {
 	readonly id = "claude" as const;
+
+	// Verified against Claude Code: `mcp__<server>__<tool>`.
+	toolName(base: string): string {
+		return `mcp__${MCP_SERVER_NAME}__${base}`;
+	}
 
 	async prepare(context: LeaderLaunchContext): Promise<LeaderLaunch> {
 		const mcpPath = join(context.sessionDir, "mcp.json");

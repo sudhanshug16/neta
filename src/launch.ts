@@ -101,15 +101,18 @@ export async function launchLeader(options: LaunchOptions): Promise<number> {
 	const sessionDir = await mkdtemp(join(tmpdir(), `${APP_NAME}-session-`));
 	const invocation = resolveSelfInvocation();
 
+	const adapter = adapterFor(backend.id);
 	const flavors = await materializeFlavors(agentDir, cwd).catch(() => []);
 	const leaderPrompt = buildLeaderPrompt({
 		tiers: config.tierMapping(),
 		charter: loadCharter(cwd, agentDir),
 		flavors,
 		control: "mcp",
+		// This vendor's names, not ours: a prompt naming tools that do not exist
+		// leaves the leader with no way to delegate.
+		toolName: (base) => adapter.toolName(base),
 	});
 
-	const adapter = adapterFor(backend.id);
 	const launch = await adapter.prepare({
 		backend,
 		cwd,

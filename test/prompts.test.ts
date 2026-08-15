@@ -38,6 +38,27 @@ describe("leader prompt", () => {
 		expect(prompt).not.toContain("neta spawn --role");
 	});
 
+	// The leader can only call what its host calls the tool. Naming the bare tool
+	// to a host that namespaces it cost a whole session's delegation.
+	it("uses the host's own tool names, everywhere it names one", () => {
+		const prompt = buildLeaderPrompt({
+			tiers: DEFAULT_TIERS,
+			control: "mcp",
+			toolName: (base) => `mcp__neta__${base}`,
+		});
+
+		for (const tool of ["neta_spawn", "neta_wait", "neta_workers", "neta_log", "neta_answer"]) {
+			expect(prompt).toContain(`mcp__neta__${tool}`);
+		}
+		// No bare name survives to be copied by mistake.
+		expect(prompt).not.toMatch(/`neta_(spawn|wait|workers|log|answer)`/);
+	});
+
+	// If a host renames tools again, the leader should look before giving up.
+	it("tells a leader whose tools are missing to look for renamed ones first", () => {
+		expect(buildLeaderPrompt({ tiers: DEFAULT_TIERS })).toContain('names containing "neta"');
+	});
+
 	it("names the CLI commands when the leader has no tools", () => {
 		const prompt = buildLeaderPrompt({ tiers: DEFAULT_TIERS, control: "cli" });
 
@@ -50,8 +71,9 @@ describe("leader prompt", () => {
 	it("forbids faking delegation when the tools fail", () => {
 		const prompt = buildLeaderPrompt({ tiers: DEFAULT_TIERS });
 
-		expect(prompt).toContain("stop\nand report the blocker");
+		expect(prompt).toContain("report the blocker with");
 		expect(prompt).toContain("internal subagent");
+		expect(prompt).toContain("Never describe results as coming");
 	});
 
 	it("closes the bash hole in words as well as in enforcement", () => {

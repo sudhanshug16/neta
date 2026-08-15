@@ -50,6 +50,10 @@ describe("worker channel", () => {
 		leaderRequests = [];
 		tempDir = mkdtempSync(join(tmpdir(), "neta-channel-"));
 		address = join(tempDir, "channel.sock");
+		// Leader commands fall back to the session registry when the environment
+		// says nothing, so point it at an empty directory: otherwise a real Neta
+		// session running on the developer's machine answers these tests.
+		env.set("NETA_DIR", tempDir);
 		server = new ChannelServer(address, handler);
 		await server.start();
 	});

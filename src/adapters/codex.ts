@@ -26,6 +26,7 @@ import {
 	type LeaderAdapter,
 	type LeaderLaunch,
 	type LeaderLaunchContext,
+	MCP_SERVER_NAME,
 } from "./types.ts";
 
 /** TOML basic string. Codex parses each `-c` value as TOML. */
@@ -40,11 +41,11 @@ export function configOverrides(context: LeaderLaunchContext): string[] {
 		.join(", ");
 	return [
 		"-c",
-		`mcp_servers.neta.command=${tomlString(command)}`,
+		`mcp_servers.${MCP_SERVER_NAME}.command=${tomlString(command)}`,
 		"-c",
-		`mcp_servers.neta.args=[${args.map(tomlString).join(", ")}]`,
+		`mcp_servers.${MCP_SERVER_NAME}.args=[${args.map(tomlString).join(", ")}]`,
 		"-c",
-		`mcp_servers.neta.env={ ${env} }`,
+		`mcp_servers.${MCP_SERVER_NAME}.env={ ${env} }`,
 		"-c",
 		'sandbox_mode="read-only"',
 		"-c",
@@ -102,6 +103,11 @@ export function preserveRefreshedAuth(overlay: string, realHome: string): void {
 
 export class CodexAdapter implements LeaderAdapter {
 	readonly id = "codex" as const;
+
+	// Verified against Codex: the same scheme Claude Code uses.
+	toolName(base: string): string {
+		return `mcp__${MCP_SERVER_NAME}__${base}`;
+	}
 
 	async prepare(context: LeaderLaunchContext): Promise<LeaderLaunch> {
 		const realHome = realCodexHome();

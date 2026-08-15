@@ -42,11 +42,15 @@ const TIER_LADDER = `- **junior** — mechanical work with a precise spec: renam
  */
 const HONESTY = `## When delegation fails
 
-If a worker cannot be spawned, or the worker tools are missing or erroring, stop
-and report the blocker with the exact error. Do not do the work yourself, and do
-not use your own backend's internal subagent or task features as a substitute —
-those are invisible to Neta and to the user. Never describe results as coming
-from a worker unless they came back through Neta.`;
+If a worker tool is missing, first list the tools you actually have and look for
+names containing "neta" — hosts rename tools by prefixing them, and this prompt
+may have the older name. Use whatever name you find.
+
+If that turns up nothing, or a spawn errors, stop and report the blocker with
+the exact error. Do not do the work yourself, and do not use your own backend's
+internal subagent or task features as a substitute — those are invisible to Neta
+and to the user. Never describe results as coming from a worker unless they came
+back through Neta.`;
 
 interface Surface {
 	/** How the leader is told it cannot edit. */
@@ -59,7 +63,7 @@ interface Surface {
 	closing: string;
 }
 
-function surface(control: LeaderControl): Surface {
+function surface(control: LeaderControl, tool: (base: string) => string): Surface {
 	if (control === "cli") {
 		return {
 			noEdit: `Your file edits are rejected, so attempting one wastes a turn. You must not
@@ -81,11 +85,11 @@ through the same CLI and already know how to use it.`,
 attempting one wastes a turn. You must not edit files through bash either (no
 \`>\`, \`sed -i\`, \`tee\`, \`patch\`, \`git commit\` of your own work). Reading,
 searching, running tests, and inspecting git is your job.`,
-		spawn: "`neta_spawn`",
-		spawnFails: "`neta_spawn` fails if you ask for a second one",
-		status: "`neta_workers` lists every worker and its state; `neta_log` pulls a worker's new log lines",
-		wait: "`neta_wait`",
-		answer: "`neta_answer`",
+		spawn: `\`${tool("neta_spawn")}\``,
+		spawnFails: `\`${tool("neta_spawn")}\` fails if you ask for a second one`,
+		status: `\`${tool("neta_workers")}\` lists every worker and its state; \`${tool("neta_log")}\` pulls a worker's new log lines`,
+		wait: `\`${tool("neta_wait")}\``,
+		answer: `\`${tool("neta_answer")}\``,
 		closing: `The worker CLI is \`${APP_NAME}\`; workers already know how to use it.`,
 	};
 }
@@ -103,12 +107,18 @@ export interface LeaderPromptOptions {
 	charter?: Charter;
 	flavors?: FlavorRef[];
 	control?: LeaderControl;
+	/**
+	 * Turns a tool's base name into what this host actually calls it. Hosts
+	 * namespace MCP tools per server and disagree on how, so the prompt has to
+	 * be told rather than assume.
+	 */
+	toolName?: (base: string) => string;
 }
 
 export function buildLeaderPrompt(options: LeaderPromptOptions): string {
-	const { tiers, control = "mcp" } = options;
+	const { tiers, control = "mcp", toolName = (base) => base } = options;
 	const mapping = (Object.keys(tiers) as Tier[]).map((tier) => `${tier} -> ${tiers[tier].backend}`).join(", ");
-	const s = surface(control);
+	const s = surface(control, toolName);
 
 	// Embedded rather than referenced: the leader runs in someone else's CLI, so
 	// there is no guarantee it would read a path we merely pointed at.

@@ -43,9 +43,20 @@ export interface LeaderLaunch {
 	warnings: string[];
 }
 
+/** The name Neta's control plane is registered under, in every vendor's config. */
+export const MCP_SERVER_NAME = "neta";
+
 export interface LeaderAdapter {
 	readonly id: DetectedLeaderBackend["id"];
 	prepare(context: LeaderLaunchContext): Promise<LeaderLaunch>;
+	/**
+	 * What the leader must actually type to call one of our tools.
+	 *
+	 * Hosts namespace MCP tools by server, and they do not agree on how, so a
+	 * prompt that says `neta_spawn` is wrong everywhere. Each of these was read
+	 * off the running CLI, not guessed.
+	 */
+	toolName(base: string): string;
 }
 
 /** Environment every control-plane process needs, whichever vendor starts it. */
