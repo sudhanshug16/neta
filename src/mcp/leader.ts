@@ -78,6 +78,20 @@ function statusReport(summaries: WorkerSummary[], maxResultChars = MAX_RESULT_CH
 		.join("\n\n");
 }
 
+function formatOpenNotes(manager: WorkerManager): string {
+	const openNotes = manager.getOpenNotes();
+	if (openNotes.length === 0) return "";
+	const lines = openNotes.map((note) => {
+		const textClipped = note.text.length > 80 ? `${note.text.slice(0, 77)}...` : note.text;
+		const workersText =
+			note.workers.length > 0
+				? ` (${note.workers.map((w) => `${w.workerId} ${w.state}`).join(", ")})`
+				: " (unworked)";
+		return `${note.id} "${textClipped}"${workersText}`;
+	});
+	return `\n\nOpen notes: ${lines.join(" | ")}`;
+}
+
 function tier(args: Record<string, unknown>, name = "tier") {
 	const value = requireString(args, name);
 	if (!isTier(value)) throw new Error(`Unknown tier "${value}". Tiers: ${TIERS.join(", ")}.`);
@@ -95,6 +109,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 			task: { type: "string", description: "Self-contained instructions for this member." },
 			name: { type: "string", description: "Two or three words naming this member's job, for its tab." },
 			writer: { type: "boolean", description: "Grant this member the writer slot." },
+			note: { type: "string", description: "Link this member to a note (note id, e.g. n1)." },
 		},
 		required: ["role", "tier", "task"],
 	};
@@ -105,7 +120,8 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 			description:
 				"Spawn a worker agent to do a piece of work. Give it everything it needs in the task: it cannot see this " +
 				`conversation. Roles: ${roles}. Tiers: junior (exact spec), senior (scoped work), staff (ambiguity). ` +
-				"Returns immediately; use neta_wait to collect the result.",
+				"Returns immediately; use neta_wait to collect the result. If a writer is already active, the new writer " +
+				"is queued and starts automatically when the slot frees.",
 			inputSchema: {
 				type: "object",
 				properties: {
@@ -123,7 +139,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 					},
 					writer: {
 						type: "boolean",
-						description: "Grant the writer slot (edit/write access). Only one writer at a time.",
+						description: "Grant the writer slot (edit/write access). Queued if a writer is already active.",
 					},
 					backend: {
 						type: "string",
@@ -132,6 +148,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 							"and the assignment policy decides.",
 					},
 					room: { type: "string", description: "Join a room and share its transcript with the other members." },
+					note: { type: "string", description: "Link this worker to a note (note id, e.g. n1)." },
 				},
 				required: ["role", "tier", "task"],
 			},
@@ -144,8 +161,11 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 					writer: optionalBoolean(args, "writer"),
 					backend: optionalString(args, "backend"),
 					room: optionalString(args, "room"),
+					note: optionalString(args, "note"),
 				});
-				return text(`Spawned ${describe(summary)}\nScratch: ${summary.scratchDir}`);
+				return text(
+					`${summary.state === "running" ? "Spawned" : summary.result}\n${describe(summary)}\nScratch: ${summary.scratchDir}`,
+				);
 			},
 		},
 		{
@@ -230,6 +250,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 								name: optionalString(raw, "name"),
 								writer: optionalBoolean(raw, "writer"),
 								room,
+								note: optionalString(raw, "note"),
 							}),
 						);
 					} catch (error) {
@@ -247,7 +268,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 				"List workers with their state, token usage and final results. Cheap and safe to call whenever you want " +
 				"to know what is happening; it does not interrupt the workers. For a worker's running commentary, use " +
 				"neta_log. When called with a specific workerId, the full result is returned unclipped; when listing all " +
-				"workers, results are clipped to 3000 characters.",
+				"workers, results are clipped to 3000 characters. Shows open notes at the end.",
 			inputSchema: {
 				type: "object",
 				properties: { workerId: { type: "string", description: "Only this worker. Omit for all." } },
@@ -257,7 +278,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 				const summaries = workerId ? [manager.get(workerId)] : manager.list();
 				if (summaries.length === 0) return text("No workers have been spawned.");
 				const maxChars = workerId ? 20000 : MAX_RESULT_CHARS;
-				return text(statusReport(summaries, maxChars));
+				return text(statusReport(summaries, maxChars) + formatOpenNotes(manager));
 			},
 		},
 		{
@@ -284,7 +305,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 			description:
 				"Block until the named workers finish, then return their results. This is how you collect work: end your " +
 				"turn with it rather than polling. Returns early with current state if the timeout expires. Results are " +
-				"clipped to 3000 characters; use neta_workers with a specific workerId to retrieve the full result.",
+				"clipped to 3000 characters; use neta_workers with a specific workerId to retrieve the full result. Shows open notes at the end.",
 			inputSchema: {
 				type: "object",
 				properties: {
@@ -310,7 +331,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 					? `\n\nStill running after ${seconds}s: ${stillRunning.map((s) => s.id).join(", ")}. ` +
 						"Call neta_wait again to keep waiting; they are not lost."
 					: "";
-				return text(statusReport(summaries) + note);
+				return text(statusReport(summaries) + note + formatOpenNotes(manager));
 			},
 		},
 		{
@@ -374,6 +395,54 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 				const posts = manager.roomTranscript(room, optionalNumber(args, "tail"));
 				if (posts.length === 0) return text(`Room "${room}" is empty.`);
 				return text(posts.map((entry) => `[${entry.label}] ${entry.text}`).join("\n"));
+			},
+		},
+		{
+			name: "neta_note",
+			description:
+				"Record parked work, pending decisions, or promised follow-ups in the open-notes ledger. " +
+				"Create a note with {text}, close it with {close: noteId}. Call with no args to list all open notes. " +
+				"Link workers to notes via the note param on spawn; when a worker reaches a terminal state, " +
+				"its state is recorded on the note. Notes are session-scoped and in-memory.",
+			inputSchema: {
+				type: "object",
+				properties: {
+					text: { type: "string", description: "Create a new open note with this text." },
+					close: { type: "string", description: "Close this note id (e.g. n1)." },
+				},
+			},
+			async run(args) {
+				const textArg = optionalString(args, "text");
+				const closeArg = optionalString(args, "close");
+
+				if (textArg && closeArg) {
+					throw new Error("Provide either text (create) or close (close one), not both.");
+				}
+
+				if (textArg) {
+					const note = manager.createNote(textArg);
+					return text(`Created ${note.id}: ${note.text}`);
+				}
+
+				if (closeArg) {
+					const note = manager.closeNote(closeArg);
+					return text(`Closed ${note.id}`);
+				}
+
+				// List all open notes
+				const openNotes = manager.getOpenNotes();
+				if (openNotes.length === 0) return text("No open notes.");
+				return text(
+					openNotes
+						.map((note) => {
+							const workersText =
+								note.workers.length > 0
+									? ` (${note.workers.map((w) => `${w.workerId} ${w.state}`).join(", ")})`
+									: " (unworked)";
+							return `${note.id} "${note.text}"${workersText}`;
+						})
+						.join("\n"),
+				);
 			},
 		},
 		{

@@ -75,7 +75,7 @@ edit files through your shell either (no \`>\`, \`sed -i\`, \`tee\`, \`patch\`,
 \`git commit\` of your own work). Reading, searching, running tests, and
 inspecting git is your job.`,
 			spawn: `\`${APP_NAME} spawn --role <role> --tier <tier> [--writer] [--room <name>] <task>\``,
-			spawnFails: `\`${APP_NAME} spawn --writer\` fails if a writer is already running`,
+			spawnFails: `additional writers queue automatically; the spawn result says queued vs running`,
 			status: `\`${APP_NAME} workers\` lists every worker and its state; \`${APP_NAME} log <id>\` pulls a worker's new log lines`,
 			wait: `\`${APP_NAME} wait <id> [<id>...]\``,
 			answer: `\`${APP_NAME} answer <id> <text>\``,
@@ -90,7 +90,7 @@ attempting one wastes a turn. You must not edit files through bash either (no
 \`>\`, \`sed -i\`, \`tee\`, \`patch\`, \`git commit\` of your own work). Reading,
 searching, running tests, and inspecting git is your job.`,
 		spawn: `\`${tool("neta_spawn")}\``,
-		spawnFails: `\`${tool("neta_spawn")}\` fails if you ask for a second one`,
+		spawnFails: `additional writers queue automatically; the spawn result says queued vs running`,
 		status: `\`${tool("neta_workers")}\` lists every worker and its state; \`${tool("neta_log")}\` pulls a worker's new log lines`,
 		wait: `\`${tool("neta_wait")}\``,
 		answer: `\`${tool("neta_answer")}\``,
@@ -201,9 +201,15 @@ Rules that matter in practice:
   "rails cable"). The user sees that name on the worker's tab, and five workers
   all called "scout" tell them nothing.
 - Reads parallelize; writes serialize. You may run several read-only workers at
-  once, but only one writer exists at a time. ${s.spawnFails}.
+  once, but only one writer can run at a time. ${s.spawnFails}. Queue
+  independent tasks freely, but when the next write depends on the previous
+  worker's outcome, prefer waiting and briefing it fresh.
 - Every writer commits its work before finishing, so the next writer can be
   briefed from \`git log\`.
+- Record parked work, pending decisions, and promised follow-ups with
+  \`neta_note\` the moment they appear. Link spawns to notes via the note param
+  when the work relates to that note. Close notes only after verifying the work
+  is complete. Present open notes before declaring work done.
 - A junior that fails on ambiguity is a spec problem, not a model problem.
   Rewrite the spec and respawn rather than escalating by reflex.
 - Verify before you believe. When a worker says it fixed something, check the

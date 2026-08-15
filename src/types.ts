@@ -28,6 +28,8 @@ export type WorkerState =
 	| "running"
 	/** Blocked on `neta ask`, waiting for the leader to answer. */
 	| "waiting"
+	/** Queued behind another writer, not yet started. */
+	| "queued"
 	/** Finished its task. */
 	| "done"
 	/** Crashed, refused, or was rejected by its backend. */
@@ -113,6 +115,8 @@ export interface SpawnRequest {
 	backend?: string;
 	/** Room to join. Members of a room can read and post to a shared transcript. */
 	room?: string;
+	/** Link this worker to a note. */
+	note?: string;
 }
 
 export interface WorkerSummary {
@@ -147,6 +151,23 @@ export interface WorkerSummary {
 	model?: string;
 	/** The mode this worker negotiated and is running in, if reported by the backend. */
 	mode?: string;
+}
+
+/** A worker that finished and landed on a note. */
+export interface NoteWorkerLink {
+	workerId: string;
+	state: WorkerState;
+}
+
+/** An open-notes ledger entry for tracking parked/deferred work. */
+export interface Note {
+	id: string;
+	text: string;
+	open: boolean;
+	createdAt: number;
+	closedAt?: number;
+	/** Workers linked to this note, with their terminal state. */
+	workers: NoteWorkerLink[];
 }
 
 /** Human-readable token and cost line, or undefined when the backend reported nothing. */

@@ -49,6 +49,7 @@ export type LeaderChannelRequest =
 			writer?: boolean;
 			room?: string;
 			backend?: string;
+			note?: string;
 	  }
 	| { type: "workers"; token: string }
 	| { type: "log"; token: string; workerId: string }

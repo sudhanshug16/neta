@@ -25,6 +25,7 @@ import type { NetaConfig } from "../settings.ts";
 import {
 	formatUsage,
 	isTerminalState,
+	type Note,
 	type RoomPost,
 	type SpawnRequest,
 	TIERS,
@@ -70,6 +71,10 @@ interface WorkerRecord {
 	archived?: boolean;
 	model?: string;
 	mode?: string;
+	/** Note this worker is linked to. */
+	noteId?: string;
+	/** Messages sent while queued, delivered when started. */
+	pendingBrief: string[];
 }
 
 /** Opens a pane per worker, when a multiplexer is running. */
@@ -133,6 +138,11 @@ export class WorkerManager implements ChannelHandler {
 	private lastWriterBackend: string | undefined;
 	/** Authorizes leader channel commands. Given only to the leader's own process. */
 	readonly leaderToken: string;
+	/** Open-notes ledger. */
+	private readonly notes = new Map<string, Note>();
+	private noteCounter = 0;
+	/** FIFO queue of writer worker IDs waiting for the slot. */
+	private readonly writerQueue: string[] = [];
 
 	constructor(options: WorkerManagerOptions) {
 		this.options = options;
@@ -157,12 +167,14 @@ export class WorkerManager implements ChannelHandler {
 
 	async spawn(request: SpawnRequest): Promise<WorkerSummary> {
 		const writer = request.writer ?? false;
-		if (writer && this.activeWriter) {
-			const holder = this.workers.get(this.activeWriter);
-			throw new Error(
-				`Worker ${this.activeWriter} (${holder?.role ?? "unknown"}) already holds the writer slot. ` +
-					`Wait for it to finish, or kill it, before spawning another writer.`,
-			);
+		const shouldQueue = writer && this.activeWriter;
+
+		// Validate note linkage
+		if (request.note) {
+			const note = this.notes.get(request.note);
+			if (!note) {
+				throw new Error(`Unknown note id "${request.note}".`);
+			}
 		}
 
 		const roleText = loadRoleText(request.role, this.options.cwd, this.options.agentDir);
@@ -204,7 +216,7 @@ export class WorkerManager implements ChannelHandler {
 			writer,
 			room: request.room,
 			task: request.task,
-			state: "starting",
+			state: shouldQueue ? "queued" : "starting",
 			startedAt: Date.now(),
 			scratchDir,
 			log: [],
@@ -213,8 +225,28 @@ export class WorkerManager implements ChannelHandler {
 			queuedPrompts: 0,
 			waiters: [],
 			driver: undefined as unknown as WorkerTransportDriver,
+			noteId: request.note,
+			pendingBrief: [],
 		};
 
+		this.workers.set(id, record);
+		if (request.room) this.ensureRoom(request.room);
+
+		// If queued, add to queue and return early
+		if (shouldQueue) {
+			this.writerQueue.push(id);
+			const queuedBehind = this.activeWriter;
+			const holderInfo = queuedBehind ? this.workers.get(queuedBehind) : undefined;
+			record.result = `Queued ${id} (writer) behind ${queuedBehind}; starts automatically when the writer slot frees.`;
+			this.appendLog(
+				record,
+				"status",
+				`Queued behind ${queuedBehind} (${holderInfo?.role ?? "unknown"}). Will start automatically.`,
+			);
+			return this.summarize(record);
+		}
+
+		// Non-queued path: start immediately
 		const transportOptions: TransportOptions = {
 			workerId: id,
 			cwd: this.options.cwd,
@@ -248,12 +280,10 @@ export class WorkerManager implements ChannelHandler {
 		};
 
 		record.driver = this.createTransport(transportOptions);
-		this.workers.set(id, record);
 		if (writer) {
 			this.activeWriter = id;
 			this.lastWriterBackend = backend.name;
 		}
-		if (request.room) this.ensureRoom(request.room);
 
 		try {
 			await record.driver.start();
@@ -279,8 +309,14 @@ export class WorkerManager implements ChannelHandler {
 		if (isTerminalState(record.state)) {
 			throw new Error(`Worker ${workerId} already finished (${record.state}). Spawn a new worker instead.`);
 		}
-		this.appendLog(record, "status", `Leader: ${message}`);
-		this.enqueue(record, message);
+		if (record.state === "queued") {
+			// Append to pending brief for delivery when started
+			record.pendingBrief.push(message);
+			this.appendLog(record, "status", `Leader queued message (will be delivered at start): ${message}`);
+		} else {
+			this.appendLog(record, "status", `Leader: ${message}`);
+			this.enqueue(record, message);
+		}
 		return this.summarize(record);
 	}
 
@@ -298,8 +334,15 @@ export class WorkerManager implements ChannelHandler {
 	async kill(workerId: string): Promise<WorkerSummary> {
 		const record = this.require(workerId);
 		if (!isTerminalState(record.state)) {
-			await record.driver.kill();
-			this.finish(record, "killed", "Killed by the leader.");
+			if (record.state === "queued") {
+				// Remove from queue and mark killed without starting driver
+				const index = this.writerQueue.indexOf(workerId);
+				if (index >= 0) this.writerQueue.splice(index, 1);
+				this.finish(record, "killed", "Killed by the leader.");
+			} else {
+				await record.driver.kill();
+				this.finish(record, "killed", "Killed by the leader.");
+			}
 		}
 		return this.summarize(record);
 	}
@@ -514,8 +557,12 @@ export class WorkerManager implements ChannelHandler {
 						writer: request.writer,
 						room: request.room,
 						backend: request.backend,
+						note: request.note,
 					});
 					const access = summary.writer ? "writer" : "read-only";
+					if (summary.state === "queued") {
+						return { ok: true, text: summary.result ?? `Queued ${summary.id}` };
+					}
 					return {
 						ok: true,
 						text: `Spawned ${summary.id} (${summary.role}/${summary.tier}, ${access}, backend ${summary.backend}). You get a message when it finishes or asks a question.`,
@@ -713,12 +760,151 @@ export class WorkerManager implements ChannelHandler {
 		// every pane. The state is the news; the text is not. Failures still carry
 		// their reason, which did not stream.
 		this.appendLog(record, state === "done" ? "status" : "error", state === "done" ? "done" : `${state}: ${result}`);
-		if (this.activeWriter === record.id) this.activeWriter = undefined;
+
+		// Link worker terminal state to note if present
+		if (record.noteId) {
+			const note = this.notes.get(record.noteId);
+			if (note) {
+				note.workers.push({ workerId: record.id, state });
+			}
+		}
+
+		const wasActiveWriter = this.activeWriter === record.id;
+		if (wasActiveWriter) this.activeWriter = undefined;
+
 		record.pendingAsk?.resolve({ ok: false, error: `Worker ${state}.` });
 		record.pendingAsk = undefined;
 		const waiters = record.waiters;
 		record.waiters = [];
 		for (const waiter of waiters) waiter();
+
+		// Dequeue next writer if this was the active writer
+		if (wasActiveWriter) {
+			void this.dequeueNextWriter();
+		}
+	}
+
+	// =========================================================================
+	// Notes ledger
+	// =========================================================================
+
+	createNote(text: string): Note {
+		const id = `n${++this.noteCounter}`;
+		const note: Note = {
+			id,
+			text,
+			open: true,
+			createdAt: Date.now(),
+			workers: [],
+		};
+		this.notes.set(id, note);
+		return note;
+	}
+
+	closeNote(noteId: string): Note {
+		const note = this.notes.get(noteId);
+		if (!note) throw new Error(`Unknown note id "${noteId}".`);
+		note.open = false;
+		note.closedAt = Date.now();
+		return note;
+	}
+
+	listNotes(): Note[] {
+		return [...this.notes.values()];
+	}
+
+	getOpenNotes(): Note[] {
+		return [...this.notes.values()].filter((note) => note.open);
+	}
+
+	private async dequeueNextWriter(): Promise<void> {
+		if (this.writerQueue.length === 0) return;
+		const nextId = this.writerQueue.shift();
+		if (!nextId) return;
+
+		const record = this.workers.get(nextId);
+		if (!record || record.state !== "queued") return;
+
+		this.activeWriter = nextId;
+
+		// Prepend staleness guard to task
+		const stalenessGuard =
+			"Note: you were queued behind another writer that has since finished. Check `git log` and `git status` for the repo's current state before starting.";
+		const fullTask = `${stalenessGuard}\n\n---\n\n# Task\n\n${record.task}`;
+
+		// Prepare backend and transport
+		const backend = this.options.config.resolve(record.tier, record.backend, true);
+		const runtimeEnv = (await this.options.prepareEnv?.()) ?? {};
+		const roleText = loadRoleText(record.role, this.options.cwd, this.options.agentDir);
+
+		const systemPrompt = [
+			roleText?.trim() ?? "",
+			"",
+			workingAgreement({ tier: record.tier, writer: true, room: record.room, binary: APP_NAME }),
+			"",
+			`Your scratch directory (outside the repository) is ${record.scratchDir}. Use it for notes and throwaway files.`,
+		].join("\n");
+
+		const transportOptions: TransportOptions = {
+			workerId: record.id,
+			cwd: this.options.cwd,
+			env: {
+				...runtimeEnv,
+				...backend.env,
+				[NETA_SOCKET_ENV]: this.options.channelAddress,
+				[NETA_WORKER_ENV]: record.id,
+				[NETA_SCRATCH_ENV]: record.scratchDir,
+			},
+			command: backend.command,
+			args: backend.args,
+			model: backend.model,
+			writer: true,
+			systemPrompt,
+			scratchDir: record.scratchDir,
+			mcpServers: this.options.workerMcpServers?.(record.id, record.scratchDir) ?? [],
+			events: {
+				log: (kind, text) => this.appendLog(record, kind, text),
+				usage: (usage) => {
+					record.usage = usage;
+				},
+				vendorSession: (sessionId) => {
+					record.vendorSessionId = sessionId;
+				},
+				session: (model, mode) => {
+					record.model = model;
+					record.mode = mode;
+				},
+			},
+		};
+
+		record.driver = this.createTransport(transportOptions);
+		this.setState(record, "starting");
+		this.appendLog(record, "status", "Dequeued and starting...");
+
+		try {
+			await record.driver.start();
+		} catch (error) {
+			this.finish(record, "failed", error instanceof Error ? error.message : String(error));
+			return;
+		}
+
+		this.setState(record, "running");
+
+		// Enqueue task with staleness guard and any pending messages delivered together
+		let firstPrompt = fullTask;
+		if (record.pendingBrief.length > 0) {
+			firstPrompt = `${fullTask}\n\n---\n\n# Queued messages from leader\n\n${record.pendingBrief.join("\n\n")}`;
+			record.pendingBrief = [];
+		}
+		this.enqueue(record, firstPrompt);
+
+		// Open pane for the newly started worker
+		const summary = this.summarize(record);
+		try {
+			this.options.panes?.open(summary);
+		} catch {
+			this.appendLog(record, "error", "Could not open a pane for this worker; it is running headless.");
+		}
 	}
 
 	private summarize(record: WorkerRecord): WorkerSummary {
