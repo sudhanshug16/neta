@@ -3,9 +3,9 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NoMux, selectMux } from "../src/mux/index.ts";
-import { splitWindowArgs, TmuxAdapter, newSessionArgs as tmuxSessionArgs } from "../src/mux/tmux.ts";
+import { newWindowArgs, TmuxAdapter, newSessionArgs as tmuxSessionArgs } from "../src/mux/tmux.ts";
 import type { MuxAdapter, ProcessSpec } from "../src/mux/types.ts";
-import { leaderLayout, newPaneArgs, newSessionArgs, ZellijAdapter } from "../src/mux/zellij.ts";
+import { leaderLayout, newSessionArgs, newTabArgs, ZellijAdapter } from "../src/mux/zellij.ts";
 
 const leader: ProcessSpec = { command: "/usr/local/bin/claude", args: ["--append-system-prompt", "be a lead"] };
 
@@ -24,12 +24,16 @@ describe("tmux", () => {
 		]);
 	});
 
-	it("opens a worker pane without stealing focus from the leader", () => {
-		const args = splitWindowArgs("w1 scout", { command: "neta", args: ["watch", "w1"] }, "/repo");
+	// A window, not a split. Splitting the leader's window shrinks the thing the
+	// user is typing into, and five workers made it unreadable.
+	it("puts a worker in its own window, leaving the leader focused", () => {
+		const args = newWindowArgs("w1 scout", { command: "neta", args: ["watch", "w1"] }, "/repo");
 
 		expect(args).toEqual([
-			"split-window",
+			"new-window",
 			"-d",
+			"-n",
+			"w1 scout",
 			"-c",
 			"/repo",
 			"-e",
@@ -39,6 +43,7 @@ describe("tmux", () => {
 			"watch",
 			"w1",
 		]);
+		expect(args).not.toContain("split-window");
 	});
 });
 
@@ -65,14 +70,17 @@ describe("zellij", () => {
 		expect(leaderLayout({ command: "/bin/agent", args: [] })).not.toContain("args");
 	});
 
-	it("opens a named pane in the running session", () => {
-		expect(newPaneArgs("w1 scout", { command: "neta", args: ["watch", "w1"] }, "/repo")).toEqual([
+	// A tab of its own, and one that disposes of itself: --close-on-exit is what
+	// lets a finished worker's tab disappear when the watcher exits.
+	it("opens a worker in its own tab, set to close when it ends", () => {
+		expect(newTabArgs("w1 scout", { command: "neta", args: ["watch", "w1"] }, "/repo")).toEqual([
 			"action",
-			"new-pane",
+			"new-tab",
 			"--name",
 			"w1 scout",
 			"--cwd",
 			"/repo",
+			"--close-on-exit",
 			"--",
 			"neta",
 			"watch",

@@ -55,6 +55,10 @@ export function sanitizeInheritedEnv(env: NodeJS.ProcessEnv): Record<string, str
 	return clean;
 }
 
+function describe(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
 function pickOption(options: acp.PermissionOption[], kinds: string[]): acp.PermissionOption | undefined {
 	for (const kind of kinds) {
 		const match = options.find((option) => option.kind === kind);
@@ -81,9 +85,44 @@ export interface AcpConnectionOptions {
 	allowMutations: boolean;
 	/** MCP servers the agent starts for this session. */
 	mcpServers?: AcpMcpServer[];
+	/** Model id this backend advertises, e.g. "haiku" or "gpt-5.6-sol[xhigh]". */
+	model?: string;
 	onUpdate: (update: AcpSessionUpdate) => void;
 	onStderr: (text: string) => void;
 	onDenied: (kind: string, title: string) => void;
+	/** What the session ended up running as, once negotiated. */
+	onSession?: (description: string) => void;
+}
+
+/**
+ * Selecting a model is `session/set_model`, which both shipped bridges answer
+ * but the 1.3 SDK has no constant for.
+ */
+const SET_MODEL = "session/set_model";
+
+/**
+ * Modes a worker should run in, best first.
+ *
+ * Codex's "read-only" is a kernel sandbox, which is stronger than anything Neta
+ * can enforce from the client side; where a backend offers one, take it. Where
+ * it does not, "default" leaves permission requests coming to us, which is what
+ * the client-side gate is for — so never pick a mode that silently bypasses it.
+ */
+const MODE_PREFERENCE = {
+	writer: ["agent", "acceptEdits", "default"],
+	readOnly: ["read-only", "default"],
+};
+
+/** What a session tells us it can be, beyond what the SDK's types describe. */
+interface SessionNegotiation {
+	models?: { availableModels?: { modelId: string }[]; currentModelId?: string } | null;
+	modes?: { availableModes?: { id: string }[]; currentModeId?: string } | null;
+}
+
+/** Exact id first, then the family — "gpt-5.6-sol" should find "gpt-5.6-sol[xhigh]". */
+export function chooseModel(available: string[], wanted: string): string | undefined {
+	if (available.includes(wanted)) return wanted;
+	return available.find((id) => id.startsWith(`${wanted}[`));
 }
 
 export class AcpConnection {
@@ -91,6 +130,11 @@ export class AcpConnection {
 	private child: ChildProcess | undefined;
 	private connection: acp.ClientConnection | undefined;
 	private sessionId: string | undefined;
+	/** What this backend offered when the session opened. */
+	offered: { models: string[]; currentModel?: string; modes: string[]; currentMode?: string } = {
+		models: [],
+		modes: [],
+	};
 	killed = false;
 
 	constructor(options: AcpConnectionOptions) {
@@ -143,10 +187,67 @@ export class AcpConnection {
 				mcpServers,
 			});
 			this.sessionId = session.sessionId;
+			await this.negotiate(session);
 		} catch (error) {
 			this.kill();
 			throw this.describeStartupError(command, error);
 		}
+	}
+
+	/**
+	 * Ask the session to be what this worker needs: the tier's model, and the
+	 * strictest mode that still lets the work happen.
+	 *
+	 * Both are best-effort. A backend that offers neither still runs the worker,
+	 * and saying which model actually ran beats assuming the one we asked for —
+	 * an earlier version set ANTHROPIC_MODEL and every worker quietly ran on the
+	 * most expensive model there is.
+	 */
+	private async negotiate(response: acp.NewSessionResponse): Promise<void> {
+		const connection = this.connection;
+		const sessionId = this.sessionId;
+		if (!connection || !sessionId) return;
+		const chosen: string[] = [];
+		// The 1.3 SDK's types predate model selection, which both shipped bridges
+		// answer; read the fields defensively rather than pinning a newer SDK.
+		const session = response as acp.NewSessionResponse & SessionNegotiation;
+
+		const available = (session.models?.availableModels ?? []).map((model) => model.modelId);
+		this.offered = {
+			models: available,
+			currentModel: session.models?.currentModelId,
+			modes: (session.modes?.availableModes ?? []).map((mode) => mode.id),
+			currentMode: session.modes?.currentModeId,
+		};
+		const wanted = this.options.model;
+		if (wanted && available.length > 0) {
+			const modelId = chooseModel(available, wanted);
+			if (!modelId) {
+				this.options.onStderr(`No model "${wanted}" here; running on ${session.models?.currentModelId}.`);
+			} else {
+				try {
+					await connection.agent.request(SET_MODEL, { sessionId, modelId });
+					chosen.push(`model ${modelId}`);
+				} catch (error) {
+					this.options.onStderr(`Could not select model "${modelId}": ${describe(error)}`);
+				}
+			}
+		}
+
+		const modes = (session.modes?.availableModes ?? []).map((mode) => mode.id);
+		const preferred = (this.options.allowMutations ? MODE_PREFERENCE.writer : MODE_PREFERENCE.readOnly).find((mode) =>
+			modes.includes(mode),
+		);
+		if (preferred && preferred !== session.modes?.currentModeId) {
+			try {
+				await connection.agent.request(acp.methods.agent.session.setMode, { sessionId, modeId: preferred });
+				chosen.push(`mode ${preferred}`);
+			} catch (error) {
+				this.options.onStderr(`Could not select mode "${preferred}": ${describe(error)}`);
+			}
+		}
+
+		if (chosen.length > 0) this.options.onSession?.(chosen.join(" · "));
 	}
 
 	/** Rejects on transport failure; protocol-level stops come back in the response. */

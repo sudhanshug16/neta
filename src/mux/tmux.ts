@@ -14,9 +14,16 @@ export function newSessionArgs(sessionName: string, leader: ProcessSpec): string
 	return ["new-session", "-s", sessionName, "--", leader.command, ...leader.args];
 }
 
-/** `tmux split-window -d -c <cwd> -- cmd args…` — `-d` leaves the leader focused. */
-export function splitWindowArgs(title: string, spec: ProcessSpec, cwd: string): string[] {
-	return ["split-window", "-d", "-c", cwd, "-e", `NETA_PANE=${title}`, "--", spec.command, ...spec.args];
+/**
+ * `tmux new-window -d -n <title> -c <cwd> -- cmd args…`
+ *
+ * A window, not a split: workers belong beside the leader, not on top of it.
+ * Splitting the leader's window shrinks the thing the user is actually typing
+ * into, and five workers make it unusable. `-d` leaves the leader focused, and
+ * the window closes by itself when the watcher exits.
+ */
+export function newWindowArgs(title: string, spec: ProcessSpec, cwd: string): string[] {
+	return ["new-window", "-d", "-n", title, "-c", cwd, "-e", `NETA_PANE=${title}`, "--", spec.command, ...spec.args];
 }
 
 export class TmuxAdapter implements MuxAdapter {
@@ -37,7 +44,7 @@ export class TmuxAdapter implements MuxAdapter {
 
 	openPane(title: string, spec: ProcessSpec, cwd: string): boolean {
 		if (!this.inSession()) return false;
-		const result = spawnSync("tmux", splitWindowArgs(title, spec, cwd), {
+		const result = spawnSync("tmux", newWindowArgs(title, spec, cwd), {
 			env: { ...process.env, ...spec.env },
 			stdio: "ignore",
 		});

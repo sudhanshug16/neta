@@ -81,6 +81,8 @@ export interface WorkerLogPage {
 	state: WorkerState;
 	/** Who this worker is, so a watcher can say so without a second request. */
 	worker?: WorkerSummary;
+	/** The leader has moved on to a new batch; a view of this worker can close. */
+	archived?: boolean;
 }
 
 /** Events that wake the leader. */

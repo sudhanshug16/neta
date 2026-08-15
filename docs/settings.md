@@ -45,9 +45,35 @@ A tier is what you would trust a worker with, not how clever it is. The leader
 picks tiers and never sees model names; this is where the names live.
 
 - `backend` — a key from `backends`.
-- `model` — that backend's own model id or alias. Dropped when the leader
-  overrides the backend for one spawn, since model ids do not transfer between
-  vendors.
+- `model` — that backend's own model id. Omit it and the backend's own idea of
+  the tier applies, so pointing a tier at another vendor is one word:
+
+```json
+{ "tiers": { "staff": { "backend": "codex" } } }
+```
+
+gives you `gpt-5.6-sol[xhigh]` for staff work while juniors and seniors stay on
+Claude. Shipped mappings:
+
+| Tier | claude | codex |
+| --- | --- | --- |
+| junior | `haiku` | `gpt-5.6-luna[medium]` |
+| senior | `sonnet` | `gpt-5.6-terra[high]` |
+| staff | `default` (Opus) | `gpt-5.6-sol[xhigh]` |
+
+Codex folds the reasoning level into the model id, so thinking depth is part of
+the choice: `gpt-5.6-sol[max]` is the same model thinking harder. Naming a
+family without a level (`gpt-5.6-sol`) takes that family's first level.
+
+Run **`neta models`** to see what a backend actually offers — the ids come from
+the backend itself, so they stay right when a vendor adds a model. OpenCode
+ships no defaults here on purpose: it fronts many providers, and only you know
+which one you logged into.
+
+Neta selects the model over ACP (`session/set_model`), which is why this works
+the same on every backend. It also picks the session's mode: a worker without
+the writer slot gets the backend's read-only mode where one exists — on Codex
+that is a kernel sandbox, which covers the worker's shell as well as its tools.
 
 ## backends
 
@@ -66,23 +92,21 @@ How a worker process is launched. Every worker speaks ACP over stdio.
 ### Sandboxing workers
 
 Neta rejects file-editing tool calls from a read-only worker at the ACP layer,
-on every backend. That does not cover the worker's shell. Where the backend's
-ACP bridge accepts them, sandbox flags close that gap:
+on every backend, and asks the session for the strictest mode it offers:
+
+| Backend | Read-only worker | Writer |
+| --- | --- | --- |
+| Codex | `read-only` mode — a kernel sandbox, so the shell is covered too | `agent` |
+| Claude Code | `default` mode; Neta answers its permission requests, denying edits | `acceptEdits` |
+| OpenCode | whatever read-only mode it advertises, else `default` | `agent` |
+
+Only Codex's is a sandbox. On the others a worker's *shell* could still write —
+Neta's rejection covers typed tools, not `sed -i`. If that matters for your
+work, put writers on Codex, or add backend flags of your own:
 
 ```json
-{
-  "backends": {
-    "codex": {
-      "readOnlyArgs": ["-c", "sandbox_mode=\"read-only\""],
-      "writerArgs": ["-c", "sandbox_mode=\"workspace-write\""]
-    }
-  }
-}
+{ "backends": { "codex": { "readOnlyArgs": ["-c", "sandbox_mode=\"read-only\""] } } }
 ```
-
-These are empty by default because the flags each ACP bridge forwards differ
-and change; check your bridge's own documentation before setting them, and
-verify with a worker that tries to write.
 
 ## Roles and flavors
 

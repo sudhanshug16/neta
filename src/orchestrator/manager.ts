@@ -62,6 +62,8 @@ interface WorkerRecord {
 	queue: Promise<void>;
 	waiters: Array<() => void>;
 	usage?: WorkerUsage;
+	/** Finished, and superseded by a later batch: its view can close. */
+	archived?: boolean;
 }
 
 /** Opens a pane per worker, when a multiplexer is running. */
@@ -153,6 +155,14 @@ export class WorkerManager implements ChannelHandler {
 		const roleText = loadRoleText(request.role, this.options.cwd, this.options.agentDir);
 		if (!roleText) {
 			throw new Error(`Unknown role "${request.role}". Available roles: ${roleNames().join(", ")}.`);
+		}
+
+		// Starting a batch while the last one is finished means the last one has
+		// been read, or never will be: let those views close so a long session
+		// does not bury the leader in the tabs of workers that ended an hour ago.
+		const existing = [...this.workers.values()];
+		if (existing.length > 0 && existing.every((record) => isTerminalState(record.state))) {
+			for (const record of existing) record.archived = true;
 		}
 
 		const backend = this.options.config.resolve(request.tier, request.backend, writer);
@@ -294,6 +304,7 @@ export class WorkerManager implements ChannelHandler {
 			cursor: record.log.length,
 			state: record.state,
 			worker: this.summarize(record),
+			archived: record.archived ?? false,
 		};
 	}
 

@@ -21,6 +21,12 @@ export interface NetaBackendSettings {
 	modelArgs?: string[];
 	/** Environment variable that carries the model id, for backends without a model flag. */
 	modelEnv?: string;
+	/**
+	 * Which of this backend's models each tier means, used when a tier names a
+	 * backend but no model. Model ids are the ones the backend advertises over
+	 * ACP — `neta models <backend>` lists them.
+	 */
+	tierModels?: Partial<Record<Tier, string>>;
 	/** Extra environment for the worker process. */
 	env?: Record<string, string>;
 	/**
@@ -73,32 +79,46 @@ export interface NetaSettings {
  * backend changes its invocation, override `backends.<name>` in settings
  * instead of waiting for a release.
  */
+/**
+ * Shipped backend launchers, with the model each tier means.
+ *
+ * The model ids are what these backends answer with over ACP, checked against
+ * the running bridges. Codex folds the reasoning level into the id, which is
+ * why a tier can pick "think harder" without a separate setting.
+ */
 export const DEFAULT_BACKENDS: Record<string, NetaBackendSettings> = {
 	claude: {
 		command: "npx",
 		args: ["-y", "@zed-industries/claude-code-acp"],
-		modelEnv: "ANTHROPIC_MODEL",
+		tierModels: { junior: "haiku", senior: "sonnet", staff: "default" },
 	},
 	codex: {
 		command: "npx",
 		args: ["-y", "@agentclientprotocol/codex-acp"],
-		modelArgs: ["--model", "{model}"],
+		tierModels: {
+			junior: "gpt-5.6-luna[medium]",
+			senior: "gpt-5.6-terra[high]",
+			staff: "gpt-5.6-sol[xhigh]",
+		},
 	},
+	// OpenCode fronts many providers, so there is no honest default here: the
+	// user says which model each tier means, in settings.
 	opencode: {
 		command: "opencode",
 		args: ["acp"],
-		modelArgs: ["--model", "{model}"],
 	},
 };
 
 /**
  * Shipped tier mapping. Workers run on the Claude subscription by default,
  * which is the whole point of driving real CLIs instead of burning API credit.
+ * Point a tier at another backend and it picks up that backend's model for the
+ * tier, so mixing vendors is one word per tier.
  */
 export const DEFAULT_TIERS: Record<Tier, NetaTierSettings> = {
-	junior: { backend: "claude", model: "haiku" },
-	senior: { backend: "claude", model: "sonnet" },
-	staff: { backend: "claude", model: "opus" },
+	junior: { backend: "claude" },
+	senior: { backend: "claude" },
+	staff: { backend: "claude" },
 };
 
 export interface ResolvedBackend {
@@ -170,8 +190,10 @@ export class NetaConfig {
 		}
 
 		// An explicit backend override drops the tier's model, which belongs to a
-		// different backend's naming scheme.
-		const model = backendOverride && backendOverride !== mapping.backend ? undefined : mapping.model;
+		// different backend's naming scheme — but the backend's own idea of what
+		// this tier means still applies.
+		const tierModel = backendOverride && backendOverride !== mapping.backend ? undefined : mapping.model;
+		const model = tierModel ?? backend.tierModels?.[tier];
 		const args = [...(backend.args ?? [])];
 		const env = { ...(backend.env ?? {}) };
 		if (model) {

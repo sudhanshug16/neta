@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { sanitizeInheritedEnv } from "../src/acp/connection.ts";
+import { chooseModel, sanitizeInheritedEnv } from "../src/acp/connection.ts";
 import { AcpWorkerTransport, describeToolCall } from "../src/acp/transport.ts";
 import type { TransportOptions, WorkerMcpServer } from "../src/orchestrator/transport.ts";
 import type { WorkerLogEntry, WorkerUsage } from "../src/types.ts";
@@ -157,6 +157,25 @@ describe("AcpWorkerTransport", () => {
 		started.push(transport);
 
 		await expect(transport.start()).rejects.toThrow(/definitely-not-installed/);
+	});
+});
+
+// Codex folds the reasoning level into the model id, so "gpt-5.6-sol" alone
+// still has to land on a real model rather than being dropped silently.
+describe("choosing a worker's model", () => {
+	const available = ["haiku", "sonnet", "gpt-5.6-sol[low]", "gpt-5.6-sol[xhigh]"];
+
+	it("takes an exact id", () => {
+		expect(chooseModel(available, "sonnet")).toBe("sonnet");
+		expect(chooseModel(available, "gpt-5.6-sol[xhigh]")).toBe("gpt-5.6-sol[xhigh]");
+	});
+
+	it("falls back to the family when only the model is named", () => {
+		expect(chooseModel(available, "gpt-5.6-sol")).toBe("gpt-5.6-sol[low]");
+	});
+
+	it("returns nothing for a model this backend does not have", () => {
+		expect(chooseModel(available, "opus")).toBeUndefined();
 	});
 });
 

@@ -82,6 +82,28 @@ describe("WorkerManager", () => {
 		expect(transport.prompts[0]).toBe("map the auth flow");
 	});
 
+	// Finished workers' views stay readable until the leader moves on, then close
+	// themselves — otherwise a long session buries you in tabs of workers that
+	// ended an hour ago.
+	it("archives a finished batch when the next one starts", async () => {
+		const first = await manager.spawn({ role: "scout", tier: "senior", task: "a" });
+		transports[0].finish({ ok: true, summary: "found it" });
+		await manager.waitFor([first.id], 5000);
+		expect(manager.tailLog(first.id).archived).toBe(false);
+
+		await manager.spawn({ role: "scout", tier: "senior", task: "b" });
+
+		expect(manager.tailLog(first.id).archived).toBe(true);
+	});
+
+	it("leaves a batch alone while any of it is still running", async () => {
+		const first = await manager.spawn({ role: "scout", tier: "senior", task: "a" });
+
+		await manager.spawn({ role: "scout", tier: "senior", task: "b" });
+
+		expect(manager.tailLog(first.id).archived).toBe(false);
+	});
+
 	it("tells juniors they cannot ask and seniors that they can", async () => {
 		await manager.spawn({ role: "worker", tier: "junior", task: "rename foo to bar" });
 		await manager.spawn({ role: "worker", tier: "staff", task: "find the leak" });
@@ -94,7 +116,10 @@ describe("WorkerManager", () => {
 		const summary = await manager.spawn({ role: "scout", tier: "senior", task: "look" });
 
 		expect(summary.backend).toBe("claude");
-		expect(transports[0].options.env.ANTHROPIC_MODEL).toBe("sonnet");
+		// The model reaches the worker over ACP, not through an environment
+		// variable: setting ANTHROPIC_MODEL did nothing, and every worker quietly
+		// ran on the most expensive model instead of its tier's.
+		expect(transports[0].options.model).toBe("sonnet");
 	});
 
 	it("allows only one writer at a time and releases the slot when it finishes", async () => {

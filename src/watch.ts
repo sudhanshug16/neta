@@ -15,6 +15,7 @@ import { findSession, listSessions } from "./session.ts";
 import { formatUsage, isTerminalState, type WorkerLogEntry, type WorkerLogPage, type WorkerSummary } from "./types.ts";
 
 const POLL_MS = 400;
+const ARCHIVE_POLL_MS = 2000;
 
 /**
  * A pane is read at a glance, so the shape of a line carries the meaning: what
@@ -66,6 +67,27 @@ export function resolveTarget(sessionId?: string, cwd: string = process.cwd()): 
 	if (!sessionId && address && token) return { address, token };
 	const record = sessionId ? listSessions().find((entry) => entry.id === sessionId) : findSession(cwd);
 	return record ? { address: record.socket, token: record.token } : undefined;
+}
+
+/** Resolves when the leader has moved on, or when the session goes away. */
+async function waitForArchive(target: WatchTarget, workerId: string): Promise<void> {
+	for (;;) {
+		await new Promise((resolve) => setTimeout(resolve, ARCHIVE_POLL_MS));
+		let response: Awaited<ReturnType<typeof sendChannelRequest>>;
+		try {
+			response = await sendChannelRequest(target.address, {
+				type: "tail",
+				token: target.token,
+				workerId,
+				since: Number.MAX_SAFE_INTEGER,
+			});
+		} catch {
+			// The leader is gone; nothing left to watch.
+			return;
+		}
+		if (!response.ok) return;
+		if ((response.data as WorkerLogPage | undefined)?.archived) return;
+	}
 }
 
 export interface WatchOptions {
@@ -120,13 +142,18 @@ export async function watchWorker(options: WatchOptions): Promise<number> {
 		await new Promise((resolve) => setTimeout(resolve, POLL_MS));
 	}
 
+	// A finished worker's tab stays up so its report can be read, and closes
+	// itself once the leader starts a new batch — or sooner, on a keypress.
 	const hold = options.hold ?? (process.stdin.isTTY === true && !options.once);
 	if (hold) {
-		write("(press enter to close)");
-		await new Promise<void>((resolve) => {
-			process.stdin.resume();
-			process.stdin.once("data", () => resolve());
-		});
+		write("(stays until the leader starts new workers · press enter to close now)");
+		await Promise.race([
+			new Promise<void>((resolve) => {
+				process.stdin.resume();
+				process.stdin.once("data", () => resolve());
+			}),
+			waitForArchive(target, options.workerId),
+		]);
 	}
 	return 0;
 }

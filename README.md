@@ -28,12 +28,15 @@ workers, collects their results, and reports once.
   over ACP, so it runs on the login you already have rather than on API credit.
   All three tiers default to Claude Code; change that in settings.
 - **Tiers, not model names.** The leader asks for a junior, senior or staff
-  worker; you decide which model each tier means. It never sees model names.
+  worker; you decide which model each tier means, and can mix vendors —
+  `"staff": { "backend": "codex" }` puts staff work on `gpt-5.6-sol[xhigh]`
+  while the rest stay on Claude. `neta models` lists what each backend offers.
 - **One writer at a time.** Reads parallelize; writes serialize. A second
   writer is refused, not raced.
-- **Panes, if you run a multiplexer.** With Zellij or tmux, each worker gets a
-  pane streaming its log; watching one costs nothing and closing one breaks
-  nothing. Without one, workers run headless and nothing else changes.
+- **A tab per worker, if you run a multiplexer.** With Zellij or tmux, each
+  worker opens its own tab streaming its log, so the leader you are typing into
+  keeps its window. Finished tabs stay until the leader starts new workers,
+  then close themselves. Without a multiplexer, workers run headless.
 - **Visible spend.** `neta workers` shows tokens and cost per worker, as the
   backends report them.
 
@@ -149,11 +152,10 @@ tarball and driven through a full session.
 
 Not verified, and worth knowing:
 
-- **Worker shells are not sandboxed by default.** A read-only worker's typed
-  edits are rejected by Neta on every backend, but its `bash` can still write
-  unless you set that backend's sandbox flags (`readOnlyArgs` in settings).
-- **Zellij is untested live** — its commands are unit-tested only; tmux was
-  exercised against a real server.
+- **Only Codex workers are sandboxed.** Every read-only worker has its typed
+  edits rejected by Neta, and Codex workers additionally run in its `read-only`
+  kernel sandbox, which covers the shell. On Claude Code and OpenCode a
+  determined worker could still write through `bash`.
 - **No long-running real-model use yet.** The leader's honesty rule (report a
   blocker rather than fake delegation) is enforced by prompt and tools, not by
   a test.

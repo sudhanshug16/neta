@@ -6,24 +6,32 @@ import { CONFIG_DIR_NAME } from "../src/config.ts";
 import { loadNetaSettings, NetaConfig } from "../src/settings.ts";
 
 describe("NetaConfig", () => {
-	it("resolves shipped defaults when settings are empty", () => {
+	// A tier means a different model on each vendor, so the backend says what its
+	// junior is. Model ids are the ones the bridges advertise over ACP.
+	it("gives each tier the shipped model for its backend", () => {
 		const config = new NetaConfig();
 
-		expect(config.resolve("junior").name).toBe("claude");
-		expect(config.resolve("senior").model).toBe("sonnet");
-		expect(config.resolve("staff").model).toBe("opus");
+		expect(config.resolve("junior")).toMatchObject({ name: "claude", model: "haiku" });
+		expect(config.resolve("senior")).toMatchObject({ name: "claude", model: "sonnet" });
+		expect(config.resolve("staff")).toMatchObject({ name: "claude", model: "default" });
 	});
 
-	it("lets settings remap a tier without touching the others", () => {
-		const config = new NetaConfig({ tiers: { junior: { backend: "opencode", model: "zai/glm-4.6" } } });
+	// Mixing vendors should be one word per tier: name the backend, get that
+	// backend's idea of what the tier means.
+	it("picks up the new backend's model when a tier changes vendor", () => {
+		const config = new NetaConfig({ tiers: { staff: { backend: "codex" } } });
 
-		const junior = config.resolve("junior");
-		expect(junior.name).toBe("opencode");
-		expect(junior.args).toEqual(["acp", "--model", "zai/glm-4.6"]);
+		expect(config.resolve("staff")).toMatchObject({ name: "codex", model: "gpt-5.6-sol[xhigh]" });
 		expect(config.resolve("senior").name).toBe("claude");
 	});
 
-	it("substitutes the model into backend arguments and environment", () => {
+	it("lets a tier name its own model, whatever the backend ships", () => {
+		const config = new NetaConfig({ tiers: { junior: { backend: "codex", model: "gpt-5.4-mini[low]" } } });
+
+		expect(config.resolve("junior").model).toBe("gpt-5.4-mini[low]");
+	});
+
+	it("substitutes the model into backend arguments for backends that take a flag", () => {
 		const config = new NetaConfig({
 			tiers: { staff: { backend: "custom", model: "big-model" } },
 			backends: { custom: { command: "run-agent", modelArgs: ["--model", "{model}"] } },
@@ -32,9 +40,6 @@ describe("NetaConfig", () => {
 		const staff = config.resolve("staff");
 		expect(staff.command).toBe("run-agent");
 		expect(staff.args).toEqual(["--model", "big-model"]);
-
-		const withEnv = new NetaConfig({ tiers: { staff: { backend: "claude", model: "opus" } } }).resolve("staff");
-		expect(withEnv.env.ANTHROPIC_MODEL).toBe("opus");
 	});
 
 	it("drops the tier model when an explicit backend overrides the mapping", () => {

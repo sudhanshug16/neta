@@ -66,7 +66,9 @@ export class AcpWorkerTransport implements WorkerTransportDriver {
 			env: this.options.env,
 			allowMutations: this.options.writer,
 			mcpServers: this.options.mcpServers,
+			model: this.options.model,
 			onUpdate: (update) => this.sessionUpdate(update),
+			onSession: (description) => this.options.events.log("status", `Running as ${description}.`),
 			onStderr: (text) => this.options.events.log("error", text),
 			onDenied: (kind, title) =>
 				this.options.events.log(

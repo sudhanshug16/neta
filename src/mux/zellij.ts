@@ -42,9 +42,15 @@ export function newSessionArgs(sessionName: string, layoutPath: string): string[
 	return ["--session", sessionName, "--new-session-with-layout", layoutPath];
 }
 
-/** `zellij action new-pane --name <title> --cwd <cwd> -- cmd args…` */
-export function newPaneArgs(title: string, spec: ProcessSpec, cwd: string): string[] {
-	return ["action", "new-pane", "--name", title, "--cwd", cwd, "--", spec.command, ...spec.args];
+/**
+ * `zellij action new-tab --name <title> --cwd <cwd> --close-on-exit -- cmd args…`
+ *
+ * A tab, not a pane in the leader's tab: workers are something you go and look
+ * at, not something that shrinks the window you are typing in. `--close-on-exit`
+ * is what lets a finished worker's tab clean itself up.
+ */
+export function newTabArgs(title: string, spec: ProcessSpec, cwd: string): string[] {
+	return ["action", "new-tab", "--name", title, "--cwd", cwd, "--close-on-exit", "--", spec.command, ...spec.args];
 }
 
 export class ZellijAdapter implements MuxAdapter {
@@ -67,7 +73,7 @@ export class ZellijAdapter implements MuxAdapter {
 
 	openPane(title: string, spec: ProcessSpec, cwd: string): boolean {
 		if (!this.inSession()) return false;
-		const result = spawnSync("zellij", newPaneArgs(title, spec, cwd), {
+		const result = spawnSync("zellij", newTabArgs(title, spec, cwd), {
 			env: { ...process.env, ...spec.env },
 			stdio: "ignore",
 		});

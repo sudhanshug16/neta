@@ -23,6 +23,7 @@ import { detectLeaderBackends } from "./detect.ts";
 import { runGuard } from "./guard.ts";
 import { LaunchError, launchLeader } from "./launch.ts";
 import { runControlPlane, runWorkerBridge } from "./mcp/run.ts";
+import { listBackendModels } from "./models.ts";
 import { listSessions } from "./session.ts";
 import { watchWorker } from "./watch.ts";
 
@@ -39,6 +40,8 @@ const HELP = `${APP_NAME} ${VERSION} — a leader agent that delegates to worker
   ${APP_NAME} watch <id>                Follow a worker's log until it finishes.
   ${APP_NAME} kill <id>                 Stop a worker.
   ${APP_NAME} sessions                  List running leader sessions.
+  ${APP_NAME} models [backend]          Show the models a worker backend offers,
+                                        for setting tiers in settings.json.
   ${APP_NAME} --backends                Show the agent CLIs found on PATH.
 
 Worker commands (inside a worker): notify, ask, say, room.
@@ -100,6 +103,9 @@ async function main(argv: string[]): Promise<void> {
 		}
 		case "sessions":
 			printSessions();
+			return;
+		case "models":
+			process.exitCode = await listBackendModels(args[1], process.cwd());
 			return;
 		case "--backends":
 			listBackends();
