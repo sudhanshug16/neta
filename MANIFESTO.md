@@ -22,9 +22,10 @@ running a team of engineers.
    otherwise gets out of the way. It owns no terminal multiplexer and never
    re-skins the vendor's transcript; the one composed surface it owns is the
    per-worker watch pane (header, transcript, footer, input line).
-5. **One writer per session.** Reads parallelize; writes serialize: each
-   session has a single writer slot. Two sessions in one repo are two slots —
-   Neta serializes its own writers, it does not lock the repository.
+5. **One writer per directory session.** Reads parallelize; writes serialize:
+   each session has a single writer slot, and there is at most one live session
+   per real directory. Different subdirectories of one repo can still each
+   host a session, so Neta does not lock a repository as a whole.
 6. **Workers are quiet.** Progress is pulled by the leader; only terminal
    events, blocking questions, and room activity the leader opted into push.
 7. **Enforcement over instruction.** Every restriction that matters is a

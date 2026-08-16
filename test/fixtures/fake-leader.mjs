@@ -5,7 +5,7 @@
  * launch path without a real model, a real login, or a real terminal UI.
  */
 
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 /**
@@ -47,6 +47,39 @@ if (target) {
 		}),
 		"utf-8",
 	);
+}
+
+// Launch tests use this to stand in for the control plane's durable registry
+// write. The fixture is still a real leader process, so liveness checks use
+// its actual pid just as they do in production.
+if (process.env.FAKE_LEADER_REGISTER_SESSION === "1" && process.env.NETA_DIR && process.env.NETA_SESSION_ID) {
+	const sessions = join(process.env.NETA_DIR, "sessions");
+	mkdirSync(sessions, { recursive: true, mode: 0o700 });
+	writeFileSync(
+		join(sessions, `${process.env.NETA_SESSION_ID}.json`),
+		JSON.stringify({
+			id: process.env.NETA_SESSION_ID,
+			socket: process.env.NETA_SOCKET,
+			token: process.env.NETA_LEADER_TOKEN,
+			cwd: process.cwd(),
+			leader: process.env.NETA_LEADER_BACKEND,
+			pid: process.pid,
+			startedAt: Date.now(),
+			...(process.env.NETA_MUX_SESSION_NAME && (process.env.NETA_MUX === "zellij" || process.env.NETA_MUX === "tmux")
+				? { mux: { id: process.env.NETA_MUX, name: process.env.NETA_MUX_SESSION_NAME } }
+				: {}),
+		}),
+		"utf-8",
+	);
+	if (process.env.NETA_SESSION_LOCK_PATH && process.env.NETA_SESSION_LOCK_TOKEN) {
+		const owner = join(process.env.NETA_SESSION_LOCK_PATH, "owner.json");
+		try {
+			if (JSON.parse(readFileSync(owner, "utf-8")).token === process.env.NETA_SESSION_LOCK_TOKEN)
+				rmSync(process.env.NETA_SESSION_LOCK_PATH, { recursive: true, force: true });
+		} catch {
+			// A launcher that exited before this fixture is not a relevant test case.
+		}
+	}
 }
 
 const holdMs = Number.parseInt(process.env.FAKE_LEADER_HOLD_MS ?? "0", 10);

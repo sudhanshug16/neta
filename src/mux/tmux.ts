@@ -17,6 +17,11 @@ export function newSessionArgs(sessionName: string, leader: ProcessSpec): string
 	return ["new-session", "-s", sessionName, ...environment, "--", leader.command, ...leader.args];
 }
 
+/** `tmux attach -t <name>` reconnects a later `neta` invocation to its leader. */
+export function attachSessionArgs(sessionName: string): string[] {
+	return ["attach", "-t", sessionName];
+}
+
 /**
  * `tmux new-window -d -n <title> -c <cwd> -- cmd args…`
  *

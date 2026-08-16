@@ -7,9 +7,9 @@
  */
 
 import type { MuxMode } from "../settings.ts";
-import { TmuxAdapter } from "./tmux.ts";
-import type { MuxAdapter, ProcessSpec } from "./types.ts";
-import { ZellijAdapter } from "./zellij.ts";
+import { TmuxAdapter, attachSessionArgs as tmuxAttachSessionArgs } from "./tmux.ts";
+import type { MuxAdapter, MuxId, ProcessSpec } from "./types.ts";
+import { ZellijAdapter, attachSessionArgs as zellijAttachSessionArgs } from "./zellij.ts";
 
 /** Headless: no panes, workers still run. */
 export class NoMux implements MuxAdapter {
@@ -44,6 +44,13 @@ export function selectMux(
 	}
 	const chosen = adapters.find((adapter) => adapter.id === mode);
 	return chosen?.available() ? chosen : new NoMux();
+}
+
+/** The direct command that reattaches the terminal to a recorded leader session. */
+export function attachSessionSpec(mux: Exclude<MuxId, "none">, sessionName: string): ProcessSpec {
+	return mux === "zellij"
+		? { command: "zellij", args: zellijAttachSessionArgs(sessionName) }
+		: { command: "tmux", args: tmuxAttachSessionArgs(sessionName) };
 }
 
 export type { MuxAdapter, ProcessSpec };

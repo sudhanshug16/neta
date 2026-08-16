@@ -9,7 +9,17 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import {
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { getAgentDir } from "./config.ts";
@@ -25,8 +35,20 @@ export interface SessionRecord {
 	leader: string;
 	pid: number;
 	startedAt: number;
+	/** The multiplexer session that contains the leader, when Neta started one. */
+	mux?: SessionMux;
 	/** Detached ACP process groups still owned by this manager. */
 	workerGroups?: SessionWorkerGroup[];
+}
+
+export interface SessionMux {
+	id: "zellij" | "tmux";
+	name: string;
+}
+
+export interface SessionLock {
+	path: string;
+	token: string;
 }
 
 /** Identity captured when a detached ACP group is created, before crash recovery can ever reap it. */
@@ -45,6 +67,86 @@ export interface SessionSweepOptions {
 
 function sessionsDir(agentDir: string = getAgentDir()): string {
 	return join(agentDir, "sessions");
+}
+
+/** Resolve symlinks before comparing session directories. */
+export function canonicalizeCwd(cwd: string): string {
+	return realpathSync(cwd);
+}
+
+function lockPath(cwd: string, agentDir: string): string {
+	const key = createHash("sha256").update(cwd).digest("hex");
+	return join(sessionsDir(agentDir), "locks", key);
+}
+
+function lockOwnerPath(lock: SessionLock): string {
+	return join(lock.path, "owner.json");
+}
+
+/**
+ * Acquire a directory-specific launch lock. mkdir is atomic, and the owner
+ * token stops the launcher's later cleanup from releasing a successor's lock.
+ */
+export function tryAcquireSessionLock(cwd: string, agentDir: string = getAgentDir()): SessionLock | undefined {
+	const path = lockPath(cwd, agentDir);
+	mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+	try {
+		mkdirSync(path, { recursive: false, mode: 0o700 });
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+			try {
+				const owner = JSON.parse(readFileSync(join(path, "owner.json"), "utf-8")) as {
+					pid?: unknown;
+					startedAt?: unknown;
+				};
+				const pid = owner.pid;
+				const startedAt = owner.startedAt;
+				const stale =
+					typeof pid === "number" &&
+					(!isAlive(pid) || (typeof startedAt === "string" && processStartTime(pid) !== startedAt));
+				if (stale) {
+					rmSync(path, { recursive: true, force: true });
+					return tryAcquireSessionLock(cwd, agentDir);
+				}
+			} catch {
+				// A process can die after mkdir but before it writes owner.json. Only
+				// reclaim that incomplete lock after its short creation window.
+				try {
+					if (Date.now() - statSync(path).mtimeMs > 5000) {
+						rmSync(path, { recursive: true, force: true });
+						return tryAcquireSessionLock(cwd, agentDir);
+					}
+				} catch {
+					// Another launcher released it; the next retry will acquire it.
+				}
+			}
+			return undefined;
+		}
+		throw error;
+	}
+	const lock = { path, token: randomBytes(16).toString("hex") };
+	writeFileSync(
+		lockOwnerPath(lock),
+		JSON.stringify({ pid: process.pid, startedAt: processStartTime(process.pid), token: lock.token }),
+		{
+			encoding: "utf-8",
+			mode: 0o600,
+		},
+	);
+	return lock;
+}
+
+/** Release only the lock created by this launch or its control-plane child. */
+export function releaseSessionLock(lock: SessionLock | undefined): void {
+	if (!lock) return;
+	try {
+		const owner = JSON.parse(readFileSync(lockOwnerPath(lock), "utf-8")) as { token?: unknown };
+		if (owner.token !== lock.token) return;
+		rmSync(lock.path, { recursive: true, force: true });
+	} catch {
+		// A crashed launcher or a control plane that already registered the session
+		// may have removed the lock. Either way, it is no longer ours to release.
+	}
 }
 
 function isAlive(pid: number): boolean {
@@ -139,6 +241,11 @@ export function sweepStaleSessions(agentDir: string = getAgentDir(), options: Se
 export function listSessions(agentDir: string = getAgentDir()): SessionRecord[] {
 	const dir = sessionsDir(agentDir);
 	sweepStaleSessions(agentDir);
+	return readLiveSessions(dir);
+}
+
+/** Live sessions without sweeping. Callers that need recovery must sweep first. */
+function readLiveSessions(dir: string): SessionRecord[] {
 	if (!existsSync(dir)) return [];
 	const records: SessionRecord[] = [];
 	for (const name of readdirSync(dir)) {
@@ -155,6 +262,18 @@ export function listSessions(agentDir: string = getAgentDir()): SessionRecord[] 
 		records.push(record);
 	}
 	return records.sort((a, b) => b.startedAt - a.startedAt);
+}
+
+/** A live session in this exact real directory, with symlinks resolved on both sides. */
+export function findLiveSessionInDirectory(cwd: string, agentDir: string = getAgentDir()): SessionRecord | undefined {
+	const canonicalCwd = canonicalizeCwd(cwd);
+	return readLiveSessions(sessionsDir(agentDir)).find((record) => {
+		try {
+			return canonicalizeCwd(record.cwd) === canonicalCwd;
+		} catch {
+			return false;
+		}
+	});
 }
 
 /**

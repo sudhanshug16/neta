@@ -28,6 +28,7 @@ import { createPaneHost } from "../mux/panes.ts";
 import { WorkerManager } from "../orchestrator/manager.ts";
 import {
 	processStartTime,
+	releaseSessionLock,
 	removeSessionRecord,
 	type SessionRecord,
 	type SessionWorkerGroup,
@@ -80,6 +81,10 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 	const address = process.env[NETA_SOCKET_ENV] || createChannelAddress();
 	const token = process.env[NETA_LEADER_ENV] || randomBytes(16).toString("hex");
 	const sessionId = options.sessionId ?? process.env.NETA_SESSION_ID ?? `s${process.pid}`;
+	const lockPath = process.env.NETA_SESSION_LOCK_PATH;
+	const lockToken = process.env.NETA_SESSION_LOCK_TOKEN;
+	const muxName = process.env.NETA_MUX_SESSION_NAME;
+	const muxId = process.env.NETA_MUX;
 
 	const wantsPanes = (process.env.NETA_PANES ?? (config.mux.panes ? "1" : "0")) === "1";
 	const mux = selectMux(muxMode(config.mux.mode));
@@ -103,6 +108,7 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 		leader: options.leader ?? process.env.NETA_LEADER_BACKEND ?? "unknown",
 		pid: process.pid,
 		startedAt: Date.now(),
+		...(muxName && (muxId === "zellij" || muxId === "tmux") ? { mux: { id: muxId, name: muxName } } : {}),
 	};
 	const writeRegistry = () =>
 		writeSessionRecord({ ...sessionRecord, workerGroups: [...workerGroups.values()] }, agentDir);
@@ -140,6 +146,7 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 	const server = new ChannelServer(address, manager);
 	await server.start();
 	writeRegistry();
+	if (lockPath && lockToken) releaseSessionLock({ path: lockPath, token: lockToken });
 
 	let shutdownPromise: Promise<void> | undefined;
 	const shutdown = (): Promise<void> => {

@@ -1,15 +1,18 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+	findLiveSessionInDirectory,
 	findSession,
 	listSessions,
+	releaseSessionLock,
 	removeSessionRecord,
 	type SessionRecord,
 	sweepStaleSessions,
+	tryAcquireSessionLock,
 	writeSessionRecord,
 } from "../src/session.ts";
 import { waitFor } from "./helpers.ts";
@@ -163,6 +166,34 @@ describe("session registry", () => {
 
 	it("returns nothing when no session has ever run", () => {
 		expect(listSessions(agentDir())).toEqual([]);
+	});
+
+	it("matches live sessions through a symlink only after realpath canonicalization", () => {
+		const dir = agentDir();
+		const workspace = mkdtempSync(join(tmpdir(), "neta-canonical-workspace-"));
+		dirs.push(workspace);
+		const link = join(tmpdir(), `neta-canonical-link-${process.pid}-${Date.now()}`);
+		try {
+			symlinkSync(workspace, link);
+			writeSessionRecord(record({ cwd: workspace }), dir);
+			expect(findLiveSessionInDirectory(link, dir)?.id).toBe("s1");
+		} finally {
+			rmSync(link, { force: true });
+		}
+	});
+
+	it("holds one atomic launch lock per canonical directory", () => {
+		const dir = agentDir();
+		const workspace = mkdtempSync(join(tmpdir(), "neta-lock-workspace-"));
+		dirs.push(workspace);
+		const first = tryAcquireSessionLock(workspace, dir);
+		try {
+			expect(first).toBeDefined();
+			expect(tryAcquireSessionLock(workspace, dir)).toBeUndefined();
+		} finally {
+			releaseSessionLock(first);
+		}
+		expect(tryAcquireSessionLock(workspace, dir)).toBeDefined();
 	});
 
 	describe("finding the session a command means", () => {

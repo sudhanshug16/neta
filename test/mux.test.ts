@@ -4,9 +4,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NoMux, selectMux } from "../src/mux/index.ts";
 import { createPaneHost, tabTitle } from "../src/mux/panes.ts";
-import { newWindowArgs, TmuxAdapter, newSessionArgs as tmuxSessionArgs } from "../src/mux/tmux.ts";
+import {
+	newWindowArgs,
+	TmuxAdapter,
+	attachSessionArgs as tmuxAttachSessionArgs,
+	newSessionArgs as tmuxSessionArgs,
+} from "../src/mux/tmux.ts";
 import type { MuxAdapter, ProcessSpec } from "../src/mux/types.ts";
-import { leaderLayout, newSessionArgs, newTabArgs, ZellijAdapter } from "../src/mux/zellij.ts";
+import {
+	leaderLayout,
+	newSessionArgs,
+	newTabArgs,
+	ZellijAdapter,
+	attachSessionArgs as zellijAttachSessionArgs,
+} from "../src/mux/zellij.ts";
 
 const leader: ProcessSpec = { command: "/usr/local/bin/claude", args: ["--append-system-prompt", "be a lead"] };
 
@@ -43,6 +54,10 @@ describe("tmux", () => {
 			"--",
 			"leader",
 		]);
+	});
+
+	it("reattaches a recorded tmux session with its exact name", () => {
+		expect(tmuxAttachSessionArgs("neta-2")).toEqual(["attach", "-t", "neta-2"]);
 	});
 
 	// A window, not a split. Splitting the leader's window shrinks the thing the
@@ -191,6 +206,10 @@ describe("zellij", () => {
 
 		expect(args.slice(0, 4)).toEqual(["--session", "neta-1", "--new-session-with-layout", "/tmp/layout.kdl"]);
 		expect(args).not.toContain("--layout");
+	});
+
+	it("reattaches a recorded Zellij session with its exact name", () => {
+		expect(zellijAttachSessionArgs("neta-1")).toEqual(["attach", "neta-1"]);
 	});
 });
 

@@ -24,6 +24,16 @@ and removes its session file. If it dies without cleaning up (a crash,
 file, its socket, and any recorded worker process groups — each checked
 against its recorded start time first, so a recycled pid is never killed.
 
+There is at most one live Neta session per real directory. Before a bare
+`neta` launch checks the registry, it sweeps dead sessions, resolves symlinks
+on both directory paths, and takes a directory-specific launch lock through
+registration. A second launch reattaches the recorded Zellij or tmux session;
+for a headless session it refuses and prints the session id, pid, start time,
+and the `workers`, `watch`, `kill`, and OS `kill` routes. Different directories
+and Git worktrees have different real paths, so each can run its own session.
+That normally means one writer slot per directory; separate subdirectories of
+one repository still have separate sessions and writer slots.
+
 ## The two doors
 
 Two doors reach one manager, but they do not carry the same operations. The

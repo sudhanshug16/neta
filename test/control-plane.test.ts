@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { listSessions } from "../src/session.ts";
+import { listSessions, tryAcquireSessionLock } from "../src/session.ts";
 import { waitFor } from "./helpers.ts";
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
@@ -59,6 +59,36 @@ describe("neta mcp", () => {
 		expect(sessions[0].id).toBe("smoke");
 		expect(sessions[0].leader).toBe("claude");
 		expect(existsSync(sessions[0].socket)).toBe(true);
+	});
+
+	it("persists the launcher's mux session name before releasing its launch lock", async () => {
+		const home = mkdtempSync(join(tmpdir(), "neta-mux-record-"));
+		const lock = tryAcquireSessionLock(process.cwd(), home);
+		if (!lock) throw new Error("Could not acquire test launch lock.");
+		const muxTransport = new StdioClientTransport({
+			command: process.execPath,
+			args: [CLI, "mcp"],
+			env: {
+				...process.env,
+				NETA_DIR: home,
+				NETA_MUX: "tmux",
+				NETA_MUX_SESSION_NAME: "neta-mux-record",
+				NETA_PANES: "0",
+				NETA_SESSION_ID: "mux-record",
+				NETA_SESSION_LOCK_PATH: lock.path,
+				NETA_SESSION_LOCK_TOKEN: lock.token,
+			} as Record<string, string>,
+			stderr: "ignore",
+		});
+		const muxClient = new Client({ name: "vendor-cli", version: "0.0.0" });
+		try {
+			await muxClient.connect(muxTransport);
+			expect(listSessions(home)[0]?.mux).toEqual({ id: "tmux", name: "neta-mux-record" });
+			expect(existsSync(lock.path)).toBe(false);
+		} finally {
+			await muxClient.close();
+			rmSync(home, { recursive: true, force: true });
+		}
 	});
 
 	// The second door: a person in another window runs `neta workers` and reaches

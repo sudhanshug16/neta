@@ -6,13 +6,23 @@
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { execFile } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFile, spawn } from "node:child_process";
+import {
+	chmodSync,
+	existsSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { writeSessionRecord } from "../src/session.ts";
+import { listSessions, writeSessionRecord } from "../src/session.ts";
+import { waitFor } from "./helpers.ts";
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const FAKE_LEADER = fileURLToPath(new URL("./fixtures/fake-leader.mjs", import.meta.url));
@@ -47,6 +57,7 @@ async function launch(
 	backend: string,
 	extra: string[] = [],
 	beforeLaunch?: (agentDir: string) => void,
+	extraEnv: Record<string, string> = {},
 ): Promise<LaunchRecord> {
 	const binDir = fakeBackend(backend);
 	const agentDir = scratch("neta-home-");
@@ -61,12 +72,33 @@ async function launch(
 			PATH: `${binDir}${delimiter}${process.env.PATH}`,
 			NETA_DIR: agentDir,
 			FAKE_LEADER_RECORD: record,
+			...extraEnv,
 			// Keep the Codex overlay away from the developer's real home.
 			CODEX_HOME: join(agentDir, "codex"),
 		},
 	});
 
 	return JSON.parse(readFileSync(record, "utf-8")) as LaunchRecord;
+}
+
+function launchProcess(
+	backend: string,
+	cwd: string,
+	env: Record<string, string>,
+): Promise<{ code: number; stderr: string }> {
+	const child = spawn(process.execPath, [CLI, "--leader", backend, "--mux", "none"], {
+		cwd,
+		env,
+		stdio: ["ignore", "ignore", "pipe"],
+	});
+	let stderr = "";
+	child.stderr.on("data", (chunk: Buffer) => {
+		stderr += chunk.toString();
+	});
+	return new Promise((resolve, reject) => {
+		child.on("error", reject);
+		child.on("close", (code, signal) => resolve({ code: signal ? 1 : (code ?? 0), stderr }));
+	});
 }
 
 afterEach(() => {
@@ -147,6 +179,161 @@ describe("neta (launching a leader)", () => {
 
 		expect(launched.env.NETA_SOCKET).toMatch(/neta-.*\.sock$/);
 		expect(existsSync(socket)).toBe(false);
+	});
+
+	it("refuses a second headless launch in the same real directory without adding a registry entry", async () => {
+		const binDir = fakeBackend("claude");
+		const agentDir = scratch("neta-home-");
+		const cwd = scratch("neta-repo-");
+		writeSessionRecord(
+			{
+				id: "headless-live",
+				socket: "/tmp/neta-headless-live.sock",
+				token: "token",
+				cwd,
+				leader: "claude",
+				pid: process.pid,
+				startedAt: 1_700_000_000_000,
+			},
+			agentDir,
+		);
+
+		await expect(
+			run(process.execPath, [CLI, "--leader", "claude", "--mux", "none"], {
+				cwd,
+				env: { ...process.env, PATH: `${binDir}${delimiter}${process.env.PATH}`, NETA_DIR: agentDir },
+			}),
+		).rejects.toThrow(
+			/headless-live.*pid .*started .*neta workers --session headless-live.*neta watch <worker>.*neta kill <worker>.*kill /s,
+		);
+		expect(readdirSync(join(agentDir, "sessions")).filter((name) => name.endsWith(".json"))).toEqual([
+			"headless-live.json",
+		]);
+	});
+
+	it("reattaches a live tmux directory session instead of launching another leader", async () => {
+		const binDir = fakeBackend("claude");
+		const agentDir = scratch("neta-home-");
+		const cwd = scratch("neta-repo-");
+		const attachRecord = join(scratch("neta-attach-"), "tmux.txt");
+		const tmux = join(binDir, "tmux");
+		writeFileSync(tmux, '#!/bin/sh\nprintf "%s\\n" "$@" > "$TMUX_ATTACH_RECORD"\n', "utf-8");
+		chmodSync(tmux, 0o755);
+		writeSessionRecord(
+			{
+				id: "tmux-live",
+				socket: "/tmp/neta-tmux-live.sock",
+				token: "token",
+				cwd,
+				leader: "claude",
+				pid: process.pid,
+				startedAt: Date.now(),
+				mux: { id: "tmux", name: "neta-tmux-live" },
+			},
+			agentDir,
+		);
+
+		await run(process.execPath, [CLI, "--leader", "claude", "--mux", "none"], {
+			cwd,
+			env: {
+				...process.env,
+				PATH: `${binDir}${delimiter}${process.env.PATH}`,
+				NETA_DIR: agentDir,
+				TMUX_ATTACH_RECORD: attachRecord,
+			},
+		});
+
+		expect(readFileSync(attachRecord, "utf-8").trim().split("\n")).toEqual(["attach", "-t", "neta-tmux-live"]);
+		expect(readdirSync(join(agentDir, "sessions")).filter((name) => name.endsWith(".json"))).toEqual([
+			"tmux-live.json",
+		]);
+	});
+
+	it("allows another directory to launch its own session", async () => {
+		const otherDir = scratch("neta-other-repo-");
+		const binDir = fakeBackend("claude");
+		const agentDir = scratch("neta-home-");
+		writeSessionRecord(
+			{
+				id: "other-live",
+				socket: "/tmp/neta-other-live.sock",
+				token: "token",
+				cwd: otherDir,
+				leader: "claude",
+				pid: process.pid,
+				startedAt: Date.now(),
+			},
+			agentDir,
+		);
+		const cwd = scratch("neta-repo-");
+		const record = join(scratch("neta-record-"), "launch.json");
+
+		await run(process.execPath, [CLI, "--leader", "claude", "--mux", "none"], {
+			cwd,
+			env: {
+				...process.env,
+				PATH: `${binDir}${delimiter}${process.env.PATH}`,
+				NETA_DIR: agentDir,
+				FAKE_LEADER_RECORD: record,
+			},
+		});
+
+		expect((JSON.parse(readFileSync(record, "utf-8")) as LaunchRecord).cwd).toBe(realpathSync(cwd));
+	});
+
+	it("sweeps a dead same-directory record before registering the replacement", async () => {
+		const binDir = fakeBackend("claude");
+		const agentDir = scratch("neta-home-");
+		const cwd = scratch("neta-repo-");
+		writeSessionRecord(
+			{
+				id: "dead-same-dir",
+				socket: "/tmp/neta-dead-same-dir.sock",
+				token: "token",
+				cwd,
+				leader: "claude",
+				pid: 2147483646,
+				startedAt: 0,
+			},
+			agentDir,
+		);
+		const record = join(scratch("neta-record-"), "launch.json");
+
+		await run(process.execPath, [CLI, "--leader", "claude", "--mux", "none"], {
+			cwd,
+			env: {
+				...process.env,
+				PATH: `${binDir}${delimiter}${process.env.PATH}`,
+				NETA_DIR: agentDir,
+				FAKE_LEADER_RECORD: record,
+				FAKE_LEADER_REGISTER_SESSION: "1",
+			},
+		});
+
+		const records = readdirSync(join(agentDir, "sessions")).filter((name) => name.endsWith(".json"));
+		expect(records).toHaveLength(1);
+		expect(records[0]).not.toBe("dead-same-dir.json");
+	});
+
+	it("registers exactly one session when two launches race in one directory", async () => {
+		const binDir = fakeBackend("claude");
+		const agentDir = scratch("neta-home-");
+		const cwd = scratch("neta-repo-");
+		const env = {
+			...process.env,
+			PATH: `${binDir}${delimiter}${process.env.PATH}`,
+			NETA_DIR: agentDir,
+			FAKE_LEADER_REGISTER_SESSION: "1",
+			FAKE_LEADER_HOLD_MS: "1000",
+		};
+
+		const first = launchProcess("claude", cwd, env);
+		const second = launchProcess("claude", cwd, env);
+		await waitFor(() => expect(listSessions(agentDir)).toHaveLength(1), 5000);
+		expect(listSessions(agentDir)).toHaveLength(1);
+		const outcomes = await Promise.all([first, second]);
+		expect(outcomes.map((outcome) => outcome.code).sort()).toEqual([0, 1]);
+		expect(outcomes.find((outcome) => outcome.code === 1)?.stderr).toContain("runs headless");
 	});
 
 	// Generated config carries a token; leaving it in /tmp after the session

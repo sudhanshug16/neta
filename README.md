@@ -155,11 +155,19 @@ loudly to its result — so the next writer is briefed from `git log`. That is a
 warning, not a hard gate: Neta reports the dirty handoff rather than blocking
 it.
 
+Because bare `neta` allows one live session per directory, the common case is
+one writer slot per directory. Different subdirectories of one repository can
+still host separate sessions and therefore separate writer slots.
+
 ## Sessions
 
-Each `neta` launch is one session, and several can run at once. Neta records
-each in `~/.neta/sessions/`, so any terminal reaches them; add
-`--session <id>` when more than one is running.
+There is at most one live `neta` session per directory. Running bare `neta`
+again in that directory reattaches its Zellij or tmux session instead of
+creating another one. A headless session refuses the second launch and names
+the commands to reach or stop it. Different directories — including different
+Git worktrees — run their own sessions. Neta records each session in
+`~/.neta/sessions/`, so any terminal reaches it; add `--session <id>` when
+more than one directory has a live session.
 
 ```
 neta sessions              leader sessions running on this machine

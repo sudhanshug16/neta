@@ -91,6 +91,11 @@ export function newSessionArgs(sessionName: string, layoutPath: string): string[
 	];
 }
 
+/** `zellij attach <name>` reconnects a later `neta` invocation to its leader. */
+export function attachSessionArgs(sessionName: string): string[] {
+	return ["attach", sessionName];
+}
+
 /**
  * `zellij action new-tab --name <title> --cwd <cwd> --close-on-exit -- cmd args…`
  *
