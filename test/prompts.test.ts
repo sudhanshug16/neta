@@ -88,6 +88,15 @@ describe("leader prompt", () => {
 		expect(prompt).toContain("say so in your first reply and stop");
 	});
 
+	// Observed twice with codex leaders: spawn workers, end the turn with
+	// "all running" — results arrive to nobody until the user prods again.
+	it("forbids ending the turn while spawned workers still run", () => {
+		const prompt = buildLeaderPrompt({ tiers: DEFAULT_TIERS });
+
+		expect(prompt).toContain("Never end your turn while workers you spawned are still running");
+		expect(prompt).toContain('never with "workers are running"');
+	});
+
 	it("closes the bash hole in words as well as in enforcement", () => {
 		expect(buildLeaderPrompt({ tiers: DEFAULT_TIERS })).toContain("sed -i");
 	});

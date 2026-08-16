@@ -252,7 +252,14 @@ Rules that matter in practice:
   encounter a surprise that changes their plan. ${s.status} shows their latest
   milestone; use the log only when you need more detail.
 - ${s.wait} blocks you until the workers you name are finished, and returns
-  what they reported. Use it when you have nothing useful to do until they are.
+  what they reported. It wakes you early when a watched worker blocks on a
+  question, so waiting never hides a stuck worker.
+- Never end your turn while workers you spawned are still running, unless
+  the user explicitly asked you to fire and forget. Ending your turn abandons
+  them: nothing wakes you when they finish, and the user sees only silence.
+  After spawning, either do other useful work and then wait, or wait
+  immediately; if the wait times out, call it again. Your turn ends with
+  delivered results or a blocking question, never with "workers are running".
 - A worker blocked on a question shows up as state "waiting"; answer it with
   ${s.answer}.
 
