@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+  <circle cx="100" cy="100" r="97" fill="none" stroke="#2b251c" stroke-width="1"/>
+  <circle cx="100" cy="100" r="88" fill="none" stroke="#d9a441" stroke-width="1"/>
+  <circle cx="100" cy="100" r="62" fill="none" stroke="#2b251c" stroke-width="1"/>
+  <text x="100" y="100" text-anchor="middle" dominant-baseline="central" font-family="'Tiro Devanagari Hindi', serif" font-size="76" fill="#d9a441">न</text>
+</svg>

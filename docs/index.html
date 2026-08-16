@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Neta — a leader agent that delegates to worker agents</title>
+<meta name="description" content="Neta delegates work to tiered worker agents inside the CLI you already use — the leader reads, decides and verifies, and cannot edit files.">
+<meta property="og:title" content="Neta — a leader agent that delegates to worker agents">
+<meta property="og:description" content="Neta delegates work to tiered worker agents inside the CLI you already use — the leader reads, decides and verifies, and cannot edit files.">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Spectral:ital,wght@0,300;0,400;0,500;0,600;1,300;1,400&family=Tiro+Devanagari+Hindi:ital@0;1&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="nav">
+  <div class="wrap nav-inner">
+    <a class="nav-brand" href="#">
+      <span class="mark">न</span>
+      <span class="name">Neta</span>
+    </a>
+    <nav class="nav-links">
+      <a href="https://github.com/sudhanshug16/neta#readme">Docs</a>
+      <a href="https://github.com/sudhanshug16/neta/blob/main/MANIFESTO.md">Manifesto</a>
+      <a href="https://github.com/sudhanshug16/neta">GitHub</a>
+      <a class="npm" href="https://www.npmjs.com/package/@intervene/neta">npm 1.0.0</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<section class="hero">
+  <div class="wrap">
+    <div class="hero-grid">
+      <div>
+        <div class="kicker"><span class="deva">नेता</span> · Hindi: leader</div>
+        <h1>You talk to a leader.<br>It runs the team.</h1>
+        <p class="lead">Neta delegates work to tiered worker agents and drives them until the problem is done. The leader never edits files — that restriction is enforced by your CLI's own machinery, not suggested in a prompt.</p>
+        <p class="sublead">And it has no interface of its own. You stay in Claude Code, Codex or OpenCode — the UI you already use and pay for. Neta injects instructions, tools and restrictions, then gets out of the way.</p>
+        <div class="chips">
+          <span class="chip brass">MIT</span>
+          <span class="chip phosphor">one bundled file</span>
+          <span class="chip steel">no runtime deps</span>
+          <span class="chip muted">node 22.19+</span>
+        </div>
+      </div>
+      <div>
+        <div class="term">
+          <div><span class="t-muted">$</span> npm install -g @intervene/neta</div>
+          <div><span class="t-muted">$</span> cd your-repo &amp;&amp; neta</div>
+          <div></div>
+          <div class="t-muted">launching <span class="t-paper">claude</span> as leader · read-only enforced</div>
+          <div></div>
+          <div class="t-paper"><span class="t-brass">›</span> the signup flow drops 4% of users at the email</div>
+          <div class="t-paper">  step. find out why and fix it.</div>
+          <div></div>
+          <div class="t-dim">● neta_spawn scout/staff  ×2</div>
+          <div class="t-dim">● neta_wait  ro1 ro2</div>
+          <div class="t-paper"><span class="t-steel">»</span> ro1: the token expires before the mail provider</div>
+          <div class="t-paper">  retries</div>
+          <div class="t-dim">● neta_spawn worker/senior --writer</div>
+          <div class="t-dim">● neta_spawn reviewer/senior</div>
+          <div></div>
+          <div class="t-paper"><span class="t-phosphor">✓</span> fixed, reviewed, committed as 4a9f2c1</div>
+          <div class="t-dim">  4 workers · 61,204 tokens · est. $0.38</div>
+          <div></div>
+          <div><span class="t-brass">›</span> <span class="caret">▌</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="band principles">
+  <div class="wrap">
+    <div class="principles-grid">
+      <div class="principle">
+        <div class="num">01</div>
+        <h3>A lead, not an implementer</h3>
+        <p>The leader reads, decides, delegates and verifies. Its edit tools are removed by the vendor's own permission system, and shell writes are blocked too — a leader with a way to edit eventually edits.</p>
+      </div>
+      <div class="principle">
+        <div class="num">02</div>
+        <h3>One repo, one writer</h3>
+        <p>Reads parallelize; writes serialize. A second writer is refused, not raced — it queues and starts when the slot frees. A writer commits everything before handing off.</p>
+      </div>
+      <div class="principle">
+        <div class="num">03</div>
+        <h3>Enforcement over instruction</h3>
+        <p>Every restriction that matters is a mechanism: a permission rule, a hook, a kernel sandbox, a protocol rejection. A rule that lives only in a prompt is a suggestion.</p>
+      </div>
+      <div class="principle">
+        <div class="num">04</div>
+        <h3>Finish, then report</h3>
+        <p>A CHARTER.md says which decisions the leader may take on your behalf. Inside that boundary it just does the work. Workers are quiet; only terminal events and blocking questions push.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="band">
+  <div class="wrap">
+    <div class="sec-head">
+      <h2>Tiers, not model names</h2>
+      <span class="sec-label">you decide what each one costs</span>
+    </div>
+    <div class="card-grid">
+      <div class="card tier-steel">
+        <div class="tier-head"><span class="swatch"></span>junior</div>
+        <p>Mechanical work with a precise spec: renames, applying a reviewed diff, running tests and reporting output. It only gets exact instructions.</p>
+      </div>
+      <div class="card tier-phosphor">
+        <div class="tier-head"><span class="swatch"></span>senior</div>
+        <p>Well-scoped features, bug fixes with tests, code review.</p>
+      </div>
+      <div class="card tier-violet">
+        <div class="tier-head"><span class="swatch"></span>staff</div>
+        <p>Ambiguity: unknown-cause debugging, design work, debates.</p>
+      </div>
+    </div>
+    <p class="followup">The leader asks for a junior, senior or staff worker; you map tiers to backends in settings, and you can mix vendors — putting staff work on Codex while everything else stays on Claude. Unconfigured tiers spread deterministically across whatever you have installed, and reviewers prefer a different vendor than the last writer.</p>
+  </div>
+</section>
+
+<section class="band">
+  <div class="wrap">
+    <div class="sec-head">
+      <h2>The leader cannot write</h2>
+      <span class="sec-label">enforced by each vendor, not by us</span>
+    </div>
+    <div class="et-scroll">
+      <div class="et-row et-head">
+        <div>Leader</div>
+        <div>Typed edit tools</div>
+        <div>Its shell</div>
+        <div>Strength</div>
+      </div>
+      <div class="et-row">
+        <div class="leader">Claude Code</div>
+        <div class="mech">denied by permission rules</div>
+        <div class="mech">neta guard as a PreToolUse hook</div>
+        <div class="strength ember">denylist</div>
+      </div>
+      <div class="et-row">
+        <div class="leader">Codex</div>
+        <div class="mech">kernel sandbox</div>
+        <div class="mech">same kernel sandbox, read-only</div>
+        <div class="strength phosphor">kernel</div>
+      </div>
+      <div class="et-row">
+        <div class="leader">OpenCode</div>
+        <div class="mech">permission.edit: deny</div>
+        <div class="mech">denied bash patterns</div>
+        <div class="strength ember">denylist</div>
+      </div>
+    </div>
+    <p class="et-note">Codex's is the strongest — the kernel refuses the write. The other two rely on Neta's guard, which is a denylist, and a denylist can be incomplete. That is worth knowing rather than papering over.</p>
+  </div>
+</section>
+
+<section class="band">
+  <div class="wrap">
+    <div class="sec-head">
+      <h2>Workers you can take over</h2>
+      <span class="sec-label">a pane each, and a door out</span>
+    </div>
+    <div class="two-col">
+      <div>
+        <p>A worker is an ordinary Claude Code or Codex session — same history, same id. <code class="brass">neta attach rw3</code> runs that CLI's own resume command and drops you inside the conversation, where you can read what it did and keep talking to it yourself. Neta drove it; you can finish it.</p>
+        <p>With Zellij or tmux, each worker also gets a tab streaming its log — prose as markdown, tool calls as one-liners, changes as coloured diffs, and an input line that talks to the worker. Panes read without consuming, so nothing shown there is taken from the leader. Without a multiplexer, workers run headless and nothing else changes.</p>
+        <div class="cmdlist">
+          <div class="cmd-row"><span class="cmd">neta workers</span><span class="what">what is running, and what it has cost</span></div>
+          <div class="cmd-row"><span class="cmd">neta watch rw1</span><span class="what">watch one worker, and type to it</span></div>
+          <div class="cmd-row"><span class="cmd">neta attach rw1</span><span class="what">open it in its own CLI and take over</span></div>
+          <div class="cmd-row"><span class="cmd">neta send rw1 &lt;msg&gt;</span><span class="what">give a running worker more instructions</span></div>
+          <div class="cmd-row"><span class="cmd">neta answer rw1 &lt;text&gt;</span><span class="what">unblock a worker that asked you something</span></div>
+          <div class="cmd-row"><span class="cmd">neta kill rw1</span><span class="what">stop it</span></div>
+          <div class="cmd-row"><span class="cmd">neta sessions</span><span class="what">leader sessions running on this machine</span></div>
+        </div>
+      </div>
+      <div>
+        <div class="term">
+          <div><span class="t-paper t-bold">rw3 auth-refactor</span><span class="t-muted"> · worker/senior · claude · writer</span></div>
+          <div class="t-muted">task: sign the session token, tests included</div>
+          <div></div>
+          <div class="t-steel t-bold">Reading the session layer</div>
+          <div class="t-paper">Two call sites set the cookie directly, so the</div>
+          <div class="t-paper">token is signed in <span class="t-brass">session.ts</span> and read back in</div>
+          <div class="t-paper">the middleware.</div>
+          <div></div>
+          <div class="t-dim">● read src/session.ts</div>
+          <div class="t-dim">● grep "Set-Cookie" src/</div>
+          <div></div>
+          <div class="t-paper t-bold">src/session.ts</div>
+          <div class="t-steel">@@ -12,7 +12,9 @@</div>
+          <div class="t-brick">-  res.setHeader("Set-Cookie", raw);</div>
+          <div class="t-phosphor">+  const token = sign(payload, secret);</div>
+          <div></div>
+          <div class="t-paper"><span class="t-steel">»</span> 41/41 tests pass</div>
+          <div></div>
+          <div class="t-dim"><span class="t-steel">⠹</span> running · 18,240 tokens, est. $0.11</div>
+          <div></div>
+          <div><span class="t-dim">│</span> <span class="t-paper">commit before you hand off</span><span class="caret">▌</span> <span class="t-dim">│</span></div>
+          <div class="t-dim">enter sends to the worker · ctrl+c closes</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="band">
+  <div class="wrap">
+    <div class="sec-head">
+      <h2>Backends &amp; playbooks</h2>
+      <span class="sec-label">one ACP path, three vendors</span>
+    </div>
+    <div class="card-grid-2">
+      <div class="card">
+        <h3>Every worker runs on a login you already have</h3>
+        <div class="card-list">
+          <div><span class="name">Claude Code</span> — <code>claude-code-acp</code>, Zed-maintained — your Claude subscription</div>
+          <div><span class="name">Codex</span> — <code>codex-acp</code> — your ChatGPT subscription</div>
+          <div><span class="name">OpenCode</span> — <code>opencode acp</code>, native — its own config</div>
+        </div>
+        <p class="card-foot">Driven over ACP through one internal transport — one code path, not one conditional per vendor. Cost runs on your subscription, not on API credit.</p>
+      </div>
+      <div class="card">
+        <h3>Flavors — playbooks the leader reaches for</h3>
+        <div class="card-list">
+          <div><span class="name mono">implement</span> — Decompose the task, spawn workers by tier, reviewer pass, iterate until clean, PR or merge per charter.</div>
+          <div><span class="name mono">decide</span> — For real tradeoffs: opposing stances assigned to debaters in a room, fixed rounds, a judge pass. The output is a memo that records the losing arguments.</div>
+          <div><span class="name mono">investigate</span> — Parallel scouts map the code or reproduce the bug; one synthesis. Feeds the other two.</div>
+        </div>
+        <p class="card-foot">Ordinary markdown you can override per project — as are the roles: scout, worker, reviewer, debater.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="band">
+  <div class="wrap">
+    <div class="sec-head">
+      <h2>Working end to end, and young</h2>
+      <span class="sec-label">what is verified, what isn't</span>
+    </div>
+    <div class="card-grid-2">
+      <div class="card">
+        <div class="card-label phosphor">Verified</div>
+        <div class="card-list">
+          <div>Every vendor mechanism was checked against the installed CLI before being coded.</div>
+          <div>333 tests drive the real control plane, real worker processes and a real socket.</div>
+          <div>The published package was installed from its tarball and driven through a full session.</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-label ember">Not verified, and worth knowing</div>
+        <div class="card-list">
+          <div>Only Codex workers are sandboxed at the kernel. Elsewhere a determined worker could still write through bash.</div>
+          <div>No long-running real-model use yet: the honesty rule is enforced by prompt and tools, not by a test.</div>
+          <div>Vendor flags change often. That is where breakage will show up first.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="band">
+  <div class="wrap">
+    <div class="cta-panel">
+      <div>
+        <h2>Run it in a repo you know</h2>
+        <p>Neta needs Node 22.19+ and at least one agent CLI on PATH. Nothing else to configure — tiers spread themselves across what you have until you say otherwise.</p>
+        <div class="cta-links">
+          <a href="https://github.com/sudhanshug16/neta#readme">Read the docs</a>
+          <a class="link-muted" href="https://github.com/sudhanshug16/neta/blob/main/MANIFESTO.md">The manifesto</a>
+        </div>
+      </div>
+      <div>
+        <div class="term">
+          <div><span class="t-muted">$</span> npm install -g @intervene/neta</div>
+          <div class="t-dim">  or: bun install -g @intervene/neta</div>
+          <div></div>
+          <div><span class="t-muted">$</span> neta</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap footer-inner">
+    <div class="footer-left">
+      <span class="mark">न</span>
+      <span>Neta · MIT · Sudhanshu Gautam</span>
+    </div>
+    <span>no UI of our own</span>
+  </div>
+</footer>
+
+</body>
+</html>
