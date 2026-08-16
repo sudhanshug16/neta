@@ -33,9 +33,12 @@ workers, collects their results, and reports once.
   `"staff": { "backend": "codex" }` puts staff work on `gpt-5.6-sol[xhigh]`
   while the rest stay on Claude. `neta models` lists what each backend offers.
 - **One writer at a time.** Reads parallelize; writes serialize. A second
-  writer is refused, not raced.
+  writer queues instead of racing.
+- **Write access in every worker id.** Writers are `rw<N>` and read-only
+  workers are `ro<N>`. They share one session counter, so a session might show
+  `rw1`, `ro2`, `ro3`, `rw4`.
 - **Workers you can take over.** A worker is an ordinary Claude Code or Codex
-  session — same history, same id — so `neta attach w1` opens it in that CLI's
+  session — same history, same id — so `neta attach ro1` opens it in that CLI's
   own interface, where you can read what it did and keep talking to it
   yourself. Neta drove it; you can finish it.
 - **A tab per worker, if you run a multiplexer.** With Zellij or tmux, each
@@ -89,12 +92,12 @@ neta -- --model opus       # pass arguments through to the agent CLI
 
 neta workers               # what is running, and what it has cost
 neta status                # writer slot, worker states, queue and open notes
-neta watch w1              # watch one worker, and type to talk to it
-neta attach w1             # open that worker in its own CLI and take over
-neta log w1                # its new lines since you last looked
-neta send w1 <message>     # give a running worker more instructions
-neta answer w1 <text>      # unblock a worker that asked you something
-neta kill w1               # stop it
+neta watch ro1             # watch one read-only worker, and type to talk to it
+neta attach ro1            # open that worker in its own CLI and take over
+neta log ro1               # its new lines since you last looked
+neta send rw2 <message>    # give a writer more instructions
+neta answer ro1 <text>     # unblock a worker that asked you something
+neta kill rw2              # stop it
 neta sessions              # leader sessions running on this machine
 neta --backends            # which agent CLIs are installed
 ```

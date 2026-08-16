@@ -28,21 +28,21 @@ describe("tmux", () => {
 	// A window, not a split. Splitting the leader's window shrinks the thing the
 	// user is typing into, and five workers made it unreadable.
 	it("puts a worker in its own window, leaving the leader focused", () => {
-		const args = newWindowArgs("w1 scout", { command: "neta", args: ["watch", "w1"] }, "/repo");
+		const args = newWindowArgs("ro1 scout", { command: "neta", args: ["watch", "ro1"] }, "/repo");
 
 		expect(args).toEqual([
 			"new-window",
 			"-d",
 			"-n",
-			"w1 scout",
+			"ro1 scout",
 			"-c",
 			"/repo",
 			"-e",
-			"NETA_PANE=w1 scout",
+			"NETA_PANE=ro1 scout",
 			"--",
 			"neta",
 			"watch",
-			"w1",
+			"ro1",
 		]);
 		expect(args).not.toContain("split-window");
 	});
@@ -125,18 +125,18 @@ describe("zellij", () => {
 	// A tab of its own, and one that disposes of itself: --close-on-exit is what
 	// lets a finished worker's tab disappear when the watcher exits.
 	it("opens a worker in its own tab, set to close when it ends", () => {
-		expect(newTabArgs("w1 scout", { command: "neta", args: ["watch", "w1"] }, "/repo")).toEqual([
+		expect(newTabArgs("ro1 scout", { command: "neta", args: ["watch", "ro1"] }, "/repo")).toEqual([
 			"action",
 			"new-tab",
 			"--name",
-			"w1 scout",
+			"ro1 scout",
 			"--cwd",
 			"/repo",
 			"--close-on-exit",
 			"--",
 			"neta",
 			"watch",
-			"w1",
+			"ro1",
 		]);
 	});
 
@@ -169,7 +169,7 @@ describe("zellij", () => {
 
 describe("worker views", () => {
 	const worker = {
-		id: "w1",
+		id: "ro1",
 		name: "auth flow",
 		role: "scout",
 		tier: "senior" as const,
@@ -201,15 +201,15 @@ describe("worker views", () => {
 	// The tab title is the only place a person sees which worker is which, and
 	// five tabs called "scout" say nothing.
 	it("titles the tab with the worker's id and name", () => {
-		expect(tabTitle("w1", "auth flow")).toBe("w1 auth flow");
-		expect(tabTitle("w1", "scout")).toBe("w1 scout");
+		expect(tabTitle("ro1", "auth flow")).toBe("ro1 auth flow");
+		expect(tabTitle("ro1", "scout")).toBe("ro1 scout");
 	});
 
 	it("keeps a long name short enough for a tab bar", () => {
-		const title = tabTitle("w12", "the entire websocket reconnect subsystem");
+		const title = tabTitle("ro12", "the entire websocket reconnect subsystem");
 
 		expect(title.length).toBeLessThanOrEqual(22);
-		expect(title.startsWith("w12 the")).toBe(true);
+		expect(title.startsWith("ro12 the")).toBe(true);
 		expect(title).toEndWith("…");
 	});
 
@@ -229,8 +229,8 @@ describe("worker views", () => {
 
 		host?.open(worker);
 
-		expect(calls[0].title).toBe("w1 auth flow");
-		expect(calls[0].args).toEqual(["/opt/cli.js", "watch", "w1", "--session", "s7", "--dir", "/home/u/.neta"]);
+		expect(calls[0].title).toBe("ro1 auth flow");
+		expect(calls[0].args).toEqual(["/opt/cli.js", "watch", "ro1", "--session", "s7", "--dir", "/home/u/.neta"]);
 	});
 
 	it("reports why a view could not open rather than losing it", () => {

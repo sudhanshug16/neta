@@ -94,9 +94,9 @@ describe("attach", () => {
 	it("opens the worker's own session in the backend's CLI", async () => {
 		await manager.spawn({ role: "scout", tier: "senior", task: "look", name: "auth flow" });
 		transports[0].finish({ ok: true, summary: "done" });
-		await manager.waitFor(["w1"], 5000);
+		await manager.waitFor(["ro1"], 5000);
 
-		const code = await attachWorker({ workerId: "w1", dryRun: true, write });
+		const code = await attachWorker({ workerId: "ro1", dryRun: true, write });
 
 		expect(code).toBe(0);
 		expect(lines).toContain(`claude --resume ${vendorSessionId}`);
@@ -107,7 +107,7 @@ describe("attach", () => {
 	it("warns when the worker is still being driven by the leader", async () => {
 		await manager.spawn({ role: "scout", tier: "senior", task: "look" });
 
-		await attachWorker({ workerId: "w1", dryRun: true, write });
+		await attachWorker({ workerId: "ro1", dryRun: true, write });
 
 		expect(lines.join(" ")).toContain("still running");
 		expect(lines.join(" ")).toContain("interleave");
@@ -117,17 +117,17 @@ describe("attach", () => {
 		vendorSessionId = undefined;
 		await manager.spawn({ role: "scout", tier: "senior", task: "look" });
 
-		const code = await attachWorker({ workerId: "w1", dryRun: true, write });
+		const code = await attachWorker({ workerId: "ro1", dryRun: true, write });
 
 		expect(code).toBe(1);
 		expect(lines.join(" ")).toContain("has not opened a backend session yet");
 	});
 
 	it("reports an unknown worker", async () => {
-		const code = await attachWorker({ workerId: "w9", dryRun: true, write });
+		const code = await attachWorker({ workerId: "ro9", dryRun: true, write });
 
 		expect(code).toBe(1);
-		expect(lines.join(" ")).toContain('Unknown worker "w9"');
+		expect(lines.join(" ")).toContain('Unknown worker "ro9"');
 	});
 });
 

@@ -209,7 +209,7 @@ export class WorkerManager implements ChannelHandler {
 		});
 		const backend = this.options.config.resolve(request.tier, backendName, writer);
 		const runtimeEnv = (await this.options.prepareEnv?.()) ?? {};
-		const id = `w${++this.counter}`;
+		const id = `${writer ? "rw" : "ro"}${++this.counter}`;
 		const scratchDir = await mkdtemp(join(tmpdir(), `neta-${id}-`));
 
 		const systemPrompt = [

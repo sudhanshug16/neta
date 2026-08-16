@@ -124,10 +124,10 @@ describe("watch", () => {
 	});
 
 	it("reports an unknown worker instead of hanging", async () => {
-		const code = await watchWorker({ workerId: "w42", once: true, hold: false, write });
+		const code = await watchWorker({ workerId: "ro42", once: true, hold: false, write });
 
 		expect(code).toBe(1);
-		expect(lines.join(" ")).toContain('Unknown worker "w42"');
+		expect(lines.join(" ")).toContain('Unknown worker "ro42"');
 	});
 
 	// A pane is started by the multiplexer's own process, which does not inherit
@@ -162,7 +162,7 @@ describe("watch", () => {
 		env.set(NETA_LEADER_ENV, "");
 		env.set("NETA_DIR", agentDir);
 
-		const code = await watchWorker({ workerId: "w1", once: true, hold: false, write, cwd: "/nowhere" });
+		const code = await watchWorker({ workerId: "ro1", once: true, hold: false, write, cwd: "/nowhere" });
 
 		expect(code).toBe(1);
 		expect(lines.join(" ")).toContain("No Neta session found");

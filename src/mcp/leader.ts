@@ -70,7 +70,7 @@ function statusReport(summaries: WorkerSummary[], maxResultChars = MAX_RESULT_CH
 		.join("\n\n");
 }
 
-/** "(unworked)", or the linked workers with their progress: "(w7 in progress, w8 queued)". */
+/** "(unworked)", or the linked workers with their progress: "(rw7 in progress, rw8 queued)". */
 function noteWorkersLabel(note: Note): string {
 	if (note.workers.length === 0) return " (unworked)";
 	return ` (${note.workers.map((w) => `${w.workerId} ${w.state === "running" ? "in progress" : w.state}`).join(", ")})`;
@@ -270,7 +270,9 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 				"workers, results are clipped to 3000 characters. Shows open notes at the end.",
 			inputSchema: {
 				type: "object",
-				properties: { workerId: { type: "string", description: "Only this worker. Omit for all." } },
+				properties: {
+					workerId: { type: "string", description: "Only this worker (for example, rw1 or ro2). Omit for all." },
+				},
 			},
 			async run(args) {
 				const workerId = optionalString(args, "workerId");
@@ -301,7 +303,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 			inputSchema: {
 				type: "object",
 				properties: {
-					workerId: { type: "string" },
+					workerId: { type: "string", description: "Worker id, such as rw1 or ro2." },
 					full: { type: "boolean", description: "Include all entries (tool, diff, thought). Default false." },
 				},
 				required: ["workerId"],
@@ -321,7 +323,11 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 			inputSchema: {
 				type: "object",
 				properties: {
-					workerIds: { type: "array", items: { type: "string" }, description: "Omit to wait for all running." },
+					workerIds: {
+						type: "array",
+						items: { type: "string" },
+						description: "Worker ids such as rw1 or ro2. Omit to wait for all running.",
+					},
 					timeoutSeconds: {
 						type: "number",
 						description: `Default ${DEFAULT_WAIT_SECONDS}, max ${MAX_WAIT_SECONDS}.`,
@@ -354,7 +360,10 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 				"starts. A finished worker errors; spawn a new worker instead.",
 			inputSchema: {
 				type: "object",
-				properties: { workerId: { type: "string" }, message: { type: "string" } },
+				properties: {
+					workerId: { type: "string", description: "Worker id, such as rw1 or ro2." },
+					message: { type: "string" },
+				},
 				required: ["workerId", "message"],
 			},
 			async run(args) {
@@ -368,7 +377,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 			inputSchema: {
 				type: "object",
 				properties: {
-					workerId: { type: "string" },
+					workerId: { type: "string", description: "Worker id, such as rw1 or ro2." },
 					answer: { type: "string", description: "Be specific; the worker acts on it directly." },
 				},
 				required: ["workerId", "answer"],
@@ -384,7 +393,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 				"Terminate a worker. Use it when the task changed or the worker is stuck; it releases the writer slot.",
 			inputSchema: {
 				type: "object",
-				properties: { workerId: { type: "string" } },
+				properties: { workerId: { type: "string", description: "Worker id, such as rw1 or ro2." } },
 				required: ["workerId"],
 			},
 			async run(args) {

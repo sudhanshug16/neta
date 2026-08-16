@@ -126,13 +126,13 @@ describe("leader CLI over the real shim", () => {
 
 		const listed = await neta(["workers"], asLeader());
 		expect(listed.stdout).toContain(
-			"w1 [scout/senior, read-only, model unknown — backend default] running — map the auth flow",
+			"ro1 [scout/senior, read-only, model unknown — backend default] running — map the auth flow",
 		);
 	});
 
 	it("carries the worker's own reply back to the leader", async () => {
 		await neta(["spawn", "--role", "scout", "--tier", "senior", "look around"], asLeader());
-		const waiting = neta(["wait", "w1", "--timeout", "10"], asLeader());
+		const waiting = neta(["wait", "ro1", "--timeout", "10"], asLeader());
 		transports[0].finish({ ok: true, summary: "auth lives in src/auth.ts" });
 
 		const result = await waiting;
@@ -145,17 +145,17 @@ describe("leader CLI over the real shim", () => {
 
 		const notified = await neta(["notify", "reading auth.ts"], {
 			[NETA_SOCKET_ENV]: address,
-			[NETA_WORKER_ENV]: "w1",
+			[NETA_WORKER_ENV]: "ro1",
 		});
 
 		expect(notified.code).toBe(0);
-		expect(manager.drainLog("w1").map((entry) => entry.text)).toContain("reading auth.ts");
+		expect(manager.drainLog("ro1").map((entry) => entry.text)).toContain("reading auth.ts");
 	});
 
 	it("refuses leader commands from a worker, which never holds the token", async () => {
 		const result = await neta(["spawn", "--role", "scout", "--tier", "senior", "escalate"], {
 			[NETA_SOCKET_ENV]: address,
-			[NETA_WORKER_ENV]: "w1",
+			[NETA_WORKER_ENV]: "ro1",
 			[NETA_LEADER_ENV]: "guessed-token",
 		});
 
@@ -165,9 +165,9 @@ describe("leader CLI over the real shim", () => {
 	});
 
 	it("reports an unknown worker instead of failing silently", async () => {
-		const result = await neta(["log", "w42"], asLeader());
+		const result = await neta(["log", "ro42"], asLeader());
 
 		expect(result.code).toBe(1);
-		expect(result.stderr).toContain('Unknown worker "w42"');
+		expect(result.stderr).toContain('Unknown worker "ro42"');
 	});
 });

@@ -33,7 +33,7 @@ describe("AcpWorkerTransport", () => {
 		const scratchDir = mkdtempSync(join(tmpdir(), "neta-acp-"));
 		tempDirs.push(scratchDir);
 		const options: TransportOptions = {
-			workerId: "w1",
+			workerId: "ro1",
 			cwd: process.cwd(),
 			env: {},
 			command: process.execPath,
@@ -168,7 +168,7 @@ describe("AcpWorkerTransport", () => {
 		const transport = createTransport(
 			false,
 			[],
-			[{ name: "neta", command: "/usr/bin/neta", args: ["mcp", "--worker"], env: { NETA_WORKER_ID: "w1" } }],
+			[{ name: "neta", command: "/usr/bin/neta", args: ["mcp", "--worker"], env: { NETA_WORKER_ID: "ro1" } }],
 		);
 		await transport.start();
 
@@ -176,7 +176,7 @@ describe("AcpWorkerTransport", () => {
 
 		expect(outcome.summary).toContain('"name":"neta"');
 		expect(outcome.summary).toContain('"args":["mcp","--worker"]');
-		expect(outcome.summary).toContain('{"name":"NETA_WORKER_ID","value":"w1"}');
+		expect(outcome.summary).toContain('{"name":"NETA_WORKER_ID","value":"ro1"}');
 	});
 
 	it("reports the negotiated model, mode and bridge from the backend", async () => {
@@ -252,7 +252,7 @@ describe("AcpWorkerTransport", () => {
 		const scratchDir = mkdtempSync(join(tmpdir(), "neta-acp-"));
 		tempDirs.push(scratchDir);
 		const transport = new AcpWorkerTransport({
-			workerId: "w2",
+			workerId: "ro2",
 			cwd: process.cwd(),
 			env: {},
 			command: join(scratchDir, "definitely-not-installed"),

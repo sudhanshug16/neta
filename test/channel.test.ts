@@ -69,14 +69,14 @@ describe("worker channel", () => {
 	});
 
 	it("answers notify immediately", async () => {
-		const response = await sendChannelRequest(address, { type: "notify", workerId: "w1", text: "halfway" });
+		const response = await sendChannelRequest(address, { type: "notify", workerId: "ro1", text: "halfway" });
 
 		expect(response).toEqual({ ok: true });
-		expect(notified).toEqual([{ workerId: "w1", text: "halfway" }]);
+		expect(notified).toEqual([{ workerId: "ro1", text: "halfway" }]);
 	});
 
 	it("keeps an ask open until the leader answers", async () => {
-		const pending = sendChannelRequest(address, { type: "ask", workerId: "w1", text: "which db?" });
+		const pending = sendChannelRequest(address, { type: "ask", workerId: "ro1", text: "which db?" });
 		await waitFor(() => expect(asked).toHaveLength(1));
 
 		asked[0].resolve({ ok: true, text: "postgres" });
@@ -94,7 +94,7 @@ describe("worker channel", () => {
 	describe("CLI subcommands", () => {
 		beforeEach(() => {
 			env.set(NETA_SOCKET_ENV, address);
-			env.set(NETA_WORKER_ENV, "w7");
+			env.set(NETA_WORKER_ENV, "ro7");
 		});
 
 		it("sends notify through the channel", async () => {
@@ -102,7 +102,7 @@ describe("worker channel", () => {
 
 			await expect(handleWorkerChannelCommand(["notify", "reading", "auth.ts"])).resolves.toBe(true);
 
-			expect(notified).toEqual([{ workerId: "w7", text: "reading auth.ts" }]);
+			expect(notified).toEqual([{ workerId: "ro7", text: "reading auth.ts" }]);
 			expect(log).toHaveBeenCalledWith("ok");
 			log.mockRestore();
 		});
@@ -211,12 +211,12 @@ describe("worker channel", () => {
 		it("converts a --timeout in seconds to milliseconds", async () => {
 			const log = spyOn(console, "log").mockImplementation(() => {});
 
-			await handleLeaderChannelCommand(["wait", "w1", "w2", "--timeout", "30"]);
+			await handleLeaderChannelCommand(["wait", "rw1", "ro2", "--timeout", "30"]);
 
 			expect(leaderRequests[0]).toEqual({
 				type: "wait",
 				token: "leader-token",
-				workerIds: ["w1", "w2"],
+				workerIds: ["rw1", "ro2"],
 				timeoutMs: 30_000,
 			});
 			log.mockRestore();

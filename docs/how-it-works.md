@@ -94,7 +94,9 @@ against both bridges:
 | Claude Code | `~/.claude/projects/<cwd>/<session-id>.jsonl` |
 | Codex | `~/.codex/sessions/<date>/rollout-…-<session-id>.jsonl` |
 
-So `neta attach w1` runs that CLI's own resume command — `claude --resume <id>`,
+Worker ids show access at a glance: writers use `rw<N>`, read-only workers use
+`ro<N>`, and both use one serial counter for the session. So `neta attach ro1`
+runs that CLI's own resume command — `claude --resume <id>`,
 `codex resume <id>` — and you are inside the worker's conversation in the
 interface you already know, able to read it properly and keep talking to it.
 

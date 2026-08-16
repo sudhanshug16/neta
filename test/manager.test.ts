@@ -100,6 +100,19 @@ describe("WorkerManager", () => {
 		expect(transport.prompts[0]).toBe("map the auth flow");
 	});
 
+	it("uses access prefixes with one serial counter, including queued writers", async () => {
+		const firstWriter = await manager.spawn({ role: "worker", tier: "senior", task: "first", writer: true });
+		const reader = await manager.spawn({ role: "scout", tier: "senior", task: "inspect" });
+		const queuedWriter = await manager.spawn({ role: "worker", tier: "senior", task: "second", writer: true });
+		const secondReader = await manager.spawn({ role: "reviewer", tier: "senior", task: "review" });
+
+		expect(firstWriter.id).toBe("rw1");
+		expect(reader.id).toBe("ro2");
+		expect(queuedWriter.id).toBe("rw3");
+		expect(queuedWriter.queuedBehind).toBe("rw1");
+		expect(secondReader.id).toBe("ro4");
+	});
+
 	// Finished workers' views stay readable until the leader moves on, then close
 	// themselves — otherwise a long session buries you in tabs of workers that
 	// ended an hour ago.
@@ -635,7 +648,7 @@ describe("WorkerManager", () => {
 
 			expect(response.ok).toBe(true);
 			expect(response.ok && response.text).toContain("Queued");
-			expect(response.ok && response.text).toContain("w1");
+			expect(response.ok && response.text).toContain("rw1");
 		});
 
 		it("lists workers, drains a log, and answers a blocked worker", async () => {
@@ -672,10 +685,10 @@ describe("WorkerManager", () => {
 		});
 
 		it("reports an unknown worker id with the ones that exist", async () => {
-			const response = await manager.leader({ type: "kill", token: manager.leaderToken, workerId: "w9" }, signal);
+			const response = await manager.leader({ type: "kill", token: manager.leaderToken, workerId: "ro9" }, signal);
 
 			expect(response.ok).toBe(false);
-			expect(response.ok === false && response.error).toContain('Unknown worker "w9"');
+			expect(response.ok === false && response.error).toContain('Unknown worker "ro9"');
 		});
 	});
 
@@ -701,22 +714,22 @@ describe("WorkerManager", () => {
 			});
 
 			// Spawn 3 workers with same tier, no explicit backend
-			const w1 = await multiManager.spawn({ role: "scout", tier: "senior", task: "task1" });
-			const w2 = await multiManager.spawn({ role: "scout", tier: "senior", task: "task2" });
-			const w3 = await multiManager.spawn({ role: "scout", tier: "senior", task: "task3" });
+			const first = await multiManager.spawn({ role: "scout", tier: "senior", task: "task1" });
+			const second = await multiManager.spawn({ role: "scout", tier: "senior", task: "task2" });
+			const third = await multiManager.spawn({ role: "scout", tier: "senior", task: "task3" });
 
 			// They should spread across backends
-			const backends = [w1.backend, w2.backend, w3.backend];
+			const backends = [first.backend, second.backend, third.backend];
 			expect(new Set(backends).size).toBeGreaterThan(1); // At least 2 different backends
 
 			// Spawn 3 more workers in the same session - should get the same pattern
-			const w4 = await multiManager.spawn({ role: "scout", tier: "senior", task: "task4" });
-			const w5 = await multiManager.spawn({ role: "scout", tier: "senior", task: "task5" });
-			const w6 = await multiManager.spawn({ role: "scout", tier: "senior", task: "task6" });
+			const fourth = await multiManager.spawn({ role: "scout", tier: "senior", task: "task4" });
+			const fifth = await multiManager.spawn({ role: "scout", tier: "senior", task: "task5" });
+			const sixth = await multiManager.spawn({ role: "scout", tier: "senior", task: "task6" });
 
-			expect(w4.backend).toBe(w1.backend);
-			expect(w5.backend).toBe(w2.backend);
-			expect(w6.backend).toBe(w3.backend);
+			expect(fourth.backend).toBe(first.backend);
+			expect(fifth.backend).toBe(second.backend);
+			expect(sixth.backend).toBe(third.backend);
 
 			await multiManager.dispose();
 			rmSync("/tmp/neta-test-spread.sock", { force: true });
