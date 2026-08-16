@@ -7,15 +7,22 @@ import { AcpConnection, chooseModel, sanitizeInheritedEnv } from "../src/acp/con
 import { AcpWorkerTransport, describeToolCall, paragraphFlushIndex, renderDiffText } from "../src/acp/transport.ts";
 import type { NegotiatedSession, TransportOptions, WorkerMcpServer } from "../src/orchestrator/transport.ts";
 import type { WorkerLogEntry, WorkerUsage } from "../src/types.ts";
+import { waitFor } from "./helpers.ts";
 
 const fakeAgent = fileURLToPath(new URL("./fixtures/fake-acp-agent.mjs", import.meta.url));
 
 describe("AcpWorkerTransport", () => {
 	const started: AcpWorkerTransport[] = [];
 	const tempDirs: string[] = [];
+	const grandchildPids: number[] = [];
 
 	afterEach(async () => {
 		for (const transport of started.splice(0)) await transport.kill();
+		for (const pid of grandchildPids.splice(0)) {
+			try {
+				process.kill(pid, "SIGKILL");
+			} catch {}
+		}
 		for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 		usageReports.length = 0;
 		sessionReports.length = 0;
@@ -290,6 +297,21 @@ describe("AcpWorkerTransport", () => {
 		expect(killDuration).toBeLessThan(4000);
 	});
 
+	it("waits for SIGTERM-ignoring grandchildren before resolving", async () => {
+		const transport = createTransport(false, []);
+		await transport.start();
+		const outcome = await transport.prompt("SPAWN_TRAP_SIGTERM_CHILD");
+		const pid = Number(outcome.summary.match(/grandchild:(\d+)/)?.[1]);
+		expect(pid).toBeGreaterThan(0);
+		grandchildPids.push(pid);
+
+		const killStart = Date.now();
+		await transport.kill();
+
+		expect(Date.now() - killStart).toBeGreaterThanOrEqual(2900);
+		await waitFor(() => expect(() => process.kill(pid, 0)).toThrow(), 1000);
+	});
+
 	it("kill() waits for process exit before resolving", async () => {
 		const transport = createTransport(true, []);
 		await transport.start();
@@ -328,7 +350,7 @@ describe("choosing a worker's model", () => {
 });
 
 describe("terminal permission gate", () => {
-	it("denies terminal writes loudly without blocking reads", () => {
+	it("denies terminal commands loudly without blocking reads", () => {
 		const denials: string[] = [];
 		const connection = new AcpConnection({
 			command: process.execPath,
@@ -360,10 +382,18 @@ describe("terminal permission gate", () => {
 				{ kind: "reject_once", name: "Reject", optionId: "reject" },
 			],
 		});
+		const execute = requestPermission.call(connection, {
+			toolCall: { toolCallId: "execute", title: "Run tests", kind: "execute", status: "pending" },
+			options: [
+				{ kind: "allow_once", name: "Allow", optionId: "allow" },
+				{ kind: "reject_once", name: "Reject", optionId: "reject" },
+			],
+		});
 
 		expect(write).toEqual({ outcome: { outcome: "selected", optionId: "reject" } });
 		expect(read).toEqual({ outcome: { outcome: "selected", optionId: "allow" } });
-		expect(denials).toEqual(["write:terminal"]);
+		expect(execute).toEqual({ outcome: { outcome: "selected", optionId: "reject" } });
+		expect(denials).toEqual(["write:terminal", "execute:terminal"]);
 	});
 });
 

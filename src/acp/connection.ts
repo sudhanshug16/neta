@@ -23,6 +23,7 @@ import { VERSION } from "../config.ts";
 
 /** Tool kinds a read-only agent may not perform. */
 export const MUTATING_TOOL_KINDS = new Set(["edit", "write", "delete", "move"]);
+const READ_ONLY_TOOL_KINDS = new Set(["read", "search", "list"]);
 
 const AUTH_REQUIRED_CODE = -32000;
 
@@ -364,47 +365,55 @@ export class AcpConnection {
 		if (this.killPromise) return this.killPromise;
 		const child = this.child;
 		this.child = undefined;
-		// A failed spawn has no process id and will never emit the exit event we
-		// wait for below. There is no process group to stop in that case.
-		if (!child || child.exitCode !== null || child.pid === undefined) return;
+		// A failed spawn has no process id and no process group to stop. Do not use
+		// exitCode here: npx can already be gone while the bridge it started still
+		// owns the detached process group.
+		if (!child || child.pid === undefined) return;
+
+		const pgid = child.pid;
+		const signalGroup = (signal: NodeJS.Signals) => {
+			try {
+				process.kill(-pgid, signal);
+			} catch {
+				child.kill(signal);
+			}
+		};
+		const groupAlive = (): boolean => {
+			try {
+				process.kill(-pgid, 0);
+				return true;
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+				// Negative process-group ids are not supported everywhere. The direct
+				// child is the best liveness signal on those platforms.
+				return child.exitCode === null;
+			}
+		};
 
 		this.killPromise = new Promise<void>((resolve) => {
-			let termTimer: ReturnType<typeof setTimeout> | undefined;
+			let pollTimer: ReturnType<typeof setTimeout> | undefined;
 			let killTimer: ReturnType<typeof setTimeout> | undefined;
-			const onExit = () => {
-				if (termTimer) clearTimeout(termTimer);
+			const done = () => {
+				if (pollTimer) clearTimeout(pollTimer);
 				if (killTimer) clearTimeout(killTimer);
 				resolve();
 			};
-			child.once("exit", onExit);
-			// `close()` above can race a backend that is already exiting. Register the
-			// handler first, then re-check so that an exit between the earlier check
-			// and listener registration cannot leave this promise pending forever.
-			if (child.exitCode !== null) {
-				onExit();
-				return;
-			}
-
-			// Signal the whole process group (npx and the bridge it spawned).
-			// On platforms where -pid fails, fall back to signaling just the parent.
-			termTimer = setTimeout(() => {
-				try {
-					if (child.pid) process.kill(-child.pid, "SIGTERM");
-				} catch {
-					child.kill("SIGTERM");
+			const poll = () => {
+				if (!groupAlive()) {
+					done();
+					return;
 				}
-			}, 0);
+				pollTimer = setTimeout(poll, 25);
+			};
 
-			// Escalate to SIGKILL if not exited within 3s.
+			// Signal the whole process group (npx and the bridge it spawned), then
+			// wait for the group rather than just npx. A launcher may exit immediately
+			// while a descendant keeps the ACP session alive.
+			signalGroup("SIGTERM");
 			killTimer = setTimeout(() => {
-				if (child.exitCode === null) {
-					try {
-						if (child.pid) process.kill(-child.pid, "SIGKILL");
-					} catch {
-						child.kill("SIGKILL");
-					}
-				}
+				if (groupAlive()) signalGroup("SIGKILL");
 			}, 3000);
+			poll();
 		});
 		return this.killPromise;
 	}
@@ -412,11 +421,11 @@ export class AcpConnection {
 	private requestPermission(params: acp.RequestPermissionRequest): acp.RequestPermissionResponse {
 		const kind = params.toolCall.kind ?? "other";
 		const title = params.toolCall.title ?? params.toolCall.toolCallId;
-		// Once terminal (done, failed or killed), deny mutations regardless of
-		// allowMutations. Reads stay available until the ACP process dies.
+		// Once terminal (done, failed or killed), only read-like requests remain
+		// valid; a finished worker has no legitimate terminal command to run.
 		const terminal = this.terminal || this.killed;
 		const mutation = MUTATING_TOOL_KINDS.has(kind);
-		const denied = mutation && (terminal || !this.options.allowMutations);
+		const denied = terminal ? !READ_ONLY_TOOL_KINDS.has(kind) : mutation && !this.options.allowMutations;
 
 		const option = denied
 			? pickOption(params.options, ["reject_once", "reject_always"])

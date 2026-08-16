@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+
 /**
  * Minimal ACP agent used to test the ACP worker transport without any real CLI
  * or model.
@@ -30,6 +31,7 @@
  *           no configOptions, like a backend that reports nothing
  */
 
+import { spawn } from "node:child_process";
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 
@@ -209,6 +211,17 @@ async function prompt(params, cx) {
 			update: { sessionUpdate: "current_mode_update", currentModeId: "plan" },
 		});
 		await say(cx, sessionId, "mode updated");
+		return { stopReason: "end_turn" };
+	}
+
+	if (text.includes("SPAWN_TRAP_SIGTERM_CHILD")) {
+		const child = spawn(process.execPath, [new URL("./sigterm-ignoring-child.mjs", import.meta.url).pathname], {
+			stdio: ["ignore", "pipe", "ignore"],
+		});
+		await new Promise((resolve) => child.stdout.once("data", resolve));
+		child.stdout.destroy();
+		process.once("SIGTERM", () => process.exit(0));
+		await say(cx, sessionId, `grandchild:${child.pid}`);
 		return { stopReason: "end_turn" };
 	}
 
