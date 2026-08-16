@@ -8,6 +8,7 @@ import {
 	newWindowArgs,
 	TmuxAdapter,
 	attachSessionArgs as tmuxAttachSessionArgs,
+	killSessionArgs as tmuxKillSessionArgs,
 	newSessionArgs as tmuxSessionArgs,
 } from "../src/mux/tmux.ts";
 import type { MuxAdapter, ProcessSpec } from "../src/mux/types.ts";
@@ -17,6 +18,7 @@ import {
 	newTabArgs,
 	ZellijAdapter,
 	attachSessionArgs as zellijAttachSessionArgs,
+	killSessionArgs as zellijKillSessionArgs,
 } from "../src/mux/zellij.ts";
 
 const leader: ProcessSpec = { command: "/usr/local/bin/claude", args: ["--append-system-prompt", "be a lead"] };
@@ -58,6 +60,10 @@ describe("tmux", () => {
 
 	it("reattaches a recorded tmux session with its exact name", () => {
 		expect(tmuxAttachSessionArgs("neta-2")).toEqual(["attach", "-t", "neta-2"]);
+	});
+
+	it("kills an orphaned tmux session with its exact name", () => {
+		expect(tmuxKillSessionArgs("neta-2")).toEqual(["kill-session", "-t", "neta-2"]);
 	});
 
 	// A window, not a split. Splitting the leader's window shrinks the thing the
@@ -210,6 +216,10 @@ describe("zellij", () => {
 
 	it("reattaches a recorded Zellij session with its exact name", () => {
 		expect(zellijAttachSessionArgs("neta-1")).toEqual(["attach", "neta-1"]);
+	});
+
+	it("kills an orphaned Zellij session with its exact name", () => {
+		expect(zellijKillSessionArgs("neta-1")).toEqual(["kill-session", "neta-1"]);
 	});
 });
 

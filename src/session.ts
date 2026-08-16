@@ -23,6 +23,7 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { getAgentDir } from "./config.ts";
+import { killSessionSpec } from "./mux/index.ts";
 
 export interface SessionRecord {
 	id: string;
@@ -63,6 +64,8 @@ export interface SessionSweepOptions {
 	processStartTime?: (pid: number) => string | undefined;
 	/** Emits identity-mismatch warnings without making cleanup fail. */
 	warn?: (message: string) => void;
+	/** Test seam for multiplexer cleanup; normal runs ignore muxes already gone. */
+	killMuxSession?: (mux: SessionMux) => void;
 }
 
 function sessionsDir(agentDir: string = getAgentDir()): string {
@@ -160,6 +163,11 @@ function isAlive(pid: number): boolean {
 	}
 }
 
+/** A session can be reattached only while the process that owns it is alive. */
+export function isSessionAlive(record: Pick<SessionRecord, "pid">): boolean {
+	return isAlive(record.pid);
+}
+
 /** A process identity stable across PID reuse for the lifetime of one boot. */
 export function processStartTime(pid: number): string | undefined {
 	if (!Number.isInteger(pid) || pid <= 1) return undefined;
@@ -201,6 +209,39 @@ function reapProcessGroup(
 	}
 }
 
+function killMuxSession(mux: SessionMux): void {
+	try {
+		const spec = killSessionSpec(mux.id, mux.name);
+		execFileSync(spec.command, spec.args, { stdio: "ignore" });
+	} catch {
+		// The mux may already be gone, or no longer be installed. Neither should
+		// stop registry recovery.
+	}
+}
+
+function hasDeletedCwd(record: SessionRecord): boolean {
+	try {
+		canonicalizeCwd(record.cwd);
+		return false;
+	} catch {
+		return true;
+	}
+}
+
+function tearDownSession(
+	record: SessionRecord,
+	agentDir: string,
+	identify: (pid: number) => string | undefined,
+	warn: (message: string) => void,
+	stopMux: (mux: SessionMux) => void,
+): void {
+	if (record.mux) stopMux(record.mux);
+	for (const group of Array.isArray(record.workerGroups) ? record.workerGroups : [])
+		reapProcessGroup(group, identify, warn);
+	if (typeof record.socket === "string" && isNetaSocket(record.socket)) rmSync(record.socket, { force: true });
+	removeSessionRecord(record.id, agentDir);
+}
+
 export function writeSessionRecord(record: SessionRecord, agentDir: string = getAgentDir()): string {
 	const dir = sessionsDir(agentDir);
 	mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -213,10 +254,11 @@ export function removeSessionRecord(id: string, agentDir: string = getAgentDir()
 	rmSync(join(sessionsDir(agentDir), `${id}.json`), { force: true });
 }
 
-/** Remove crash residue, but never touch a session whose manager is still alive. */
+/** Remove crashed sessions and sessions whose recorded directory has been deleted. */
 export function sweepStaleSessions(agentDir: string = getAgentDir(), options: SessionSweepOptions = {}): void {
 	const identify = options.processStartTime ?? processStartTime;
 	const warn = options.warn ?? console.warn;
+	const stopMux = options.killMuxSession ?? killMuxSession;
 	const dir = sessionsDir(agentDir);
 	if (!existsSync(dir)) return;
 	for (const name of readdirSync(dir)) {
@@ -229,11 +271,20 @@ export function sweepStaleSessions(agentDir: string = getAgentDir(), options: Se
 			rmSync(path, { force: true });
 			continue;
 		}
-		if (isAlive(record.pid)) continue;
-		for (const group of Array.isArray(record.workerGroups) ? record.workerGroups : [])
-			reapProcessGroup(group, identify, warn);
-		if (typeof record.socket === "string" && isNetaSocket(record.socket)) rmSync(record.socket, { force: true });
-		rmSync(path, { force: true });
+		const alive = isSessionAlive(record);
+		const deletedCwd = hasDeletedCwd(record);
+		if (alive && !deletedCwd) continue;
+		// A control plane can momentarily be in a directory that was deleted under
+		// it. Never have that process tear down its own still-running session.
+		if (record.pid === process.pid) continue;
+		if (alive && deletedCwd) {
+			try {
+				process.kill(record.pid, "SIGTERM");
+			} catch {
+				// It exited between the liveness check and the signal.
+			}
+		}
+		tearDownSession(record, agentDir, identify, warn, stopMux);
 	}
 }
 
@@ -258,7 +309,7 @@ function readLiveSessions(dir: string): SessionRecord[] {
 			rmSync(path, { force: true });
 			continue;
 		}
-		if (!isAlive(record.pid)) continue;
+		if (!isSessionAlive(record)) continue;
 		records.push(record);
 	}
 	return records.sort((a, b) => b.startedAt - a.startedAt);

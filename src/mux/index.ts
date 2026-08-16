@@ -7,9 +7,17 @@
  */
 
 import type { MuxMode } from "../settings.ts";
-import { TmuxAdapter, attachSessionArgs as tmuxAttachSessionArgs } from "./tmux.ts";
+import {
+	TmuxAdapter,
+	attachSessionArgs as tmuxAttachSessionArgs,
+	killSessionArgs as tmuxKillSessionArgs,
+} from "./tmux.ts";
 import type { MuxAdapter, MuxId, ProcessSpec } from "./types.ts";
-import { ZellijAdapter, attachSessionArgs as zellijAttachSessionArgs } from "./zellij.ts";
+import {
+	ZellijAdapter,
+	attachSessionArgs as zellijAttachSessionArgs,
+	killSessionArgs as zellijKillSessionArgs,
+} from "./zellij.ts";
 
 /** Headless: no panes, workers still run. */
 export class NoMux implements MuxAdapter {
@@ -51,6 +59,13 @@ export function attachSessionSpec(mux: Exclude<MuxId, "none">, sessionName: stri
 	return mux === "zellij"
 		? { command: "zellij", args: zellijAttachSessionArgs(sessionName) }
 		: { command: "tmux", args: tmuxAttachSessionArgs(sessionName) };
+}
+
+/** The direct command that removes a mux session after its leader has gone away. */
+export function killSessionSpec(mux: Exclude<MuxId, "none">, sessionName: string): ProcessSpec {
+	return mux === "zellij"
+		? { command: "zellij", args: zellijKillSessionArgs(sessionName) }
+		: { command: "tmux", args: tmuxKillSessionArgs(sessionName) };
 }
 
 export type { MuxAdapter, ProcessSpec };

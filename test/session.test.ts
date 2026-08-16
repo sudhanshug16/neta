@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,6 +19,9 @@ import { waitFor } from "./helpers.ts";
 
 const dirs: string[] = [];
 const SIGTERM_IGNORING_CHILD = fileURLToPath(new URL("./fixtures/sigterm-ignoring-child.mjs", import.meta.url));
+const FAKE_LEADER = fileURLToPath(new URL("./fixtures/fake-leader.mjs", import.meta.url));
+const tmuxAvailable = spawnSync("tmux", ["-V"], { stdio: "ignore" }).status === 0;
+const tmuxIt = tmuxAvailable ? it : it.skip;
 
 function agentDir(): string {
 	const dir = mkdtempSync(join(tmpdir(), "neta-registry-"));
@@ -31,7 +34,7 @@ function record(overrides: Partial<SessionRecord> = {}): SessionRecord {
 		id: "s1",
 		socket: "/tmp/neta-s1.sock",
 		token: "tok",
-		cwd: "/repo",
+		cwd: process.cwd(),
 		leader: "claude",
 		pid: process.pid,
 		startedAt: 1,
@@ -70,6 +73,31 @@ describe("session registry", () => {
 		writeSessionRecord(record({ id: "dead", pid: 2147483646 }), dir);
 
 		expect(listSessions(dir)).toEqual([]);
+	});
+
+	it("kills a recorded mux session while sweeping a dead manager", () => {
+		const dir = agentDir();
+		const killed: string[] = [];
+		writeSessionRecord(record({ id: "dead-mux", pid: 2147483646, mux: { id: "tmux", name: "neta-dead-mux" } }), dir);
+
+		sweepStaleSessions(dir, { killMuxSession: (mux) => killed.push(`${mux.id}:${mux.name}`) });
+
+		expect(killed).toEqual(["tmux:neta-dead-mux"]);
+		expect(existsSync(join(dir, "sessions", "dead-mux.json"))).toBe(false);
+	});
+
+	tmuxIt("kills a live tmux husk while sweeping a dead manager", () => {
+		const dir = agentDir();
+		const name = `neta-sweep-${process.pid}-${Date.now()}`;
+		const started = spawnSync("tmux", ["new-session", "-d", "-s", name, "sleep", "30"], { encoding: "utf-8" });
+		if (started.status !== 0) throw new Error(started.stderr || "Could not start tmux test session.");
+		writeSessionRecord(record({ id: "dead-tmux", pid: 2147483646, mux: { id: "tmux", name } }), dir);
+		try {
+			sweepStaleSessions(dir);
+			expect(spawnSync("tmux", ["has-session", "-t", name], { stdio: "ignore" }).status).not.toBe(0);
+		} finally {
+			spawnSync("tmux", ["kill-session", "-t", name], { stdio: "ignore" });
+		}
 	});
 
 	it("reaps recorded worker groups and socket residue from a dead manager", async () => {
@@ -142,17 +170,45 @@ describe("session registry", () => {
 			dir,
 		);
 
+		const killed: string[] = [];
+		writeSessionRecord(record({ id: "live-mux", pid: process.pid, mux: { id: "tmux", name: "neta-live" } }), dir);
 		try {
-			sweepStaleSessions(dir);
+			sweepStaleSessions(dir, { killMuxSession: (mux) => killed.push(mux.name) });
 			expect(existsSync(join(dir, "sessions", "live.json"))).toBe(true);
+			expect(existsSync(join(dir, "sessions", "live-mux.json"))).toBe(true);
 			expect(existsSync(socket)).toBe(true);
 			expect(() => process.kill(pgid, 0)).not.toThrow();
+			expect(killed).toEqual([]);
 		} finally {
 			try {
 				process.kill(-pgid, "SIGKILL");
 			} catch {
 				// The fixture has already exited.
 			}
+		}
+	});
+
+	it("terminates a live manager and removes its session when its directory was deleted", async () => {
+		const dir = agentDir();
+		const workspace = mkdtempSync(join(tmpdir(), "neta-deleted-worktree-"));
+		const manager = spawn(process.execPath, [FAKE_LEADER], {
+			env: { ...process.env, FAKE_LEADER_HOLD_MS: "30000" },
+			stdio: "ignore",
+		});
+		if (manager.pid === undefined) throw new Error("Could not start manager fixture.");
+		writeSessionRecord(
+			record({ id: "deleted-worktree", cwd: workspace, pid: manager.pid, mux: { id: "tmux", name: "deleted" } }),
+			dir,
+		);
+		rmSync(workspace, { recursive: true, force: true });
+		const killed: string[] = [];
+		try {
+			sweepStaleSessions(dir, { killMuxSession: (mux) => killed.push(mux.name) });
+			expect(existsSync(join(dir, "sessions", "deleted-worktree.json"))).toBe(false);
+			expect(killed).toEqual(["deleted"]);
+			await waitFor(() => expect(() => process.kill(manager.pid as number, 0)).toThrow(), 5000);
+		} finally {
+			manager.kill("SIGKILL");
 		}
 	});
 
@@ -199,27 +255,34 @@ describe("session registry", () => {
 	describe("finding the session a command means", () => {
 		it("prefers one started in this directory", () => {
 			const dir = agentDir();
-			writeSessionRecord(record({ id: "other", cwd: "/elsewhere", startedAt: 2 }), dir);
-			writeSessionRecord(record({ id: "here", cwd: "/repo", startedAt: 1 }), dir);
+			const other = mkdtempSync(join(tmpdir(), "neta-other-directory-"));
+			dirs.push(other);
+			writeSessionRecord(record({ id: "other", cwd: other, startedAt: 2 }), dir);
+			writeSessionRecord(record({ id: "here", cwd: process.cwd(), startedAt: 1 }), dir);
 
-			expect(findSession("/repo", dir)?.id).toBe("here");
+			expect(findSession(process.cwd(), dir)?.id).toBe("here");
 		});
 
 		it("falls back to the only running session", () => {
 			const dir = agentDir();
-			writeSessionRecord(record({ id: "only", cwd: "/elsewhere" }), dir);
+			const other = mkdtempSync(join(tmpdir(), "neta-only-directory-"));
+			dirs.push(other);
+			writeSessionRecord(record({ id: "only", cwd: other }), dir);
 
-			expect(findSession("/repo", dir)?.id).toBe("only");
+			expect(findSession(process.cwd(), dir)?.id).toBe("only");
 		});
 
 		// Guessing between two unrelated sessions would send commands to the wrong
 		// leader, so it declines instead.
 		it("refuses to guess between several unrelated sessions", () => {
 			const dir = agentDir();
-			writeSessionRecord(record({ id: "a", cwd: "/a" }), dir);
-			writeSessionRecord(record({ id: "b", cwd: "/b" }), dir);
+			const first = mkdtempSync(join(tmpdir(), "neta-first-directory-"));
+			const second = mkdtempSync(join(tmpdir(), "neta-second-directory-"));
+			dirs.push(first, second);
+			writeSessionRecord(record({ id: "a", cwd: first }), dir);
+			writeSessionRecord(record({ id: "b", cwd: second }), dir);
 
-			expect(findSession("/repo", dir)).toBeUndefined();
+			expect(findSession(process.cwd(), dir)).toBeUndefined();
 		});
 	});
 });

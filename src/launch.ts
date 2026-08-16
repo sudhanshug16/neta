@@ -30,6 +30,7 @@ import { buildLeaderPrompt } from "./prompts/leader.ts";
 import {
 	canonicalizeCwd,
 	findLiveSessionInDirectory,
+	isSessionAlive,
 	releaseSessionLock,
 	type SessionLock,
 	type SessionRecord,
@@ -161,7 +162,11 @@ export async function launchLeader(options: LaunchOptions): Promise<number> {
 	const cwd = canonicalizeCwd(options.cwd);
 	const agentDir = options.agentDir ?? getAgentDir();
 	const claimed = await claimDirectorySession(cwd, agentDir);
-	if ("existing" in claimed) return reconnectToSession(claimed.existing);
+	// Keep the liveness decision at the reattach point, even though the sweep
+	// and registry lookup already reject dead managers. A stale record must
+	// never turn into a terminal attached to an orphaned mux session.
+	if ("existing" in claimed && isSessionAlive(claimed.existing)) return reconnectToSession(claimed.existing);
+	if ("existing" in claimed) return launchLeader(options);
 	const lock = claimed.lock;
 	try {
 		const config = loadConfig(cwd, agentDir);

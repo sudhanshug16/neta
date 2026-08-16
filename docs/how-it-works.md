@@ -23,6 +23,10 @@ and removes its session file. If it dies without cleaning up (a crash,
 `kill -9`), the next `neta` invocation sweeps the residue: the stale session
 file, its socket, and any recorded worker process groups — each checked
 against its recorded start time first, so a recycled pid is never killed.
+That sweep also ends the recorded Zellij or tmux session, so a crashed manager
+cannot leave a detached pane full of orphaned worker views. A session whose
+directory was deleted is shut down and removed too, even if its manager pid
+still exists.
 
 There is at most one live Neta session per real directory. Before a bare
 `neta` launch checks the registry, it sweeps dead sessions, resolves symlinks

@@ -181,6 +181,49 @@ describe("neta (launching a leader)", () => {
 		expect(existsSync(socket)).toBe(false);
 	});
 
+	it("tears down a dead same-directory tmux husk before starting a fresh session", async () => {
+		const binDir = fakeBackend("claude");
+		const agentDir = scratch("neta-home-");
+		const cwd = scratch("neta-repo-");
+		const muxRecord = join(scratch("neta-mux-record-"), "tmux.txt");
+		const tmux = join(binDir, "tmux");
+		writeFileSync(tmux, '#!/bin/sh\nprintf "%s\\n" "$@" > "$TMUX_RECORD"\n', "utf-8");
+		chmodSync(tmux, 0o755);
+		writeSessionRecord(
+			{
+				id: "dead-tmux-husk",
+				socket: "/tmp/neta-dead-tmux-husk.sock",
+				token: "token",
+				cwd,
+				leader: "claude",
+				pid: 2147483646,
+				startedAt: 0,
+				mux: { id: "tmux", name: "neta-dead-tmux-husk" },
+			},
+			agentDir,
+		);
+
+		await run(process.execPath, [CLI, "--leader", "claude", "--mux", "none"], {
+			cwd,
+			env: {
+				...process.env,
+				PATH: `${binDir}${delimiter}${process.env.PATH}`,
+				NETA_DIR: agentDir,
+				TMUX_RECORD: muxRecord,
+				FAKE_LEADER_REGISTER_SESSION: "1",
+			},
+		});
+
+		expect(readFileSync(muxRecord, "utf-8").trim().split("\n")).toEqual([
+			"kill-session",
+			"-t",
+			"neta-dead-tmux-husk",
+		]);
+		const records = readdirSync(join(agentDir, "sessions")).filter((name) => name.endsWith(".json"));
+		expect(records).toHaveLength(1);
+		expect(records[0]).not.toBe("dead-tmux-husk.json");
+	});
+
 	it("refuses a second headless launch in the same real directory without adding a registry entry", async () => {
 		const binDir = fakeBackend("claude");
 		const agentDir = scratch("neta-home-");

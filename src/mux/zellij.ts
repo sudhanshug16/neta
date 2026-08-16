@@ -96,6 +96,11 @@ export function attachSessionArgs(sessionName: string): string[] {
 	return ["attach", sessionName];
 }
 
+/** `zellij kill-session <name>` removes a session whose leader is gone. */
+export function killSessionArgs(sessionName: string): string[] {
+	return ["kill-session", sessionName];
+}
+
 /**
  * `zellij action new-tab --name <title> --cwd <cwd> --close-on-exit -- cmd args…`
  *

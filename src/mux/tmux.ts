@@ -22,6 +22,11 @@ export function attachSessionArgs(sessionName: string): string[] {
 	return ["attach", "-t", sessionName];
 }
 
+/** `tmux kill-session -t <name>` removes a session whose leader is gone. */
+export function killSessionArgs(sessionName: string): string[] {
+	return ["kill-session", "-t", sessionName];
+}
+
 /**
  * `tmux new-window -d -n <title> -c <cwd> -- cmd args…`
  *
