@@ -77,10 +77,14 @@ describe("session registry", () => {
 		if (pgid === undefined) throw new Error("Could not start worker fixture.");
 		worker.unref();
 		writeFileSync(socket, "stale");
-		writeSessionRecord(record({ id: "dead", pid: 2147483646, socket, workerPgids: [pgid] }), dir);
+		const leaderStartedAt = "fixture-started-at";
+		writeSessionRecord(
+			record({ id: "dead", pid: 2147483646, socket, workerGroups: [{ pgid, leaderStartedAt }] }),
+			dir,
+		);
 
 		try {
-			sweepStaleSessions(dir);
+			sweepStaleSessions(dir, { processStartTime: () => leaderStartedAt });
 			expect(existsSync(join(dir, "sessions", "dead.json"))).toBe(false);
 			expect(existsSync(socket)).toBe(false);
 			await waitFor(() => expect(() => process.kill(pgid, 0)).toThrow(), 5000);
@@ -93,7 +97,35 @@ describe("session registry", () => {
 		}
 	});
 
-	it("never reaps a worker group while its manager is alive", () => {
+	it("never kills a live process whose reused PGID has a different identity", () => {
+		const dir = agentDir();
+		const worker = spawn(process.execPath, [SIGTERM_IGNORING_CHILD], { detached: true, stdio: "ignore" });
+		const pgid = worker.pid;
+		if (pgid === undefined) throw new Error("Could not start worker fixture.");
+		worker.unref();
+		writeSessionRecord(
+			record({
+				id: "reused-pgid",
+				pid: 2147483646,
+				workerGroups: [{ pgid, leaderStartedAt: "Thu Jan  1 00:00:00 1970" }],
+			}),
+			dir,
+		);
+
+		try {
+			sweepStaleSessions(dir, { processStartTime: () => "different-process", warn: () => {} });
+			expect(() => process.kill(pgid, 0)).not.toThrow();
+			expect(existsSync(join(dir, "sessions", "reused-pgid.json"))).toBe(false);
+		} finally {
+			try {
+				process.kill(-pgid, "SIGKILL");
+			} catch {
+				// The fixture has already exited.
+			}
+		}
+	});
+
+	it("never reaps a worker group while its manager is alive", async () => {
 		const dir = agentDir();
 		const socket = join(tmpdir(), `neta-live-${process.pid}-${Date.now()}.sock`);
 		const worker = spawn(process.execPath, [SIGTERM_IGNORING_CHILD], { detached: true, stdio: "ignore" });
@@ -101,7 +133,11 @@ describe("session registry", () => {
 		if (pgid === undefined) throw new Error("Could not start worker fixture.");
 		worker.unref();
 		writeFileSync(socket, "live");
-		writeSessionRecord(record({ id: "live", pid: process.pid, socket, workerPgids: [pgid] }), dir);
+		const leaderStartedAt = "fixture-started-at";
+		writeSessionRecord(
+			record({ id: "live", pid: process.pid, socket, workerGroups: [{ pgid, leaderStartedAt }] }),
+			dir,
+		);
 
 		try {
 			sweepStaleSessions(dir);

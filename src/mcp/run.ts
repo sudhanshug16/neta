@@ -26,7 +26,13 @@ import { getAgentDir } from "../config.ts";
 import { selectMux } from "../mux/index.ts";
 import { createPaneHost } from "../mux/panes.ts";
 import { WorkerManager } from "../orchestrator/manager.ts";
-import { removeSessionRecord, type SessionRecord, writeSessionRecord } from "../session.ts";
+import {
+	processStartTime,
+	removeSessionRecord,
+	type SessionRecord,
+	type SessionWorkerGroup,
+	writeSessionRecord,
+} from "../session.ts";
 import { loadConfig, type MuxMode } from "../settings.ts";
 import type { WorkerEvent } from "../types.ts";
 import { leaderTools } from "./leader.ts";
@@ -46,7 +52,7 @@ function muxMode(configured: MuxMode): MuxMode {
 function describeEvent(event: WorkerEvent): string {
 	switch (event.type) {
 		case "done":
-			return `${event.workerId} finished`;
+			return `${event.workerId} finished${event.dirtyFiles ? `; uncommitted changes: ${event.dirtyFiles.length} files` : ""}`;
 		case "failed":
 			return `${event.workerId} failed: ${event.error}`;
 		case "ask":
@@ -88,7 +94,7 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 	}
 
 	let shimDir: string | undefined;
-	const workerPgids = new Map<string, number>();
+	const workerGroups = new Map<string, SessionWorkerGroup>();
 	const sessionRecord: SessionRecord = {
 		id: sessionId,
 		socket: address,
@@ -99,7 +105,7 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 		startedAt: Date.now(),
 	};
 	const writeRegistry = () =>
-		writeSessionRecord({ ...sessionRecord, workerPgids: [...workerPgids.values()] }, agentDir);
+		writeSessionRecord({ ...sessionRecord, workerGroups: [...workerGroups.values()] }, agentDir);
 	const manager: WorkerManager = new WorkerManager({
 		cwd,
 		agentDir,
@@ -122,8 +128,11 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 		// `--mux` at launch decided this; settings answer when nobody did.
 		panes: wantsPanes ? panes : undefined,
 		onWorkerProcessGroup: (workerId, pgid) => {
-			if (pgid === undefined) workerPgids.delete(workerId);
-			else workerPgids.set(workerId, pgid);
+			if (pgid === undefined) workerGroups.delete(workerId);
+			else {
+				const leaderStartedAt = processStartTime(pgid);
+				if (leaderStartedAt) workerGroups.set(workerId, { pgid, leaderStartedAt });
+			}
 			writeRegistry();
 		},
 	});
@@ -132,14 +141,16 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 	await server.start();
 	writeRegistry();
 
-	let shuttingDown = false;
-	const shutdown = async () => {
-		if (shuttingDown) return;
-		shuttingDown = true;
-		removeSessionRecord(sessionId, agentDir);
-		await manager.dispose();
-		await server.stop();
-		if (shimDir) await rm(shimDir, { recursive: true, force: true }).catch(() => {});
+	let shutdownPromise: Promise<void> | undefined;
+	const shutdown = (): Promise<void> => {
+		if (shutdownPromise) return shutdownPromise;
+		shutdownPromise = (async () => {
+			await manager.dispose();
+			await server.stop();
+			if (shimDir) await rm(shimDir, { recursive: true, force: true }).catch(() => {});
+			removeSessionRecord(sessionId, agentDir);
+		})();
+		return shutdownPromise;
 	};
 	const exit = () => {
 		void shutdown().then(() => process.exit(0));

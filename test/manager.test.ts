@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { NETA_SOCKET_ENV, NETA_WORKER_ENV, NETA_WORKER_TOKEN_ENV } from "../src/channel/protocol.ts";
 import { WorkerManager } from "../src/orchestrator/manager.ts";
 import type { PromptOutcome, TransportOptions, WorkerTransportDriver } from "../src/orchestrator/transport.ts";
@@ -230,6 +233,39 @@ describe("WorkerManager", () => {
 		expect(transports[2].prompts[0]).toContain("other change");
 	});
 
+	it("registers process groups for dequeued writers through the same transport callback", async () => {
+		const groups: Array<{ workerId: string; pgid: number | undefined }> = [];
+		const queueManager = new WorkerManager({
+			cwd: process.cwd(),
+			agentDir: "/nonexistent-agent-dir",
+			config,
+			channelAddress: "/tmp/neta-queued-process-group.sock",
+			onEvent: () => {},
+			onWorkerProcessGroup: (workerId, pgid) => groups.push({ workerId, pgid }),
+			createTransport: (options) => {
+				const transport = new FakeTransport(options);
+				transports.push(transport);
+				return transport;
+			},
+		});
+		try {
+			const first = await queueManager.spawn({ role: "worker", tier: "senior", task: "first", writer: true });
+			const second = await queueManager.spawn({ role: "worker", tier: "senior", task: "second", writer: true });
+			transports.at(-1)?.options.events.processGroup?.(101);
+			transports.at(-1)?.finish({ ok: true, summary: "first done" });
+			await queueManager.waitFor([first.id], 5000);
+			await flush();
+			transports.at(-1)?.options.events.processGroup?.(202);
+
+			expect(queueManager.get(second.id).state).toBe("running");
+			expect(groups).toContainEqual({ workerId: first.id, pgid: 101 });
+			expect(groups).toContainEqual({ workerId: second.id, pgid: 202 });
+		} finally {
+			await queueManager.dispose();
+			rmSync("/tmp/neta-queued-process-group.sock", { force: true });
+		}
+	});
+
 	it("does not send writer notices to queued writers", async () => {
 		const first = await manager.spawn({ role: "worker", tier: "senior", task: "first", writer: true });
 		await manager.spawn({ role: "scout", tier: "senior", task: "inspect" });
@@ -294,6 +330,67 @@ describe("WorkerManager", () => {
 		const drained = manager.drainLog(summary.id).filter((entry) => entry.kind === "progress");
 		expect(drained.map((entry) => entry.text)).toEqual(["reading auth.ts", "found it"]);
 		expect(manager.drainLog(summary.id)).toEqual([]);
+	});
+
+	it("keeps watch cursors continuous after trimming more than 500 log entries", async () => {
+		const summary = await manager.spawn({ role: "scout", tier: "senior", task: "watch" });
+		for (let index = 0; index < 100; index += 1) manager.progress(summary.id, `entry ${index}`);
+		const beforeTrim = manager.tailLog(summary.id, 0);
+		for (let index = 100; index < 601; index += 1) manager.progress(summary.id, `entry ${index}`);
+
+		const afterTrim = manager.tailLog(summary.id, beforeTrim.cursor);
+		expect(afterTrim.entries[0]?.text).toBe("…1 earlier entries trimmed");
+		expect(afterTrim.entries.slice(1).map((entry) => entry.text)).toEqual(
+			Array.from({ length: 500 }, (_, index) => `entry ${index + 101}`),
+		);
+
+		manager.progress(summary.id, "entry 601");
+		const continued = manager.tailLog(summary.id, afterTrim.cursor);
+		expect(continued.entries.map((entry) => entry.text)).toEqual(["entry 601"]);
+	});
+
+	it("includes dirty writer handoff warnings in the wait result and finish event", async () => {
+		const cwd = mkdtempSync(join(tmpdir(), "neta-dirty-writer-"));
+		execFileSync("git", ["init", "-q"], { cwd });
+		writeFileSync(join(cwd, "first.txt"), "first");
+		writeFileSync(join(cwd, "second.txt"), "second");
+		const dirtyEvents: WorkerEvent[] = [];
+		const dirtyManager = new WorkerManager({
+			cwd,
+			agentDir: "/nonexistent-agent-dir",
+			config,
+			channelAddress: "/tmp/neta-dirty-writer.sock",
+			onEvent: (event) => dirtyEvents.push(event),
+			createTransport: (options) => {
+				const transport = new FakeTransport(options);
+				transports.push(transport);
+				return transport;
+			},
+		});
+		try {
+			const summary = await dirtyManager.spawn({ role: "worker", tier: "senior", task: "write", writer: true });
+			const transport = transports.at(-1);
+			if (!transport) throw new Error("Writer transport was not created.");
+			transport.finish({ ok: true, summary: "finished work" });
+			const [finished] = await dirtyManager.waitFor([summary.id], 5000);
+			expect(finished.result).toContain("uncommitted changes: 2 files");
+			const waitOutput = await dirtyManager.leader(
+				{ type: "wait", token: dirtyManager.leaderToken, workerIds: [summary.id], timeoutMs: 5000 },
+				new AbortController().signal,
+			);
+			expect(waitOutput.ok && waitOutput.text).toContain("uncommitted changes: 2 files");
+			expect(dirtyEvents).toEqual([
+				{
+					type: "done",
+					workerId: summary.id,
+					summary: "finished work\nuncommitted changes: 2 files",
+					dirtyFiles: ["?? first.txt", "?? second.txt"],
+				},
+			]);
+		} finally {
+			await dirtyManager.dispose();
+			rmSync(cwd, { recursive: true, force: true });
+		}
 	});
 
 	it("keeps the latest progress milestone on the worker summary", async () => {
@@ -490,7 +587,7 @@ describe("WorkerManager", () => {
 
 			transports[1].finish({ ok: true, summary: "second done" });
 			await manager.waitFor([second.id], 5000);
-			expect(manager.get(second.id).result).toBe("second done");
+			expect(manager.get(second.id).result).toContain("second done");
 		});
 
 		it("allows read-only workers to spawn while queue exists", async () => {
@@ -961,6 +1058,37 @@ describe("WorkerManager", () => {
 
 			await multiManager.dispose();
 			rmSync("/tmp/neta-test-diversity.sock", { force: true });
+		});
+
+		it("keeps reviewers diverse from a writer that started after queueing", async () => {
+			const multiConfig = new NetaConfig();
+			multiConfig.installedBackends = () => ["claude", "codex"];
+			const multiManager = new WorkerManager({
+				cwd: process.cwd(),
+				agentDir: "/nonexistent-agent-dir",
+				config: multiConfig,
+				channelAddress: "/tmp/neta-test-queued-diversity.sock",
+				onEvent: () => {},
+				createTransport: (options) => {
+					const transport = new FakeTransport(options);
+					transports.push(transport);
+					return transport;
+				},
+			});
+			try {
+				const first = await multiManager.spawn({ role: "worker", tier: "senior", task: "first", writer: true });
+				const queued = await multiManager.spawn({ role: "worker", tier: "senior", task: "queued", writer: true });
+				transports.at(-1)?.finish({ ok: true, summary: "first done" });
+				await multiManager.waitFor([first.id], 5000);
+				await flush();
+				const reviewer = await multiManager.spawn({ role: "reviewer", tier: "staff", task: "review" });
+
+				expect(multiManager.get(queued.id).state).toBe("running");
+				expect(reviewer.backend).not.toBe(queued.backend);
+			} finally {
+				await multiManager.dispose();
+				rmSync("/tmp/neta-test-queued-diversity.sock", { force: true });
+			}
 		});
 
 		it("passes explicit backend override to resolve and returns it in spawn result", async () => {

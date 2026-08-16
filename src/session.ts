@@ -8,6 +8,7 @@
  * cleaned up on the next read.
  */
 
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -25,7 +26,21 @@ export interface SessionRecord {
 	pid: number;
 	startedAt: number;
 	/** Detached ACP process groups still owned by this manager. */
-	workerPgids?: number[];
+	workerGroups?: SessionWorkerGroup[];
+}
+
+/** Identity captured when a detached ACP group is created, before crash recovery can ever reap it. */
+export interface SessionWorkerGroup {
+	pgid: number;
+	/** `ps lstart` for the group leader; prevents a recycled numeric PGID from being killed. */
+	leaderStartedAt: string;
+}
+
+export interface SessionSweepOptions {
+	/** Test seam for platforms where the process table is unavailable to the test sandbox. */
+	processStartTime?: (pid: number) => string | undefined;
+	/** Emits identity-mismatch warnings without making cleanup fail. */
+	warn?: (message: string) => void;
 }
 
 function sessionsDir(agentDir: string = getAgentDir()): string {
@@ -43,14 +58,34 @@ function isAlive(pid: number): boolean {
 	}
 }
 
+/** A process identity stable across PID reuse for the lifetime of one boot. */
+export function processStartTime(pid: number): string | undefined {
+	if (!Number.isInteger(pid) || pid <= 1) return undefined;
+	try {
+		const startedAt = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf-8" }).trim();
+		return startedAt || undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 function isNetaSocket(address: string): boolean {
 	return process.platform === "win32"
 		? address.startsWith("\\\\.\\pipe\\neta-")
 		: dirname(address) === tmpdir() && /^neta-.+\.sock$/.test(basename(address));
 }
 
-function reapProcessGroup(pgid: number): void {
+function reapProcessGroup(
+	group: SessionWorkerGroup,
+	identify: (pid: number) => string | undefined,
+	warn: (message: string) => void,
+): void {
+	const { pgid, leaderStartedAt } = group;
 	if (!Number.isInteger(pgid) || pgid <= 1 || pgid === process.pid) return;
+	if (identify(pgid) !== leaderStartedAt) {
+		warn(`[neta] stale session skipped process group ${pgid}: group leader identity no longer matches`);
+		return;
+	}
 	for (const signal of ["SIGTERM", "SIGKILL"] as const) {
 		try {
 			process.kill(-pgid, signal);
@@ -77,7 +112,9 @@ export function removeSessionRecord(id: string, agentDir: string = getAgentDir()
 }
 
 /** Remove crash residue, but never touch a session whose manager is still alive. */
-export function sweepStaleSessions(agentDir: string = getAgentDir()): void {
+export function sweepStaleSessions(agentDir: string = getAgentDir(), options: SessionSweepOptions = {}): void {
+	const identify = options.processStartTime ?? processStartTime;
+	const warn = options.warn ?? console.warn;
 	const dir = sessionsDir(agentDir);
 	if (!existsSync(dir)) return;
 	for (const name of readdirSync(dir)) {
@@ -91,7 +128,8 @@ export function sweepStaleSessions(agentDir: string = getAgentDir()): void {
 			continue;
 		}
 		if (isAlive(record.pid)) continue;
-		for (const pgid of Array.isArray(record.workerPgids) ? record.workerPgids : []) reapProcessGroup(pgid);
+		for (const group of Array.isArray(record.workerGroups) ? record.workerGroups : [])
+			reapProcessGroup(group, identify, warn);
 		if (typeof record.socket === "string" && isNetaSocket(record.socket)) rmSync(record.socket, { force: true });
 		rmSync(path, { force: true });
 	}

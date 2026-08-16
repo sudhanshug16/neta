@@ -43,6 +43,7 @@ describe("a leader session, end to end", () => {
 	let agentDir: string;
 	let repo: string;
 	let client: Client;
+	let transport: StdioClientTransport;
 
 	beforeEach(async () => {
 		agentDir = mkdtempSync(join(tmpdir(), "neta-e2e-home-"));
@@ -61,7 +62,7 @@ describe("a leader session, end to end", () => {
 			}),
 		);
 
-		const transport = new StdioClientTransport({
+		transport = new StdioClientTransport({
 			command: process.execPath,
 			args: [CLI, "mcp"],
 			cwd: repo,
@@ -75,7 +76,7 @@ describe("a leader session, end to end", () => {
 	});
 
 	afterEach(async () => {
-		await client.close();
+		await client.close().catch(() => {});
 		rmSync(agentDir, { recursive: true, force: true });
 		rmSync(repo, { recursive: true, force: true });
 	});
@@ -177,10 +178,38 @@ describe("a leader session, end to end", () => {
 	it("records a running worker group for crash cleanup, then removes it at death", async () => {
 		await call("neta_spawn", { role: "scout", tier: "senior", task: "WAIT_FOR_NOTICE" });
 		const registry = join(agentDir, "sessions", "e2e.json");
-		expect(JSON.parse(readFileSync(registry, "utf-8")).workerPgids).toHaveLength(1);
+		expect(JSON.parse(readFileSync(registry, "utf-8")).workerGroups).toHaveLength(1);
 
 		await call("neta_wait", { workerIds: ["ro1"], timeoutSeconds: 30 });
-		expect(JSON.parse(readFileSync(registry, "utf-8")).workerPgids).toEqual([]);
+		expect(JSON.parse(readFileSync(registry, "utf-8")).workerGroups).toEqual([]);
+	});
+
+	it("awaits a repeated shutdown signal until a SIGTERM-resistant worker is dead", async () => {
+		await call("neta_spawn", { role: "worker", tier: "senior", task: "REPORT_PID TRAP_SIGTERM", writer: true });
+		const registry = join(agentDir, "sessions", "e2e.json");
+		const deadline = Date.now() + 3000;
+		let log = bodyOf(await call("neta_log", { workerId: "rw1" }));
+		while (!log.includes("pid:") && Date.now() < deadline) {
+			await new Promise((resolve) => setTimeout(resolve, 25));
+			log = bodyOf(await call("neta_log", { workerId: "rw1" }));
+		}
+		const workerPid = pidFrom(log);
+		const controlPlanePid = transport.pid;
+		if (controlPlanePid === null) throw new Error("Control plane pid missing.");
+
+		process.kill(controlPlanePid, "SIGTERM");
+		process.kill(controlPlanePid, "SIGTERM");
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		expect(isRunning(workerPid)).toBe(true);
+		expect(() => readFileSync(registry, "utf-8")).not.toThrow();
+
+		const stoppedBy = Date.now() + 5000;
+		while (isRunning(controlPlanePid) && Date.now() < stoppedBy) {
+			await new Promise((resolve) => setTimeout(resolve, 25));
+		}
+		expect(isRunning(controlPlanePid)).toBe(false);
+		expect(isRunning(workerPid)).toBe(false);
+		expect(() => readFileSync(registry, "utf-8")).toThrow();
 	});
 
 	it("starts a queued writer only after the previous fixture process dies", async () => {

@@ -21,7 +21,7 @@ import { NETA_SCRATCH_ENV, NETA_SOCKET_ENV, NETA_WORKER_ENV, NETA_WORKER_TOKEN_E
 import type { ChannelHandler } from "../channel/server.ts";
 import { APP_NAME } from "../config.ts";
 import { loadRoleText, roleNames, workingAgreement } from "../prompts/roles.ts";
-import type { NetaConfig } from "../settings.ts";
+import type { NetaConfig, ResolvedBackend } from "../settings.ts";
 import {
 	displayModel,
 	formatUsage,
@@ -70,6 +70,8 @@ interface WorkerRecord {
 	channelToken: string;
 	driver: WorkerTransportDriver;
 	log: WorkerLogEntry[];
+	/** Absolute index of the first retained log entry. */
+	logFirstIndex: number;
 	/** Log entries the leader has already been shown. */
 	logCursor: number;
 	pendingAsk?: { question: string; resolve: (response: ChannelResponse) => void };
@@ -282,6 +284,7 @@ export class WorkerManager implements ChannelHandler {
 			scratchDir,
 			channelToken: randomBytes(16).toString("hex"),
 			log: [],
+			logFirstIndex: 0,
 			logCursor: 0,
 			queue: Promise.resolve(),
 			queuedPrompts: 0,
@@ -317,46 +320,7 @@ export class WorkerManager implements ChannelHandler {
 		}
 
 		// Non-queued path: start immediately
-		const transportOptions: TransportOptions = {
-			workerId: id,
-			cwd: this.options.cwd,
-			env: {
-				...runtimeEnv,
-				...backend.env,
-				[NETA_SOCKET_ENV]: this.options.channelAddress,
-				[NETA_WORKER_ENV]: id,
-				[NETA_WORKER_TOKEN_ENV]: record.channelToken,
-				[NETA_SCRATCH_ENV]: scratchDir,
-			},
-			command: backend.command,
-			args: backend.args,
-			model: backend.model,
-			writer,
-			systemPrompt,
-			scratchDir,
-			mcpServers: this.options.workerMcpServers?.(id, scratchDir, record.channelToken) ?? [],
-			events: {
-				log: (kind, text) => this.appendLog(record, kind, text),
-				usage: (usage) => {
-					record.usage = usage;
-				},
-				vendorSession: (sessionId) => {
-					record.vendorSessionId = sessionId;
-				},
-				session: (session) => {
-					record.model = session.model;
-					record.modelId = session.modelId;
-					record.mode = session.mode;
-					record.agentInfo = session.agentInfo;
-				},
-				processGroup: (pgid) => {
-					record.processGroupId = pgid;
-					this.options.onWorkerProcessGroup?.(record.id, pgid);
-				},
-			},
-		};
-
-		record.driver = this.createTransport(transportOptions);
+		record.driver = this.createWorkerTransport(record, backend, runtimeEnv, systemPrompt);
 		if (writer) {
 			record.headAtStart = gitHead(this.options.cwd);
 			this.lastWriterBackend = backend.name;
@@ -490,8 +454,9 @@ export class WorkerManager implements ChannelHandler {
 	/** New log lines since the last drain, oldest first. */
 	drainLog(workerId: string): WorkerLogEntry[] {
 		const record = this.require(workerId);
-		const entries = record.log.slice(record.logCursor);
-		record.logCursor = record.log.length;
+		const from = Math.max(record.logCursor, record.logFirstIndex);
+		const entries = record.log.slice(from - record.logFirstIndex);
+		record.logCursor = record.logFirstIndex + record.log.length;
 		return entries;
 	}
 
@@ -502,10 +467,15 @@ export class WorkerManager implements ChannelHandler {
 	 */
 	tailLog(workerId: string, since = 0): WorkerLogPage {
 		const record = this.require(workerId);
-		const from = Math.max(0, Math.min(since, record.log.length));
+		const from = Math.max(0, since);
+		const trimmed = Math.max(0, record.logFirstIndex - from);
+		const entries = record.log.slice(Math.max(0, from - record.logFirstIndex));
 		return {
-			entries: record.log.slice(from),
-			cursor: record.log.length,
+			entries:
+				trimmed > 0
+					? [{ at: Date.now(), kind: "status", text: `…${trimmed} earlier entries trimmed` }, ...entries]
+					: entries,
+			cursor: record.logFirstIndex + record.log.length,
 			state: record.state,
 			worker: this.summarize(record),
 			archived: record.archived ?? false,
@@ -963,8 +933,56 @@ export class WorkerManager implements ChannelHandler {
 		if (record.log.length > MAX_LOG_ENTRIES) {
 			const dropped = record.log.length - MAX_LOG_ENTRIES;
 			record.log.splice(0, dropped);
-			record.logCursor = Math.max(0, record.logCursor - dropped);
+			record.logFirstIndex += dropped;
+			record.logCursor = Math.max(record.logCursor, record.logFirstIndex);
 		}
+	}
+
+	/** One transport shape for immediate and dequeued workers, including crash-recovery registration. */
+	private createWorkerTransport(
+		record: WorkerRecord,
+		backend: ResolvedBackend,
+		runtimeEnv: Record<string, string>,
+		systemPrompt: string,
+	): WorkerTransportDriver {
+		return this.createTransport({
+			workerId: record.id,
+			cwd: this.options.cwd,
+			env: {
+				...runtimeEnv,
+				...backend.env,
+				[NETA_SOCKET_ENV]: this.options.channelAddress,
+				[NETA_WORKER_ENV]: record.id,
+				[NETA_WORKER_TOKEN_ENV]: record.channelToken,
+				[NETA_SCRATCH_ENV]: record.scratchDir,
+			},
+			command: backend.command,
+			args: backend.args,
+			model: backend.model,
+			writer: record.writer,
+			systemPrompt,
+			scratchDir: record.scratchDir,
+			mcpServers: this.options.workerMcpServers?.(record.id, record.scratchDir, record.channelToken) ?? [],
+			events: {
+				log: (kind, text) => this.appendLog(record, kind, text),
+				usage: (usage) => {
+					record.usage = usage;
+				},
+				vendorSession: (sessionId) => {
+					record.vendorSessionId = sessionId;
+				},
+				session: (session) => {
+					record.model = session.model;
+					record.modelId = session.modelId;
+					record.mode = session.mode;
+					record.agentInfo = session.agentInfo;
+				},
+				processGroup: (pgid) => {
+					record.processGroupId = pgid;
+					this.options.onWorkerProcessGroup?.(record.id, pgid);
+				},
+			},
+		});
 	}
 
 	private setState(record: WorkerRecord, state: WorkerState): void {
@@ -1079,6 +1097,7 @@ export class WorkerManager implements ChannelHandler {
 				result = record.killReason;
 			}
 			const dirtyFiles = state === "done" && startedWriter ? await gitDirtyFiles(this.options.cwd) : [];
+			if (dirtyFiles.length > 0) result = `${result}\nuncommitted changes: ${dirtyFiles.length} files`;
 			const changes = startedWriter ? await this.writerChangeStatus(record, state) : undefined;
 
 			this.setState(record, state);
@@ -1187,43 +1206,9 @@ export class WorkerManager implements ChannelHandler {
 			`Your scratch directory (outside the repository) is ${record.scratchDir}. Use it for notes and throwaway files.`,
 		].join("\n");
 
-		const transportOptions: TransportOptions = {
-			workerId: record.id,
-			cwd: this.options.cwd,
-			env: {
-				...runtimeEnv,
-				...backend.env,
-				[NETA_SOCKET_ENV]: this.options.channelAddress,
-				[NETA_WORKER_ENV]: record.id,
-				[NETA_WORKER_TOKEN_ENV]: record.channelToken,
-				[NETA_SCRATCH_ENV]: record.scratchDir,
-			},
-			command: backend.command,
-			args: backend.args,
-			model: backend.model,
-			writer: true,
-			systemPrompt,
-			scratchDir: record.scratchDir,
-			mcpServers: this.options.workerMcpServers?.(record.id, record.scratchDir, record.channelToken) ?? [],
-			events: {
-				log: (kind, text) => this.appendLog(record, kind, text),
-				usage: (usage) => {
-					record.usage = usage;
-				},
-				vendorSession: (sessionId) => {
-					record.vendorSessionId = sessionId;
-				},
-				session: (session) => {
-					record.model = session.model;
-					record.modelId = session.modelId;
-					record.mode = session.mode;
-					record.agentInfo = session.agentInfo;
-				},
-			},
-		};
-
-		record.driver = this.createTransport(transportOptions);
+		record.driver = this.createWorkerTransport(record, backend, runtimeEnv, systemPrompt);
 		record.headAtStart = gitHead(this.options.cwd);
+		this.lastWriterBackend = backend.name;
 		this.setState(record, "starting");
 		this.appendLog(record, "status", "Dequeued and starting...");
 
