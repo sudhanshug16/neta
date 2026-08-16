@@ -42,7 +42,7 @@ import {
 	type WorkerUsage,
 } from "../types.ts";
 import {
-	formatLastNotify,
+	formatLastProgress,
 	formatStatusSnapshot,
 	formatWriterActivityNotice,
 	formatWriterContext,
@@ -71,8 +71,8 @@ interface WorkerRecord {
 	/** Log entries the leader has already been shown. */
 	logCursor: number;
 	pendingAsk?: { question: string; resolve: (response: ChannelResponse) => void };
-	/** The worker's most recent `neta notify`, for a "last:" line in listings. */
-	lastNotify?: { text: string; at: number };
+	/** The worker's most recent `neta progress`, for a "last:" line in listings. */
+	lastProgress?: { text: string; at: number };
 	/** Serializes prompts for this worker. */
 	queue: Promise<void>;
 	/** Prompts queued or running. The worker is only done when the last one ends. */
@@ -638,11 +638,11 @@ export class WorkerManager implements ChannelHandler {
 	// Worker channel (ChannelHandler)
 	// =========================================================================
 
-	notify(workerId: string, text: string): ChannelResponse {
+	progress(workerId: string, text: string): ChannelResponse {
 		const record = this.workers.get(workerId);
 		if (!record) return { ok: false, error: `Unknown worker ${workerId}.` };
-		record.lastNotify = { text, at: Date.now() };
-		this.appendLog(record, "notify", text);
+		record.lastProgress = { text, at: Date.now() };
+		this.appendLog(record, "progress", text);
 		return { ok: true };
 	}
 
@@ -868,8 +868,8 @@ export class WorkerManager implements ChannelHandler {
 		let line = `${summary.id} [${summary.role}/${summary.tier}, ${access}${room}${session}] ${summary.state} — ${summary.task}`;
 		const usage = formatUsage(summary.usage, summary.modelId ?? summary.model);
 		if (usage) line += `\n  usage: ${usage}`;
-		const lastNotify = formatLastNotify(summary);
-		if (lastNotify) line += `\n  ${lastNotify}`;
+		const lastProgress = formatLastProgress(summary);
+		if (lastProgress) line += `\n  ${lastProgress}`;
 		if (summary.pendingQuestion) line += `\n  asks: ${summary.pendingQuestion}`;
 		if (summary.result) {
 			const result =
@@ -1191,7 +1191,7 @@ export class WorkerManager implements ChannelHandler {
 			result: record.result,
 			queuedBehind: record.state === "queued" ? record.queuedBehind : undefined,
 			pendingQuestion: record.pendingAsk?.question,
-			lastNotify: record.lastNotify,
+			lastProgress: record.lastProgress,
 			scratchDir: record.scratchDir,
 			usage: record.usage,
 			vendorSessionId: record.vendorSessionId,

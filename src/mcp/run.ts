@@ -166,7 +166,7 @@ export async function runWorkerBridge(): Promise<void> {
 	const mcp = createMcpServer(
 		"neta-worker",
 		workerTools(address, workerId),
-		"Report to your leader with neta_notify, and use neta_ask when you are blocked.",
+		"Report progress milestones to your leader with neta_progress, and use neta_ask when you are blocked.",
 	);
 	await mcp.connect(new StdioServerTransport());
 }

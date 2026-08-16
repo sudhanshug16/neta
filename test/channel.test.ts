@@ -21,7 +21,7 @@ describe("worker channel", () => {
 	let leaderRequests: LeaderChannelRequest[];
 
 	const handler: ChannelHandler = {
-		notify(workerId, text) {
+		progress(workerId, text) {
 			notified.push({ workerId, text });
 			return { ok: true };
 		},
@@ -75,8 +75,8 @@ describe("worker channel", () => {
 		process.exitCode = 0;
 	});
 
-	it("answers notify immediately", async () => {
-		const response = await sendChannelRequest(address, { type: "notify", workerId: "ro1", text: "halfway" });
+	it("answers progress immediately", async () => {
+		const response = await sendChannelRequest(address, { type: "progress", workerId: "ro1", text: "halfway" });
 
 		expect(response).toEqual({ ok: true });
 		expect(notified).toEqual([{ workerId: "ro1", text: "halfway" }]);
@@ -104,10 +104,10 @@ describe("worker channel", () => {
 			env.set(NETA_WORKER_ENV, "ro7");
 		});
 
-		it("sends notify through the channel", async () => {
+		it("sends progress through the channel", async () => {
 			const log = spyOn(console, "log").mockImplementation(() => {});
 
-			await expect(handleWorkerChannelCommand(["notify", "reading", "auth.ts"])).resolves.toBe(true);
+			await expect(handleWorkerChannelCommand(["progress", "reading", "auth.ts"])).resolves.toBe(true);
 
 			expect(notified).toEqual([{ workerId: "ro7", text: "reading auth.ts" }]);
 			expect(log).toHaveBeenCalledWith("ok");
@@ -165,7 +165,7 @@ describe("worker channel", () => {
 		env.set(NETA_SOCKET_ENV, "");
 		env.set(NETA_WORKER_ENV, "");
 
-		await expect(handleWorkerChannelCommand(["notify", "the team about the outage"])).resolves.toBe(false);
+		await expect(handleWorkerChannelCommand(["progress", "the team about the outage"])).resolves.toBe(false);
 		expect(notified).toEqual([]);
 	});
 

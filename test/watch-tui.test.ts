@@ -73,7 +73,7 @@ describe("TranscriptView", () => {
 
 	it("keeps every entry kind visible", () => {
 		const view = new TranscriptView();
-		view.append(entry("notify", "halfway"));
+		view.append(entry("progress", "halfway"));
 		view.append(entry("say", "posting to the room"));
 		view.append(entry("status", "Leader: keep going"));
 		view.append(entry("thought", "weighing options"));

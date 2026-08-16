@@ -42,7 +42,7 @@ export function isTerminalState(state: WorkerState): boolean {
 }
 
 /**
- * One line of worker output the leader can pull. Workers narrate freely into
+ * One line of worker output the leader can pull. Progress milestones land in
  * this log; nothing here wakes the leader.
  *
  * "text" and "thought" carry the worker's own streamed prose and reasoning,
@@ -51,7 +51,7 @@ export function isTerminalState(state: WorkerState): boolean {
  */
 export interface WorkerLogEntry {
 	at: number;
-	kind: "notify" | "say" | "status" | "tool" | "text" | "thought" | "diff" | "error";
+	kind: "progress" | "say" | "status" | "tool" | "text" | "thought" | "diff" | "error";
 	text: string;
 }
 
@@ -138,8 +138,8 @@ export interface WorkerSummary {
 	queuedBehind?: string;
 	/** Question the worker is blocked on, when state is "waiting". */
 	pendingQuestion?: string;
-	/** The worker's most recent `neta notify`, for a "last:" line in listings. */
-	lastNotify?: { text: string; at: number };
+	/** The worker's most recent `neta progress`, for a "last:" line in listings. */
+	lastProgress?: { text: string; at: number };
 	scratchDir: string;
 	usage?: WorkerUsage;
 	/**

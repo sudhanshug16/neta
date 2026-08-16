@@ -1,5 +1,5 @@
 /**
- * Worker side of the channel: the `neta notify|ask|say|room|status` subcommands.
+ * Worker side of the channel: the `neta progress|ask|say|room|status` subcommands.
  *
  * These only exist inside a worker process, which is why the dispatcher below
  * requires NETA_SOCKET to be set.
@@ -9,11 +9,11 @@ import { connect } from "node:net";
 import { APP_NAME } from "../config.ts";
 import { type ChannelRequest, type ChannelResponse, NETA_SOCKET_ENV, NETA_WORKER_ENV } from "./protocol.ts";
 
-const CHANNEL_COMMANDS = new Set(["notify", "ask", "say", "room", "status"]);
+const CHANNEL_COMMANDS = new Set(["progress", "ask", "say", "room", "status"]);
 
 const CHANNEL_HELP = `Worker channel commands (available inside a Neta worker):
 
-  ${APP_NAME} notify <message>   Append to your log. The leader reads it when it chooses.
+  ${APP_NAME} progress <message> Records a progress milestone in your log. Use it when you start, when a major step completes, and when something surprising changes your plan — one line each, not a running commentary. The leader and the user read these at a glance; frequent trivial calls bury the signal.
   ${APP_NAME} ask <question>     Ask the leader and wait for the answer. Not available to junior workers.
   ${APP_NAME} say <message>      Post to your room, visible to the other members.
   ${APP_NAME} room [--tail N]    Read your room transcript.
@@ -105,14 +105,14 @@ export async function handleWorkerChannelCommand(args: string[]): Promise<boolea
 			process.exitCode = 1;
 			return true;
 		}
-		request = { type: command as "notify" | "ask" | "say", workerId, text };
+		request = { type: command as "progress" | "ask" | "say", workerId, text };
 	}
 
 	try {
 		const response = await sendChannelRequest(address, request);
 		if (response.ok) {
 			if (response.text) console.log(response.text);
-			else if (command === "notify" || command === "say") console.log("ok");
+			else if (command === "progress" || command === "say") console.log("ok");
 		} else {
 			console.error(response.error);
 			process.exitCode = 1;

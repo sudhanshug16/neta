@@ -284,25 +284,25 @@ describe("WorkerManager", () => {
 		expect(transports[0].killed).toBe(true);
 	});
 
-	it("collects notify lines into a log the leader drains once", async () => {
+	it("collects progress milestones into a log the leader drains once", async () => {
 		const summary = await manager.spawn({ role: "scout", tier: "senior", task: "look around" });
 
-		expect(manager.notify(summary.id, "reading auth.ts")).toEqual({ ok: true });
-		expect(manager.notify(summary.id, "found it")).toEqual({ ok: true });
+		expect(manager.progress(summary.id, "reading auth.ts")).toEqual({ ok: true });
+		expect(manager.progress(summary.id, "found it")).toEqual({ ok: true });
 
-		const drained = manager.drainLog(summary.id).filter((entry) => entry.kind === "notify");
+		const drained = manager.drainLog(summary.id).filter((entry) => entry.kind === "progress");
 		expect(drained.map((entry) => entry.text)).toEqual(["reading auth.ts", "found it"]);
 		expect(manager.drainLog(summary.id)).toEqual([]);
 	});
 
-	it("keeps the latest notify on the worker summary", async () => {
+	it("keeps the latest progress milestone on the worker summary", async () => {
 		const summary = await manager.spawn({ role: "scout", tier: "senior", task: "look around" });
-		expect(manager.get(summary.id).lastNotify).toBeUndefined();
+		expect(manager.get(summary.id).lastProgress).toBeUndefined();
 
-		manager.notify(summary.id, "reading auth.ts");
-		manager.notify(summary.id, "found it");
+		manager.progress(summary.id, "reading auth.ts");
+		manager.progress(summary.id, "found it");
 
-		expect(manager.get(summary.id).lastNotify?.text).toBe("found it");
+		expect(manager.get(summary.id).lastProgress?.text).toBe("found it");
 	});
 
 	it("blocks a senior on ask until the leader answers", async () => {
@@ -779,14 +779,14 @@ describe("WorkerManager", () => {
 
 		it("lists workers, drains a log, and answers a blocked worker", async () => {
 			const summary = await manager.spawn({ role: "worker", tier: "senior", task: "do it" });
-			manager.notify(summary.id, "reading auth.ts");
+			manager.progress(summary.id, "reading auth.ts");
 
 			const listed = await manager.leader({ type: "workers", token: manager.leaderToken }, signal);
 			expect(listed.ok && listed.text).toContain(`${summary.id} [worker/senior`);
 			expect(listed.ok && listed.text).toContain("last: reading auth.ts");
 
 			const log = await manager.leader({ type: "log", token: manager.leaderToken, workerId: summary.id }, signal);
-			expect(log.ok && log.text).toContain("[notify] reading auth.ts");
+			expect(log.ok && log.text).toContain("[progress] reading auth.ts");
 
 			const pending = manager.ask(summary.id, "which database?", signal);
 			await flush();

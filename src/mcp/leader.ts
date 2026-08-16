@@ -12,7 +12,7 @@
  */
 
 import type { WorkerManager } from "../orchestrator/manager.ts";
-import { formatLastNotify, formatWorkerSummary } from "../orchestrator/status.ts";
+import { formatLastProgress, formatWorkerSummary } from "../orchestrator/status.ts";
 import { roleNames } from "../prompts/roles.ts";
 import {
 	isTerminalState,
@@ -75,8 +75,8 @@ function statusReport(summaries: WorkerSummary[], maxResultChars = MAX_RESULT_CH
 	return summaries
 		.map((summary) => {
 			const lines = [describe(summary)];
-			const lastNotify = formatLastNotify(summary);
-			if (lastNotify) lines.push(`  ${lastNotify}`);
+			const lastProgress = formatLastProgress(summary);
+			if (lastProgress) lines.push(`  ${lastProgress}`);
 			if (summary.result) lines.push(`  result: ${clip(summary.result, maxResultChars)}`);
 			return lines.join("\n");
 		})
@@ -330,7 +330,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 			name: "neta_workers",
 			description:
 				"List workers with their state, token usage and final results. Cheap and safe to call whenever you want " +
-				"to know what is happening; it does not interrupt the workers. Each worker's most recent notify shows " +
+				"to know what is happening; it does not interrupt the workers. Each worker's most recent progress milestone shows " +
 				"as a last: line. For a worker's running commentary, use neta_log. When called with a specific workerId, " +
 				"the full result is returned unclipped; when listing all workers, results are clipped to 3000 " +
 				"characters. Shows open notes at the end.",

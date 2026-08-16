@@ -104,7 +104,7 @@ export function workingAgreement(options: WorkingAgreementOptions): string {
 		"",
 		"# Talking to the leader",
 		"",
-		`- \`${options.binary} notify <message>\` records progress. The leader reads it when it chooses, so narrate freely; it costs the leader nothing.`,
+		`- \`${options.binary} progress <message>\` records a progress milestone in your log. Use it when you start, when a major step completes, and when something surprising changes your plan — one line each, not a running commentary. The leader and the user read these at a glance; frequent trivial calls bury the signal.`,
 	);
 
 	if (options.tier === "junior") {

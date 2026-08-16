@@ -17,7 +17,7 @@ import {
 } from "./protocol.ts";
 
 export interface ChannelHandler {
-	notify(workerId: string, text: string): ChannelResponse;
+	progress(workerId: string, text: string): ChannelResponse;
 	ask(workerId: string, text: string, signal: AbortSignal): Promise<ChannelResponse>;
 	say(workerId: string, text: string): ChannelResponse;
 	room(workerId: string, tail: number | undefined): ChannelResponse;
@@ -112,8 +112,8 @@ export class ChannelServer {
 
 			try {
 				switch (request.type) {
-					case "notify":
-						respond(handler.notify(request.workerId, request.text));
+					case "progress":
+						respond(handler.progress(request.workerId, request.text));
 						break;
 					case "say":
 						respond(handler.say(request.workerId, request.text));

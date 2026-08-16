@@ -258,11 +258,11 @@ describe("leader MCP tools", () => {
 		expect(bodyOf(await call("neta_room", { room: "db" }))).toContain("Postgres or SQLite?");
 	});
 
-	it("shows the latest notify as a truncated last: line in listings", async () => {
+	it("shows the latest progress milestone as a truncated last: line in listings", async () => {
 		await call("neta_spawn", { role: "scout", tier: "senior", task: "look" });
 		expect(bodyOf(await call("neta_workers"))).not.toContain("last:");
 
-		manager.notify("ro1", `progress: ${"x".repeat(100)}`);
+		manager.progress("ro1", `progress: ${"x".repeat(100)}`);
 
 		const body = bodyOf(await call("neta_workers"));
 		expect(body).toContain("last: progress: x");
@@ -321,13 +321,13 @@ describe("leader MCP tools", () => {
 		transports[0].options.events.log("text", "Found the issue");
 		transports[0].options.events.log("thought", "considering options");
 		transports[0].options.events.log("diff", "patch content");
-		transports[0].options.events.log("notify", "done reading");
+		transports[0].options.events.log("progress", "done reading");
 
 		const log = await call("neta_log", { workerId: "ro1" });
 
 		const body = bodyOf(log);
 		expect(body).toContain("[text] Found the issue");
-		expect(body).toContain("[notify] done reading");
+		expect(body).toContain("[progress] done reading");
 		expect(body).not.toContain("[tool]");
 		expect(body).not.toContain("[thought]");
 		expect(body).not.toContain("[diff]");
@@ -409,8 +409,8 @@ describe("worker MCP tools", () => {
 		rmSync(dir, { recursive: true, force: true });
 	});
 
-	it("carries a notify into the worker's log", async () => {
-		await client.callTool({ name: "neta_notify", arguments: { message: "reading auth.ts" } });
+	it("carries a progress milestone into the worker's log", async () => {
+		await client.callTool({ name: "neta_progress", arguments: { message: "reading auth.ts" } });
 
 		expect(manager.drainLog("ro1").map((entry) => entry.text)).toContain("reading auth.ts");
 	});

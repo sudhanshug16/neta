@@ -239,7 +239,9 @@ Rules that matter in practice:
 
 ## Staying informed without interrupting anyone
 
-- Workers narrate into a log. ${s.status}; it costs them nothing.
+- Workers record progress milestones when they start, complete a major step, or
+  encounter a surprise that changes their plan. ${s.status} shows their latest
+  milestone; use the log only when you need more detail.
 - ${s.wait} blocks you until the workers you name are finished, and returns
   what they reported. Use it when you have nothing useful to do until they are.
 - A worker blocked on a question shows up as state "waiting"; answer it with

@@ -1,7 +1,7 @@
 /**
  * Wire protocol for the worker channel.
  *
- * Workers reach the leader by running `neta notify|ask|say|room` from whatever
+ * Workers reach the leader by running `neta progress|ask|say|room` from whatever
  * shell tool their backend gives them. This is the second door into the
  * orchestrator: the leader itself uses MCP tools, but any unsandboxed process
  * — and any human with a terminal — can use this one.
@@ -26,8 +26,8 @@ export const NETA_SCRATCH_ENV = "NETA_SCRATCH";
 export const NETA_LEADER_ENV = "NETA_LEADER_TOKEN";
 
 export type WorkerChannelRequest =
-	/** Append to this worker's log. The leader pulls it; nothing is pushed. */
-	| { type: "notify"; workerId: string; text: string }
+	/** Record a progress milestone in this worker's log. The leader pulls it; nothing is pushed. */
+	| { type: "progress"; workerId: string; text: string }
 	/** Block until the leader answers. Not available to juniors. */
 	| { type: "ask"; workerId: string; text: string }
 	/** Post to the worker's room transcript. */

@@ -140,16 +140,26 @@ describe("leader CLI over the real shim", () => {
 		expect(result.stdout).toContain("auth lives in src/auth.ts");
 	});
 
-	it("lets a worker report back through the same shim", async () => {
+	it("lets a worker report progress through the same shim", async () => {
 		await neta(["spawn", "--role", "scout", "--tier", "senior", "look"], asLeader());
 
-		const notified = await neta(["notify", "reading auth.ts"], {
+		const progressed = await neta(["progress", "reading auth.ts"], {
 			[NETA_SOCKET_ENV]: address,
 			[NETA_WORKER_ENV]: "ro1",
 		});
 
-		expect(notified.code).toBe(0);
+		expect(progressed.code).toBe(0);
 		expect(manager.drainLog("ro1").map((entry) => entry.text)).toContain("reading auth.ts");
+	});
+
+	it("rejects the removed notify worker subcommand", async () => {
+		const result = await neta(["notify", "reading auth.ts"], {
+			[NETA_SOCKET_ENV]: address,
+			[NETA_WORKER_ENV]: "ro1",
+		});
+
+		expect(result.code).toBe(1);
+		expect(result.stderr).toContain('Unknown command "notify"');
 	});
 
 	it("refuses leader commands from a worker, which never holds the token", async () => {

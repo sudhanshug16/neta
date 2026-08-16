@@ -152,7 +152,7 @@ export class TranscriptView extends Container {
 			case "diff":
 				this.addChild(new Text(colorDiff(entry.text), 0, 1));
 				return;
-			case "notify":
+			case "progress":
 				this.addChild(new Text(`${style.cyan("»")} ${entry.text}`, 0, 0));
 				return;
 			case "say":

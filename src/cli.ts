@@ -10,7 +10,7 @@
  * - the leader's vendor CLI runs `neta mcp`, the control plane that owns the
  *   workers;
  * - a worker's backend runs `neta mcp --worker`, and the worker itself runs
- *   `neta notify|ask|say|room|status --writers` from its shell;
+ *   `neta progress|ask|say|room|status --writers` from its shell;
  * - Claude Code runs `neta guard` as a hook before every bash command.
  *
  * Worker and leader subcommands are dispatched first and gated on being in a
@@ -50,7 +50,7 @@ const HELP = `${APP_NAME} ${VERSION} — a leader agent that delegates to worker
                                         for setting tiers in settings.json.
   ${APP_NAME} --backends                Show the agent CLIs found on PATH.
 
-Worker commands (inside a worker): notify, ask, say, room, status --writers.
+Worker commands (inside a worker): progress, ask, say, room, status --writers.
 Plumbing: ${APP_NAME} mcp [--worker], ${APP_NAME} guard.
 `;
 

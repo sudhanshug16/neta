@@ -33,7 +33,7 @@ const ARCHIVE_POLL_MS = 2000;
  */
 function formatLine(entry: WorkerLogEntry): string {
 	switch (entry.kind) {
-		case "notify":
+		case "progress":
 			return `» ${entry.text}`;
 		case "say":
 			return `→ ${entry.text}`;

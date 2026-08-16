@@ -23,16 +23,17 @@ async function send(address: string, request: ChannelRequest, okText: string) {
 export function workerTools(address: string, workerId: string): McpTool[] {
 	return [
 		{
-			name: "neta_notify",
+			name: "neta_progress",
 			description:
-				"Record progress in your log. The leader reads it when it chooses, so narrate freely; it costs the " +
-				"leader nothing and never interrupts anyone.",
+				"Record a progress milestone in your log. Use it when you start, when a major step completes, and when " +
+				"something surprising changes your plan — one line each, not a running commentary. The leader and the user " +
+				"read these at a glance; frequent trivial calls bury the signal.",
 			inputSchema: {
 				type: "object",
 				properties: { message: { type: "string" } },
 				required: ["message"],
 			},
-			run: (args) => send(address, { type: "notify", workerId, text: requireString(args, "message") }, "ok"),
+			run: (args) => send(address, { type: "progress", workerId, text: requireString(args, "message") }, "ok"),
 		},
 		{
 			name: "neta_ask",

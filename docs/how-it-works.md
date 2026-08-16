@@ -28,7 +28,7 @@ Every worker operation exists twice, over one manager:
 | Door | Who uses it | How |
 | --- | --- | --- |
 | MCP tools | the leader | `neta_spawn`, `neta_status`, `neta_wait`, … in the vendor's tool loop |
-| Unix socket | workers, and you | `neta notify`, `neta workers`, `neta status`, `neta watch` |
+| Unix socket | workers, and you | `neta progress`, `neta workers`, `neta status`, `neta watch` |
 
 The socket door is authorized by a token. Workers get their own id and can only
 report or run `neta status --writers`; the token that authorizes spawning and killing goes to the leader's
@@ -38,8 +38,8 @@ you are running.
 
 ## Waking the leader
 
-Workers are quiet. They narrate into a log the leader pulls when it chooses,
-and nothing they say interrupts anyone. Two things block instead:
+Workers are quiet. They record progress milestones in a log the leader pulls
+when it chooses, and nothing they say interrupts anyone. Two things block instead:
 
 - the leader's `neta_wait` blocks until the workers it named are finished —
   all of them, or the first one with `first: true` — and returns their

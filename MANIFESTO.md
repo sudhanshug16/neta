@@ -109,9 +109,9 @@ with one exception the leader controls:
 Everything crosses agent boundaries as a **blocking tool call**, never as
 keystrokes typed into someone else's terminal:
 
-- `neta notify <msg>` — appends to the worker's log. The leader pulls this on
-  demand; it does not push. Workers can narrate freely without hammering the
-  leader. The latest notify also shows as a `last:` line in worker listings.
+- `neta progress <msg>` — records a progress milestone in the worker's log.
+  The leader pulls this on demand; it does not push. The latest progress also
+  shows as a `last:` line in worker listings.
 - `neta ask <question>` — blocks the worker until the leader answers.
   Tier-gated: juniors do not get `ask` — a blocked junior fails fast with a
   report and the leader respawns it with a better spec.
