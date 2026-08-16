@@ -40,8 +40,8 @@ running a team of engineers.
   kernel sandbox on Codex. Editing through a shell is blocked, not just
   discouraged; trivial fixes go to a junior worker.
 - Worker results reach it by returning from a blocking `neta_wait`, so a worker
-  finishing wakes an idle leader without ever interrupting a conversation in
-  progress.
+  finishing — or blocking on a question — wakes an idle leader without ever
+  interrupting a conversation in progress.
 
 ## CHARTER.md
 
@@ -111,7 +111,7 @@ keystrokes typed into someone else's terminal:
 
 - `neta notify <msg>` — appends to the worker's log. The leader pulls this on
   demand; it does not push. Workers can narrate freely without hammering the
-  leader.
+  leader. The latest notify also shows as a `last:` line in worker listings.
 - `neta ask <question>` — blocks the worker until the leader answers.
   Tier-gated: juniors do not get `ask` — a blocked junior fails fast with a
   report and the leader respawns it with a better spec.
@@ -119,8 +119,10 @@ keystrokes typed into someone else's terminal:
   spawning them, so the leader can present a staffing plan.
 - `neta_remember` — persists a tier-to-backend override to the project's
   `.neta/settings.json` (JSON rewrite; comments not preserved).
-- `neta_wait` — blocks the leader until named workers reach a terminal state,
-  and returns what they said.
+- `neta_wait` — blocks the leader until the watched workers need it: all of
+  them finishing (or the first one, with `first`), one of them blocking on
+  `ask`, or — opted in per call with `roomEvents` — a new post in a room.
+  Returns what woke it.
 - `neta_note` — open-notes ledger for recording parked work, pending decisions,
   and promised follow-ups. Workers can be linked to notes; when a worker
   finishes, its state lands on the note. Close when verified done.

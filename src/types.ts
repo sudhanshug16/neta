@@ -138,6 +138,8 @@ export interface WorkerSummary {
 	queuedBehind?: string;
 	/** Question the worker is blocked on, when state is "waiting". */
 	pendingQuestion?: string;
+	/** The worker's most recent `neta notify`, for a "last:" line in listings. */
+	lastNotify?: { text: string; at: number };
 	scratchDir: string;
 	usage?: WorkerUsage;
 	/**
@@ -185,6 +187,28 @@ export interface Note {
 	closedAt?: number;
 	/** Workers linked to this note, with their current state. */
 	workers: NoteWorkerLink[];
+}
+
+/** What can end a leader's wait. */
+export type WaitWakeReason = "completed" | "first" | "ask" | "room" | "timeout";
+
+/** Options for WorkerManager.wait. */
+export interface WaitOptions {
+	/** Return on the first watched worker to reach a terminal state, instead of all. */
+	first?: boolean;
+	/** Rooms whose new posts also wake the wait. */
+	rooms?: string[];
+}
+
+/** Why a wait returned, and the watched workers as of that moment. */
+export interface WaitResult {
+	reason: WaitWakeReason;
+	/** The watched workers, summarized at wake time, in the order they were named. */
+	workers: WorkerSummary[];
+	/** The worker whose completion ("first") or question ("ask") woke the wait. */
+	wokeBy?: WorkerSummary;
+	/** The new posts that woke the wait ("room"), and the room they landed in. */
+	roomActivity?: { room: string; posts: RoomPost[] };
 }
 
 /** A point-in-time view of the writer slot, workers and open-notes ledger. */

@@ -295,6 +295,16 @@ describe("WorkerManager", () => {
 		expect(manager.drainLog(summary.id)).toEqual([]);
 	});
 
+	it("keeps the latest notify on the worker summary", async () => {
+		const summary = await manager.spawn({ role: "scout", tier: "senior", task: "look around" });
+		expect(manager.get(summary.id).lastNotify).toBeUndefined();
+
+		manager.notify(summary.id, "reading auth.ts");
+		manager.notify(summary.id, "found it");
+
+		expect(manager.get(summary.id).lastNotify?.text).toBe("found it");
+	});
+
 	it("blocks a senior on ask until the leader answers", async () => {
 		const summary = await manager.spawn({ role: "worker", tier: "senior", task: "do it" });
 		const abort = new AbortController();
@@ -577,6 +587,75 @@ describe("WorkerManager", () => {
 		expect(summaries.map((summary) => summary.result)).toEqual(["found a", "found b"]);
 	});
 
+	it("returns the first finished worker in first mode while the other still runs", async () => {
+		const first = await manager.spawn({ role: "scout", tier: "senior", task: "a" });
+		const second = await manager.spawn({ role: "scout", tier: "senior", task: "b" });
+
+		const waiting = manager.wait([first.id, second.id], 5000, { first: true });
+		transports[0].finish({ ok: true, summary: "found a" });
+
+		const result = await waiting;
+		expect(result.reason).toBe("first");
+		expect(result.wokeBy?.id).toBe(first.id);
+		expect(result.wokeBy?.result).toBe("found a");
+		expect(result.workers.find((worker) => worker.id === second.id)?.state).toBe("running");
+	});
+
+	it("returns immediately in first mode when a watched worker is already terminal", async () => {
+		const first = await manager.spawn({ role: "scout", tier: "senior", task: "a" });
+		const second = await manager.spawn({ role: "scout", tier: "senior", task: "b" });
+		transports[0].finish({ ok: true, summary: "found a" });
+		await manager.waitFor([first.id], 5000);
+
+		const result = await manager.wait([first.id, second.id], 5000, { first: true });
+
+		expect(result.reason).toBe("first");
+		expect(result.wokeBy?.id).toBe(first.id);
+		expect(manager.get(second.id).state).toBe("running");
+	});
+
+	// A blocked worker's question used to sit until every watched worker finished
+	// or the timeout fired: waiters were only resolved in the terminal transition,
+	// never when a worker entered "waiting" through ask.
+	it("wakes a wait when a watched worker blocks on a question", async () => {
+		const summary = await manager.spawn({ role: "worker", tier: "senior", task: "do it" });
+
+		const waiting = manager.wait([summary.id], 5000);
+		const pending = manager.ask(summary.id, "which database?", new AbortController().signal);
+
+		const result = await waiting;
+		expect(result.reason).toBe("ask");
+		expect(result.wokeBy?.id).toBe(summary.id);
+		expect(result.wokeBy?.pendingQuestion).toBe("which database?");
+
+		manager.answer(summary.id, "postgres");
+		expect(await pending).toEqual({ ok: true, text: "postgres" });
+	});
+
+	it("wakes a wait on room activity when opted in", async () => {
+		const member = await manager.spawn({ role: "debater", tier: "staff", task: "argue", room: "db" });
+		manager.postToRoom("db", "leader", "leader", "old post");
+
+		const waiting = manager.wait([member.id], 5000, { rooms: ["db"] });
+		manager.postToRoom("db", "leader", "leader", "new evidence");
+
+		const result = await waiting;
+		expect(result.reason).toBe("room");
+		expect(result.roomActivity?.room).toBe("db");
+		// Only posts that landed after the wait began; the older transcript is
+		// the leader's to pull through neta_room.
+		expect(result.roomActivity?.posts.map((post) => post.text)).toEqual(["new evidence"]);
+	});
+
+	it("ignores room activity without the opt-in", async () => {
+		const member = await manager.spawn({ role: "debater", tier: "staff", task: "argue", room: "db" });
+
+		const waiting = manager.wait([member.id], 50);
+		manager.postToRoom("db", "leader", "leader", "new evidence");
+
+		expect((await waiting).reason).toBe("timeout");
+	});
+
 	it("rejects follow-up messages to a finished worker", async () => {
 		const summary = await manager.spawn({ role: "worker", tier: "senior", task: "do it" });
 		transports[0].finish({ ok: true, summary: "done" });
@@ -704,6 +783,7 @@ describe("WorkerManager", () => {
 
 			const listed = await manager.leader({ type: "workers", token: manager.leaderToken }, signal);
 			expect(listed.ok && listed.text).toContain(`${summary.id} [worker/senior`);
+			expect(listed.ok && listed.text).toContain("last: reading auth.ts");
 
 			const log = await manager.leader({ type: "log", token: manager.leaderToken, workerId: summary.id }, signal);
 			expect(log.ok && log.text).toContain("[notify] reading auth.ts");

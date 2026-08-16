@@ -31,6 +31,8 @@ import {
 	type SpawnRequest,
 	TIERS,
 	type Tier,
+	type WaitOptions,
+	type WaitResult,
 	type WorkerEvent,
 	type WorkerLogEntry,
 	type WorkerLogPage,
@@ -39,7 +41,13 @@ import {
 	type WorkerSummary,
 	type WorkerUsage,
 } from "../types.ts";
-import { formatStatusSnapshot, formatWriterActivityNotice, formatWriterContext, formatWriterStatus } from "./status.ts";
+import {
+	formatLastNotify,
+	formatStatusSnapshot,
+	formatWriterActivityNotice,
+	formatWriterContext,
+	formatWriterStatus,
+} from "./status.ts";
 import type { TransportOptions, WorkerMcpServer, WorkerTransportDriver } from "./transport.ts";
 
 const MAX_LOG_ENTRIES = 500;
@@ -63,6 +71,8 @@ interface WorkerRecord {
 	/** Log entries the leader has already been shown. */
 	logCursor: number;
 	pendingAsk?: { question: string; resolve: (response: ChannelResponse) => void };
+	/** The worker's most recent `neta notify`, for a "last:" line in listings. */
+	lastNotify?: { text: string; at: number };
 	/** Serializes prompts for this worker. */
 	queue: Promise<void>;
 	/** Prompts queued or running. The worker is only done when the last one ends. */
@@ -156,6 +166,8 @@ export class WorkerManager implements ChannelHandler {
 	private readonly workers = new Map<string, WorkerRecord>();
 	private readonly rooms = new Map<string, RoomPost[]>();
 	private readonly createTransport: TransportFactory;
+	/** Waits watching a room for new posts; poked by postToRoom. */
+	private readonly roomWatchers = new Map<string, Array<() => void>>();
 	private counter = 0;
 	private activeWriter: string | undefined;
 	/** Backend of the most recent writer, for diversity rule. Never cleared. */
@@ -477,34 +489,83 @@ export class WorkerManager implements ChannelHandler {
 
 	postToRoom(room: string, from: string, label: string, text: string): void {
 		this.ensureRoom(room).push({ at: Date.now(), from, label, text });
+		for (const watcher of [...(this.roomWatchers.get(room) ?? [])]) watcher();
 	}
 
-	/** Resolves when every listed worker is terminal, or when the timeout fires. */
-	async waitFor(workerIds: string[], timeoutMs: number): Promise<WorkerSummary[]> {
+	/**
+	 * Block until the watched workers need the leader: all of them terminal (or
+	 * the first one, in first mode), one of them blocking on a question, a new
+	 * post in a watched room, or the timeout. A pending question always wakes
+	 * the wait — an unanswered ask is more urgent than continuing to block. A
+	 * condition already true at call time returns immediately.
+	 */
+	async wait(workerIds: string[], timeoutMs: number, options: WaitOptions = {}): Promise<WaitResult> {
 		const records = workerIds.map((id) => this.require(id));
-		const pending = records.filter((record) => !isTerminalState(record.state));
-		if (pending.length === 0) return records.map((record) => this.summarize(record));
+		const rooms = [...new Set(options.rooms ?? [])];
+		const roomCursors = new Map(rooms.map((room) => [room, (this.rooms.get(room) ?? []).length]));
 
-		await new Promise<void>((resolve) => {
-			let settled = false;
-			const finish = () => {
-				if (settled) return;
-				settled = true;
-				clearTimeout(timer);
-				resolve();
-			};
-			const timer = setTimeout(finish, timeoutMs);
-			timer.unref?.();
-			let remaining = pending.length;
-			for (const record of pending) {
-				record.waiters.push(() => {
-					remaining -= 1;
-					if (remaining === 0) finish();
-				});
-			}
+		const snapshot = (
+			reason: WaitResult["reason"],
+			wokeBy?: WorkerRecord,
+			roomActivity?: WaitResult["roomActivity"],
+		): WaitResult => ({
+			reason,
+			workers: records.map((record) => this.summarize(record)),
+			wokeBy: wokeBy ? this.summarize(wokeBy) : undefined,
+			roomActivity,
 		});
 
-		return records.map((record) => this.summarize(record));
+		const evaluate = (): WaitResult | undefined => {
+			const asking = records.find((record) => record.state === "waiting" && record.pendingAsk);
+			if (asking) return snapshot("ask", asking);
+			const terminal = records.filter((record) => isTerminalState(record.state));
+			if (terminal.length === records.length) return snapshot("completed");
+			if (options.first && terminal.length > 0) return snapshot("first", terminal[0]);
+			for (const [room, cursor] of roomCursors) {
+				const posts = this.rooms.get(room) ?? [];
+				if (posts.length > cursor) return snapshot("room", undefined, { room, posts: posts.slice(cursor) });
+			}
+			return undefined;
+		};
+
+		const immediate = evaluate();
+		if (immediate) return immediate;
+
+		return new Promise<WaitResult>((resolve) => {
+			let settled = false;
+			const settle = (result: WaitResult) => {
+				settled = true;
+				clearTimeout(timer);
+				for (const record of records) {
+					record.waiters = record.waiters.filter((waiter) => waiter !== poke);
+				}
+				for (const room of rooms) {
+					const watchers = this.roomWatchers.get(room)?.filter((watcher) => watcher !== poke);
+					if (!watchers) continue;
+					if (watchers.length === 0) this.roomWatchers.delete(room);
+					else this.roomWatchers.set(room, watchers);
+				}
+				resolve(result);
+			};
+			const poke = () => {
+				if (settled) return;
+				const result = evaluate();
+				if (result) settle(result);
+			};
+			const timer = setTimeout(() => {
+				if (!settled) settle(snapshot("timeout"));
+			}, timeoutMs);
+			timer.unref?.();
+			for (const record of records) record.waiters.push(poke);
+			for (const room of rooms) {
+				this.roomWatchers.set(room, [...(this.roomWatchers.get(room) ?? []), poke]);
+			}
+		});
+	}
+
+	/** Resolves when every listed worker is terminal, one blocks on a question, or the timeout fires. */
+	async waitFor(workerIds: string[], timeoutMs: number): Promise<WorkerSummary[]> {
+		return (await this.wait(workerIds, timeoutMs)).workers;
 	}
 
 	async dispose(): Promise<void> {
@@ -580,6 +641,7 @@ export class WorkerManager implements ChannelHandler {
 	notify(workerId: string, text: string): ChannelResponse {
 		const record = this.workers.get(workerId);
 		if (!record) return { ok: false, error: `Unknown worker ${workerId}.` };
+		record.lastNotify = { text, at: Date.now() };
 		this.appendLog(record, "notify", text);
 		return { ok: true };
 	}
@@ -806,6 +868,8 @@ export class WorkerManager implements ChannelHandler {
 		let line = `${summary.id} [${summary.role}/${summary.tier}, ${access}${room}${session}] ${summary.state} — ${summary.task}`;
 		const usage = formatUsage(summary.usage, summary.modelId ?? summary.model);
 		if (usage) line += `\n  usage: ${usage}`;
+		const lastNotify = formatLastNotify(summary);
+		if (lastNotify) line += `\n  ${lastNotify}`;
 		if (summary.pendingQuestion) line += `\n  asks: ${summary.pendingQuestion}`;
 		if (summary.result) {
 			const result =
@@ -845,6 +909,12 @@ export class WorkerManager implements ChannelHandler {
 
 	private setState(record: WorkerRecord, state: WorkerState): void {
 		record.state = state;
+		// A worker blocking on ask wakes any wait watching it: an unanswered
+		// question is more urgent than continuing to block. Unlike finish(), the
+		// waiters stay registered — a wait that does not settle keeps listening.
+		if (state === "waiting") {
+			for (const waiter of [...record.waiters]) waiter();
+		}
 		if (record.noteId) {
 			const link = this.notes.get(record.noteId)?.workers.find((w) => w.workerId === record.id);
 			if (link) link.state = state;
@@ -1121,6 +1191,7 @@ export class WorkerManager implements ChannelHandler {
 			result: record.result,
 			queuedBehind: record.state === "queued" ? record.queuedBehind : undefined,
 			pendingQuestion: record.pendingAsk?.question,
+			lastNotify: record.lastNotify,
 			scratchDir: record.scratchDir,
 			usage: record.usage,
 			vendorSessionId: record.vendorSessionId,

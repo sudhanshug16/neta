@@ -188,6 +188,49 @@ describe("leader MCP tools", () => {
 		expect(bodyOf(await waiting)).toContain("auth lives in src/auth.ts");
 	});
 
+	it("returns the first finished worker with first=true, listing the rest as still running", async () => {
+		await call("neta_spawn", { role: "scout", tier: "senior", task: "a" });
+		await call("neta_spawn", { role: "scout", tier: "senior", task: "b" });
+
+		const waiting = call("neta_wait", { workerIds: ["ro1", "ro2"], first: true, timeoutSeconds: 10 });
+		transports[0].finish({ ok: true, summary: "found a" });
+
+		const body = bodyOf(await waiting);
+		expect(body).toContain("result: found a");
+		expect(body).toContain("Still running");
+		expect(body).toContain("ro2 scout/senior");
+		expect(manager.get("ro2").state).toBe("running");
+	});
+
+	it("wakes neta_wait when a worker blocks on a question", async () => {
+		await call("neta_spawn", { role: "worker", tier: "senior", task: "migrate" });
+		await call("neta_spawn", { role: "scout", tier: "senior", task: "look" });
+
+		const waiting = call("neta_wait", { timeoutSeconds: 10 });
+		const asking = manager.ask("ro1", "which database?", new AbortController().signal);
+
+		const body = bodyOf(await waiting);
+		expect(body).toContain("blocked on a question");
+		expect(body).toContain("which database?");
+		expect(body).toContain("ro2 scout/senior");
+
+		await call("neta_answer", { workerId: "ro1", answer: "postgres" });
+		expect(await asking).toEqual({ ok: true, text: "postgres" });
+	});
+
+	it("wakes neta_wait on room activity when opted in with roomEvents", async () => {
+		await call("neta_spawn", { role: "debater", tier: "staff", task: "argue", room: "db" });
+
+		const waiting = call("neta_wait", { workerIds: ["ro1"], roomEvents: true, timeoutSeconds: 10 });
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		manager.postToRoom("db", "leader", "leader", "fresh evidence");
+
+		const body = bodyOf(await waiting);
+		expect(body).toContain('New activity in room "db"');
+		expect(body).toContain("fresh evidence");
+		expect(body).toContain("neta_room");
+	});
+
 	it("gives a blocked worker its answer", async () => {
 		await call("neta_spawn", { role: "worker", tier: "senior", task: "do it" });
 		const asking = manager.ask("ro1", "which database?", new AbortController().signal);
@@ -213,6 +256,19 @@ describe("leader MCP tools", () => {
 		expect(bodyOf(result)).toContain("room=db");
 		expect(transports).toHaveLength(2);
 		expect(bodyOf(await call("neta_room", { room: "db" }))).toContain("Postgres or SQLite?");
+	});
+
+	it("shows the latest notify as a truncated last: line in listings", async () => {
+		await call("neta_spawn", { role: "scout", tier: "senior", task: "look" });
+		expect(bodyOf(await call("neta_workers"))).not.toContain("last:");
+
+		manager.notify("ro1", `progress: ${"x".repeat(100)}`);
+
+		const body = bodyOf(await call("neta_workers"));
+		expect(body).toContain("last: progress: x");
+		expect(body).not.toContain("x".repeat(100));
+		// The consolidated status snapshot carries the same line.
+		expect(bodyOf(await call("neta_status"))).toContain("last: progress: x");
 	});
 
 	it("shows what a worker has cost once the backend says", async () => {

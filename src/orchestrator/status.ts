@@ -7,6 +7,16 @@
 import { displayModel, formatUsage, type Note, type WorkerStatusSnapshot, type WorkerSummary } from "../types.ts";
 
 const OBJECTIVE_LIMIT = 100;
+const LAST_NOTIFY_LIMIT = 80;
+
+/** The most recent `neta notify` as a "last:" line, or undefined before any notify. */
+export function formatLastNotify(summary: WorkerSummary): string | undefined {
+	if (!summary.lastNotify) return undefined;
+	const flat = summary.lastNotify.text.replace(/\s+/g, " ").trim();
+	if (flat === "") return undefined;
+	const clipped = flat.length <= LAST_NOTIFY_LIMIT ? flat : `${flat.slice(0, LAST_NOTIFY_LIMIT - 3).trimEnd()}...`;
+	return `last: ${clipped}`;
+}
 
 export function formatWorkerSummary(summary: WorkerSummary): string {
 	const named = summary.name === summary.role ? summary.id : `${summary.id} "${summary.name}"`;
@@ -36,7 +46,13 @@ function formatNotes(notes: Note[]): string[] {
 function section(label: string, workers: WorkerSummary[]): string[] {
 	return [
 		label,
-		...(workers.length === 0 ? ["  (none)"] : workers.map((worker) => `  ${formatWorkerSummary(worker)}`)),
+		...(workers.length === 0
+			? ["  (none)"]
+			: workers.flatMap((worker) => {
+					const lastNotify = formatLastNotify(worker);
+					const line = `  ${formatWorkerSummary(worker)}`;
+					return lastNotify ? [line, `    ${lastNotify}`] : [line];
+				})),
 	];
 }
 

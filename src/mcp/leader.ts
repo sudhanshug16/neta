@@ -6,14 +6,23 @@
  * user can read and change it.
  *
  * `neta_wait` is the one that matters for how a leader behaves. It blocks until
- * the workers it names finish, which is how an idle leader wakes up with real
- * results instead of polling.
+ * something needs the leader — workers finishing (all, or the first with
+ * `first`), a worker blocking on a question, opted-in room activity — which is
+ * how an idle leader wakes up with real results instead of polling.
  */
 
 import type { WorkerManager } from "../orchestrator/manager.ts";
-import { formatWorkerSummary } from "../orchestrator/status.ts";
+import { formatLastNotify, formatWorkerSummary } from "../orchestrator/status.ts";
 import { roleNames } from "../prompts/roles.ts";
-import { isTier, type Note, TIERS, type WorkerLogEntry, type WorkerSummary } from "../types.ts";
+import {
+	isTerminalState,
+	isTier,
+	type Note,
+	TIERS,
+	type WaitResult,
+	type WorkerLogEntry,
+	type WorkerSummary,
+} from "../types.ts";
 import {
 	type McpTool,
 	optionalBoolean,
@@ -37,6 +46,8 @@ const MAX_WAIT_SECONDS = 900;
 const MAX_RESULT_CHARS = 3000;
 const MAX_LOG_ENTRIES = 60;
 const MAX_LOG_CHARS = 8000;
+/** A room wake carries a pointer plus a short tail, not the whole transcript. */
+const ROOM_WAKE_TAIL = 5;
 
 function clip(text: string, limit: number): string {
 	return text.length <= limit ? text : `${text.slice(0, limit)}\n… ${text.length - limit} more characters`;
@@ -64,10 +75,64 @@ function statusReport(summaries: WorkerSummary[], maxResultChars = MAX_RESULT_CH
 	return summaries
 		.map((summary) => {
 			const lines = [describe(summary)];
+			const lastNotify = formatLastNotify(summary);
+			if (lastNotify) lines.push(`  ${lastNotify}`);
 			if (summary.result) lines.push(`  result: ${clip(summary.result, maxResultChars)}`);
 			return lines.join("\n");
 		})
 		.join("\n\n");
+}
+
+/** One line per worker, for the workers a wait is not reporting in full. */
+function oneLiners(summaries: WorkerSummary[]): string {
+	return summaries.map((summary) => describe(summary)).join("\n");
+}
+
+/** Render a wait's outcome by what woke it. */
+function formatWaitResult(result: WaitResult, seconds: number): string {
+	const stillRunning = result.workers.filter((summary) => !isTerminalState(summary.state));
+	switch (result.reason) {
+		case "completed":
+			return statusReport(result.workers);
+		case "first": {
+			const finished = result.workers.filter((summary) => isTerminalState(summary.state));
+			const rest = stillRunning.length
+				? `\n\nStill running (call neta_wait again to collect them):\n${oneLiners(stillRunning)}`
+				: "";
+			return statusReport(finished) + rest;
+		}
+		case "ask": {
+			const asking = result.wokeBy;
+			if (!asking) return statusReport(result.workers);
+			const others = result.workers.filter((summary) => summary.id !== asking.id);
+			const rest = others.length ? `\n\nOthers:\n${oneLiners(others)}` : "";
+			return (
+				`${asking.id} is blocked on a question; answer it with neta_answer, then wait again.\n` +
+				statusReport([asking]) +
+				rest
+			);
+		}
+		case "room": {
+			const activity = result.roomActivity;
+			if (!activity) return statusReport(result.workers);
+			const shown = activity.posts.slice(-ROOM_WAKE_TAIL);
+			const dropped = activity.posts.length - shown.length;
+			const tail = shown.map((post) => `[${post.label}] ${post.text}`).join("\n");
+			return (
+				`New activity in room "${activity.room}"; read the full transcript with neta_room.\n` +
+				(dropped > 0 ? `… ${dropped} earlier new posts not shown\n` : "") +
+				clip(tail, MAX_LOG_CHARS) +
+				`\n\nWatched workers:\n${oneLiners(result.workers)}`
+			);
+		}
+		case "timeout": {
+			const note = stillRunning.length
+				? `\n\nStill running after ${seconds}s: ${stillRunning.map((summary) => summary.id).join(", ")}. ` +
+					"Call neta_wait again to keep waiting; they are not lost."
+				: "";
+			return statusReport(result.workers) + note;
+		}
+	}
 }
 
 /** "(unworked)", or the linked workers with their progress: "(rw7 in progress, rw8 queued)". */
@@ -265,9 +330,10 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 			name: "neta_workers",
 			description:
 				"List workers with their state, token usage and final results. Cheap and safe to call whenever you want " +
-				"to know what is happening; it does not interrupt the workers. For a worker's running commentary, use " +
-				"neta_log. When called with a specific workerId, the full result is returned unclipped; when listing all " +
-				"workers, results are clipped to 3000 characters. Shows open notes at the end.",
+				"to know what is happening; it does not interrupt the workers. Each worker's most recent notify shows " +
+				"as a last: line. For a worker's running commentary, use neta_log. When called with a specific workerId, " +
+				"the full result is returned unclipped; when listing all workers, results are clipped to 3000 " +
+				"characters. Shows open notes at the end.",
 			inputSchema: {
 				type: "object",
 				properties: {
@@ -317,9 +383,13 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 		{
 			name: "neta_wait",
 			description:
-				"Block until the named workers finish, then return their results. This is how you collect work: end your " +
-				"turn with it rather than polling. Returns early with current state if the timeout expires. Results are " +
-				"clipped to 3000 characters; use neta_workers with a specific workerId to retrieve the full result. Shows open notes at the end.",
+				"Block until the named workers need you, then return what woke you. This is how you collect work: end " +
+				"your turn with it rather than polling. Wakes on: every named worker finishing (the default); the first " +
+				"one finishing, with first=true, to act on results as they land; any watched worker blocking on a " +
+				"question (always on — answer it with neta_answer and wait again); a new post in a room, with " +
+				"roomEvents, to referee a debate live. Returns early with current state if the timeout expires. Results " +
+				"are clipped to 3000 characters; use neta_workers with a specific workerId to retrieve the full result. " +
+				"Shows open notes at the end.",
 			inputSchema: {
 				type: "object",
 				properties: {
@@ -332,6 +402,18 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 						type: "number",
 						description: `Default ${DEFAULT_WAIT_SECONDS}, max ${MAX_WAIT_SECONDS}.`,
 					},
+					first: {
+						type: "boolean",
+						description:
+							"Return as soon as any watched worker finishes, with its result and one-line states of the rest. " +
+							"Default: wait for all of them.",
+					},
+					roomEvents: {
+						type: ["boolean", "string"],
+						description:
+							"Also wake when a new post lands in a room: true watches the watched workers' rooms, a room name " +
+							"watches that room.",
+					},
 				},
 			},
 			async run(args) {
@@ -339,17 +421,25 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 					optionalStringArray(args, "workerIds") ??
 					manager
 						.list()
-						.filter((summary) => !["done", "failed", "killed"].includes(summary.state))
+						.filter((summary) => !isTerminalState(summary.state))
 						.map((summary) => summary.id);
 				if (ids.length === 0) return text("Nothing to wait for.");
 				const seconds = Math.min(optionalNumber(args, "timeoutSeconds") ?? DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS);
-				const summaries = await manager.waitFor(ids, seconds * 1000);
-				const stillRunning = summaries.filter((summary) => !["done", "failed", "killed"].includes(summary.state));
-				const note = stillRunning.length
-					? `\n\nStill running after ${seconds}s: ${stillRunning.map((s) => s.id).join(", ")}. ` +
-						"Call neta_wait again to keep waiting; they are not lost."
-					: "";
-				return text(statusReport(summaries) + note + formatOpenNotes(manager));
+				const first = optionalBoolean(args, "first") ?? false;
+				const roomEvents = args.roomEvents;
+				let rooms: string[] | undefined;
+				if (typeof roomEvents === "string" && roomEvents.trim() !== "") {
+					rooms = [roomEvents];
+				} else if (roomEvents === true) {
+					rooms = ids.flatMap((id) => {
+						const room = manager.get(id).room;
+						return room ? [room] : [];
+					});
+				} else if (roomEvents !== undefined && roomEvents !== null && roomEvents !== false && roomEvents !== "") {
+					throw new Error('"roomEvents" must be true or a room name.');
+				}
+				const result = await manager.wait(ids, seconds * 1000, { first, rooms });
+				return text(formatWaitResult(result, seconds) + formatOpenNotes(manager));
 			},
 		},
 		{

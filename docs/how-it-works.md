@@ -41,8 +41,11 @@ you are running.
 Workers are quiet. They narrate into a log the leader pulls when it chooses,
 and nothing they say interrupts anyone. Two things block instead:
 
-- the leader's `neta_wait` blocks until the workers it named are finished, and
-  returns their summaries — this is how an idle leader wakes up with results;
+- the leader's `neta_wait` blocks until the workers it named are finished —
+  all of them, or the first one with `first: true` — and returns their
+  summaries; this is how an idle leader wakes up with results. A watched
+  worker blocking on `ask` wakes the wait immediately, and `roomEvents` opts
+  a wait into waking on new room posts, so a debate can be refereed live;
 - a worker's `neta_ask` blocks until the leader answers.
 
 Blocking tool calls are the only cross-agent channel. Neta never types into

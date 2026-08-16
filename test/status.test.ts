@@ -1,5 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { formatStatusSnapshot, formatWorkerSummary, formatWriterStatus } from "../src/orchestrator/status.ts";
+import {
+	formatLastNotify,
+	formatStatusSnapshot,
+	formatWorkerSummary,
+	formatWriterStatus,
+} from "../src/orchestrator/status.ts";
 import type { WorkerStatusSnapshot, WorkerSummary } from "../src/types.ts";
 
 function worker(overrides: Partial<WorkerSummary> = {}): WorkerSummary {
@@ -58,6 +63,16 @@ describe("formatStatusSnapshot", () => {
 			"Terminal:\n  ro4 scout/senior | backend=codex | done | model unknown — backend default",
 		);
 		expect(status).toContain('Open notes:\n  n1 "finish the auth rollout" (rw2 queued)');
+	});
+
+	it("flattens and clips the latest notify to one last: line", () => {
+		expect(formatLastNotify(worker())).toBeUndefined();
+		expect(formatLastNotify(worker({ lastNotify: { text: "line one\nline two", at: 1 } }))).toBe(
+			"last: line one line two",
+		);
+		expect(formatLastNotify(worker({ lastNotify: { text: "y".repeat(200), at: 1 } }))).toBe(
+			`last: ${"y".repeat(77)}...`,
+		);
 	});
 
 	// A blank where the model should be reads as "fine"; only a worker that has
