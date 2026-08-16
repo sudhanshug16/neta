@@ -8,9 +8,10 @@ use. You talk to Claude Code, Codex or OpenCode in its own interface; Neta
 launches it as the leader — instructions injected, worker tools registered as
 an MCP server, write access removed with that vendor's own permission
 machinery — and gives it a team of worker agents, each a real agent CLI driven
-over ACP on the subscription you already pay for. The leader reads, decides,
-delegates and verifies; workers do the work; one writer at a time. Neta owns
-no UI of its own — it stays behind the CLI and gets out of the way.
+over ACP on the login you already use. The leader reads, decides, delegates
+and verifies; workers do the work; one writer at a time per session. Neta owns
+no session UI — it stays behind the CLI and gets out of the way; the one
+surface it draws is the per-worker `neta watch` pane.
 
 ## Install
 
@@ -54,10 +55,18 @@ restriction is a mechanism, not a prompt:
 | --- | --- | --- |
 | Claude Code | denied by permission rules | `neta guard` runs as a PreToolUse hook |
 | Codex | kernel sandbox | same kernel sandbox (`sandbox_mode = "read-only"`) |
-| OpenCode | `permission.edit: deny` | denied bash patterns |
+| OpenCode | `permission.edit: deny` | bash denied by default; read-only allowlist |
 
-Codex's is the strongest — the kernel refuses the write. The other two rely on
-Neta's guard, which is a denylist, and a denylist can be incomplete.
+Codex's is the strongest — the kernel refuses the write. Claude Code relies on
+Neta's guard, which denies shell writes by pattern — redirects (fd-prefixed
+ones like `2>` included), in-place editors, `tee`, `patch`, the file movers,
+mutating git subcommands — and a denylist can be incomplete. OpenCode denies
+bash outright and allows only listed read-only inspection commands; an
+allowlist fails closed, but both are weaker than a kernel. The honesty rule
+gets the same treatment where the vendor allows it: on Claude Code the
+backend's own subagent tools (`Agent`, `Task`) are denied, so the leader
+cannot pass its internal subagents off as workers; on Codex and OpenCode that
+rule lives in the prompt.
 
 ## Workers, tiers, backends
 
@@ -65,8 +74,9 @@ Every worker is a real agent CLI driven over ACP (Agent Client Protocol):
 Claude Code and Codex through their ACP bridges
 (`@agentclientprotocol/claude-agent-acp`, `@agentclientprotocol/codex-acp`),
 OpenCode natively (`opencode acp`). One transport, so every backend behaves
-the same — and every worker runs on the login you already have rather than on
-API credit.
+the same — and every worker launches with that CLI's own auth. Whether that
+means a subscription login or API credit is that CLI's configuration; Neta
+adds no billing of its own.
 
 The leader asks for a tier, never a model. A tier is what you would trust a
 worker with:
@@ -79,8 +89,9 @@ Tiers ship unconfigured, and unconfigured tiers follow the spread policy:
 deterministic round-robin across installed backends, stable per session, with
 two diversity rules — reviewers and debaters prefer a different backend than
 the most recent writer, and debaters in one room are spread across vendors.
-The first staffing plan of an unconfigured session states this policy, so you
-learn it exists before it spends anything.
+When neither a charter nor any tier-to-backend mapping is configured, the
+first staffing plan of the session states this policy, so you learn it exists
+before it spends anything.
 
 Settings pin tiers down. `{ "tiers": { "staff": { "backend": "codex" } } }`
 puts staff work on `gpt-5.6-sol[xhigh]` while the rest keep the spread, and
@@ -116,7 +127,9 @@ host process, outside any sandbox:
 
 Workers report back through their own MCP tools — `neta_progress`,
 `neta_ask`, `neta_say`, `neta_room`, `neta_status` — or the same commands in
-their shell; both doors reach the same socket:
+their shell; both doors reach the same socket, and every request carries that
+worker's own token. Workers hold no leader token and cannot run leader
+commands:
 
 ```
 neta progress <message>    record a progress milestone; the leader pulls it
@@ -135,8 +148,12 @@ Codex's kernel sandbox covers the worker's shell as well. Read-only workers
 are kept aware of the writer: spawned alongside one, they are told who holds
 the slot and what it is doing; when a writer starts or finishes, they get a
 notice — the finish notice says whether it committed and whether uncommitted
-changes remain; `neta status --writers` answers on demand. Writers commit
-everything before finishing, so the next writer is briefed from `git log`.
+changes remain; `neta status --writers` answers on demand. Writers are told to
+commit everything before finishing — the role prompt says so, and a writer
+that hands off with a dirty tree gets "uncommitted changes: N files" appended
+loudly to its result — so the next writer is briefed from `git log`. That is a
+warning, not a hard gate: Neta reports the dirty handoff rather than blocking
+it.
 
 ## Sessions
 
@@ -148,6 +165,8 @@ each in `~/.neta/sessions/`, so any terminal reaches them; add
 neta sessions              leader sessions running on this machine
 neta status                writer slot, worker states, queue and open notes
 neta workers               what is running, and what it has cost
+neta spawn ...             start a worker from your terminal
+neta wait ro1 ro2          block until those workers finish
 neta watch ro1             watch one worker live, and type to talk to it
 neta attach ro1            open that worker in its own CLI and take over
 neta log ro1               its new lines since you last looked
@@ -157,16 +176,19 @@ neta kill rw2              stop it
 neta --backends            which agent CLIs are installed
 ```
 
-`neta attach` works because a worker is an ordinary Claude Code or Codex
-session — same history, same id — so it opens in that CLI's own interface,
+`neta attach` works because a worker is an ordinary session of the CLI that
+ran it: Neta hands the session id the worker's ACP handshake returned to that
+backend's own resume command — `claude --resume <id>`, `codex resume <id>`,
+`opencode --session <id>` — so it opens in the interface you already know,
 where you can read what it did and keep talking to it yourself. Neta drove it;
 you can finish it.
 
 ## Configuring it
 
-- **Settings** live in `~/.neta/settings.json`, overridden key by key by the
-  project's `.neta/settings.json`: which CLI leads, tiers, backends,
-  multiplexer. See [docs/settings.md](docs/settings.md).
+- **Settings** live in `~/.neta/settings.json`, with the project's
+  `.neta/settings.json` merged on top: which CLI leads, tiers, backends,
+  multiplexer. Each tier and each backend entry deep-merges — project fields
+  win, user fields survive. See [docs/settings.md](docs/settings.md).
 - **CHARTER.md** in your project says which decisions the leader may take on
   your behalf and which stop and ask — see
   [CHARTER.example.md](CHARTER.example.md). `~/.neta/CHARTER.md` is also

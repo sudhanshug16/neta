@@ -19,21 +19,34 @@ worker control is MCP and not a CLI.
 
 The control plane has no daemon and no lifetime of its own: when the leader
 exits, its stdio closes, and the control plane kills every worker it started
-and removes its session file.
+and removes its session file. If it dies without cleaning up (a crash,
+`kill -9`), the next `neta` invocation sweeps the residue: the stale session
+file, its socket, and any recorded worker process groups — each checked
+against its recorded start time first, so a recycled pid is never killed.
 
 ## The two doors
 
-Every worker operation exists twice, over one manager:
+Two doors reach one manager, but they do not carry the same operations. The
+MCP door has all thirteen leader tools. The socket door carries the eight
+leader commands a person or token-holding process needs from a terminal —
+`spawn`, `workers`, `status`, `log`, `wait`, `send`, `answer`, `kill` — plus
+the worker commands and the view commands (`watch`, `attach`, `sessions`).
+The five tools without socket twins (`neta_plan`, `neta_spawn_group`,
+`neta_room`, `neta_note`, `neta_remember`) are staffing and bookkeeping
+surfaces of the leader's own judgment loop, which lives in the MCP door.
 
 | Door | Who uses it | How |
 | --- | --- | --- |
-| MCP tools | the leader | `neta_spawn`, `neta_status`, `neta_wait`, … in the vendor's tool loop |
-| Unix socket | workers, and you | `neta progress`, `neta workers`, `neta status`, `neta watch` |
+| MCP tools | the leader | all 13 `neta_*` tools in the vendor's tool loop |
+| Unix socket | workers, and you | 8 leader commands, 5 worker commands, the view commands |
 
-The socket door is authorized by a token. Workers get their own id and can only
-report or run `neta status --writers`; the token that authorizes spawning and killing goes to the leader's
-process and to the session file in `~/.neta/sessions/`, which is readable only
-by you. That file is how `neta workers` or `neta status` in a second terminal finds the session
+The socket door is authorized per role, by token. Each worker's requests carry
+its own per-worker token, and a worker can only report progress, ask, post to
+its room, or run `neta status --writers`; it holds no leader token, and the
+CLI refuses leader commands inside a worker. The leader token — the one that
+authorizes spawning and killing — goes to the leader's process and to the
+session file in `~/.neta/sessions/`, which is readable only by you. That file
+is how `neta workers` or `neta status` in a second terminal finds the session
 you are running.
 
 ## Waking the leader
@@ -63,18 +76,27 @@ The leader is read-only, enforced with each vendor's own machinery:
 
 Codex's is the strongest: the kernel refuses the write, so there is no pattern
 to outsmart. Claude Code relies on Neta's guard, which denies redirects into
-files, in-place editors, `tee`, `patch`, the file-moving commands, and git
-subcommands that change a repository. OpenCode instead denies bash by default
-and allows only listed read-only inspection commands; both approaches are
-weaker than a kernel sandbox.
+files (fd-prefixed forms like `2> file` and `&> file` included), in-place
+editors, `tee`, `patch`, the file-moving commands, and git subcommands that
+change a repository. OpenCode instead denies bash by default and allows only
+listed read-only inspection commands; both approaches are weaker than a
+kernel sandbox.
+
+The honesty rule — never substitute the backend's internal subagents for Neta
+workers — is mechanized where the vendor allows it: Claude Code's `Agent` and
+`Task` tools are in the deny rules, so the leader cannot use them. Codex and
+OpenCode expose no equivalent tool to deny, so there the rule is prompt-level.
 
 All Neta processes run as the same OS user; tokens separate sessions and roles,
 not a malicious process running as that same user.
 
 Workers are restricted at the ACP layer: a worker without the writer slot has
-its file-editing tool calls rejected by Neta, whatever its prompt says. Its
-shell is only sandboxed if you give that backend sandbox flags — see
-`readOnlyArgs` in [settings](settings.md).
+its file-editing tool calls rejected by Neta, whatever its prompt says. Neta
+also asks each worker session for the strictest mode it advertises — where a
+backend offers a read-only mode, it is requested automatically; on Codex that
+mode is a kernel sandbox, which covers the worker's shell too. Elsewhere the
+shell is only sandboxed if you add that backend's own sandbox flags as an
+extra layer — see `readOnlyArgs` in [settings](settings.md).
 
 ## Instructions, per vendor
 
@@ -84,27 +106,26 @@ CLI differently, because the CLIs differ:
 - **Claude Code**: `--append-system-prompt`.
 - **OpenCode**: `instructions` in an inline `OPENCODE_CONFIG_CONTENT` config.
 - **Codex**: no append flag exists, so the session runs against an overlay
-  `CODEX_HOME` — every entry of your real one symlinked in, with `AGENTS.md`
-  replaced by your own text plus Neta's. Sessions, history and credentials
-  still live in your real home through those links, and a refreshed
-  `auth.json` is copied back when the session ends.
+  `CODEX_HOME` — each entry of your real one symlinked in, with `AGENTS.md`
+  replaced by your own text plus Neta's. The copy is best-effort: an entry
+  that cannot be linked is silently skipped, and Codex simply does not see
+  it. Sessions, history and credentials live in your real home through the
+  links that succeed, and a refreshed `auth.json` is copied back when the
+  session ends — also best-effort.
 
 ## Taking a worker over
 
-A worker driven over ACP is not a special kind of session. The id the ACP
-handshake returns is the id the vendor files the conversation under — verified
-against both bridges:
-
-| Backend | Where the worker's conversation lives |
-| --- | --- |
-| Claude Code | `~/.claude/projects/<cwd>/<session-id>.jsonl` |
-| Codex | `~/.codex/sessions/<date>/rollout-…-<session-id>.jsonl` |
+A worker driven over ACP is not a special kind of session — it is an ordinary
+session of its backend CLI, and the ACP handshake hands back that backend's
+own session id.
 
 Worker ids show access at a glance: writers use `rw<N>`, read-only workers use
-`ro<N>`, and both use one serial counter for the session. So `neta attach ro1`
-runs that CLI's own resume command — `claude --resume <id>`,
-`codex resume <id>` — and you are inside the worker's conversation in the
-interface you already know, able to read it properly and keep talking to it.
+`ro<N>`, and both use one serial counter for the session. `neta attach ro1`
+passes the worker's session id to the backend's resume command —
+`claude --resume <id>`, `codex resume <id>`, `opencode --session <id>`,
+configurable per backend via `backends.<name>.resume` — and you are inside
+the worker's conversation in the interface you already know, able to read it
+properly and keep talking to it.
 
 There is no second mode to opt into and nothing is given up to get this: Neta
 still drove the worker, still gated its edits, still counted its tokens. If you
@@ -123,9 +144,11 @@ control. Panes read the log without consuming it, so nothing a pane shows is
 stolen from the leader, and `neta watch <id> --plain` prints the same stream
 as bare lines for piping.
 
-If you are already inside a multiplexer session, Neta uses it. If you are not,
-it starts one around the leader. With neither installed, workers run headless
-and nothing else changes.
+Under the default `auto` mode, a multiplexer session you are already inside
+wins; outside one, `auto` prefers Zellij, then tmux. An explicit `--mux
+zellij` or `--mux tmux` picks that multiplexer regardless. If you are not
+inside a session, Neta starts one around the leader; with no multiplexer
+available, workers run headless and nothing else changes.
 
 ## Worker cost estimation
 

@@ -25,7 +25,7 @@
       <a href="https://github.com/sudhanshug16/neta#readme">Docs</a>
       <a href="https://github.com/sudhanshug16/neta/blob/main/MANIFESTO.md">Manifesto</a>
       <a href="https://github.com/sudhanshug16/neta">GitHub</a>
-      <a class="npm" href="https://www.npmjs.com/package/@intervene/neta">npm 1.0.0</a>
+      <a class="npm" href="https://www.npmjs.com/package/@intervene/neta">npm</a>
     </nav>
   </div>
 </header>
@@ -39,7 +39,7 @@
         <div class="kicker"><span class="deva">नेता</span> · Hindi: leader</div>
         <h1>You talk to a leader.<br>It runs the team.</h1>
         <p class="lead">Neta delegates work to tiered worker agents and drives them until the problem is done. The leader never edits files — that restriction is enforced by your CLI's own machinery, not suggested in a prompt.</p>
-        <p class="sublead">And it has no interface of its own. You stay in Claude Code, Codex or OpenCode — the UI you already use and pay for. Neta injects instructions, tools and restrictions, then gets out of the way.</p>
+        <p class="sublead">And it owns no session UI. You stay in Claude Code, Codex or OpenCode — the UI you already use and pay for. Neta injects instructions, tools and restrictions, then gets out of the way; the one surface it draws is the per-worker watch pane.</p>
         <div class="chips">
           <span class="chip brass">MIT</span>
           <span class="chip phosphor">one bundled file</span>
@@ -84,8 +84,8 @@
       </div>
       <div class="principle">
         <div class="num">02</div>
-        <h3>One repo, one writer</h3>
-        <p>Reads parallelize; writes serialize. A second writer is refused, not raced — it queues and starts when the slot frees. A writer commits everything before handing off.</p>
+        <h3>One writer per session</h3>
+        <p>Reads parallelize; writes serialize. Each session has a single writer slot: a second writer is queued, not raced, and starts when the slot frees. A writer is told to commit everything before handing off, and a dirty handoff is called out loudly in its result.</p>
       </div>
       <div class="principle">
         <div class="num">03</div>
@@ -95,7 +95,7 @@
       <div class="principle">
         <div class="num">04</div>
         <h3>Finish, then report</h3>
-        <p>A CHARTER.md says which decisions the leader may take on your behalf. Inside that boundary it just does the work. Workers are quiet; only terminal events and blocking questions push.</p>
+        <p>A CHARTER.md says which decisions the leader may take on your behalf. Inside that boundary it just does the work. Workers are quiet; only terminal events, blocking questions, and room posts the leader opts into push.</p>
       </div>
     </div>
   </div>
@@ -153,11 +153,11 @@
       <div class="et-row">
         <div class="leader">OpenCode</div>
         <div class="mech">permission.edit: deny</div>
-        <div class="mech">denied bash patterns</div>
-        <div class="strength ember">denylist</div>
+        <div class="mech">bash denied by default; read-only allowlist</div>
+        <div class="strength ember">allowlist</div>
       </div>
     </div>
-    <p class="et-note">Codex's is the strongest — the kernel refuses the write. The other two rely on Neta's guard, which is a denylist, and a denylist can be incomplete. That is worth knowing rather than papering over.</p>
+    <p class="et-note">Codex's is the strongest — the kernel refuses the write. Claude Code relies on Neta's guard, which is a denylist, and a denylist can be incomplete. OpenCode denies bash outright and allows only read-only commands — an allowlist fails closed, but both are weaker than a kernel. That is worth knowing rather than papering over.</p>
   </div>
 </section>
 
@@ -169,7 +169,7 @@
     </div>
     <div class="two-col">
       <div>
-        <p>A worker is an ordinary Claude Code or Codex session — same history, same id. <code class="brass">neta attach rw3</code> runs that CLI's own resume command and drops you inside the conversation, where you can read what it did and keep talking to it yourself. Neta drove it; you can finish it.</p>
+        <p>A worker is an ordinary session of the CLI that ran it. <code class="brass">neta attach rw3</code> hands the worker's own session id to that CLI's resume command and drops you inside the conversation, where you can read what it did and keep talking to it yourself. Neta drove it; you can finish it.</p>
         <p>With Zellij or tmux, each worker also gets a tab streaming its log — prose as markdown, tool calls as one-liners, changes as coloured diffs, and an input line that talks to the worker. Panes read without consuming, so nothing shown there is taken from the leader. Without a multiplexer, workers run headless and nothing else changes.</p>
         <div class="cmdlist">
           <div class="cmd-row"><span class="cmd">neta workers</span><span class="what">what is running, and what it has cost</span></div>
@@ -221,11 +221,11 @@
       <div class="card">
         <h3>Every worker runs on a login you already have</h3>
         <div class="card-list">
-          <div><span class="name">Claude Code</span> — <code>claude-code-acp</code>, Zed-maintained — your Claude subscription</div>
-          <div><span class="name">Codex</span> — <code>codex-acp</code> — your ChatGPT subscription</div>
+          <div><span class="name">Claude Code</span> — <code>claude-agent-acp</code> — its own login</div>
+          <div><span class="name">Codex</span> — <code>codex-acp</code> — its own login</div>
           <div><span class="name">OpenCode</span> — <code>opencode acp</code>, native — its own config</div>
         </div>
-        <p class="card-foot">Driven over ACP through one internal transport — one code path, not one conditional per vendor. Cost runs on your subscription, not on API credit.</p>
+        <p class="card-foot">Driven over ACP through one internal transport — one code path, not one conditional per vendor. Each worker launches with that CLI's own auth; whether that is a subscription or API credit is that CLI's configuration.</p>
       </div>
       <div class="card">
         <h3>Flavors — playbooks the leader reaches for</h3>
@@ -251,7 +251,7 @@
         <div class="card-label phosphor">Verified</div>
         <div class="card-list">
           <div>Every vendor mechanism was checked against the installed CLI before being coded.</div>
-          <div>333 tests drive the real control plane, real worker processes and a real socket.</div>
+          <div>351 tests drive the real control plane, real worker processes and a real socket.</div>
           <div>The published package was installed from its tarball and driven through a full session.</div>
         </div>
       </div>
@@ -259,7 +259,7 @@
         <div class="card-label ember">Not verified, and worth knowing</div>
         <div class="card-list">
           <div>Only Codex workers are sandboxed at the kernel. Elsewhere a determined worker could still write through bash.</div>
-          <div>No long-running real-model use yet: the honesty rule is enforced by prompt and tools, not by a test.</div>
+          <div>No long-running real-model use yet. The honesty rule is mechanized on Claude Code — its own subagent tools are denied — and prompt-level on Codex and OpenCode; no test exercises it against a real model.</div>
           <div>Vendor flags change often. That is where breakage will show up first.</div>
         </div>
       </div>
@@ -298,7 +298,7 @@
       <span class="mark">न</span>
       <span>Neta · MIT · Sudhanshu Gautam</span>
     </div>
-    <span>no UI of our own</span>
+    <span>no session UI of our own</span>
   </div>
 </footer>
 

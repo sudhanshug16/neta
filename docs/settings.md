@@ -1,9 +1,18 @@
 # Settings
 
-Neta reads `~/.neta/settings.json`, then `.neta/settings.json` in the project,
-which wins key by key. Both are optional; the defaults are opinions, not
-requirements. A malformed file is ignored rather than fatal — a broken settings
-file should not stop you leading a session.
+Neta reads `~/.neta/settings.json`, then `.neta/settings.json` in the project
+on top. Each tier entry and each backend entry deep-merges: project fields
+win, user fields survive, and a backend's `env` and `tierModels` maps merge
+the same way. So with
+
+```json
+user:    { "backends": { "opencode": { "tierModels": { "junior": "opencode/deepseek-v4-flash-free" } } } }
+project: { "backends": { "opencode": { "tierModels": { "staff": "openai/gpt-5.6-sol" } } } }
+```
+
+the session has both tier models. Both files are optional; the defaults are
+opinions, not requirements. A malformed file is ignored rather than fatal — a
+broken settings file should not stop you leading a session.
 
 ```json
 {
@@ -33,7 +42,7 @@ file should not stop you leading a session.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `mode` | `auto` | `zellij`, `tmux`, `none`, or `auto` (prefer Zellij, then tmux, then headless). If you are already inside a session, that one wins. |
+| `mode` | `auto` | `zellij`, `tmux`, `none`, or `auto`. Under `auto`, a session you are already inside wins; otherwise it prefers Zellij, then tmux, then headless. An explicit choice picks that multiplexer regardless. |
 | `panes` | `true` | Open a pane per worker. Set `false` to run every worker headless. |
 
 An explicitly chosen multiplexer that is not installed falls back to headless
@@ -94,12 +103,19 @@ which one you logged into. Give its tiers meaning with `tierModels`:
 ```
 
 OpenCode model ids are provider-qualified (`provider/model`); Neta passes them
-through unchanged over ACP `session/set_model`.
+through unchanged.
 
-Neta selects the model over ACP (`session/set_model`), which is why this works
-the same on every backend. It also picks the session's mode: a worker without
-the writer slot gets the backend's read-only mode where one exists — on Codex
-that is a kernel sandbox, which covers the worker's shell as well as its tools.
+Neta selects the model over ACP, which is why this works the same on every
+backend: `session/set_config_option` where the bridge supports it, falling
+back to the legacy `session/set_model` extension where it does not. Codex's
+composite ids are split — `gpt-5.6-sol[xhigh]` becomes the model plus a
+thought-level option, selected separately. Selection is negotiated, not
+assumed: a model the backend does not offer, or a selection call that fails,
+is loudly logged in the worker's log and the worker runs on the backend's
+default — and listings show what actually ran, not what was asked for. Neta
+also picks the session's mode: a worker without the writer slot gets the
+backend's read-only mode where one is advertised — on Codex that is a kernel
+sandbox, which covers the worker's shell as well as its tools.
 
 ## backends
 

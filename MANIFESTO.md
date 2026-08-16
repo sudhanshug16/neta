@@ -17,18 +17,24 @@ running a team of engineers.
    a numeric intelligence scale is fake precision.
 3. **Finish, then report.** The charter defines what the leader may decide on
    the user's behalf; everything inside that boundary is done without asking.
-4. **No UI of our own.** The user stays in the agent CLI they already use and
-   pay for. Neta injects instructions, tools and restrictions, and otherwise
-   gets out of the way. It owns no terminal, no transcript, no multiplexer.
-5. **One repo, one writer.** Reads parallelize; writes serialize.
+4. **No session UI of our own.** The user stays in the agent CLI they already
+   use and pay for. Neta injects instructions, tools and restrictions, and
+   otherwise gets out of the way. It owns no terminal multiplexer and never
+   re-skins the vendor's transcript; the one composed surface it owns is the
+   per-worker watch pane (header, transcript, footer, input line).
+5. **One writer per session.** Reads parallelize; writes serialize: each
+   session has a single writer slot. Two sessions in one repo are two slots —
+   Neta serializes its own writers, it does not lock the repository.
 6. **Workers are quiet.** Progress is pulled by the leader; only terminal
-   events and blocking questions push.
+   events, blocking questions, and room activity the leader opted into push.
 7. **Enforcement over instruction.** Every restriction that matters is a
    mechanism — a permission rule, a hook, a kernel sandbox, a protocol
    rejection — because a rule that lives only in a prompt is a suggestion.
 8. **Report honestly or stop.** A leader that cannot delegate says so. It never
    does the work itself and never passes its backend's own subagents off as
-   Neta workers.
+   Neta workers — mechanized on Claude Code, whose `Agent` and `Task` tools
+   are denied; a prompt rule on Codex and OpenCode, which expose no such tool
+   to deny.
 
 ## The leader
 
@@ -36,9 +42,9 @@ running a team of engineers.
   `neta` with the leader instructions appended and Neta's worker tools
   registered as an MCP server.
 - Read-only, enforced by that vendor: permission rules and a bash hook on
-  Claude Code, `permission.edit: deny` and denied bash patterns on OpenCode, a
-  kernel sandbox on Codex. Editing through a shell is blocked, not just
-  discouraged; trivial fixes go to a junior worker.
+  Claude Code, `permission.edit: deny` with default-deny bash and a read-only
+  allowlist on OpenCode, a kernel sandbox on Codex. Editing through a shell is
+  blocked, not just discouraged; trivial fixes go to a junior worker.
 - Worker results reach it by returning from a blocking `neta_wait`, so a worker
   finishing — or blocking on a question — wakes an idle leader without ever
   interrupting a conversation in progress.
@@ -65,9 +71,12 @@ transport, so there is one code path rather than one conditional per vendor:
 
 | Backend | ACP entry point | Auth |
 | --- | --- | --- |
-| Claude Code | `@agentclientprotocol/claude-agent-acp` | Claude subscription |
-| Codex | `@agentclientprotocol/codex-acp` | ChatGPT subscription |
+| Claude Code | `@agentclientprotocol/claude-agent-acp` | its own login |
+| Codex | `@agentclientprotocol/codex-acp` | its own login |
 | OpenCode | `opencode acp` (native) | its own config |
+
+Each worker launches with its CLI's own auth; whether that is a subscription
+login or API credit is that CLI's configuration, not Neta's.
 
 A spawn is **role + tier + task**, plus optional writer flag and room.
 
@@ -140,13 +149,16 @@ All workers run in the directory they were spawned in.
   discipline — protocol enforcement, identical across backends. A worker's
   *shell* is only sandboxed where its backend supports it; that gap is
   documented rather than assumed away.
-- **Single writer slot.** When a writer is already active, additional writer
-  spawns queue automatically (FIFO) and start when the slot frees. Queued
-  workers can be killed. The spawn result says queued vs running. Reads and
-  thinking parallelize; repo writes serialize.
-- **Commit on handoff.** A writer commits everything before finishing, with a
-  message stating what was done and why. The next writer is briefed from
-  `git log` — cheap, durable context transfer.
+- **Single writer slot, per session.** When a writer is already active,
+  additional writer spawns queue automatically (FIFO) and start when the slot
+  frees. Queued workers can be killed. The spawn result says queued vs
+  running. Reads and thinking parallelize; repo writes serialize.
+- **Commit on handoff.** A writer is told to commit everything before
+  finishing, with a message stating what was done and why — the role prompt
+  carries the rule, and a writer that hands off with a dirty tree has
+  "uncommitted changes" stated loudly in its finish result and in the notice
+  read-only workers receive. A warning, not a hard gate. The next writer is
+  briefed from `git log` — cheap, durable context transfer.
 - **Scratchpad.** Every worker gets a temp directory outside the repo.
 - **No worktrees.** Worktree setup/teardown (installs, env, scripts) is harness
   business. If the environment Neta runs in provides workspace isolation, the
@@ -156,8 +168,10 @@ All workers run in the directory they were spawned in.
 ## Visibility
 
 - Every worker can have a pane (Zellij or tmux) streaming its log, so a person
-  can look at what a worker is doing without asking the leader. Panes read
-  without consuming: nothing shown in a pane is taken from the leader.
+  can look at what a worker is doing without asking the leader — and type to
+  it: the pane's input line delivers a message as the worker's next turn,
+  never as keystrokes. Panes read without consuming: nothing shown in a pane
+  is taken from the leader.
 - Token usage and cost are aggregated per worker and shown in `neta workers`.
   Spend that nobody can see is spend nobody controls.
 
@@ -177,7 +191,9 @@ markdown, user-extendable. Shipped:
 
 ## Non-goals
 
-- A Neta-owned TUI, transcript view, or terminal multiplexer.
+- A session UI of our own: no re-skinned vendor transcript, no unified
+  transcript view, no terminal multiplexer. The one composed surface Neta
+  owns is the per-worker `neta watch` pane.
 - Keystroke injection into other agents' terminals.
 - Worker-to-worker messaging outside rooms.
 - Worktree or workspace management of our own.

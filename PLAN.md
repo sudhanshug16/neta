@@ -31,9 +31,16 @@ each **vendor's own mechanisms**, kernel sandbox where available.
 
 ## Settled decisions
 
-- **No TUI of our own. No pi.** Plain TypeScript, two protocol deps pinned
-  exact: `@agentclientprotocol/sdk` (workers) and `@modelcontextprotocol/sdk`
-  (leader control plane).
+- **No session UI of our own. No pi agent loop.** Neta never re-skins the
+  vendor's transcript; the one composed surface it owns is the per-worker
+  `neta watch` pane (header, transcript, footer, input line). Plain
+  TypeScript, two protocol deps pinned exact: `@agentclientprotocol/sdk`
+  (workers) and `@modelcontextprotocol/sdk` (leader control plane). The pane
+  renderer is `@earendil-works/pi-tui`, a pi-derived TUI library — a
+  deliberate, contained exception to the no-pi rule: pinned exact, bundled at
+  build like every dep, confined to `src/watch-tui.ts`, and carrying none of
+  pi's agent loop or provider machinery. (`diff`, also pinned exact, renders
+  the pane's file changes.)
 - **Backend assignment policy**: tiers default to unconfigured; spread policy
   applies deterministically (round-robin across installed backends, stable per
   session); reviewer/debater roles default to a different backend than the most
@@ -43,8 +50,9 @@ each **vendor's own mechanisms**, kernel sandbox where available.
   `neta_remember` persists overrides to `.neta/settings.json`.
 - **Bun is the toolchain**: install, test, build. `bun build --target=node`
   bundles everything into one `dist/cli.js`, so what ships is a single file
-  that runs on Node and pulls in no dependency tree of its own (1 MB, against
-  30 MB across 93 packages when the SDKs were resolved at install time).
+  that runs on Node and pulls in no dependency tree of its own (1.6 MB,
+  against 30 MB across 93 packages when the SDKs were resolved at install
+  time).
   Typechecking is `tsc --noEmit`, which Bun does not do.
 - **Leader**: native vendor CLI, launched by `neta` with per-vendor config
   injection (instructions, MCP registration, write restrictions).
@@ -129,11 +137,13 @@ construction is unit-tested only.
 
 ## Deliberately not built
 
-- A unified transcript view, a Neta-owned TUI, or a forked multiplexer.
+- A unified transcript view, a re-skinned vendor transcript, or a forked
+  multiplexer. Neta owns no session UI beyond the per-worker watch pane.
 - Keystroke injection into panes.
 - Worker↔worker messaging outside rooms.
-- Native-TUI workers (a worker you can type into). Panes show worker logs;
-  workers stay unattended by design.
+- Native-TUI workers: no worker runs inside its vendor's interactive UI under
+  Neta. Talking to one goes through the watch pane's input line (delivered as
+  the worker's next turn) or `neta attach` in the vendor's own interface.
 - Worker shell sandboxing by default — the flags each ACP bridge forwards
   differ and change, so `readOnlyArgs`/`writerArgs` are settings with
   documented examples rather than guesses baked into defaults.
