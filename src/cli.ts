@@ -19,7 +19,7 @@
 
 import { attachWorker } from "./attach.ts";
 import { handleWorkerChannelCommand } from "./channel/client.ts";
-import { handleLeaderChannelCommand } from "./channel/leader-cli.ts";
+import { handleLeaderChannelCommand, LEADER_COMMANDS } from "./channel/leader-cli.ts";
 import { APP_NAME, VERSION } from "./config.ts";
 import { detectLeaderBackends } from "./detect.ts";
 import { runGuard } from "./guard.ts";
@@ -30,18 +30,23 @@ import { listSessions } from "./session.ts";
 import { watchWorker } from "./watch.ts";
 import { watchWorkerTui } from "./watch-tui.ts";
 
-const LEADER_WORDS = new Set(["spawn", "workers", "status", "log", "wait", "send", "answer", "kill"]);
-
 const HELP = `${APP_NAME} ${VERSION} — a leader agent that delegates to worker agents.
 
   ${APP_NAME} [--leader <claude|codex|opencode>] [--mux <zellij|tmux|none>] [-- <args>]
       Start a leader session in that agent's own UI. Arguments after -- are
       passed through to it.
 
+  ${APP_NAME} spawn --role <role> --tier <tier> [flags] <task>
+                                        Start a worker (spawn --help for the flags).
   ${APP_NAME} workers                   List this session's workers and what they cost.
   ${APP_NAME} status                    Show the writer slot, worker states and open notes.
-  ${APP_NAME} log <id>                  Read a worker's new log lines.
+  ${APP_NAME} wait <id> [<id>...]       Block until the listed workers finish.
+  ${APP_NAME} send <id> <message>       Send a follow-up instruction to a running worker.
+  ${APP_NAME} answer <id> <text>        Answer a worker's pending question.
   ${APP_NAME} watch <id>                Watch a worker and type to it (--plain for bare log lines).
+  ${APP_NAME} log <id>                  Drain a worker's new log lines. This moves the
+                                        leader's read cursor; to look in on a worker
+                                        without stealing lines, use watch.
   ${APP_NAME} attach <id>               Open a worker in its own CLI (Claude Code,
                                         Codex) to read it there and take over.
   ${APP_NAME} kill <id>                 Stop a worker.
@@ -150,8 +155,8 @@ async function main(argv: string[]): Promise<void> {
 			return;
 	}
 
-	if (command && LEADER_WORDS.has(command)) {
-		// The word was a worker command, but nothing is running to receive it.
+	if (command && LEADER_COMMANDS.has(command)) {
+		// The word was a leader command, but nothing is running to receive it.
 		console.error(`No Neta session found here. Start one with \`${APP_NAME}\`, or name one with --session <id>.`);
 		process.exitCode = 1;
 		return;

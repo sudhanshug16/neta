@@ -14,6 +14,7 @@
 import type { WorkerManager } from "../orchestrator/manager.ts";
 import { formatLastProgress, formatWorkerSummary } from "../orchestrator/status.ts";
 import { roleNames } from "../prompts/roles.ts";
+import { persistTierOverride } from "../settings.ts";
 import {
 	isTerminalState,
 	isTier,
@@ -168,6 +169,12 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 			task: { type: "string", description: "Self-contained instructions for this member." },
 			name: { type: "string", description: "Two or three words naming this member's job, for its tab." },
 			writer: { type: "boolean", description: "Grant this member the writer slot." },
+			backend: {
+				type: "string",
+				description:
+					"Explicit backend for this member. Use it to apply the user's staffing-plan tweaks; otherwise omit " +
+					"and the assignment policy decides.",
+			},
 			note: { type: "string", description: "Link this member to a note (note id, e.g. n1)." },
 		},
 		required: ["role", "tier", "task"],
@@ -313,6 +320,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 								task: requireString(raw, "task"),
 								name: optionalString(raw, "name"),
 								writer: optionalBoolean(raw, "writer"),
+								backend: optionalString(raw, "backend"),
 								room,
 								note: optionalString(raw, "note"),
 							}),
@@ -332,7 +340,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 				"List workers with their state, token usage and final results. Cheap and safe to call whenever you want " +
 				"to know what is happening; it does not interrupt the workers. Each worker's most recent progress milestone shows " +
 				"as a last: line. For a worker's running commentary, use neta_log. When called with a specific workerId, " +
-				"the full result is returned unclipped; when listing all workers, results are clipped to 3000 " +
+				"the result is returned up to 20,000 characters; when listing all workers, results are clipped to 3000 " +
 				"characters. Shows open notes at the end.",
 			inputSchema: {
 				type: "object",
@@ -388,8 +396,8 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 				"one finishing, with first=true, to act on results as they land; any watched worker blocking on a " +
 				"question (always on — answer it with neta_answer and wait again); a new post in a room, with " +
 				"roomEvents, to referee a debate live. Returns early with current state if the timeout expires. Results " +
-				"are clipped to 3000 characters; use neta_workers with a specific workerId to retrieve the full result. " +
-				"Shows open notes at the end.",
+				"are clipped to 3000 characters; use neta_workers with a specific workerId to retrieve the result " +
+				"(up to 20,000 characters). Shows open notes at the end.",
 			inputSchema: {
 				type: "object",
 				properties: {
@@ -565,7 +573,6 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 				required: ["tier", "backend"],
 			},
 			async run(args) {
-				const { persistTierOverride } = await import("../settings.ts");
 				const tierValue = tier(args);
 				const backendValue = requireString(args, "backend");
 				const modelValue = optionalString(args, "model");

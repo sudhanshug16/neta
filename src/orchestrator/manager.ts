@@ -755,6 +755,7 @@ export class WorkerManager implements ChannelHandler {
 						role: request.role,
 						tier: request.tier as Tier,
 						task: request.task,
+						name: request.name,
 						writer: request.writer,
 						room: request.room,
 						backend: request.backend,

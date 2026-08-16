@@ -7,7 +7,9 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { spawn } from "node:child_process";
+import { mkdtempSync } from "node:fs";
 import { rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createChannelAddress, NETA_LEADER_ENV, NETA_SOCKET_ENV, NETA_WORKER_ENV } from "../src/channel/protocol.ts";
@@ -128,6 +130,49 @@ describe("leader CLI over the real shim", () => {
 		expect(listed.stdout).toContain(
 			"ro1 [scout/senior, read-only, model unknown — backend default] running — map the auth flow",
 		);
+	});
+
+	it("carries --name and --note through the socket spawn", async () => {
+		const note = manager.createNote("wire the auth flow");
+		const result = await neta(
+			[
+				"spawn",
+				"--role",
+				"scout",
+				"--tier",
+				"senior",
+				"--name",
+				"auth flow",
+				"--note",
+				note.id,
+				"map the auth flow",
+			],
+			asLeader(),
+		);
+
+		expect(result.stderr).toBe("");
+		expect(result.code).toBe(0);
+		expect(manager.get("ro1").name).toBe("auth flow");
+		expect(manager.getOpenNotes()[0].workers.map((worker) => worker.workerId)).toEqual(["ro1"]);
+	});
+
+	it("answers spawn --help without a session", async () => {
+		// An empty NETA_DIR means no session registry, and blank channel
+		// variables mean no leader environment: nothing to resolve a target from.
+		const emptyDir = mkdtempSync(join(tmpdir(), "neta-empty-"));
+		try {
+			const result = await neta(["spawn", "--help"], {
+				NETA_DIR: emptyDir,
+				[NETA_SOCKET_ENV]: "",
+				[NETA_LEADER_ENV]: "",
+			});
+
+			expect(result.code).toBe(0);
+			expect(result.stdout).toContain("spawn --role <role> --tier <tier>");
+			expect(result.stderr).not.toContain("No Neta session found");
+		} finally {
+			await rm(emptyDir, { recursive: true, force: true });
+		}
 	});
 
 	it("carries the worker's own reply back to the leader", async () => {

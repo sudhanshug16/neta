@@ -258,6 +258,20 @@ describe("leader MCP tools", () => {
 		expect(bodyOf(await call("neta_room", { room: "db" }))).toContain("Postgres or SQLite?");
 	});
 
+	it("honors a group member's backend override", async () => {
+		const result = await call("neta_spawn_group", {
+			room: "db",
+			members: [
+				{ role: "debater", tier: "staff", task: "argue for postgres", backend: "opencode" },
+				{ role: "debater", tier: "staff", task: "argue for sqlite", backend: "codex" },
+			],
+		});
+
+		expect(result.isError).toBeFalsy();
+		expect(manager.get("ro1").backend).toBe("opencode");
+		expect(manager.get("ro2").backend).toBe("codex");
+	});
+
 	it("shows the latest progress milestone as a truncated last: line in listings", async () => {
 		await call("neta_spawn", { role: "scout", tier: "senior", task: "look" });
 		expect(bodyOf(await call("neta_workers"))).not.toContain("last:");

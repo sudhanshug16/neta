@@ -48,6 +48,7 @@ export type LeaderChannelRequest =
 			role: string;
 			tier: string;
 			task: string;
+			name?: string;
 			writer?: boolean;
 			room?: string;
 			backend?: string;

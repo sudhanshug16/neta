@@ -13,11 +13,11 @@ import { findSession, listSessions } from "../session.ts";
 import { sendChannelRequest } from "./client.ts";
 import { type LeaderChannelRequest, NETA_LEADER_ENV, NETA_SOCKET_ENV } from "./protocol.ts";
 
-const LEADER_COMMANDS = new Set(["spawn", "workers", "status", "log", "wait", "send", "answer", "kill"]);
+export const LEADER_COMMANDS = new Set(["spawn", "workers", "status", "log", "wait", "send", "answer", "kill"]);
 
 const LEADER_HELP = `Leader channel commands (available where the leader token is set):
 
-  ${APP_NAME} spawn --role <role> --tier <tier> [--writer] [--room <name>] [--backend <name>] <task>
+  ${APP_NAME} spawn --role <role> --tier <tier> [--writer] [--name <label>] [--note <id>] [--room <name>] [--backend <name>] <task>
       Start a worker. Roles: scout, worker, reviewer, debater. Tiers: junior, senior, staff.
   ${APP_NAME} workers               List every worker and its state.
   ${APP_NAME} status                Show the writer slot, worker states and open notes.
@@ -64,17 +64,21 @@ function buildRequest(command: string, token: string, rest: string[]): LeaderCha
 			if (typeof role !== "string" || !role) return `Usage: ${APP_NAME} spawn --role <role> --tier <tier> <task>`;
 			if (typeof tier !== "string" || !tier) return `Usage: ${APP_NAME} spawn --role <role> --tier <tier> <task>`;
 			if (!task) return "The task is missing. Describe what the worker should do after the flags.";
+			const name = flags.get("name");
 			const room = flags.get("room");
 			const backend = flags.get("backend");
+			const note = flags.get("note");
 			return {
 				type: "spawn",
 				token,
 				role,
 				tier,
 				task,
+				name: typeof name === "string" && name ? name : undefined,
 				writer: flags.get("writer") === true,
 				room: typeof room === "string" && room ? room : undefined,
 				backend: typeof backend === "string" && backend ? backend : undefined,
+				note: typeof note === "string" && note ? note : undefined,
 			};
 		}
 		case "workers":
@@ -148,13 +152,14 @@ function resolveTarget(args: string[]): Target | undefined {
 export async function handleLeaderChannelCommand(args: string[]): Promise<boolean> {
 	const command = args[0];
 	if (!command || !LEADER_COMMANDS.has(command)) return false;
-	const target = resolveTarget(args.slice(1));
-	if (!target) return false;
-	const { address, token, rest } = target;
-	if (rest.includes("--help") || rest.includes("-h")) {
+	// Help works without a session, so `neta spawn --help` answers anywhere.
+	if (args.includes("--help") || args.includes("-h")) {
 		console.log(LEADER_HELP);
 		return true;
 	}
+	const target = resolveTarget(args.slice(1));
+	if (!target) return false;
+	const { address, token, rest } = target;
 
 	const request = buildRequest(command, token, rest);
 	if (typeof request === "string") {
