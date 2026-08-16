@@ -374,4 +374,16 @@ describe("worker MCP tools", () => {
 		expect(result.isError).toBe(true);
 		expect(bodyOf(result)).toBe("You are not in a room.");
 	});
+
+	it("shows writers-only status through the worker MCP socket bridge", async () => {
+		await manager.spawn({ role: "worker", tier: "senior", task: "Update billing", writer: true });
+		await manager.spawn({ role: "worker", tier: "senior", task: "Document billing", writer: true });
+
+		const result = (await client.callTool({ name: "neta_status", arguments: {} })) as CallToolResult;
+		const body = bodyOf(result);
+
+		expect(body).toContain("Active:\n  rw2 worker | worker: Update billing");
+		expect(body).toContain("Queued:\n  rw3 worker | worker: Document billing");
+		expect(body).not.toContain("ro1");
+	});
 });

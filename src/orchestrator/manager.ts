@@ -39,7 +39,7 @@ import {
 	type WorkerSummary,
 	type WorkerUsage,
 } from "../types.ts";
-import { formatStatusSnapshot } from "./status.ts";
+import { formatStatusSnapshot, formatWriterContext, formatWriterStatus } from "./status.ts";
 import type { TransportOptions, WorkerMcpServer, WorkerTransportDriver } from "./transport.ts";
 
 const MAX_LOG_ENTRIES = 500;
@@ -323,7 +323,17 @@ export class WorkerManager implements ChannelHandler {
 		}
 
 		this.setState(record, "running");
-		this.enqueue(record, request.task);
+		const writerContext = writer
+			? undefined
+			: formatWriterContext(
+					this.activeWriter ? this.summarize(this.require(this.activeWriter)) : undefined,
+					this.writerQueue.flatMap((workerId) => {
+						const queued = this.workers.get(workerId);
+						return queued ? [this.summarize(queued)] : [];
+					}),
+				);
+		const task = writerContext ? `${writerContext}\n\n---\n\n# Task\n\n${request.task}` : request.task;
+		this.enqueue(record, task);
 		const summary = this.summarize(record);
 		// A pane is a convenience for the person watching; never let it fail a spawn.
 		try {
@@ -411,6 +421,12 @@ export class WorkerManager implements ChannelHandler {
 	/** Render the shared status snapshot for the socket channel. */
 	status(): string {
 		return formatStatusSnapshot(this.statusSnapshot());
+	}
+
+	/** Writers-only status available to read-only workers through their channel. */
+	writerStatus(workerId: string): ChannelResponse {
+		this.require(workerId);
+		return { ok: true, text: formatWriterStatus(this.statusSnapshot()) };
 	}
 
 	/** New log lines since the last drain, oldest first. */

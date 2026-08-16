@@ -32,6 +32,13 @@ describe("worker channel", () => {
 		room(_workerId, tail) {
 			return { ok: true, text: `room(tail=${tail ?? "all"})` };
 		},
+		writerStatus(workerId) {
+			notified.push({ workerId, text: "writer-status" });
+			return {
+				ok: true,
+				text: "Neta writers\nFinished:\n  (none)\nActive:\n  rw1 worker | worker: Fix login\nQueued:\n  (none)",
+			};
+		},
 		ask(workerId, text) {
 			return new Promise<ChannelResponse>((resolve) => {
 				asked.push({ workerId, text, resolve });
@@ -125,6 +132,18 @@ describe("worker channel", () => {
 			await handleWorkerChannelCommand(["room", "--tail", "5"]);
 
 			expect(log).toHaveBeenCalledWith("room(tail=5)");
+			log.mockRestore();
+		});
+
+		it("renders writers-only status through the real worker socket", async () => {
+			const log = spyOn(console, "log").mockImplementation(() => {});
+
+			await handleWorkerChannelCommand(["status", "--writers"]);
+
+			expect(notified).toEqual([{ workerId: "ro7", text: "writer-status" }]);
+			expect(log).toHaveBeenCalledWith(
+				"Neta writers\nFinished:\n  (none)\nActive:\n  rw1 worker | worker: Fix login\nQueued:\n  (none)",
+			);
 			log.mockRestore();
 		});
 

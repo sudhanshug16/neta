@@ -109,7 +109,9 @@ reach the same leader. Add `--session <id>` when more than one is running.
 Inside a session the leader gets MCP tools — `neta_spawn`, `neta_spawn_group`,
 `neta_workers`, `neta_status`, `neta_log`, `neta_wait`, `neta_send`, `neta_answer`,
 `neta_kill`, `neta_room` — and workers get `neta_notify`, `neta_ask`,
-`neta_say`, `neta_room`, plus the same commands in their shell.
+`neta_say`, `neta_room`, `neta_status`, plus the same commands in their shell.
+Read-only workers can run `neta status --writers` to see active, queued and
+finished writers before inspecting a shared checkout.
 
 ## Configuring it
 

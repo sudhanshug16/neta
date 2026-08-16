@@ -100,6 +100,37 @@ describe("WorkerManager", () => {
 		expect(transport.prompts[0]).toBe("map the auth flow");
 	});
 
+	it("does not add writer context when no writers are active or queued", async () => {
+		await manager.spawn({ role: "scout", tier: "senior", task: "map the auth flow" });
+
+		expect(transports[0].prompts[0]).toBe("map the auth flow");
+	});
+
+	it("prepends active and queued writer context to a read-only worker task", async () => {
+		await manager.spawn({
+			role: "worker",
+			name: "billing migration",
+			tier: "senior",
+			task: "Migrate billing tables\nThen verify invoices.",
+			writer: true,
+		});
+		await manager.spawn({
+			role: "worker",
+			name: "docs pass",
+			tier: "senior",
+			task: "Document the billing rollout",
+			writer: true,
+		});
+		await manager.spawn({ role: "scout", tier: "senior", task: "Inspect the migration" });
+
+		const prompt = transports[1].prompts[0];
+		expect(prompt).toContain("# Concurrent writer context");
+		expect(prompt).toContain('Active writer: rw1 "billing migration" | billing migration: Migrate billing tables');
+		expect(prompt).toContain('Queued writers:\n- rw2 "docs pass" | docs pass: Document the billing rollout');
+		expect(prompt).toContain("`git show HEAD:<path>` reads the last committed version.");
+		expect(prompt).toEndWith("Inspect the migration");
+	});
+
 	it("uses access prefixes with one serial counter, including queued writers", async () => {
 		const firstWriter = await manager.spawn({ role: "worker", tier: "senior", task: "first", writer: true });
 		const reader = await manager.spawn({ role: "scout", tier: "senior", task: "inspect" });

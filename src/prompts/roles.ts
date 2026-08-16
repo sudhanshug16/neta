@@ -95,6 +95,7 @@ export function workingAgreement(options: WorkingAgreementOptions): string {
 		lines.push(
 			"- You are read-only. File edits and writes are rejected at the protocol layer, so do not attempt them.",
 			"- If the task cannot be done without writing, stop and report that instead of working around it.",
+			`- \`${options.binary} status --writers\` shows active, queued and finished writers before you inspect shared files.`,
 		);
 	}
 

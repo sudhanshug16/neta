@@ -66,5 +66,13 @@ export function workerTools(address: string, workerId: string): McpTool[] {
 			run: (args) =>
 				send(address, { type: "room", workerId, tail: optionalNumber(args, "tail") }, "(room is empty)"),
 		},
+		{
+			name: "neta_status",
+			description:
+				"Show only active, queued and finished writers. Use this before inspecting files while another worker may " +
+				"have uncommitted changes in the shared checkout.",
+			inputSchema: { type: "object" },
+			run: () => send(address, { type: "writer-status", workerId }, "(no writers)"),
+		},
 	];
 }

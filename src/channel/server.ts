@@ -21,6 +21,8 @@ export interface ChannelHandler {
 	ask(workerId: string, text: string, signal: AbortSignal): Promise<ChannelResponse>;
 	say(workerId: string, text: string): ChannelResponse;
 	room(workerId: string, tail: number | undefined): ChannelResponse;
+	/** Read-only writer status, available to every worker without a leader token. */
+	writerStatus(workerId: string): ChannelResponse;
 	/** Token-authorized leader operations. `wait` may block on the signal like `ask`. */
 	leader(request: LeaderChannelRequest, signal: AbortSignal): Promise<ChannelResponse>;
 }
@@ -118,6 +120,9 @@ export class ChannelServer {
 						break;
 					case "room":
 						respond(handler.room(request.workerId, request.tail));
+						break;
+					case "writer-status":
+						respond(handler.writerStatus(request.workerId));
 						break;
 					case "ask":
 						respond(await handler.ask(request.workerId, request.text, abort.signal));

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { formatStatusSnapshot, formatWorkerSummary } from "../src/orchestrator/status.ts";
+import { formatStatusSnapshot, formatWorkerSummary, formatWriterStatus } from "../src/orchestrator/status.ts";
 import type { WorkerStatusSnapshot, WorkerSummary } from "../src/types.ts";
 
 function worker(overrides: Partial<WorkerSummary> = {}): WorkerSummary {
@@ -67,5 +67,37 @@ describe("formatStatusSnapshot", () => {
 		expect(formatWorkerSummary(worker({ state: "queued" }))).not.toContain("model unknown");
 		expect(formatWorkerSummary(worker({ state: "starting" }))).not.toContain("model unknown");
 		expect(formatWorkerSummary(worker({ model: "sonnet" }))).toContain("model=sonnet");
+	});
+
+	it("renders only writers in finished, active and queued groups", () => {
+		const active = worker({
+			id: "rw1",
+			name: "billing migration",
+			task: "Migrate billing tables\nDo not deploy",
+			writer: true,
+		});
+		const queued = worker({
+			id: "rw2",
+			name: "docs pass",
+			task: "Document the rollout",
+			state: "queued",
+			writer: true,
+		});
+		const finished = worker({ id: "rw3", name: "cleanup", task: "Remove old index", state: "done", writer: true });
+		const reader = worker({ id: "ro4", name: "scout", task: "Inspect billing", state: "running" });
+		const snapshot: WorkerStatusSnapshot = {
+			writerSlot: active,
+			writerQueue: [queued],
+			workers: { running: [active, reader], queued: [queued], waiting: [], terminal: [finished] },
+			openNotes: [],
+		};
+
+		const status = formatWriterStatus(snapshot);
+
+		expect(status).toContain('Finished:\n  rw3 "cleanup" | cleanup: Remove old index');
+		expect(status).toContain('Active:\n  rw1 "billing migration" | billing migration: Migrate billing tables');
+		expect(status).toContain('Queued:\n  rw2 "docs pass" | docs pass: Document the rollout');
+		expect(status).not.toContain("ro4");
+		expect(status).not.toContain("Open notes");
 	});
 });

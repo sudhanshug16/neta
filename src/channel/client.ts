@@ -1,5 +1,5 @@
 /**
- * Worker side of the channel: the `neta notify|ask|say|room` subcommands.
+ * Worker side of the channel: the `neta notify|ask|say|room|status` subcommands.
  *
  * These only exist inside a worker process, which is why the dispatcher below
  * requires NETA_SOCKET to be set.
@@ -9,7 +9,7 @@ import { connect } from "node:net";
 import { APP_NAME } from "../config.ts";
 import { type ChannelRequest, type ChannelResponse, NETA_SOCKET_ENV, NETA_WORKER_ENV } from "./protocol.ts";
 
-const CHANNEL_COMMANDS = new Set(["notify", "ask", "say", "room"]);
+const CHANNEL_COMMANDS = new Set(["notify", "ask", "say", "room", "status"]);
 
 const CHANNEL_HELP = `Worker channel commands (available inside a Neta worker):
 
@@ -17,6 +17,7 @@ const CHANNEL_HELP = `Worker channel commands (available inside a Neta worker):
   ${APP_NAME} ask <question>     Ask the leader and wait for the answer. Not available to junior workers.
   ${APP_NAME} say <message>      Post to your room, visible to the other members.
   ${APP_NAME} room [--tail N]    Read your room transcript.
+  ${APP_NAME} status --writers   Show active, queued and finished writers.
 `;
 
 /**
@@ -90,6 +91,13 @@ export async function handleWorkerChannelCommand(args: string[]): Promise<boolea
 	let request: ChannelRequest;
 	if (command === "room") {
 		request = { type: "room", workerId, tail: parseTail(rest) };
+	} else if (command === "status") {
+		if (rest.length !== 1 || rest[0] !== "--writers") {
+			console.error(`Usage: ${APP_NAME} status --writers`);
+			process.exitCode = 1;
+			return true;
+		}
+		request = { type: "writer-status", workerId };
 	} else {
 		const text = rest.join(" ").trim();
 		if (!text) {

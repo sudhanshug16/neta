@@ -31,7 +31,7 @@ Every worker operation exists twice, over one manager:
 | Unix socket | workers, and you | `neta notify`, `neta workers`, `neta status`, `neta watch` |
 
 The socket door is authorized by a token. Workers get their own id and can only
-report; the token that authorizes spawning and killing goes to the leader's
+report or run `neta status --writers`; the token that authorizes spawning and killing goes to the leader's
 process and to the session file in `~/.neta/sessions/`, which is readable only
 by you. That file is how `neta workers` or `neta status` in a second terminal finds the session
 you are running.
