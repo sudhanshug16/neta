@@ -17,7 +17,7 @@ import { createMcpServer } from "../src/mcp/serve.ts";
 import { workerTools } from "../src/mcp/worker.ts";
 import { WorkerManager } from "../src/orchestrator/manager.ts";
 import type { PromptOutcome, TransportOptions, WorkerTransportDriver } from "../src/orchestrator/transport.ts";
-import { NetaConfig } from "../src/settings.ts";
+import { fixtureBackendConfig } from "./helpers.ts";
 
 class FakeTransport implements WorkerTransportDriver {
 	readonly options: TransportOptions;
@@ -61,7 +61,7 @@ describe("leader MCP tools", () => {
 		manager = new WorkerManager({
 			cwd: process.cwd(),
 			agentDir: "/nonexistent-agent-dir",
-			config: new NetaConfig(),
+			config: fixtureBackendConfig(),
 			channelAddress: "/tmp/neta-mcp-test.sock",
 			onEvent: () => {},
 			createTransport: (options) => {
@@ -402,7 +402,7 @@ describe("worker MCP tools", () => {
 		manager = new WorkerManager({
 			cwd: process.cwd(),
 			agentDir: "/nonexistent-agent-dir",
-			config: new NetaConfig(),
+			config: fixtureBackendConfig(),
 			channelAddress: address,
 			onEvent: () => {},
 			createTransport: (options) => {

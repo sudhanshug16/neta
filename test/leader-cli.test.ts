@@ -24,7 +24,7 @@ import { createLeaderCliShim, prependToPath } from "../src/cli-shim.ts";
 import { WorkerManager } from "../src/orchestrator/manager.ts";
 import type { PromptOutcome, TransportOptions, WorkerTransportDriver } from "../src/orchestrator/transport.ts";
 import { writeSessionRecord } from "../src/session.ts";
-import { NetaConfig } from "../src/settings.ts";
+import { fixtureBackendConfig } from "./helpers.ts";
 
 class FakeTransport implements WorkerTransportDriver {
 	readonly options: TransportOptions;
@@ -58,7 +58,7 @@ interface RunResult {
 }
 
 describe("leader CLI over the real shim", () => {
-	const config = new NetaConfig();
+	const config = fixtureBackendConfig();
 	let shimDir: string;
 	let address: string;
 	let server: ChannelServer;

@@ -8,6 +8,7 @@ import { WorkerManager } from "../src/orchestrator/manager.ts";
 import type { PromptOutcome, TransportOptions, WorkerTransportDriver } from "../src/orchestrator/transport.ts";
 import { NetaConfig } from "../src/settings.ts";
 import type { WorkerEvent } from "../src/types.ts";
+import { fixtureBackendConfig } from "./helpers.ts";
 
 class FakeTransport implements WorkerTransportDriver {
 	readonly options: TransportOptions;
@@ -61,7 +62,7 @@ class FakeTransport implements WorkerTransportDriver {
 }
 
 describe("WorkerManager", () => {
-	const config = new NetaConfig();
+	const config = fixtureBackendConfig();
 	let transports: FakeTransport[];
 	let events: WorkerEvent[];
 	let manager: WorkerManager;
@@ -864,7 +865,7 @@ describe("WorkerManager", () => {
 		const lazy = new WorkerManager({
 			cwd: process.cwd(),
 			agentDir: "/nonexistent-agent-dir",
-			config: new NetaConfig({ backends: { claude: { env: { PATH: "/backend/bin" } } } }),
+			config: fixtureBackendConfig({ backends: { claude: { env: { PATH: "/backend/bin" } } } }),
 			channelAddress: "/tmp/neta-test.sock",
 			onEvent: () => {},
 			prepareEnv: async () => {

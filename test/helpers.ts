@@ -2,6 +2,11 @@
  * Two small things `bun:test` does not ship, which several suites need.
  */
 
+import { fileURLToPath } from "node:url";
+import { NetaConfig, type NetaSettings } from "../src/settings.ts";
+
+const FAKE_ACP_AGENT = fileURLToPath(new URL("./fixtures/fake-acp-agent.mjs", import.meta.url));
+
 /**
  * Scrub session environment variables so tests run cleanly even when executed
  * inside a live Neta session. This runs on import, so every test file that uses
@@ -59,4 +64,22 @@ export class EnvStub {
 		}
 		this.previous.clear();
 	}
+}
+
+/**
+ * All vendor-shaped test backends run the fixture through Bun. Keeping their
+ * names preserves assignment-policy coverage while making detection independent
+ * of whatever vendor CLIs happen to be installed on the host.
+ */
+export function fixtureBackendConfig(settings: NetaSettings = {}): NetaConfig {
+	const fixture = { detect: "bun", command: process.execPath, args: [FAKE_ACP_AGENT] };
+	return new NetaConfig({
+		...settings,
+		backends: {
+			...settings.backends,
+			claude: { ...fixture, ...settings.backends?.claude },
+			codex: { ...fixture, ...settings.backends?.codex },
+			opencode: { ...fixture, ...settings.backends?.opencode },
+		},
+	});
 }

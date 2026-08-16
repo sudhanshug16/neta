@@ -12,9 +12,8 @@ import { ChannelServer } from "../src/channel/server.ts";
 import { WorkerManager } from "../src/orchestrator/manager.ts";
 import type { PromptOutcome, TransportOptions, WorkerTransportDriver } from "../src/orchestrator/transport.ts";
 import { writeSessionRecord } from "../src/session.ts";
-import { NetaConfig } from "../src/settings.ts";
 import { watchWorker } from "../src/watch.ts";
-import { EnvStub } from "./helpers.ts";
+import { EnvStub, fixtureBackendConfig } from "./helpers.ts";
 
 const env = new EnvStub();
 
@@ -57,7 +56,7 @@ describe("watch", () => {
 		manager = new WorkerManager({
 			cwd: process.cwd(),
 			agentDir: "/nonexistent-agent-dir",
-			config: new NetaConfig(),
+			config: fixtureBackendConfig(),
 			channelAddress: address,
 			leaderToken: "tok",
 			onEvent: () => {},
