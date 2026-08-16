@@ -48,6 +48,18 @@ describe("bash guard", () => {
 		}
 	});
 
+	it("denies fd-prefixed shell redirects", () => {
+		for (const command of [
+			"printf x 1> src/file",
+			"printf x 2> src/file",
+			"printf x &> src/file",
+			"printf x >> src/file",
+			"printf x 1>> src/file",
+		]) {
+			expect(denied(command), command).toBe(true);
+		}
+	});
+
 	it("denies git commands that change the repository", () => {
 		for (const command of [
 			"git commit -m 'fix'",

@@ -215,6 +215,14 @@ describe("OpenCode adapter", () => {
 		expect(config.mcp.neta.environment.NETA_LEADER_TOKEN).toBe("tok");
 	});
 
+	it("keeps shell redirects under the default deny rule", async () => {
+		const launch = await new OpenCodeAdapter().prepare(context());
+		const config = JSON.parse(launch.env.OPENCODE_CONFIG_CONTENT);
+
+		expect(config.permission.bash["echo x > src/file"]).toBeUndefined();
+		expect(config.permission.bash["*"]).toBe("deny");
+	});
+
 	// Saying "read-only" about a leader whose shell is only pattern-checked would
 	// overstate what the user is getting.
 	it("says out loud that its restriction is weaker than a sandbox", async () => {

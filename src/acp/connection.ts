@@ -28,8 +28,9 @@ const READ_ONLY_TOOL_KINDS = new Set(["read", "search", "list"]);
 const AUTH_REQUIRED_CODE = -32000;
 
 /**
- * Variables that describe an *ancestor* agent session rather than the one we
- * are starting: its messaging socket, its session id, its pid.
+ * Variables that describe an *ancestor* agent or Neta leader session rather
+ * than the worker we are starting: its messaging socket, its session id, its
+ * pid, or its leader authority.
  *
  * Neta is an ACP host, so it launches these CLIs as fresh subprocesses the way
  * an editor does. When Neta itself was started from inside one of these agents,
@@ -39,11 +40,13 @@ const AUTH_REQUIRED_CODE = -32000;
  * session"), which is the correct call on its part — the values are simply not
  * ours to forward.
  *
- * Anything a user or our own settings set deliberately is applied after this
- * and therefore survives.
+ * A worker receives its own channel identity after this filter. It must never
+ * inherit the leader token, even when Neta itself was launched by a leader.
  */
 const INHERITED_SESSION_PREFIXES = ["CLAUDE_CODE_"];
 const INHERITED_SESSION_VARS = new Set(["CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT"]);
+const LEADER_ENV_PREFIX = "NETA_LEADER_";
+const LEADER_ENV_VARS = new Set(["NETA_SESSION_ID", "NETA_MUX", "NETA_PANES"]);
 
 export function sanitizeInheritedEnv(env: NodeJS.ProcessEnv): Record<string, string> {
 	const clean: Record<string, string> = {};
@@ -51,6 +54,7 @@ export function sanitizeInheritedEnv(env: NodeJS.ProcessEnv): Record<string, str
 		if (value === undefined) continue;
 		if (INHERITED_SESSION_VARS.has(name)) continue;
 		if (INHERITED_SESSION_PREFIXES.some((prefix) => name.startsWith(prefix))) continue;
+		if (name.startsWith(LEADER_ENV_PREFIX) || LEADER_ENV_VARS.has(name)) continue;
 		clean[name] = value;
 	}
 	return clean;
@@ -196,7 +200,7 @@ export class AcpConnection {
 		const { command, args } = this.options;
 		const child = spawn(command, args, {
 			cwd: this.options.cwd,
-			env: { ...sanitizeInheritedEnv(process.env), ...this.options.env },
+			env: sanitizeInheritedEnv({ ...process.env, ...this.options.env }),
 			stdio: ["pipe", "pipe", "pipe"],
 			detached: true,
 		});

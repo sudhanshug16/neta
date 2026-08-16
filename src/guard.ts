@@ -106,10 +106,10 @@ export function inspectBashCommand(command: string): GuardVerdict {
 		const parts = words(segment);
 		if (parts.length === 0) continue;
 
-		// Redirections: `> file` writes, `2>/dev/null` does not.
-		const redirect = segment.match(/(?<![0-9<>])>{1,2}\s*(\S+)/g);
-		for (const match of redirect ?? []) {
-			const target = match.replace(/^>{1,2}\s*/, "");
+		// Redirections: `> file`, `1> file` and `&> file` write; `2>/dev/null` does not.
+		const redirect = segment.matchAll(/(?<![<=>])(?:\d+|&)?>{1,2}\s*(\S+)/g);
+		for (const match of redirect) {
+			const target = match[1];
 			if (!isHarmlessRedirect(target)) return deny(`Writing to ${target} through a shell redirect is not allowed.`);
 		}
 

@@ -7,7 +7,7 @@ import { AcpConnection, chooseModel, sanitizeInheritedEnv } from "../src/acp/con
 import { AcpWorkerTransport, describeToolCall, paragraphFlushIndex, renderDiffText } from "../src/acp/transport.ts";
 import type { NegotiatedSession, TransportOptions, WorkerMcpServer } from "../src/orchestrator/transport.ts";
 import type { WorkerLogEntry, WorkerUsage } from "../src/types.ts";
-import { waitFor } from "./helpers.ts";
+import { EnvStub, waitFor } from "./helpers.ts";
 
 const fakeAgent = fileURLToPath(new URL("./fixtures/fake-acp-agent.mjs", import.meta.url));
 
@@ -36,13 +36,14 @@ describe("AcpWorkerTransport", () => {
 		log: WorkerLogEntry[],
 		mcpServers: WorkerMcpServer[] = [],
 		agentArgs: string[] = [],
+		env: Record<string, string> = {},
 	): AcpWorkerTransport {
 		const scratchDir = mkdtempSync(join(tmpdir(), "neta-acp-"));
 		tempDirs.push(scratchDir);
 		const options: TransportOptions = {
 			workerId: "ro1",
 			cwd: process.cwd(),
-			env: {},
+			env,
 			command: process.execPath,
 			args: [fakeAgent, ...agentArgs],
 			model: undefined,
@@ -184,6 +185,26 @@ describe("AcpWorkerTransport", () => {
 		expect(outcome.summary).toContain('"name":"neta"');
 		expect(outcome.summary).toContain('"args":["mcp","--worker"]');
 		expect(outcome.summary).toContain('{"name":"NETA_WORKER_ID","value":"ro1"}');
+	});
+
+	it("does not pass leader authority into a spawned worker", async () => {
+		const env = new EnvStub();
+		env.set("NETA_LEADER_TOKEN", "leader-secret");
+		env.set("NETA_LEADER_BACKEND", "claude");
+		env.set("NETA_SESSION_ID", "leader-session");
+		env.set("NETA_MUX", "tmux");
+		env.set("NETA_PANES", "1");
+		try {
+			const transport = createTransport(false, [], [], [], { NETA_LEADER_TOKEN: "backend-secret" });
+			await transport.start();
+
+			const outcome = await transport.prompt("REPORT_NETA_ENV");
+			expect(outcome.summary).toBe(
+				'{"leaderToken":null,"leaderBackend":null,"sessionId":null,"mux":null,"panes":null}',
+			);
+		} finally {
+			env.restore();
+		}
 	});
 
 	it("reports the negotiated model, mode and bridge from the backend", async () => {
@@ -499,5 +520,19 @@ describe("sanitizeInheritedEnv", () => {
 		});
 
 		expect(clean).toEqual({ PATH: "/usr/bin", ANTHROPIC_MODEL: "haiku", ANTHROPIC_API_KEY: "sk-test" });
+	});
+
+	it("drops Neta leader authority while preserving worker credentials", () => {
+		const clean = sanitizeInheritedEnv({
+			NETA_LEADER_TOKEN: "leader-secret",
+			NETA_LEADER_BACKEND: "claude",
+			NETA_SESSION_ID: "leader-session",
+			NETA_MUX: "tmux",
+			NETA_PANES: "1",
+			NETA_WORKER_ID: "ro1",
+			NETA_WORKER_TOKEN: "worker-token",
+		});
+
+		expect(clean).toEqual({ NETA_WORKER_ID: "ro1", NETA_WORKER_TOKEN: "worker-token" });
 	});
 });

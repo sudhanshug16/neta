@@ -137,6 +137,21 @@ async function prompt(params, cx) {
 		return { stopReason: "end_turn" };
 	}
 
+	if (text.includes("REPORT_NETA_ENV")) {
+		await say(
+			cx,
+			sessionId,
+			JSON.stringify({
+				leaderToken: process.env.NETA_LEADER_TOKEN ?? null,
+				leaderBackend: process.env.NETA_LEADER_BACKEND ?? null,
+				sessionId: process.env.NETA_SESSION_ID ?? null,
+				mux: process.env.NETA_MUX ?? null,
+				panes: process.env.NETA_PANES ?? null,
+			}),
+		);
+		return { stopReason: "end_turn" };
+	}
+
 	if (text.includes("TOOL_STREAM")) {
 		await say(cx, sessionId, "Before tool call.");
 		const toolCallId = `call_${++counter}`;
