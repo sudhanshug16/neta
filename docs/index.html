@@ -57,12 +57,12 @@
           <div class="t-paper"><span class="t-brass">›</span> the signup flow drops 4% of users at the email</div>
           <div class="t-paper">  step. find out why and fix it.</div>
           <div></div>
-          <div class="t-dim">● neta_spawn scout/staff  ×2</div>
+          <div class="t-dim">● neta_spawn scout/architect  ×2</div>
           <div class="t-dim">● neta_wait  ro1 ro2</div>
           <div class="t-paper"><span class="t-steel">»</span> ro1: the token expires before the mail provider</div>
           <div class="t-paper">  retries</div>
-          <div class="t-dim">● neta_spawn worker/senior --writer</div>
-          <div class="t-dim">● neta_spawn reviewer/senior</div>
+          <div class="t-dim">● neta_spawn worker/expert --writer</div>
+          <div class="t-dim">● neta_spawn reviewer/expert</div>
           <div></div>
           <div class="t-paper"><span class="t-phosphor">✓</span> fixed, reviewed, committed as 4a9f2c1</div>
           <div class="t-dim">  4 workers · 61,204 tokens · est. $0.38</div>
@@ -108,20 +108,24 @@
       <span class="sec-label">you decide what each one costs</span>
     </div>
     <div class="card-grid">
+      <div class="card tier-muted">
+        <div class="tier-head"><span class="swatch"></span>apprentice</div>
+        <p>The mechanical floor: run a named command and report output, apply one exactly specified small change, or answer one bounded question about a named file.</p>
+      </div>
       <div class="card tier-steel">
-        <div class="tier-head"><span class="swatch"></span>junior</div>
+        <div class="tier-head"><span class="swatch"></span>journeyman</div>
         <p>Mechanical work with a precise spec: renames, applying a reviewed diff, running tests and reporting output. It only gets exact instructions.</p>
       </div>
       <div class="card tier-phosphor">
-        <div class="tier-head"><span class="swatch"></span>senior</div>
+        <div class="tier-head"><span class="swatch"></span>expert</div>
         <p>Well-scoped features, bug fixes with tests, code review.</p>
       </div>
       <div class="card tier-violet">
-        <div class="tier-head"><span class="swatch"></span>staff</div>
+        <div class="tier-head"><span class="swatch"></span>architect</div>
         <p>Ambiguity: unknown-cause debugging, design work, debates.</p>
       </div>
     </div>
-    <p class="followup">The leader asks for a junior, senior or staff worker; you map tiers to backends in settings, and you can mix vendors — putting staff work on Codex while everything else stays on Claude. Unconfigured tiers spread deterministically across whatever you have installed, and reviewers prefer a different vendor than the last writer.</p>
+    <p class="followup">The leader asks for an apprentice, journeyman, expert or architect worker; you map tiers to backends in settings, and you can mix vendors — putting architect work on Codex while everything else stays on Claude. Unconfigured tiers spread deterministically across whatever you have installed, and reviewers prefer a different vendor than the last writer.</p>
   </div>
 </section>
 
@@ -183,7 +187,7 @@
       </div>
       <div>
         <div class="term">
-          <div><span class="t-paper t-bold">rw3 auth-refactor</span><span class="t-muted"> · worker/senior · claude · writer</span></div>
+          <div><span class="t-paper t-bold">rw3 auth-refactor</span><span class="t-muted"> · worker/expert · claude · writer</span></div>
           <div class="t-muted">task: sign the session token, tests included</div>
           <div></div>
           <div class="t-steel t-bold">Reading the session layer</div>

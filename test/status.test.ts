@@ -12,7 +12,7 @@ function worker(overrides: Partial<WorkerSummary> = {}): WorkerSummary {
 		id: "ro1",
 		name: "auth flow",
 		role: "worker",
-		tier: "senior",
+		tier: "expert",
 		backend: "codex",
 		writer: false,
 		state: "running",
@@ -52,15 +52,15 @@ describe("formatStatusSnapshot", () => {
 
 		const status = formatStatusSnapshot(snapshot);
 
-		expect(status).toContain('Writer slot:\n  rw1 "auth flow" worker/senior | backend=codex | running | writer');
+		expect(status).toContain('Writer slot:\n  rw1 "auth flow" worker/expert | backend=codex | running | writer');
 		expect(status).toContain("model=gpt-4o | mode=workspace-write | 2,000,000 tokens, est. $12.50");
-		expect(status).toContain('Writer queue:\n  rw2 "docs pass" worker/senior | backend=codex | queued | writer');
+		expect(status).toContain('Writer queue:\n  rw2 "docs pass" worker/expert | backend=codex | queued | writer');
 		expect(status).toContain(
-			'Waiting (blocked on leader answer):\n  ro3 "db decision" worker/senior | backend=codex | waiting | ' +
+			'Waiting (blocked on leader answer):\n  ro3 "db decision" worker/expert | backend=codex | waiting | ' +
 				"model unknown — backend default | asking: Use Postgres?",
 		);
 		expect(status).toContain(
-			"Terminal:\n  ro4 scout/senior | backend=codex | done | model unknown — backend default",
+			"Terminal:\n  ro4 scout/expert | backend=codex | done | model unknown — backend default",
 		);
 		expect(status).toContain('Open notes:\n  n1 "finish the auth rollout" (rw2 queued)');
 	});

@@ -87,13 +87,13 @@ describe("watch", () => {
 	// A pane is read at a glance: it has to say who this worker is and what it
 	// was asked to do, not just stream unlabelled lines.
 	it("introduces the worker, then prints its log", async () => {
-		const worker = await manager.spawn({ role: "scout", tier: "senior", task: "map the auth flow" });
+		const worker = await manager.spawn({ role: "scout", tier: "expert", task: "map the auth flow" });
 		manager.progress(worker.id, "reading auth.ts");
 
 		const code = await watchWorker({ workerId: worker.id, once: true, hold: false, write });
 
 		expect(code).toBe(0);
-		expect(lines[0]).toBe(`${worker.id} · scout/senior · claude · read-only · model unknown — backend default`);
+		expect(lines[0]).toBe(`${worker.id} · scout/expert · claude · read-only · model unknown — backend default`);
 		expect(lines[1]).toBe("task: map the auth flow");
 		expect(lines).toContain("» reading auth.ts");
 		// The metadata line every state change reprints, here for the first state seen.
@@ -105,7 +105,7 @@ describe("watch", () => {
 	// The leader reads its log by draining it. If a pane drained the same log,
 	// lines would vanish before the leader ever saw them.
 	it("does not consume the lines the leader has not read", async () => {
-		const worker = await manager.spawn({ role: "scout", tier: "senior", task: "look" });
+		const worker = await manager.spawn({ role: "scout", tier: "expert", task: "look" });
 		manager.progress(worker.id, "found the bug");
 
 		await watchWorker({ workerId: worker.id, once: true, hold: false, write });
@@ -114,7 +114,7 @@ describe("watch", () => {
 	});
 
 	it("follows until the worker finishes and says how it ended", async () => {
-		const worker = await manager.spawn({ role: "scout", tier: "senior", task: "look" });
+		const worker = await manager.spawn({ role: "scout", tier: "expert", task: "look" });
 		const watching = watchWorker({ workerId: worker.id, hold: false, write });
 		manager.progress(worker.id, "halfway");
 		transports[0].finish({ ok: true, summary: "done looking" });
@@ -127,7 +127,7 @@ describe("watch", () => {
 	// A headless reader scrolls too: the metadata reprints on every state change,
 	// current as of the newest model and usage reports from the backend.
 	it("reprints current metadata when the state changes", async () => {
-		const worker = await manager.spawn({ role: "scout", tier: "senior", task: "look" });
+		const worker = await manager.spawn({ role: "scout", tier: "expert", task: "look" });
 		const watching = watchWorker({ workerId: worker.id, hold: false, write });
 		transports[0].options.events.session({ model: "Claude Opus 4.5", modelId: "claude-opus-4-5" });
 		transports[0].options.events.usage({ inputTokens: 60_000, outputTokens: 8_000 });
@@ -148,7 +148,7 @@ describe("watch", () => {
 	// A pane is started by the multiplexer's own process, which does not inherit
 	// our environment, so watch looks the session up in the registry instead.
 	it("finds its session in the registry when the environment says nothing", async () => {
-		const worker = await manager.spawn({ role: "scout", tier: "senior", task: "look" });
+		const worker = await manager.spawn({ role: "scout", tier: "expert", task: "look" });
 		manager.progress(worker.id, "from the registry");
 		env.set(NETA_SOCKET_ENV, "");
 		env.set(NETA_LEADER_ENV, "");

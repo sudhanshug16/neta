@@ -228,7 +228,7 @@ describe("worker views", () => {
 		id: "ro1",
 		name: "auth flow",
 		role: "scout",
-		tier: "senior" as const,
+		tier: "expert" as const,
 		backend: "claude",
 		writer: false,
 		state: "running" as const,

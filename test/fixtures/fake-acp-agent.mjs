@@ -59,6 +59,8 @@ function configOptions(current, thoughtLevel = "medium") {
 			options: [
 				{ value: "fixture-default", name: "Fixture Default" },
 				{ value: "fixture-fast", name: "Fixture Fast" },
+				{ value: "gpt-5.6-luna", name: "GPT 5.6 Luna" },
+				{ value: "gpt-5.6-terra", name: "GPT 5.6 Terra" },
 				{ value: "gpt-5.6-sol", name: "GPT 5.6 Sol" },
 			],
 		},
@@ -70,7 +72,9 @@ function configOptions(current, thoughtLevel = "medium") {
 			currentValue: thoughtLevel,
 			options: [
 				{ value: "medium", name: "Medium" },
+				{ value: "high", name: "High" },
 				{ value: "xhigh", name: "Extra High" },
+				{ value: "max", name: "Max" },
 			],
 		},
 		{

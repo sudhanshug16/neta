@@ -117,11 +117,19 @@ describe("leader prompt", () => {
 
 	it("describes the tier mapping without naming models", () => {
 		const prompt = buildLeaderPrompt({
-			tiers: { junior: { backend: "claude" }, senior: { backend: "claude" }, staff: { backend: "claude" } },
+			tiers: { journeyman: { backend: "claude" }, expert: { backend: "claude" }, architect: { backend: "claude" } },
 		});
 
-		expect(prompt).toContain("junior -> claude");
+		expect(prompt).toContain("journeyman -> claude");
 		expect(prompt).not.toContain("haiku");
+	});
+
+	it("tells the leader to use the lowest tier that fits the work", () => {
+		const prompt = buildLeaderPrompt({ tiers: DEFAULT_TIERS });
+
+		expect(prompt).toContain("Pick the lowest tier that can do the job");
+		expect(prompt).toContain("mechanical, inventory, and reading tasks go to\napprentice or journeyman scouts");
+		expect(prompt).toContain("use an architect only\nwhen the shape of the answer is unknown");
 	});
 
 	it("describes unconfigured tiers as using spread policy", () => {
@@ -151,7 +159,7 @@ describe("leader prompt", () => {
 	});
 
 	it("skips the policy disclosure when a tier mapping is configured", () => {
-		const prompt = buildLeaderPrompt({ tiers: { senior: { backend: "codex" } } });
+		const prompt = buildLeaderPrompt({ tiers: { expert: { backend: "codex" } } });
 
 		expect(prompt).not.toContain("first staffing plan of the session");
 	});

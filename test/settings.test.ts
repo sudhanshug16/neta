@@ -7,48 +7,51 @@ import { loadNetaSettings, NetaConfig, persistTierOverride } from "../src/settin
 
 describe("NetaConfig", () => {
 	// A tier means a different model on each vendor, so the backend says what its
-	// junior is. Model ids are the ones the bridges advertise over ACP.
-	it("gives each tier the shipped model for its backend when configured", () => {
-		const config = new NetaConfig({
-			tiers: { junior: { backend: "claude" }, senior: { backend: "claude" }, staff: { backend: "claude" } },
-		});
+	// tier is. Model ids are the ones the bridges advertise over ACP.
+	it("gives every tier the shipped model for both configured backends", () => {
+		const config = new NetaConfig();
 
-		expect(config.resolve("junior", "claude")).toMatchObject({ name: "claude", model: "haiku" });
-		expect(config.resolve("senior", "claude")).toMatchObject({ name: "claude", model: "sonnet" });
-		expect(config.resolve("staff", "claude")).toMatchObject({ name: "claude", model: "default" });
+		expect(config.resolve("apprentice", "claude")).toMatchObject({ name: "claude", model: "haiku" });
+		expect(config.resolve("journeyman", "claude")).toMatchObject({ name: "claude", model: "sonnet" });
+		expect(config.resolve("expert", "claude")).toMatchObject({ name: "claude", model: "opus[1m]" });
+		expect(config.resolve("architect", "claude")).toMatchObject({ name: "claude", model: "claude-fable-5[1m]" });
+		expect(config.resolve("apprentice", "codex")).toMatchObject({ name: "codex", model: "gpt-5.6-luna[high]" });
+		expect(config.resolve("journeyman", "codex")).toMatchObject({ name: "codex", model: "gpt-5.6-terra[medium]" });
+		expect(config.resolve("expert", "codex")).toMatchObject({ name: "codex", model: "gpt-5.6-sol[medium]" });
+		expect(config.resolve("architect", "codex")).toMatchObject({ name: "codex", model: "gpt-5.6-sol[max]" });
 	});
 
 	// Mixing vendors should be one word per tier: name the backend, get that
 	// backend's idea of what the tier means.
 	it("picks up the new backend's model when a tier changes vendor", () => {
-		const config = new NetaConfig({ tiers: { senior: { backend: "claude" }, staff: { backend: "codex" } } });
+		const config = new NetaConfig({ tiers: { expert: { backend: "claude" }, architect: { backend: "codex" } } });
 
-		expect(config.resolve("staff", "codex")).toMatchObject({ name: "codex", model: "gpt-5.6-sol[xhigh]" });
-		expect(config.resolve("senior", "claude").name).toBe("claude");
+		expect(config.resolve("architect", "codex")).toMatchObject({ name: "codex", model: "gpt-5.6-sol[max]" });
+		expect(config.resolve("expert", "claude").name).toBe("claude");
 	});
 
 	it("lets a tier name its own model, whatever the backend ships", () => {
-		const config = new NetaConfig({ tiers: { junior: { backend: "codex", model: "gpt-5.4-mini[low]" } } });
+		const config = new NetaConfig({ tiers: { journeyman: { backend: "codex", model: "gpt-5.4-mini[low]" } } });
 
-		expect(config.resolve("junior", "codex").model).toBe("gpt-5.4-mini[low]");
+		expect(config.resolve("journeyman", "codex").model).toBe("gpt-5.4-mini[low]");
 	});
 
 	it("substitutes the model into backend arguments for backends that take a flag", () => {
 		const config = new NetaConfig({
-			tiers: { staff: { backend: "custom", model: "big-model" } },
+			tiers: { architect: { backend: "custom", model: "big-model" } },
 			backends: { custom: { command: "run-agent", modelArgs: ["--model", "{model}"] } },
 		});
 
-		const staff = config.resolve("staff", "custom");
-		expect(staff.command).toBe("run-agent");
-		expect(staff.args).toEqual(["--model", "big-model"]);
+		const architect = config.resolve("architect", "custom");
+		expect(architect.command).toBe("run-agent");
+		expect(architect.args).toEqual(["--model", "big-model"]);
 	});
 
 	it("drops the tier model when a different backend is used than configured", () => {
 		// Model ids belong to a backend's own naming scheme, so carrying "sonnet"
 		// over to opencode would ask for a model that does not exist there.
-		const config = new NetaConfig({ tiers: { senior: { backend: "claude", model: "sonnet" } } });
-		const resolved = config.resolve("senior", "opencode");
+		const config = new NetaConfig({ tiers: { expert: { backend: "claude", model: "sonnet" } } });
+		const resolved = config.resolve("expert", "opencode");
 
 		expect(resolved.name).toBe("opencode");
 		expect(resolved.model).toBeUndefined();
@@ -56,7 +59,7 @@ describe("NetaConfig", () => {
 	});
 
 	it("names the configured backends when one is unknown", () => {
-		expect(() => new NetaConfig().resolve("senior", "nope")).toThrow(/Unknown worker backend "nope".*claude/s);
+		expect(() => new NetaConfig().resolve("expert", "nope")).toThrow(/Unknown worker backend "nope".*claude/s);
 	});
 
 	it("detects shipped backends by their vendor CLIs, not npx", () => {
@@ -93,7 +96,7 @@ describe("NetaConfig", () => {
 			expect(config.backendNames()).not.toContain("opencode");
 			expect(config.installedBackends({ PATH: binDir })).toEqual(["enabled"]);
 			expect(() => config.launcher("opencode")).toThrow('Backend "opencode" is disabled in settings.');
-			expect(() => config.resolve("senior", "opencode")).toThrow('Backend "opencode" is disabled in settings.');
+			expect(() => config.resolve("expert", "opencode")).toThrow('Backend "opencode" is disabled in settings.');
 		} finally {
 			rmSync(binDir, { recursive: true, force: true });
 		}
@@ -129,17 +132,48 @@ describe("loadNetaSettings", () => {
 		const cwd = scratch();
 		writeFileSync(
 			join(agentDir, "settings.json"),
-			JSON.stringify({ tiers: { junior: { backend: "codex" }, staff: { backend: "codex" } } }),
+			JSON.stringify({ tiers: { journeyman: { backend: "codex" }, architect: { backend: "codex" } } }),
 		);
 		mkdirSync(join(cwd, CONFIG_DIR_NAME));
 		writeFileSync(
 			join(cwd, CONFIG_DIR_NAME, "settings.json"),
-			JSON.stringify({ tiers: { junior: { backend: "opencode" } } }),
+			JSON.stringify({ tiers: { journeyman: { backend: "opencode" } } }),
 		);
 
 		const settings = loadNetaSettings(cwd, agentDir);
 
-		expect(settings.tiers).toEqual({ junior: { backend: "opencode" }, staff: { backend: "codex" } });
+		expect(settings.tiers).toEqual({ journeyman: { backend: "opencode" }, architect: { backend: "codex" } });
+	});
+
+	it("maps old settings keys to the guild ladder and lets canonical keys win", () => {
+		const agentDir = scratch();
+		const cwd = scratch();
+		writeFileSync(
+			join(agentDir, "settings.json"),
+			JSON.stringify({
+				tiers: { intern: { backend: "legacy-intern" }, junior: { backend: "legacy-junior" } },
+				backends: { claude: { tierModels: { intern: "legacy-haiku", junior: "legacy-sonnet" } } },
+			}),
+		);
+		mkdirSync(join(cwd, CONFIG_DIR_NAME));
+		writeFileSync(
+			join(cwd, CONFIG_DIR_NAME, "settings.json"),
+			JSON.stringify({
+				tiers: { apprentice: { backend: "canonical-apprentice" }, journeyman: { model: "canonical-sonnet" } },
+				backends: { claude: { tierModels: { apprentice: "canonical-haiku", journeyman: "canonical-journeyman" } } },
+			}),
+		);
+
+		const settings = loadNetaSettings(cwd, agentDir);
+
+		expect(settings.tiers).toEqual({
+			apprentice: { backend: "canonical-apprentice" },
+			journeyman: { backend: "legacy-junior", model: "canonical-sonnet" },
+		});
+		expect(settings.backends?.claude?.tierModels).toEqual({
+			apprentice: "canonical-haiku",
+			journeyman: "canonical-journeyman",
+		});
 	});
 
 	it("merges sibling backend and tier fields from user and project settings", () => {
@@ -152,10 +186,10 @@ describe("loadNetaSettings", () => {
 					opencode: {
 						command: "user-opencode",
 						env: { API_KEY: "user-key" },
-						tierModels: { staff: "user-staff" },
+						tierModels: { architect: "user-architect" },
 					},
 				},
-				tiers: { staff: { backend: "opencode" } },
+				tiers: { architect: { backend: "opencode" } },
 			}),
 		);
 		mkdirSync(join(cwd, CONFIG_DIR_NAME));
@@ -166,10 +200,10 @@ describe("loadNetaSettings", () => {
 					opencode: {
 						disabled: false,
 						env: { BASE_URL: "project-url" },
-						tierModels: { senior: "project-senior" },
+						tierModels: { expert: "project-expert" },
 					},
 				},
-				tiers: { staff: { model: "project-staff" } },
+				tiers: { architect: { model: "project-architect" } },
 			}),
 		);
 
@@ -179,9 +213,9 @@ describe("loadNetaSettings", () => {
 			command: "user-opencode",
 			disabled: false,
 			env: { API_KEY: "user-key", BASE_URL: "project-url" },
-			tierModels: { staff: "user-staff", senior: "project-senior" },
+			tierModels: { architect: "user-architect", expert: "project-expert" },
 		});
-		expect(settings.tiers?.staff).toEqual({ backend: "opencode", model: "project-staff" });
+		expect(settings.tiers?.architect).toEqual({ backend: "opencode", model: "project-architect" });
 	});
 
 	it("lets a project re-enable a backend disabled in user settings", () => {
@@ -235,25 +269,25 @@ describe("loadNetaSettings", () => {
 		mkdirSync(join(cwd, CONFIG_DIR_NAME));
 		writeFileSync(
 			join(cwd, CONFIG_DIR_NAME, "settings.json"),
-			JSON.stringify({ tiers: { junior: { backend: "codex" } } }),
+			JSON.stringify({ tiers: { journeyman: { backend: "codex" } } }),
 		);
 
-		await persistTierOverride(cwd, "senior", { backend: "opencode" });
+		await persistTierOverride(cwd, "expert", { backend: "opencode" });
 
 		const updated = JSON.parse(readFileSync(join(cwd, CONFIG_DIR_NAME, "settings.json"), "utf-8"));
 		expect(updated.tiers).toEqual({
-			junior: { backend: "codex" },
-			senior: { backend: "opencode" },
+			journeyman: { backend: "codex" },
+			expert: { backend: "opencode" },
 		});
 	});
 
 	it("creates .neta directory when persisting tier override if it does not exist", async () => {
 		const cwd = scratch();
 
-		await persistTierOverride(cwd, "staff", { backend: "claude", model: "opus" });
+		await persistTierOverride(cwd, "architect", { backend: "claude", model: "opus" });
 
 		expect(existsSync(join(cwd, CONFIG_DIR_NAME))).toBe(true);
 		const settings = JSON.parse(readFileSync(join(cwd, CONFIG_DIR_NAME, "settings.json"), "utf-8"));
-		expect(settings.tiers).toEqual({ staff: { backend: "claude", model: "opus" } });
+		expect(settings.tiers).toEqual({ architect: { backend: "claude", model: "opus" } });
 	});
 });

@@ -45,7 +45,7 @@ running a team of engineers.
 - Read-only, enforced by that vendor: permission rules and a bash hook on
   Claude Code, `permission.edit: deny` with default-deny bash and a read-only
   allowlist on OpenCode, a kernel sandbox on Codex. Editing through a shell is
-  blocked, not just discouraged; trivial fixes go to a junior worker.
+  blocked, not just discouraged; trivial fixes go to an apprentice worker.
 - Worker results reach it by returning from a blocking `neta_wait`, so a worker
   finishing — or blocking on a question — wakes an idle leader without ever
   interrupting a conversation in progress.
@@ -81,16 +81,18 @@ login or API credit is that CLI's configuration, not Neta's.
 
 A spawn is **role + tier + task**, plus optional writer flag and room.
 
-### Tiers: junior, senior, staff
+### Tiers: apprentice, journeyman, expert, architect
 
 Tiers describe what you would trust the worker with, not how smart it is.
 The descriptions go in the leader's prompt verbatim:
 
-- **junior** — mechanical work with a precise spec: renames, applying a
-  reviewed diff, running tests and reporting output. Fails silently on
-  ambiguity, so it only gets exact instructions.
-- **senior** — well-scoped features, bug fixes with tests, code review.
-- **staff** — ambiguity: unknown-cause debugging, design work, debates.
+- **apprentice** — the mechanical floor: run a named command and report its
+  output, apply an exactly specified small change, or read a named file and
+  answer one bounded question. Fails on any ambiguity.
+- **journeyman** — mechanical work with a precise spec: renames, applying a
+  reviewed diff, running tests and reporting output. Fails on ambiguity.
+- **expert** — well-scoped features, bug fixes with tests, code review.
+- **architect** — ambiguity: unknown-cause debugging, design work, debates.
 
 The tier-to-backend mapping lives in settings and may be left unconfigured.
 Unconfigured tiers are assigned deterministically: spread round-robin across
@@ -104,8 +106,8 @@ spawning, so the leader can present a staffing plan before proceeding.
 ### Roles
 
 A role is a prompt: scout, worker, reviewer, debater. Shipped as markdown role
-definitions; users add their own. Role and tier are orthogonal — a junior
-reviewer and a staff reviewer run the same prompt on different models.
+definitions; users add their own. Role and tier are orthogonal — a journeyman
+reviewer and an architect reviewer run the same prompt on different models.
 
 ## Communication
 
@@ -123,8 +125,8 @@ keystrokes typed into someone else's terminal:
   The leader pulls this on demand; it does not push. The latest progress also
   shows as a `last:` line in worker listings.
 - `neta ask <question>` — blocks the worker until the leader answers.
-  Tier-gated: juniors do not get `ask` — a blocked junior fails fast with a
-  report and the leader respawns it with a better spec.
+  Tier-gated: apprentices and journeymen do not get `ask` — a blocked worker
+  fails fast with a report and the leader respawns it with a better spec.
 - `neta_plan` — computes backend assignments for proposed workers without
   spawning them, so the leader can present a staffing plan.
 - `neta_remember` — persists a tier-to-backend override to the project's

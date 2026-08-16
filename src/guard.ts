@@ -12,7 +12,7 @@
  *
  * The rule is deliberately blunt — deny anything that looks like a write, and
  * let the leader delegate it. A false deny costs the leader one turn and a
- * junior worker; a false allow costs the user the guarantee they were promised.
+ * apprentice worker; a false allow costs the user the guarantee they were promised.
  */
 
 /** Commands that exist to change files. */

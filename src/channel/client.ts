@@ -20,7 +20,7 @@ const CHANNEL_COMMANDS = new Set(["progress", "ask", "say", "room", "status"]);
 const CHANNEL_HELP = `Worker channel commands (available inside a Neta worker):
 
   ${APP_NAME} progress <message> Records a progress milestone in your log. Use it when you start, when a major step completes, and when something surprising changes your plan — one line each, not a running commentary. The leader and the user read these at a glance; frequent trivial calls bury the signal.
-  ${APP_NAME} ask <question>     Ask the leader and wait for the answer. Not available to junior workers.
+  ${APP_NAME} ask <question>     Ask the leader and wait for the answer. Not available to journeyman workers.
   ${APP_NAME} say <message>      Post to your room, visible to the other members.
   ${APP_NAME} room [--tail N]    Read your room transcript.
   ${APP_NAME} status --writers   Show active, queued and finished writers.

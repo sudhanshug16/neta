@@ -129,15 +129,15 @@ describe("leader CLI over the real shim", () => {
 	});
 
 	it("spawns a worker the leader can then see and instruct", async () => {
-		const spawned = await neta(["spawn", "--role", "scout", "--tier", "senior", "map the auth flow"], asLeader());
+		const spawned = await neta(["spawn", "--role", "scout", "--tier", "expert", "map the auth flow"], asLeader());
 
 		expect(spawned.code).toBe(0);
-		expect(spawned.stdout).toContain("scout/senior, read-only");
+		expect(spawned.stdout).toContain("scout/expert, read-only");
 		expect(transports).toHaveLength(1);
 
 		const listed = await neta(["workers"], asLeader());
 		expect(listed.stdout).toContain(
-			"ro1 [scout/senior, read-only, model unknown — backend default] running — map the auth flow",
+			"ro1 [scout/expert, read-only, model unknown — backend default] running — map the auth flow",
 		);
 	});
 
@@ -149,7 +149,7 @@ describe("leader CLI over the real shim", () => {
 				"--role",
 				"scout",
 				"--tier",
-				"senior",
+				"expert",
 				"--name",
 				"auth flow",
 				"--note",
@@ -187,7 +187,7 @@ describe("leader CLI over the real shim", () => {
 	});
 
 	it("carries the worker's own reply back to the leader", async () => {
-		await neta(["spawn", "--role", "scout", "--tier", "senior", "look around"], asLeader());
+		await neta(["spawn", "--role", "scout", "--tier", "expert", "look around"], asLeader());
 		const waiting = neta(["wait", "ro1", "--timeout", "10"], asLeader());
 		transports[0].finish({ ok: true, summary: "auth lives in src/auth.ts" });
 
@@ -197,7 +197,7 @@ describe("leader CLI over the real shim", () => {
 	});
 
 	it("lets a worker report progress through the same shim", async () => {
-		await neta(["spawn", "--role", "scout", "--tier", "senior", "look"], asLeader());
+		await neta(["spawn", "--role", "scout", "--tier", "expert", "look"], asLeader());
 
 		const progressed = await neta(["progress", "reading auth.ts"], {
 			[NETA_SOCKET_ENV]: address,
@@ -233,7 +233,7 @@ describe("leader CLI over the real shim", () => {
 			},
 			registry,
 		);
-		const result = await neta(["spawn", "--role", "scout", "--tier", "senior", "escalate"], {
+		const result = await neta(["spawn", "--role", "scout", "--tier", "expert", "escalate"], {
 			NETA_DIR: registry,
 			[NETA_SOCKET_ENV]: address,
 			[NETA_WORKER_ENV]: "ro1",

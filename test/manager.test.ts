@@ -7,7 +7,7 @@ import { NETA_SOCKET_ENV, NETA_WORKER_ENV, NETA_WORKER_TOKEN_ENV } from "../src/
 import { WorkerManager } from "../src/orchestrator/manager.ts";
 import type { PromptOutcome, TransportOptions, WorkerTransportDriver } from "../src/orchestrator/transport.ts";
 import { NetaConfig } from "../src/settings.ts";
-import type { WorkerEvent } from "../src/types.ts";
+import { TIERS, type WorkerEvent } from "../src/types.ts";
 import { fixtureBackendConfig } from "./helpers.ts";
 
 class FakeTransport implements WorkerTransportDriver {
@@ -92,7 +92,7 @@ describe("WorkerManager", () => {
 	const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 	it("starts a worker with its role prompt, working agreement and channel environment", async () => {
-		const summary = await manager.spawn({ role: "scout", tier: "senior", task: "map the auth flow" });
+		const summary = await manager.spawn({ role: "scout", tier: "expert", task: "map the auth flow" });
 
 		expect(summary.state).toBe("running");
 		const transport = transports[0];
@@ -106,7 +106,7 @@ describe("WorkerManager", () => {
 	});
 
 	it("does not add writer context when no writers are active or queued", async () => {
-		await manager.spawn({ role: "scout", tier: "senior", task: "map the auth flow" });
+		await manager.spawn({ role: "scout", tier: "expert", task: "map the auth flow" });
 
 		expect(transports[0].prompts[0]).toBe("map the auth flow");
 	});
@@ -115,18 +115,18 @@ describe("WorkerManager", () => {
 		await manager.spawn({
 			role: "worker",
 			name: "billing migration",
-			tier: "senior",
+			tier: "expert",
 			task: "Migrate billing tables\nThen verify invoices.",
 			writer: true,
 		});
 		await manager.spawn({
 			role: "worker",
 			name: "docs pass",
-			tier: "senior",
+			tier: "expert",
 			task: "Document the billing rollout",
 			writer: true,
 		});
-		await manager.spawn({ role: "scout", tier: "senior", task: "Inspect the migration" });
+		await manager.spawn({ role: "scout", tier: "expert", task: "Inspect the migration" });
 
 		const prompt = transports[1].prompts[0];
 		expect(prompt).toContain("# Concurrent writer context");
@@ -137,10 +137,10 @@ describe("WorkerManager", () => {
 	});
 
 	it("uses access prefixes with one serial counter, including queued writers", async () => {
-		const firstWriter = await manager.spawn({ role: "worker", tier: "senior", task: "first", writer: true });
-		const reader = await manager.spawn({ role: "scout", tier: "senior", task: "inspect" });
-		const queuedWriter = await manager.spawn({ role: "worker", tier: "senior", task: "second", writer: true });
-		const secondReader = await manager.spawn({ role: "reviewer", tier: "senior", task: "review" });
+		const firstWriter = await manager.spawn({ role: "worker", tier: "expert", task: "first", writer: true });
+		const reader = await manager.spawn({ role: "scout", tier: "expert", task: "inspect" });
+		const queuedWriter = await manager.spawn({ role: "worker", tier: "expert", task: "second", writer: true });
+		const secondReader = await manager.spawn({ role: "reviewer", tier: "expert", task: "review" });
 
 		expect(firstWriter.id).toBe("rw1");
 		expect(reader.id).toBe("ro2");
@@ -153,44 +153,46 @@ describe("WorkerManager", () => {
 	// themselves — otherwise a long session buries you in tabs of workers that
 	// ended an hour ago.
 	it("archives a finished batch when the next one starts", async () => {
-		const first = await manager.spawn({ role: "scout", tier: "senior", task: "a" });
+		const first = await manager.spawn({ role: "scout", tier: "expert", task: "a" });
 		transports[0].finish({ ok: true, summary: "found it" });
 		await manager.waitFor([first.id], 5000);
 		expect(manager.tailLog(first.id).archived).toBe(false);
 
-		await manager.spawn({ role: "scout", tier: "senior", task: "b" });
+		await manager.spawn({ role: "scout", tier: "expert", task: "b" });
 
 		expect(manager.tailLog(first.id).archived).toBe(true);
 	});
 
 	it("leaves a batch alone while any of it is still running", async () => {
-		const first = await manager.spawn({ role: "scout", tier: "senior", task: "a" });
+		const first = await manager.spawn({ role: "scout", tier: "expert", task: "a" });
 
-		await manager.spawn({ role: "scout", tier: "senior", task: "b" });
+		await manager.spawn({ role: "scout", tier: "expert", task: "b" });
 
 		expect(manager.tailLog(first.id).archived).toBe(false);
 	});
 
-	it("tells juniors they cannot ask and seniors that they can", async () => {
-		await manager.spawn({ role: "worker", tier: "junior", task: "rename foo to bar" });
-		await manager.spawn({ role: "worker", tier: "staff", task: "find the leak" });
+	it("tells apprentices and journeymen they cannot ask, while experts can", async () => {
+		await manager.spawn({ role: "worker", tier: "apprentice", task: "rename foo to bar" });
+		await manager.spawn({ role: "worker", tier: "journeyman", task: "run the named test" });
+		await manager.spawn({ role: "worker", tier: "architect", task: "find the leak" });
 
 		expect(transports[0].options.systemPrompt).toContain("You cannot ask the leader questions");
-		expect(transports[1].options.systemPrompt).toContain("ask <question>` blocks you");
+		expect(transports[1].options.systemPrompt).toContain("You cannot ask the leader questions");
+		expect(transports[2].options.systemPrompt).toContain("ask <question>` blocks you");
 	});
 
 	it("hands the worker the backend its tier maps to", async () => {
-		const summary = await manager.spawn({ role: "scout", tier: "senior", task: "look" });
+		const summary = await manager.spawn({ role: "scout", tier: "expert", task: "look" });
 
 		expect(summary.backend).toBe("claude");
 		// The model reaches the worker over ACP, not through an environment
 		// variable: setting ANTHROPIC_MODEL did nothing, and every worker quietly
 		// ran on the most expensive model instead of its tier's.
-		expect(transports[0].options.model).toBe("sonnet");
+		expect(transports[0].options.model).toBe("opus[1m]");
 	});
 
 	it("surfaces the negotiated model, mode and bridge in the worker summary", async () => {
-		const summary = await manager.spawn({ role: "scout", tier: "senior", task: "look" });
+		const summary = await manager.spawn({ role: "scout", tier: "expert", task: "look" });
 		transports[0].options.events.session({
 			model: "negotiated-model",
 			modelId: "negotiated-model-id",
@@ -206,16 +208,16 @@ describe("WorkerManager", () => {
 	});
 
 	it("queues a second writer and starts it automatically when the first finishes", async () => {
-		const first = await manager.spawn({ role: "worker", tier: "senior", task: "fix the bug", writer: true });
+		const first = await manager.spawn({ role: "worker", tier: "expert", task: "fix the bug", writer: true });
 		expect(first.writer).toBe(true);
 		expect(first.state).toBe("running");
 
-		const second = await manager.spawn({ role: "worker", tier: "senior", task: "other change", writer: true });
+		const second = await manager.spawn({ role: "worker", tier: "expert", task: "other change", writer: true });
 		expect(second.state).toBe("queued");
 		expect(second.queuedBehind).toBe(first.id);
 
 		// A read-only worker alongside the writer is fine.
-		await manager.spawn({ role: "scout", tier: "junior", task: "read the tests" });
+		await manager.spawn({ role: "scout", tier: "journeyman", task: "read the tests" });
 
 		transports[0].finish({ ok: true, summary: "fixed and committed" });
 		// A finishing writer is checked for uncommitted changes before the slot is
@@ -250,8 +252,8 @@ describe("WorkerManager", () => {
 			},
 		});
 		try {
-			const first = await queueManager.spawn({ role: "worker", tier: "senior", task: "first", writer: true });
-			const second = await queueManager.spawn({ role: "worker", tier: "senior", task: "second", writer: true });
+			const first = await queueManager.spawn({ role: "worker", tier: "expert", task: "first", writer: true });
+			const second = await queueManager.spawn({ role: "worker", tier: "expert", task: "second", writer: true });
 			transports.at(-1)?.options.events.processGroup?.(101);
 			transports.at(-1)?.finish({ ok: true, summary: "first done" });
 			await queueManager.waitFor([first.id], 5000);
@@ -268,9 +270,9 @@ describe("WorkerManager", () => {
 	});
 
 	it("does not send writer notices to queued writers", async () => {
-		const first = await manager.spawn({ role: "worker", tier: "senior", task: "first", writer: true });
-		await manager.spawn({ role: "scout", tier: "senior", task: "inspect" });
-		const queued = await manager.spawn({ role: "worker", tier: "senior", task: "second", writer: true });
+		const first = await manager.spawn({ role: "worker", tier: "expert", task: "first", writer: true });
+		await manager.spawn({ role: "scout", tier: "expert", task: "inspect" });
+		const queued = await manager.spawn({ role: "worker", tier: "expert", task: "second", writer: true });
 
 		transports[0].finish({ ok: true, summary: "first done" });
 		await manager.waitFor([first.id], 5000);
@@ -284,8 +286,8 @@ describe("WorkerManager", () => {
 	});
 
 	it("keeps the writer slot until the finished worker's process is dead", async () => {
-		const first = await manager.spawn({ role: "worker", tier: "senior", task: "first", writer: true });
-		const second = await manager.spawn({ role: "worker", tier: "senior", task: "second", writer: true });
+		const first = await manager.spawn({ role: "worker", tier: "expert", task: "first", writer: true });
+		const second = await manager.spawn({ role: "worker", tier: "expert", task: "second", writer: true });
 		const releaseKill = transports[0].delayKill();
 
 		transports[0].finish({ ok: true, summary: "first done" });
@@ -303,7 +305,7 @@ describe("WorkerManager", () => {
 	});
 
 	it("pushes a done event when a worker finishes", async () => {
-		const summary = await manager.spawn({ role: "worker", tier: "senior", task: "do it" });
+		const summary = await manager.spawn({ role: "worker", tier: "expert", task: "do it" });
 		transports[0].finish({ ok: true, summary: "all done" });
 		await flush();
 
@@ -312,7 +314,7 @@ describe("WorkerManager", () => {
 	});
 
 	it("pushes a failed event and keeps the reason", async () => {
-		const summary = await manager.spawn({ role: "worker", tier: "senior", task: "do it" });
+		const summary = await manager.spawn({ role: "worker", tier: "expert", task: "do it" });
 		transports[0].finish({ ok: false, summary: "backend not installed" });
 		await flush();
 
@@ -323,7 +325,7 @@ describe("WorkerManager", () => {
 	});
 
 	it("collects progress milestones into a log the leader drains once", async () => {
-		const summary = await manager.spawn({ role: "scout", tier: "senior", task: "look around" });
+		const summary = await manager.spawn({ role: "scout", tier: "expert", task: "look around" });
 
 		expect(manager.progress(summary.id, "reading auth.ts")).toEqual({ ok: true });
 		expect(manager.progress(summary.id, "found it")).toEqual({ ok: true });
@@ -334,7 +336,7 @@ describe("WorkerManager", () => {
 	});
 
 	it("keeps watch cursors continuous after trimming more than 500 log entries", async () => {
-		const summary = await manager.spawn({ role: "scout", tier: "senior", task: "watch" });
+		const summary = await manager.spawn({ role: "scout", tier: "expert", task: "watch" });
 		for (let index = 0; index < 100; index += 1) manager.progress(summary.id, `entry ${index}`);
 		const beforeTrim = manager.tailLog(summary.id, 0);
 		for (let index = 100; index < 601; index += 1) manager.progress(summary.id, `entry ${index}`);
@@ -369,7 +371,7 @@ describe("WorkerManager", () => {
 			},
 		});
 		try {
-			const summary = await dirtyManager.spawn({ role: "worker", tier: "senior", task: "write", writer: true });
+			const summary = await dirtyManager.spawn({ role: "worker", tier: "expert", task: "write", writer: true });
 			const transport = transports.at(-1);
 			if (!transport) throw new Error("Writer transport was not created.");
 			transport.finish({ ok: true, summary: "finished work" });
@@ -395,7 +397,7 @@ describe("WorkerManager", () => {
 	});
 
 	it("keeps the latest progress milestone on the worker summary", async () => {
-		const summary = await manager.spawn({ role: "scout", tier: "senior", task: "look around" });
+		const summary = await manager.spawn({ role: "scout", tier: "expert", task: "look around" });
 		expect(manager.get(summary.id).lastProgress).toBeUndefined();
 
 		manager.progress(summary.id, "reading auth.ts");
@@ -404,8 +406,8 @@ describe("WorkerManager", () => {
 		expect(manager.get(summary.id).lastProgress?.text).toBe("found it");
 	});
 
-	it("blocks a senior on ask until the leader answers", async () => {
-		const summary = await manager.spawn({ role: "worker", tier: "senior", task: "do it" });
+	it("blocks a expert on ask until the leader answers", async () => {
+		const summary = await manager.spawn({ role: "worker", tier: "expert", task: "do it" });
 		const abort = new AbortController();
 
 		const pending = manager.ask(summary.id, "which database?", abort.signal);
@@ -419,21 +421,23 @@ describe("WorkerManager", () => {
 		expect(manager.get(summary.id).state).toBe("running");
 	});
 
-	it("refuses ask for juniors and tells them what to do instead", async () => {
-		const summary = await manager.spawn({ role: "worker", tier: "junior", task: "rename it" });
+	it("refuses ask for apprentices and journeymen, and tells them what to do instead", async () => {
+		const apprentice = await manager.spawn({ role: "worker", tier: "apprentice", task: "rename it" });
+		const journeyman = await manager.spawn({ role: "worker", tier: "journeyman", task: "run the named test" });
 
-		const response = await manager.ask(summary.id, "which one?", new AbortController().signal);
+		const response = await manager.ask(apprentice.id, "which one?", new AbortController().signal);
 
 		expect(response).toEqual({
 			ok: false,
-			error: "Junior workers cannot ask the leader. Stop and finish with a report describing what is missing.",
+			error: "Apprentice and journeyman workers cannot ask the leader. Stop and finish with a report describing what is missing.",
 		});
-		expect(manager.get(summary.id).state).toBe("running");
+		expect(await manager.ask(journeyman.id, "which test?", new AbortController().signal)).toEqual(response);
+		expect(manager.get(apprentice.id).state).toBe("running");
 	});
 
 	it("shares a room transcript between its members", async () => {
-		const first = await manager.spawn({ role: "debater", tier: "staff", task: "argue for", room: "db" });
-		const second = await manager.spawn({ role: "debater", tier: "staff", task: "argue against", room: "db" });
+		const first = await manager.spawn({ role: "debater", tier: "architect", task: "argue for", room: "db" });
+		const second = await manager.spawn({ role: "debater", tier: "architect", task: "argue against", room: "db" });
 
 		manager.postToRoom("db", "leader", "leader", "Postgres or SQLite?");
 		manager.say(first.id, "Postgres: we already run it");
@@ -441,11 +445,11 @@ describe("WorkerManager", () => {
 
 		expect(seen.ok).toBe(true);
 		expect(seen.ok && seen.text).toContain("Postgres or SQLite?");
-		expect(seen.ok && seen.text).toContain("[debater/staff] Postgres: we already run it");
+		expect(seen.ok && seen.text).toContain("[debater/architect] Postgres: we already run it");
 	});
 
 	it("does not let a worker outside a room post to one", async () => {
-		const summary = await manager.spawn({ role: "scout", tier: "senior", task: "look" });
+		const summary = await manager.spawn({ role: "scout", tier: "expert", task: "look" });
 
 		expect(manager.say(summary.id, "hello")).toEqual({ ok: false, error: "You are not in a room." });
 	});
@@ -474,8 +478,8 @@ describe("WorkerManager", () => {
 				},
 			});
 
-			const firstSpawn = parallel.spawn({ role: "worker", tier: "senior", task: "first", writer: true });
-			const secondSpawn = parallel.spawn({ role: "worker", tier: "senior", task: "second", writer: true });
+			const firstSpawn = parallel.spawn({ role: "worker", tier: "expert", task: "first", writer: true });
+			const secondSpawn = parallel.spawn({ role: "worker", tier: "expert", task: "second", writer: true });
 			await flush();
 			releaseSetup?.();
 			const [first, second] = await Promise.all([firstSpawn, secondSpawn]);
@@ -488,9 +492,9 @@ describe("WorkerManager", () => {
 		});
 
 		it("queues third writer in FIFO order", async () => {
-			const first = await manager.spawn({ role: "worker", tier: "senior", task: "first", writer: true });
-			const second = await manager.spawn({ role: "worker", tier: "senior", task: "second", writer: true });
-			const third = await manager.spawn({ role: "worker", tier: "senior", task: "third", writer: true });
+			const first = await manager.spawn({ role: "worker", tier: "expert", task: "first", writer: true });
+			const second = await manager.spawn({ role: "worker", tier: "expert", task: "second", writer: true });
+			const third = await manager.spawn({ role: "worker", tier: "expert", task: "third", writer: true });
 
 			expect(first.state).toBe("running");
 			expect(second.state).toBe("queued");
@@ -515,8 +519,8 @@ describe("WorkerManager", () => {
 		});
 
 		it("starts next queued worker when active writer is killed", async () => {
-			const first = await manager.spawn({ role: "worker", tier: "senior", task: "first", writer: true });
-			const second = await manager.spawn({ role: "worker", tier: "senior", task: "second", writer: true });
+			const first = await manager.spawn({ role: "worker", tier: "expert", task: "first", writer: true });
+			const second = await manager.spawn({ role: "worker", tier: "expert", task: "second", writer: true });
 
 			expect(second.state).toBe("queued");
 
@@ -527,8 +531,8 @@ describe("WorkerManager", () => {
 		});
 
 		it("cancels queued worker when killed without starting it", async () => {
-			const first = await manager.spawn({ role: "worker", tier: "senior", task: "first", writer: true });
-			const second = await manager.spawn({ role: "worker", tier: "senior", task: "second", writer: true });
+			const first = await manager.spawn({ role: "worker", tier: "expert", task: "first", writer: true });
+			const second = await manager.spawn({ role: "worker", tier: "expert", task: "second", writer: true });
 
 			expect(second.state).toBe("queued");
 
@@ -547,8 +551,8 @@ describe("WorkerManager", () => {
 		});
 
 		it("delivers messages to queued worker as pending brief", async () => {
-			const first = await manager.spawn({ role: "worker", tier: "senior", task: "first", writer: true });
-			const second = await manager.spawn({ role: "worker", tier: "senior", task: "second", writer: true });
+			const first = await manager.spawn({ role: "worker", tier: "expert", task: "first", writer: true });
+			const second = await manager.spawn({ role: "worker", tier: "expert", task: "second", writer: true });
 
 			expect(second.state).toBe("queued");
 
@@ -572,8 +576,8 @@ describe("WorkerManager", () => {
 		// The spawn-time queue notice used to be stored in record.result, so every
 		// listing showed it as the worker's output long after the worker started.
 		it("keeps result empty until a queued worker actually finishes", async () => {
-			const first = await manager.spawn({ role: "worker", tier: "senior", task: "first", writer: true });
-			const second = await manager.spawn({ role: "worker", tier: "senior", task: "second", writer: true });
+			const first = await manager.spawn({ role: "worker", tier: "expert", task: "first", writer: true });
+			const second = await manager.spawn({ role: "worker", tier: "expert", task: "second", writer: true });
 
 			expect(second.result).toBeUndefined();
 
@@ -592,10 +596,10 @@ describe("WorkerManager", () => {
 		});
 
 		it("allows read-only workers to spawn while queue exists", async () => {
-			await manager.spawn({ role: "worker", tier: "senior", task: "first", writer: true });
-			await manager.spawn({ role: "worker", tier: "senior", task: "second", writer: true });
+			await manager.spawn({ role: "worker", tier: "expert", task: "first", writer: true });
+			await manager.spawn({ role: "worker", tier: "expert", task: "second", writer: true });
 
-			const reader = await manager.spawn({ role: "scout", tier: "senior", task: "read" });
+			const reader = await manager.spawn({ role: "scout", tier: "expert", task: "read" });
 
 			expect(reader.state).toBe("running");
 			expect(reader.writer).toBe(false);
@@ -634,7 +638,7 @@ describe("WorkerManager", () => {
 			const note = manager.createNote("implement auth");
 			const summary = await manager.spawn({
 				role: "worker",
-				tier: "senior",
+				tier: "expert",
 				task: "implement auth flow",
 				note: note.id,
 			});
@@ -651,7 +655,7 @@ describe("WorkerManager", () => {
 			const note = manager.createNote("implement auth");
 			const summary = await manager.spawn({
 				role: "worker",
-				tier: "senior",
+				tier: "expert",
 				task: "implement auth flow",
 				note: note.id,
 			});
@@ -660,11 +664,11 @@ describe("WorkerManager", () => {
 		});
 
 		it("shows a queued linked worker as queued on the note", async () => {
-			await manager.spawn({ role: "worker", tier: "senior", task: "hold the slot", writer: true });
+			await manager.spawn({ role: "worker", tier: "expert", task: "hold the slot", writer: true });
 			const note = manager.createNote("follow-up change");
 			const queued = await manager.spawn({
 				role: "worker",
-				tier: "senior",
+				tier: "expert",
 				task: "next change",
 				writer: true,
 				note: note.id,
@@ -675,7 +679,7 @@ describe("WorkerManager", () => {
 		});
 
 		it("errors when spawning with unknown note id", async () => {
-			await expect(manager.spawn({ role: "worker", tier: "senior", task: "do it", note: "n99" })).rejects.toThrow(
+			await expect(manager.spawn({ role: "worker", tier: "expert", task: "do it", note: "n99" })).rejects.toThrow(
 				/Unknown note id/,
 			);
 		});
@@ -684,7 +688,7 @@ describe("WorkerManager", () => {
 			const note = manager.createNote("risky task");
 			const _summary = await manager.spawn({
 				role: "worker",
-				tier: "senior",
+				tier: "expert",
 				task: "try something",
 				note: note.id,
 			});
@@ -699,19 +703,19 @@ describe("WorkerManager", () => {
 	});
 
 	it("kills a worker, releases the slot and reports it", async () => {
-		const summary = await manager.spawn({ role: "worker", tier: "senior", task: "do it", writer: true });
+		const summary = await manager.spawn({ role: "worker", tier: "expert", task: "do it", writer: true });
 
 		const killed = await manager.kill(summary.id);
 
 		expect(killed.state).toBe("killed");
 		expect(transports[0].killed).toBe(true);
 		await expect(
-			manager.spawn({ role: "worker", tier: "senior", task: "next", writer: true }),
+			manager.spawn({ role: "worker", tier: "expert", task: "next", writer: true }),
 		).resolves.toBeDefined();
 	});
 
 	it("reports a running turn killed instead of failed when the leader stops it", async () => {
-		const summary = await manager.spawn({ role: "worker", tier: "senior", task: "do it", writer: true });
+		const summary = await manager.spawn({ role: "worker", tier: "expert", task: "do it", writer: true });
 		const releaseKill = transports[0].delayKill();
 
 		const killing = manager.kill(summary.id);
@@ -726,8 +730,8 @@ describe("WorkerManager", () => {
 	});
 
 	it("shuts down a running and queued writer without starting the queued worker", async () => {
-		await manager.spawn({ role: "worker", tier: "senior", task: "first", writer: true });
-		await manager.spawn({ role: "worker", tier: "senior", task: "second", writer: true });
+		await manager.spawn({ role: "worker", tier: "expert", task: "first", writer: true });
+		await manager.spawn({ role: "worker", tier: "expert", task: "second", writer: true });
 		const releaseKill = transports[0].delayKill();
 		let disposed = false;
 		const shutdown = manager.dispose().then(() => {
@@ -744,8 +748,8 @@ describe("WorkerManager", () => {
 	});
 
 	it("waits for the named workers and returns their results", async () => {
-		const first = await manager.spawn({ role: "scout", tier: "senior", task: "a" });
-		const second = await manager.spawn({ role: "scout", tier: "senior", task: "b" });
+		const first = await manager.spawn({ role: "scout", tier: "expert", task: "a" });
+		const second = await manager.spawn({ role: "scout", tier: "expert", task: "b" });
 
 		const waiting = manager.waitFor([first.id, second.id], 5000);
 		transports[0].finish({ ok: true, summary: "found a" });
@@ -756,8 +760,8 @@ describe("WorkerManager", () => {
 	});
 
 	it("returns the first finished worker in first mode while the other still runs", async () => {
-		const first = await manager.spawn({ role: "scout", tier: "senior", task: "a" });
-		const second = await manager.spawn({ role: "scout", tier: "senior", task: "b" });
+		const first = await manager.spawn({ role: "scout", tier: "expert", task: "a" });
+		const second = await manager.spawn({ role: "scout", tier: "expert", task: "b" });
 
 		const waiting = manager.wait([first.id, second.id], 5000, { first: true });
 		transports[0].finish({ ok: true, summary: "found a" });
@@ -770,8 +774,8 @@ describe("WorkerManager", () => {
 	});
 
 	it("returns immediately in first mode when a watched worker is already terminal", async () => {
-		const first = await manager.spawn({ role: "scout", tier: "senior", task: "a" });
-		const second = await manager.spawn({ role: "scout", tier: "senior", task: "b" });
+		const first = await manager.spawn({ role: "scout", tier: "expert", task: "a" });
+		const second = await manager.spawn({ role: "scout", tier: "expert", task: "b" });
 		transports[0].finish({ ok: true, summary: "found a" });
 		await manager.waitFor([first.id], 5000);
 
@@ -786,7 +790,7 @@ describe("WorkerManager", () => {
 	// or the timeout fired: waiters were only resolved in the terminal transition,
 	// never when a worker entered "waiting" through ask.
 	it("wakes a wait when a watched worker blocks on a question", async () => {
-		const summary = await manager.spawn({ role: "worker", tier: "senior", task: "do it" });
+		const summary = await manager.spawn({ role: "worker", tier: "expert", task: "do it" });
 
 		const waiting = manager.wait([summary.id], 5000);
 		const pending = manager.ask(summary.id, "which database?", new AbortController().signal);
@@ -801,7 +805,7 @@ describe("WorkerManager", () => {
 	});
 
 	it("wakes a wait on room activity when opted in", async () => {
-		const member = await manager.spawn({ role: "debater", tier: "staff", task: "argue", room: "db" });
+		const member = await manager.spawn({ role: "debater", tier: "architect", task: "argue", room: "db" });
 		manager.postToRoom("db", "leader", "leader", "old post");
 
 		const waiting = manager.wait([member.id], 5000, { rooms: ["db"] });
@@ -816,7 +820,7 @@ describe("WorkerManager", () => {
 	});
 
 	it("ignores room activity without the opt-in", async () => {
-		const member = await manager.spawn({ role: "debater", tier: "staff", task: "argue", room: "db" });
+		const member = await manager.spawn({ role: "debater", tier: "architect", task: "argue", room: "db" });
 
 		const waiting = manager.wait([member.id], 50);
 		manager.postToRoom("db", "leader", "leader", "new evidence");
@@ -825,7 +829,7 @@ describe("WorkerManager", () => {
 	});
 
 	it("rejects follow-up messages to a finished worker", async () => {
-		const summary = await manager.spawn({ role: "worker", tier: "senior", task: "do it" });
+		const summary = await manager.spawn({ role: "worker", tier: "expert", task: "do it" });
 		transports[0].finish({ ok: true, summary: "done" });
 		await flush();
 
@@ -837,7 +841,7 @@ describe("WorkerManager", () => {
 	// the queued prompt hit the terminal-state check and returned without ever
 	// reaching the model.
 	it("delivers a message sent mid-turn instead of finishing the worker under it", async () => {
-		const summary = await manager.spawn({ role: "worker", tier: "senior", task: "do it" });
+		const summary = await manager.spawn({ role: "worker", tier: "expert", task: "do it" });
 		manager.send(summary.id, "also update the docs");
 
 		transports[0].finish({ ok: true, summary: "code done" });
@@ -880,8 +884,8 @@ describe("WorkerManager", () => {
 		});
 
 		expect(prepared).toBe(0);
-		await lazy.spawn({ role: "scout", tier: "senior", task: "a" });
-		await lazy.spawn({ role: "scout", tier: "senior", task: "b" });
+		await lazy.spawn({ role: "scout", tier: "expert", task: "a" });
+		await lazy.spawn({ role: "scout", tier: "expert", task: "b" });
 		expect(prepared).toBe(2);
 
 		// Workers reach the leader by running the `neta` CLI, so the prepared PATH
@@ -892,7 +896,7 @@ describe("WorkerManager", () => {
 	});
 
 	it("names the known roles when asked for one that does not exist", async () => {
-		await expect(manager.spawn({ role: "architect", tier: "senior", task: "x" })).rejects.toThrow(
+		await expect(manager.spawn({ role: "architect", tier: "expert", task: "x" })).rejects.toThrow(
 			/Unknown role "architect".*scout, worker, reviewer, debater/s,
 		);
 	});
@@ -913,12 +917,12 @@ describe("WorkerManager", () => {
 
 		it("spawns a worker and reports what was started", async () => {
 			const response = await manager.leader(
-				{ type: "spawn", token: manager.leaderToken, role: "scout", tier: "senior", task: "map auth" },
+				{ type: "spawn", token: manager.leaderToken, role: "scout", tier: "expert", task: "map auth" },
 				signal,
 			);
 
 			expect(response.ok).toBe(true);
-			expect(response.ok && response.text).toContain("scout/senior, read-only");
+			expect(response.ok && response.text).toContain("scout/expert, read-only");
 			expect(transports[0].prompts[0]).toBe("map auth");
 		});
 
@@ -928,15 +932,18 @@ describe("WorkerManager", () => {
 				signal,
 			);
 
-			expect(response).toEqual({ ok: false, error: 'Unknown tier "principal". Tiers: junior, senior, staff.' });
+			expect(response).toEqual({
+				ok: false,
+				error: 'Unknown tier "principal". Tiers: apprentice, journeyman, expert, architect.',
+			});
 			expect(transports).toHaveLength(0);
 		});
 
 		it("queues a second writer through the channel and reports queued status", async () => {
-			await manager.spawn({ role: "worker", tier: "senior", task: "first", writer: true });
+			await manager.spawn({ role: "worker", tier: "expert", task: "first", writer: true });
 
 			const response = await manager.leader(
-				{ type: "spawn", token: manager.leaderToken, role: "worker", tier: "senior", task: "second", writer: true },
+				{ type: "spawn", token: manager.leaderToken, role: "worker", tier: "expert", task: "second", writer: true },
 				signal,
 			);
 
@@ -946,11 +953,11 @@ describe("WorkerManager", () => {
 		});
 
 		it("lists workers, drains a log, and answers a blocked worker", async () => {
-			const summary = await manager.spawn({ role: "worker", tier: "senior", task: "do it" });
+			const summary = await manager.spawn({ role: "worker", tier: "expert", task: "do it" });
 			manager.progress(summary.id, "reading auth.ts");
 
 			const listed = await manager.leader({ type: "workers", token: manager.leaderToken }, signal);
-			expect(listed.ok && listed.text).toContain(`${summary.id} [worker/senior`);
+			expect(listed.ok && listed.text).toContain(`${summary.id} [worker/expert`);
 			expect(listed.ok && listed.text).toContain("last: reading auth.ts");
 
 			const log = await manager.leader({ type: "log", token: manager.leaderToken, workerId: summary.id }, signal);
@@ -968,7 +975,7 @@ describe("WorkerManager", () => {
 		});
 
 		it("waits for the named workers and returns their results", async () => {
-			const summary = await manager.spawn({ role: "scout", tier: "senior", task: "look" });
+			const summary = await manager.spawn({ role: "scout", tier: "expert", task: "look" });
 			const waiting = manager.leader(
 				{ type: "wait", token: manager.leaderToken, workerIds: [summary.id], timeoutMs: 5000 },
 				signal,
@@ -1009,18 +1016,18 @@ describe("WorkerManager", () => {
 			});
 
 			// Spawn 3 workers with same tier, no explicit backend
-			const first = await multiManager.spawn({ role: "scout", tier: "senior", task: "task1" });
-			const second = await multiManager.spawn({ role: "scout", tier: "senior", task: "task2" });
-			const third = await multiManager.spawn({ role: "scout", tier: "senior", task: "task3" });
+			const first = await multiManager.spawn({ role: "scout", tier: "expert", task: "task1" });
+			const second = await multiManager.spawn({ role: "scout", tier: "expert", task: "task2" });
+			const third = await multiManager.spawn({ role: "scout", tier: "expert", task: "task3" });
 
 			// They should spread across backends
 			const backends = [first.backend, second.backend, third.backend];
 			expect(new Set(backends).size).toBeGreaterThan(1); // At least 2 different backends
 
 			// Spawn 3 more workers in the same session - should get the same pattern
-			const fourth = await multiManager.spawn({ role: "scout", tier: "senior", task: "task4" });
-			const fifth = await multiManager.spawn({ role: "scout", tier: "senior", task: "task5" });
-			const sixth = await multiManager.spawn({ role: "scout", tier: "senior", task: "task6" });
+			const fourth = await multiManager.spawn({ role: "scout", tier: "expert", task: "task4" });
+			const fifth = await multiManager.spawn({ role: "scout", tier: "expert", task: "task5" });
+			const sixth = await multiManager.spawn({ role: "scout", tier: "expert", task: "task6" });
 
 			expect(fourth.backend).toBe(first.backend);
 			expect(fifth.backend).toBe(second.backend);
@@ -1050,10 +1057,10 @@ describe("WorkerManager", () => {
 			});
 
 			// Spawn a writer
-			const writer = await multiManager.spawn({ role: "worker", tier: "senior", task: "implement", writer: true });
+			const writer = await multiManager.spawn({ role: "worker", tier: "expert", task: "implement", writer: true });
 
 			// Spawn a reviewer - should get a different backend
-			const reviewer = await multiManager.spawn({ role: "reviewer", tier: "staff", task: "review" });
+			const reviewer = await multiManager.spawn({ role: "reviewer", tier: "architect", task: "review" });
 
 			expect(reviewer.backend).not.toBe(writer.backend);
 
@@ -1077,12 +1084,12 @@ describe("WorkerManager", () => {
 				},
 			});
 			try {
-				const first = await multiManager.spawn({ role: "worker", tier: "senior", task: "first", writer: true });
-				const queued = await multiManager.spawn({ role: "worker", tier: "senior", task: "queued", writer: true });
+				const first = await multiManager.spawn({ role: "worker", tier: "expert", task: "first", writer: true });
+				const queued = await multiManager.spawn({ role: "worker", tier: "expert", task: "queued", writer: true });
 				transports.at(-1)?.finish({ ok: true, summary: "first done" });
 				await multiManager.waitFor([first.id], 5000);
 				await flush();
-				const reviewer = await multiManager.spawn({ role: "reviewer", tier: "staff", task: "review" });
+				const reviewer = await multiManager.spawn({ role: "reviewer", tier: "architect", task: "review" });
 
 				expect(multiManager.get(queued.id).state).toBe("running");
 				expect(reviewer.backend).not.toBe(queued.backend);
@@ -1093,10 +1100,10 @@ describe("WorkerManager", () => {
 		});
 
 		it("passes explicit backend override to resolve and returns it in spawn result", async () => {
-			const summary = await manager.spawn({ role: "scout", tier: "senior", task: "look", backend: "codex" });
+			const summary = await manager.spawn({ role: "scout", tier: "expert", task: "look", backend: "codex" });
 
 			expect(summary.backend).toBe("codex");
-			expect(transports[transports.length - 1].options.model).toBe("gpt-5.6-terra[high]");
+			expect(transports[transports.length - 1].options.model).toBe("gpt-5.6-sol[medium]");
 		});
 
 		it("rejects an explicit override for a disabled backend without starting a worker", async () => {
@@ -1107,17 +1114,34 @@ describe("WorkerManager", () => {
 			});
 
 			await expect(
-				manager.spawn({ role: "scout", tier: "senior", task: "look", backend: "opencode" }),
+				manager.spawn({ role: "scout", tier: "expert", task: "look", backend: "opencode" }),
 			).rejects.toThrow('Backend "opencode" is disabled in settings.');
 			expect(transports).toHaveLength(0);
 		});
 
 		it("resolves unconfigured tiers when only one backend is installed", async () => {
 			// This should not throw even though DEFAULT_TIERS is empty
-			const summary = await manager.spawn({ role: "scout", tier: "senior", task: "look" });
+			const summary = await manager.spawn({ role: "scout", tier: "expert", task: "look" });
 
 			expect(summary.backend).toBeTruthy();
 			expect(["claude", "codex", "opencode"]).toContain(summary.backend);
+		});
+
+		it("plans every tier through the unconfigured spread policy", () => {
+			const assignments = manager.planAssignments(
+				TIERS.flatMap((tier) => [
+					{ role: "scout", tier },
+					{ role: "scout", tier },
+				]),
+			);
+
+			expect(assignments.map((assignment) => assignment.tier)).toEqual(TIERS.flatMap((tier) => [tier, tier]));
+			for (let index = 0; index < assignments.length; index += 2) {
+				expect(assignments.slice(index, index + 2).map((assignment) => assignment.backend)).toEqual([
+					"claude",
+					"codex",
+				]);
+			}
 		});
 
 		it("planAssignments followed by spawning the exact list yields the same backends per worker", async () => {
@@ -1140,10 +1164,10 @@ describe("WorkerManager", () => {
 			});
 
 			const requestList = [
-				{ role: "scout", tier: "senior" as const },
-				{ role: "worker", tier: "senior" as const, writer: true },
-				{ role: "reviewer", tier: "senior" as const },
-				{ role: "worker", tier: "junior" as const },
+				{ role: "scout", tier: "expert" as const },
+				{ role: "worker", tier: "expert" as const, writer: true },
+				{ role: "reviewer", tier: "expert" as const },
+				{ role: "worker", tier: "journeyman" as const },
 			];
 
 			// Plan the assignments
@@ -1189,9 +1213,9 @@ describe("WorkerManager", () => {
 			});
 
 			const requestList = [
-				{ role: "scout", tier: "senior" as const },
-				{ role: "worker", tier: "senior" as const, writer: true },
-				{ role: "reviewer", tier: "senior" as const },
+				{ role: "scout", tier: "expert" as const },
+				{ role: "worker", tier: "expert" as const, writer: true },
+				{ role: "reviewer", tier: "expert" as const },
 			];
 
 			// Call planAssignments twice with the same list
@@ -1240,8 +1264,8 @@ describe("WorkerManager", () => {
 			});
 
 			const requestList = [
-				{ role: "worker", tier: "senior" as const, writer: true },
-				{ role: "reviewer", tier: "senior" as const },
+				{ role: "worker", tier: "expert" as const, writer: true },
+				{ role: "reviewer", tier: "expert" as const },
 			];
 
 			// Plan the assignments
@@ -1275,13 +1299,13 @@ describe("WorkerManager", () => {
 			// Spawn two debaters in the same room
 			const debater1 = await multiManager.spawn({
 				role: "debater",
-				tier: "staff",
+				tier: "architect",
 				task: "argue for postgres",
 				room: "db-debate",
 			});
 			const debater2 = await multiManager.spawn({
 				role: "debater",
-				tier: "staff",
+				tier: "architect",
 				task: "argue for sqlite",
 				room: "db-debate",
 			});
@@ -1315,19 +1339,19 @@ describe("WorkerManager", () => {
 			// Spawn three debaters in the same room (more than available backends)
 			const debater1 = await multiManager.spawn({
 				role: "debater",
-				tier: "staff",
+				tier: "architect",
 				task: "first",
 				room: "multi-debate",
 			});
 			const debater2 = await multiManager.spawn({
 				role: "debater",
-				tier: "staff",
+				tier: "architect",
 				task: "second",
 				room: "multi-debate",
 			});
 			const debater3 = await multiManager.spawn({
 				role: "debater",
-				tier: "staff",
+				tier: "architect",
 				task: "third",
 				room: "multi-debate",
 			});
@@ -1363,13 +1387,13 @@ describe("WorkerManager", () => {
 			// Spawn debaters in room A
 			const roomA1 = await multiManager.spawn({
 				role: "debater",
-				tier: "staff",
+				tier: "architect",
 				task: "a1",
 				room: "room-a",
 			});
 			const roomA2 = await multiManager.spawn({
 				role: "debater",
-				tier: "staff",
+				tier: "architect",
 				task: "a2",
 				room: "room-a",
 			});
@@ -1377,13 +1401,13 @@ describe("WorkerManager", () => {
 			// Spawn debaters in room B
 			const roomB1 = await multiManager.spawn({
 				role: "debater",
-				tier: "staff",
+				tier: "architect",
 				task: "b1",
 				room: "room-b",
 			});
 			const roomB2 = await multiManager.spawn({
 				role: "debater",
-				tier: "staff",
+				tier: "architect",
 				task: "b2",
 				room: "room-b",
 			});
@@ -1423,7 +1447,7 @@ describe("WorkerManager", () => {
 			// First debater gets explicit override
 			const debater1 = await multiManager.spawn({
 				role: "debater",
-				tier: "staff",
+				tier: "architect",
 				task: "first",
 				room: "override-room",
 				backend: "codex",
@@ -1432,7 +1456,7 @@ describe("WorkerManager", () => {
 			// Second debater uses room mixing
 			const debater2 = await multiManager.spawn({
 				role: "debater",
-				tier: "staff",
+				tier: "architect",
 				task: "second",
 				room: "override-room",
 			});
@@ -1452,8 +1476,8 @@ describe("WorkerManager", () => {
 			const multiConfig = new NetaConfig();
 			const mockInstalledBackends = () => ["claude", "codex"];
 			multiConfig.installedBackends = mockInstalledBackends;
-			// Configure staff tier to always use codex
-			multiConfig.tierMapping = () => ({ staff: { backend: "codex" } });
+			// Configure architect tier to always use codex
+			multiConfig.tierMapping = () => ({ architect: { backend: "codex" } });
 
 			const multiManager = new WorkerManager({
 				cwd: process.cwd(),
@@ -1471,13 +1495,13 @@ describe("WorkerManager", () => {
 			// Both debaters should use configured tier backend
 			const debater1 = await multiManager.spawn({
 				role: "debater",
-				tier: "staff",
+				tier: "architect",
 				task: "first",
 				room: "tier-room",
 			});
 			const debater2 = await multiManager.spawn({
 				role: "debater",
-				tier: "staff",
+				tier: "architect",
 				task: "second",
 				room: "tier-room",
 			});
@@ -1511,13 +1535,13 @@ describe("WorkerManager", () => {
 
 			const debater1 = await singleManager.spawn({
 				role: "debater",
-				tier: "staff",
+				tier: "architect",
 				task: "first",
 				room: "single-room",
 			});
 			const debater2 = await singleManager.spawn({
 				role: "debater",
-				tier: "staff",
+				tier: "architect",
 				task: "second",
 				room: "single-room",
 			});
@@ -1551,13 +1575,13 @@ describe("WorkerManager", () => {
 			// Spawn a scout and a worker in a room (not debaters)
 			const scout = await multiManager.spawn({
 				role: "scout",
-				tier: "senior",
+				tier: "expert",
 				task: "explore",
 				room: "mixed-room",
 			});
 			const worker = await multiManager.spawn({
 				role: "worker",
-				tier: "senior",
+				tier: "expert",
 				task: "implement",
 				room: "mixed-room",
 			});
@@ -1589,10 +1613,10 @@ describe("WorkerManager", () => {
 			});
 
 			const requestList = [
-				{ role: "debater", tier: "staff" as const, room: "debate-x" },
-				{ role: "debater", tier: "staff" as const, room: "debate-x" },
-				{ role: "debater", tier: "senior" as const, room: "debate-y" },
-				{ role: "debater", tier: "senior" as const, room: "debate-y" },
+				{ role: "debater", tier: "architect" as const, room: "debate-x" },
+				{ role: "debater", tier: "architect" as const, room: "debate-x" },
+				{ role: "debater", tier: "expert" as const, room: "debate-y" },
+				{ role: "debater", tier: "expert" as const, room: "debate-y" },
 			];
 
 			// Plan the assignments
@@ -1641,8 +1665,8 @@ describe("WorkerManager", () => {
 			});
 
 			const requestList = [
-				{ role: "debater", tier: "staff" as const, room: "room-z" },
-				{ role: "debater", tier: "staff" as const, room: "room-z" },
+				{ role: "debater", tier: "architect" as const, room: "room-z" },
+				{ role: "debater", tier: "architect" as const, room: "room-z" },
 			];
 
 			// Call planAssignments twice

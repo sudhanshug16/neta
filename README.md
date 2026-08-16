@@ -81,9 +81,11 @@ adds no billing of its own.
 The leader asks for a tier, never a model. A tier is what you would trust a
 worker with:
 
-- **junior** — mechanical work with a precise spec; fails fast on ambiguity.
-- **senior** — well-scoped features, bug fixes with tests, code review.
-- **staff** — ambiguity: unknown-cause debugging, design work, debates.
+- **apprentice** — the mechanical floor: a named command, an exactly specified
+  small change, or one bounded question about a named file. Fails on any ambiguity.
+- **journeyman** — mechanical work with a precise spec; fails on ambiguity.
+- **expert** — well-scoped features, bug fixes with tests, code review.
+- **architect** — ambiguity: unknown-cause debugging, design work, debates.
 
 Tiers ship unconfigured, and unconfigured tiers follow the spread policy:
 deterministic round-robin across installed backends, stable per session, with
@@ -93,12 +95,12 @@ When neither a charter nor any tier-to-backend mapping is configured, the
 first staffing plan of the session states this policy, so you learn it exists
 before it spends anything.
 
-Settings pin tiers down. `{ "tiers": { "staff": { "backend": "codex" } } }`
-puts staff work on `gpt-5.6-sol[xhigh]` while the rest keep the spread, and
+Settings pin tiers down. `{ "tiers": { "architect": { "backend": "codex" } } }`
+puts architect work on `gpt-5.6-sol[max]` while the rest keep the spread, and
 `tierModels` on a backend names which of its models each tier means. OpenCode
 ships no tier models on purpose — it fronts many providers, and only you know
 which one you logged into — so its ids are provider-qualified
-(`"senior": "openai/gpt-5.4"`); [docs/settings.md](docs/settings.md) has the
+(`"expert": "openai/gpt-5.4"`); [docs/settings.md](docs/settings.md) has the
 full example. `"disabled": true` removes a backend from assignment and leader
 selection. `neta models [backend]` lists the ids, straight from the backend.
 
@@ -133,7 +135,7 @@ commands:
 
 ```
 neta progress <message>    record a progress milestone; the leader pulls it
-neta ask <question>        block until the leader answers (juniors cannot ask)
+neta ask <question>        block until the leader answers (apprentices and journeymen cannot ask)
 neta say <message>         post to your room
 neta room [--tail N]       read your room's transcript
 neta status --writers      show active, queued and finished writers

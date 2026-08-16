@@ -189,10 +189,10 @@ describe("worker channel", () => {
 
 			const handled = handleWorkerChannelCommand(["ask", "anything"]);
 			await waitFor(() => expect(asked).toHaveLength(1));
-			asked[0].resolve({ ok: false, error: "Junior workers cannot ask the leader." });
+			asked[0].resolve({ ok: false, error: "Journeyman workers cannot ask the leader." });
 			await handled;
 
-			expect(error).toHaveBeenCalledWith("Junior workers cannot ask the leader.");
+			expect(error).toHaveBeenCalledWith("Journeyman workers cannot ask the leader.");
 			expect(process.exitCode).toBe(1);
 			error.mockRestore();
 		});
@@ -240,7 +240,7 @@ describe("worker channel", () => {
 					"--role",
 					"worker",
 					"--tier",
-					"senior",
+					"expert",
 					"--writer",
 					"--room",
 					"db",
@@ -256,7 +256,7 @@ describe("worker channel", () => {
 					type: "spawn",
 					token: "leader-token",
 					role: "worker",
-					tier: "senior",
+					tier: "expert",
 					task: "fix the login bug",
 					writer: true,
 					room: "db",
@@ -269,14 +269,14 @@ describe("worker channel", () => {
 		it("defaults writer to false and omits an unset room", async () => {
 			const log = spyOn(console, "log").mockImplementation(() => {});
 
-			await handleLeaderChannelCommand(["spawn", "--role", "scout", "--tier", "junior", "map the auth flow"]);
+			await handleLeaderChannelCommand(["spawn", "--role", "scout", "--tier", "journeyman", "map the auth flow"]);
 
 			// JSON drops undefined, so an unset room arrives as an absent key.
 			expect(leaderRequests[0]).toEqual({
 				type: "spawn",
 				token: "leader-token",
 				role: "scout",
-				tier: "junior",
+				tier: "journeyman",
 				task: "map the auth flow",
 				writer: false,
 			});
@@ -310,7 +310,7 @@ describe("worker channel", () => {
 		it("rejects a spawn with no task instead of sending it", async () => {
 			const error = spyOn(console, "error").mockImplementation(() => {});
 
-			await expect(handleLeaderChannelCommand(["spawn", "--role", "worker", "--tier", "senior"])).resolves.toBe(
+			await expect(handleLeaderChannelCommand(["spawn", "--role", "worker", "--tier", "expert"])).resolves.toBe(
 				true,
 			);
 

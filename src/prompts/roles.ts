@@ -3,7 +3,7 @@
  *
  * A role says what kind of work the worker is doing; the tier decides which
  * model runs it. Role text therefore never mentions models, and the same
- * reviewer prompt runs on a junior and on a staff worker.
+ * reviewer prompt runs on a journeyman and on an architect worker.
  *
  * Users override any role by dropping `<name>.md` into `.neta/roles/` in the
  * project or `~/.neta/roles/`, and add their own roles the same way.
@@ -107,7 +107,7 @@ export function workingAgreement(options: WorkingAgreementOptions): string {
 		`- \`${options.binary} progress <message>\` records a progress milestone in your log. Use it when you start, when a major step completes, and when something surprising changes your plan — one line each, not a running commentary. The leader and the user read these at a glance; frequent trivial calls bury the signal.`,
 	);
 
-	if (options.tier === "junior") {
+	if (options.tier === "apprentice" || options.tier === "journeyman") {
 		lines.push(
 			`- You cannot ask the leader questions. If the spec is ambiguous or blocked, stop and finish with a report saying exactly what is missing.`,
 		);

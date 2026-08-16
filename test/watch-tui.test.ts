@@ -93,7 +93,7 @@ function summary(overrides: Partial<WorkerSummary> = {}): WorkerSummary {
 		id: "w1",
 		name: "auth flow",
 		role: "worker",
-		tier: "senior",
+		tier: "expert",
 		backend: "claude",
 		writer: true,
 		state: "running",

@@ -37,11 +37,18 @@ export async function listBackendModels(backendName: string | undefined, cwd: st
 
 		try {
 			await connection.start();
-			const { models, currentModel, modes, currentMode } = connection.offered;
+			const { models, currentModel, modes, currentMode, thoughtLevels, currentThoughtLevel } = connection.offered;
 			console.log(`\n${name}`);
 			console.log(`  models: ${models.length === 0 ? "(none advertised)" : ""}`);
 			for (const model of models) console.log(`    ${model}${model === currentModel ? "  (default)" : ""}`);
 			console.log(`  modes: ${modes.map((mode) => (mode === currentMode ? `${mode} (default)` : mode)).join(", ")}`);
+			if (thoughtLevels.length > 0) {
+				console.log(
+					`  thought levels: ${thoughtLevels
+						.map((level) => (level === currentThoughtLevel ? `${level} (default)` : level))
+						.join(", ")}`,
+				);
+			}
 			const mapped = TIERS.filter((tier) => {
 				const tierConfig = config.tierMapping()[tier];
 				return tierConfig?.backend === name;

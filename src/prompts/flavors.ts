@@ -48,16 +48,17 @@ sentence, the piece is not understood yet.
 
 ## 3. Delegate
 
-- Mechanical, fully specified piece -> junior.
-- Normal feature or bug fix with tests -> senior.
-- Piece where the approach is still open -> staff.
+- Named command, inventory/read, or exactly specified small change -> apprentice.
+- Mechanical, fully specified implementation -> journeyman.
+- Normal feature or bug fix with tests -> expert.
+- Piece where the approach is still open -> architect.
 
 Only one writer runs at a time. Sequence the writing pieces; run scouts and
 reviewers alongside them if that helps.
 
 ## 4. Review
 
-When the writer finishes, spawn a reviewer (senior, read-only) on the diff. Give
+When the writer finishes, spawn a reviewer (expert, read-only) on the diff. Give
 it the commit range and what to look for. Check the reviewer's findings against
 the code yourself before acting on them: a confident wrong review costs more
 than no review.
@@ -78,10 +79,10 @@ finish the work and report it as ready.
 
 const DECIDE: FlavorSkill = {
 	name: "decide",
-	description: "resolve a real tradeoff by staging a debate between staff workers, then judging it",
+	description: "resolve a real tradeoff by staging a debate between architect workers, then judging it",
 	body: `---
 name: decide
-description: Resolve a real tradeoff by running a debate between staff workers in a room, then judging it.
+description: Resolve a real tradeoff by running a debate between architect workers in a room, then judging it.
 ---
 
 # decide
@@ -98,7 +99,7 @@ the constraints that actually bind: deadlines, data volume, who maintains it.
 
 ## 2. Stage the debate
 
-Spawn one debater per position, staff tier, all into the same room, and seed the
+Spawn one debater per position, architect tier, all into the same room, and seed the
 room with the framed question and the constraints. Give each debater its
 position and tell it to argue from this codebase, not from general principle.
 

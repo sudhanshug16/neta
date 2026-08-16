@@ -12,7 +12,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir } from "./config.ts";
 import { findOnPath } from "./detect.ts";
-import { TIERS, type Tier } from "./types.ts";
+import { LEGACY_TIER_ALIASES, TIERS, type Tier, type TierSettingsKey } from "./types.ts";
 
 export interface NetaBackendSettings {
 	/** Exclude this backend from automatic selection and reject explicit use. */
@@ -31,7 +31,7 @@ export interface NetaBackendSettings {
 	 * backend but no model. Model ids are the ones the backend advertises over
 	 * ACP — `neta models <backend>` lists them.
 	 */
-	tierModels?: Partial<Record<Tier, string>>;
+	tierModels?: Partial<Record<TierSettingsKey, string>>;
 	/** Extra environment for the worker process. */
 	env?: Record<string, string>;
 	/**
@@ -79,7 +79,7 @@ export interface NetaTierSettings {
 export interface NetaSettings {
 	leader?: NetaLeaderSettings;
 	mux?: NetaMuxSettings;
-	tiers?: Partial<Record<Tier, NetaTierSettings>>;
+	tiers?: Partial<Record<TierSettingsKey, NetaTierSettings>>;
 	backends?: Record<string, NetaBackendSettings>;
 }
 
@@ -102,7 +102,12 @@ export const DEFAULT_BACKENDS: Record<string, NetaBackendSettings> = {
 		detect: "claude",
 		command: "npx",
 		args: ["-y", "@agentclientprotocol/claude-agent-acp@0.68.0"],
-		tierModels: { junior: "haiku", senior: "sonnet", staff: "default" },
+		tierModels: {
+			apprentice: "haiku",
+			journeyman: "sonnet",
+			expert: "opus[1m]",
+			architect: "claude-fable-5[1m]",
+		},
 		// A worker is an ordinary Claude Code session, filed under the same id.
 		resume: { command: "claude", args: ["--resume", "{session}"] },
 	},
@@ -111,9 +116,10 @@ export const DEFAULT_BACKENDS: Record<string, NetaBackendSettings> = {
 		command: "npx",
 		args: ["-y", "@agentclientprotocol/codex-acp@1.3.0"],
 		tierModels: {
-			junior: "gpt-5.6-luna[medium]",
-			senior: "gpt-5.6-terra[high]",
-			staff: "gpt-5.6-sol[xhigh]",
+			apprentice: "gpt-5.6-luna[high]",
+			journeyman: "gpt-5.6-terra[medium]",
+			expert: "gpt-5.6-sol[medium]",
+			architect: "gpt-5.6-sol[max]",
 		},
 		resume: { command: "codex", args: ["resume", "{session}"] },
 	},
@@ -149,18 +155,19 @@ export class NetaConfig {
 	readonly mux: Required<NetaMuxSettings>;
 
 	constructor(settings?: NetaSettings) {
-		this.leader = { backend: settings?.leader?.backend, strictMcp: settings?.leader?.strictMcp ?? false };
-		this.mux = { mode: settings?.mux?.mode ?? "auto", panes: settings?.mux?.panes ?? true };
+		const normalized = normalizeSettings(settings ?? {});
+		this.leader = { backend: normalized.leader?.backend, strictMcp: normalized.leader?.strictMcp ?? false };
+		this.mux = { mode: normalized.mux?.mode ?? "auto", panes: normalized.mux?.panes ?? true };
 		this.tiers = { ...DEFAULT_TIERS };
 		for (const tier of TIERS) {
-			const override = settings?.tiers?.[tier];
+			const override = normalized.tiers?.[tier];
 			if (override) {
 				const base = this.tiers[tier];
 				this.tiers[tier] = base ? { ...base, ...override } : override;
 			}
 		}
 		this.backends = { ...DEFAULT_BACKENDS };
-		for (const [name, override] of Object.entries(settings?.backends ?? {})) {
+		for (const [name, override] of Object.entries(normalized.backends ?? {})) {
 			this.backends[name] = mergeBackendSettings(this.backends[name], override);
 		}
 	}
@@ -261,12 +268,56 @@ function mergeBackendSettings(
 ): NetaBackendSettings {
 	const env = base?.env || override.env ? { ...base?.env, ...override.env } : undefined;
 	const tierModels =
-		base?.tierModels || override.tierModels ? { ...base?.tierModels, ...override.tierModels } : undefined;
+		base?.tierModels || override.tierModels
+			? { ...normalizeTierModels(base?.tierModels), ...normalizeTierModels(override.tierModels) }
+			: undefined;
 	return {
 		...base,
 		...override,
 		...(env ? { env } : {}),
 		...(tierModels ? { tierModels } : {}),
+	};
+}
+
+function normalizeTierModels(tierModels: NetaBackendSettings["tierModels"] | undefined): Partial<Record<Tier, string>> {
+	const normalized: Partial<Record<Tier, string>> = {};
+	for (const [legacy, tier] of Object.entries(LEGACY_TIER_ALIASES)) {
+		const model = tierModels?.[legacy as TierSettingsKey];
+		if (model !== undefined) normalized[tier as Tier] = model;
+	}
+	for (const tier of TIERS) {
+		const model = tierModels?.[tier];
+		if (model !== undefined) normalized[tier] = model;
+	}
+	return normalized;
+}
+
+function normalizeTierSettings(tiers: NetaSettings["tiers"] | undefined): Partial<Record<Tier, NetaTierSettings>> {
+	const normalized: Partial<Record<Tier, NetaTierSettings>> = {};
+	for (const [legacy, tier] of Object.entries(LEGACY_TIER_ALIASES)) {
+		const setting = tiers?.[legacy as TierSettingsKey];
+		if (setting) normalized[tier as Tier] = setting;
+	}
+	for (const tier of TIERS) {
+		const setting = tiers?.[tier];
+		if (setting) normalized[tier] = { ...normalized[tier], ...setting };
+	}
+	return normalized;
+}
+
+function normalizeSettings(settings: NetaSettings): NetaSettings {
+	return {
+		...settings,
+		tiers: normalizeTierSettings(settings.tiers),
+		backends: Object.fromEntries(
+			Object.entries(settings.backends ?? {}).map(([name, backend]) => [
+				name,
+				{
+					...backend,
+					...(backend.tierModels ? { tierModels: normalizeTierModels(backend.tierModels) } : {}),
+				},
+			]),
+		),
 	};
 }
 
@@ -364,8 +415,8 @@ function readSettingsFile(path: string): NetaSettings {
  * independently, so a project can override one field without losing siblings.
  */
 export function loadNetaSettings(cwd: string, agentDir: string = getAgentDir()): NetaSettings {
-	const user = readSettingsFile(join(agentDir, "settings.json"));
-	const project = readSettingsFile(join(cwd, CONFIG_DIR_NAME, "settings.json"));
+	const user = normalizeSettings(readSettingsFile(join(agentDir, "settings.json")));
+	const project = normalizeSettings(readSettingsFile(join(cwd, CONFIG_DIR_NAME, "settings.json")));
 	return {
 		leader: { ...user.leader, ...project.leader },
 		mux: { ...user.mux, ...project.mux },

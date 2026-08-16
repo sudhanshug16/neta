@@ -106,17 +106,17 @@ describe("leader MCP tools", () => {
 	});
 
 	it("spawns a worker and describes what started", async () => {
-		const result = await call("neta_spawn", { role: "scout", tier: "senior", task: "map the auth flow" });
+		const result = await call("neta_spawn", { role: "scout", tier: "apprentice", task: "map the auth flow" });
 
 		expect(result.isError).toBeFalsy();
-		expect(bodyOf(result)).toContain("ro1 scout/senior");
+		expect(bodyOf(result)).toContain("ro1 scout/apprentice");
 		expect(transports[0].options.systemPrompt).toContain("You are a scout");
 	});
 
 	it("queues a second writer and reports queued status", async () => {
-		await call("neta_spawn", { role: "worker", tier: "senior", task: "first", writer: true });
+		await call("neta_spawn", { role: "worker", tier: "expert", task: "first", writer: true });
 
-		const second = await call("neta_spawn", { role: "worker", tier: "senior", task: "second", writer: true });
+		const second = await call("neta_spawn", { role: "worker", tier: "expert", task: "second", writer: true });
 
 		expect(second.isError).toBe(false);
 		expect(bodyOf(second)).toContain("Queued");
@@ -124,9 +124,9 @@ describe("leader MCP tools", () => {
 
 	it("shows linked worker progress in the open-notes footer", async () => {
 		await call("neta_note", { text: "auth work" });
-		await call("neta_spawn", { role: "worker", tier: "senior", task: "auth", writer: true, note: "n1" });
+		await call("neta_spawn", { role: "worker", tier: "expert", task: "auth", writer: true, note: "n1" });
 		await call("neta_note", { text: "docs pass" });
-		await call("neta_spawn", { role: "worker", tier: "senior", task: "docs", writer: true, note: "n2" });
+		await call("neta_spawn", { role: "worker", tier: "expert", task: "docs", writer: true, note: "n2" });
 		await call("neta_note", { text: "cost estimate" });
 
 		const body = bodyOf(await call("neta_workers"));
@@ -141,20 +141,20 @@ describe("leader MCP tools", () => {
 
 	it("returns the consolidated status through the real MCP client", async () => {
 		await call("neta_note", { text: "auth work" });
-		await call("neta_spawn", { role: "worker", tier: "senior", task: "auth", writer: true, note: "n1" });
-		await call("neta_spawn", { role: "worker", tier: "senior", task: "docs", writer: true });
+		await call("neta_spawn", { role: "worker", tier: "expert", task: "auth", writer: true, note: "n1" });
+		await call("neta_spawn", { role: "worker", tier: "expert", task: "docs", writer: true });
 
 		const body = bodyOf(await call("neta_status"));
 
-		expect(body).toContain("Writer slot:\n  rw1 worker/senior | backend=claude | running | writer");
-		expect(body).toContain("Writer queue:\n  rw2 worker/senior | backend=codex | queued | writer");
+		expect(body).toContain("Writer slot:\n  rw1 worker/expert | backend=claude | running | writer");
+		expect(body).toContain("Writer queue:\n  rw2 worker/expert | backend=codex | queued | writer");
 		expect(body).toContain("Waiting (blocked on leader answer):\n  (none)");
 		expect(body).toContain('Open notes:\n  n1 "auth work" (rw1 running)');
 	});
 
 	it("keeps the done form in the footer once a linked worker finishes", async () => {
 		await call("neta_note", { text: "auth work" });
-		await call("neta_spawn", { role: "worker", tier: "senior", task: "auth", note: "n1" });
+		await call("neta_spawn", { role: "worker", tier: "expert", task: "auth", note: "n1" });
 		transports[0].finish({ ok: true, summary: "done" });
 		await new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -162,8 +162,8 @@ describe("leader MCP tools", () => {
 	});
 
 	it("shows no result line for workers that have not finished", async () => {
-		await call("neta_spawn", { role: "worker", tier: "senior", task: "first", writer: true });
-		await call("neta_spawn", { role: "worker", tier: "senior", task: "second", writer: true });
+		await call("neta_spawn", { role: "worker", tier: "expert", task: "first", writer: true });
+		await call("neta_spawn", { role: "worker", tier: "expert", task: "second", writer: true });
 
 		const body = bodyOf(await call("neta_workers"));
 		expect(body).not.toContain("result:");
@@ -181,7 +181,7 @@ describe("leader MCP tools", () => {
 	// This is the wake-up: an idle leader ends its turn in neta_wait and comes
 	// back with the worker's own words.
 	it("blocks in neta_wait until the worker finishes, then reports its summary", async () => {
-		await call("neta_spawn", { role: "scout", tier: "senior", task: "look" });
+		await call("neta_spawn", { role: "scout", tier: "expert", task: "look" });
 		const waiting = call("neta_wait", { workerIds: ["ro1"], timeoutSeconds: 10 });
 		transports[0].finish({ ok: true, summary: "auth lives in src/auth.ts" });
 
@@ -189,8 +189,8 @@ describe("leader MCP tools", () => {
 	});
 
 	it("returns the first finished worker with first=true, listing the rest as still running", async () => {
-		await call("neta_spawn", { role: "scout", tier: "senior", task: "a" });
-		await call("neta_spawn", { role: "scout", tier: "senior", task: "b" });
+		await call("neta_spawn", { role: "scout", tier: "expert", task: "a" });
+		await call("neta_spawn", { role: "scout", tier: "expert", task: "b" });
 
 		const waiting = call("neta_wait", { workerIds: ["ro1", "ro2"], first: true, timeoutSeconds: 10 });
 		transports[0].finish({ ok: true, summary: "found a" });
@@ -198,13 +198,13 @@ describe("leader MCP tools", () => {
 		const body = bodyOf(await waiting);
 		expect(body).toContain("result: found a");
 		expect(body).toContain("Still running");
-		expect(body).toContain("ro2 scout/senior");
+		expect(body).toContain("ro2 scout/expert");
 		expect(manager.get("ro2").state).toBe("running");
 	});
 
 	it("wakes neta_wait when a worker blocks on a question", async () => {
-		await call("neta_spawn", { role: "worker", tier: "senior", task: "migrate" });
-		await call("neta_spawn", { role: "scout", tier: "senior", task: "look" });
+		await call("neta_spawn", { role: "worker", tier: "expert", task: "migrate" });
+		await call("neta_spawn", { role: "scout", tier: "expert", task: "look" });
 
 		const waiting = call("neta_wait", { timeoutSeconds: 10 });
 		const asking = manager.ask("ro1", "which database?", new AbortController().signal);
@@ -212,14 +212,14 @@ describe("leader MCP tools", () => {
 		const body = bodyOf(await waiting);
 		expect(body).toContain("blocked on a question");
 		expect(body).toContain("which database?");
-		expect(body).toContain("ro2 scout/senior");
+		expect(body).toContain("ro2 scout/expert");
 
 		await call("neta_answer", { workerId: "ro1", answer: "postgres" });
 		expect(await asking).toEqual({ ok: true, text: "postgres" });
 	});
 
 	it("wakes neta_wait on room activity when opted in with roomEvents", async () => {
-		await call("neta_spawn", { role: "debater", tier: "staff", task: "argue", room: "db" });
+		await call("neta_spawn", { role: "debater", tier: "architect", task: "argue", room: "db" });
 
 		const waiting = call("neta_wait", { workerIds: ["ro1"], roomEvents: true, timeoutSeconds: 10 });
 		await new Promise((resolve) => setTimeout(resolve, 20));
@@ -232,7 +232,7 @@ describe("leader MCP tools", () => {
 	});
 
 	it("gives a blocked worker its answer", async () => {
-		await call("neta_spawn", { role: "worker", tier: "senior", task: "do it" });
+		await call("neta_spawn", { role: "worker", tier: "expert", task: "do it" });
 		const asking = manager.ask("ro1", "which database?", new AbortController().signal);
 		await new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -248,8 +248,8 @@ describe("leader MCP tools", () => {
 			room: "db",
 			seed: "Postgres or SQLite?",
 			members: [
-				{ role: "debater", tier: "staff", task: "argue for postgres" },
-				{ role: "debater", tier: "staff", task: "argue for sqlite" },
+				{ role: "debater", tier: "architect", task: "argue for postgres" },
+				{ role: "debater", tier: "architect", task: "argue for sqlite" },
 			],
 		});
 
@@ -262,8 +262,8 @@ describe("leader MCP tools", () => {
 		const result = await call("neta_spawn_group", {
 			room: "db",
 			members: [
-				{ role: "debater", tier: "staff", task: "argue for postgres", backend: "opencode" },
-				{ role: "debater", tier: "staff", task: "argue for sqlite", backend: "codex" },
+				{ role: "debater", tier: "architect", task: "argue for postgres", backend: "opencode" },
+				{ role: "debater", tier: "architect", task: "argue for sqlite", backend: "codex" },
 			],
 		});
 
@@ -273,7 +273,7 @@ describe("leader MCP tools", () => {
 	});
 
 	it("shows the latest progress milestone as a truncated last: line in listings", async () => {
-		await call("neta_spawn", { role: "scout", tier: "senior", task: "look" });
+		await call("neta_spawn", { role: "scout", tier: "expert", task: "look" });
 		expect(bodyOf(await call("neta_workers"))).not.toContain("last:");
 
 		manager.progress("ro1", `progress: ${"x".repeat(100)}`);
@@ -286,14 +286,14 @@ describe("leader MCP tools", () => {
 	});
 
 	it("shows what a worker has cost once the backend says", async () => {
-		await call("neta_spawn", { role: "scout", tier: "senior", task: "look" });
+		await call("neta_spawn", { role: "scout", tier: "expert", task: "look" });
 		transports[0].options.events.usage({ totalTokens: 12345, costAmount: 0.31, costCurrency: "USD" });
 
 		expect(bodyOf(await call("neta_workers"))).toContain("12,345 tokens, 0.31 USD");
 	});
 
 	it("shows the worker's negotiated model and mode when the backend reports them", async () => {
-		await call("neta_spawn", { role: "scout", tier: "senior", task: "look" });
+		await call("neta_spawn", { role: "scout", tier: "expert", task: "look" });
 		transports[0].options.events.session({ model: "test-model", mode: "test-mode", agentInfo: "bridge@2.0.0" });
 
 		const workers = bodyOf(await call("neta_workers"));
@@ -314,14 +314,14 @@ describe("leader MCP tools", () => {
 	it("computes backend assignments without spawning via neta_plan", async () => {
 		const result = await call("neta_plan", {
 			workers: [
-				{ role: "scout", tier: "senior" },
-				{ role: "worker", tier: "senior", writer: true },
+				{ role: "scout", tier: "expert" },
+				{ role: "worker", tier: "expert", writer: true },
 			],
 		});
 
 		const body = bodyOf(result);
-		expect(body).toContain("1. scout/senior ->");
-		expect(body).toContain("2. worker/senior ->");
+		expect(body).toContain("1. scout/expert ->");
+		expect(body).toContain("2. worker/expert ->");
 		expect(body).toContain("read-only");
 		expect(body).toContain("writer");
 
@@ -330,7 +330,7 @@ describe("leader MCP tools", () => {
 	});
 
 	it("omits tool/diff/thought entries from neta_log by default", async () => {
-		await call("neta_spawn", { role: "scout", tier: "senior", task: "look" });
+		await call("neta_spawn", { role: "scout", tier: "expert", task: "look" });
 		transports[0].options.events.log("tool", "Read File auth.ts");
 		transports[0].options.events.log("text", "Found the issue");
 		transports[0].options.events.log("thought", "considering options");
@@ -348,7 +348,7 @@ describe("leader MCP tools", () => {
 	});
 
 	it("includes all entry kinds in neta_log when full=true", async () => {
-		await call("neta_spawn", { role: "scout", tier: "senior", task: "look" });
+		await call("neta_spawn", { role: "scout", tier: "expert", task: "look" });
 		transports[0].options.events.log("tool", "Read File auth.ts");
 		transports[0].options.events.log("text", "Found the issue");
 		transports[0].options.events.log("thought", "considering options");
@@ -362,7 +362,7 @@ describe("leader MCP tools", () => {
 	});
 
 	it("returns the full result for a single-worker neta_workers query", async () => {
-		await call("neta_spawn", { role: "scout", tier: "senior", task: "look" });
+		await call("neta_spawn", { role: "scout", tier: "expert", task: "look" });
 		const longResult = "x".repeat(15000);
 		transports[0].finish({ ok: true, summary: longResult });
 		await new Promise((resolve) => setTimeout(resolve, 0));
@@ -375,7 +375,7 @@ describe("leader MCP tools", () => {
 	});
 
 	it("clips results in the list view of neta_workers", async () => {
-		await call("neta_spawn", { role: "scout", tier: "senior", task: "look" });
+		await call("neta_spawn", { role: "scout", tier: "expert", task: "look" });
 		const longResult = "x".repeat(15000);
 		transports[0].finish({ ok: true, summary: longResult });
 		await new Promise((resolve) => setTimeout(resolve, 0));
@@ -412,7 +412,7 @@ describe("worker MCP tools", () => {
 		});
 		server = new ChannelServer(address, manager);
 		await server.start();
-		await manager.spawn({ role: "scout", tier: "senior", task: "look" });
+		await manager.spawn({ role: "scout", tier: "expert", task: "look" });
 
 		const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
 		await createMcpServer("neta-worker", workerTools(address, "ro1", workerToken)).connect(serverSide);
@@ -450,8 +450,8 @@ describe("worker MCP tools", () => {
 	});
 
 	it("shows writers-only status through the worker MCP socket bridge", async () => {
-		await manager.spawn({ role: "worker", tier: "senior", task: "Update billing", writer: true });
-		await manager.spawn({ role: "worker", tier: "senior", task: "Document billing", writer: true });
+		await manager.spawn({ role: "worker", tier: "expert", task: "Update billing", writer: true });
+		await manager.spawn({ role: "worker", tier: "expert", task: "Document billing", writer: true });
 
 		const result = (await client.callTool({ name: "neta_status", arguments: {} })) as CallToolResult;
 		const body = bodyOf(result);

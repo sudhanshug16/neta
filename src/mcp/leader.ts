@@ -165,7 +165,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 		type: "object",
 		properties: {
 			role: { type: "string", description: `Role prompt to run. Built-in: ${roles}.` },
-			tier: { type: "string", enum: [...TIERS], description: "junior, senior or staff." },
+			tier: { type: "string", enum: [...TIERS], description: "apprentice, journeyman, expert or architect." },
 			task: { type: "string", description: "Self-contained instructions for this member." },
 			name: { type: "string", description: "Two or three words naming this member's job, for its tab." },
 			writer: { type: "boolean", description: "Grant this member the writer slot." },
@@ -185,7 +185,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 			name: "neta_spawn",
 			description:
 				"Spawn a worker agent to do a piece of work. Give it everything it needs in the task: it cannot see this " +
-				`conversation. Roles: ${roles}. Tiers: junior (exact spec), senior (scoped work), staff (ambiguity). ` +
+				`conversation. Roles: ${roles}. Tiers: apprentice (mechanical), journeyman (exact spec), expert (scoped work), architect (ambiguity). ` +
 				"Returns immediately; use neta_wait to collect the result. If a writer is already active, the new writer " +
 				"is queued and starts automatically when the slot frees.",
 			inputSchema: {

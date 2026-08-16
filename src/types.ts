@@ -12,9 +12,20 @@ import { estimateCost } from "./pricing.ts";
  * quality: the leader picks a tier from the task shape and never sees model
  * names. The tier -> backend/model mapping lives in settings.
  */
-export type Tier = "junior" | "senior" | "staff";
+export type Tier = "apprentice" | "journeyman" | "expert" | "architect";
 
-export const TIERS: readonly Tier[] = ["junior", "senior", "staff"] as const;
+export const TIERS: readonly Tier[] = ["apprentice", "journeyman", "expert", "architect"] as const;
+
+/** Legacy settings names accepted when reading files written by earlier releases. */
+export const LEGACY_TIER_ALIASES = {
+	intern: "apprentice",
+	junior: "journeyman",
+	senior: "expert",
+	staff: "architect",
+} as const;
+
+export type LegacyTier = keyof typeof LEGACY_TIER_ALIASES;
+export type TierSettingsKey = Tier | LegacyTier;
 
 export function isTier(value: string): value is Tier {
 	return (TIERS as readonly string[]).includes(value);

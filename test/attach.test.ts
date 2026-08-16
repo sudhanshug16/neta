@@ -92,7 +92,7 @@ describe("attach", () => {
 	});
 
 	it("opens the worker's own session in the backend's CLI", async () => {
-		await manager.spawn({ role: "scout", tier: "senior", task: "look", name: "auth flow" });
+		await manager.spawn({ role: "scout", tier: "expert", task: "look", name: "auth flow" });
 		transports[0].finish({ ok: true, summary: "done" });
 		await manager.waitFor(["ro1"], 5000);
 
@@ -105,7 +105,7 @@ describe("attach", () => {
 	// Neta keeps driving a running worker, so two clients would take turns in one
 	// conversation. That is the user's call, but they should know they made it.
 	it("warns when the worker is still being driven by the leader", async () => {
-		await manager.spawn({ role: "scout", tier: "senior", task: "look" });
+		await manager.spawn({ role: "scout", tier: "expert", task: "look" });
 
 		await attachWorker({ workerId: "ro1", dryRun: true, write });
 
@@ -115,7 +115,7 @@ describe("attach", () => {
 
 	it("says so when the backend has not opened a session yet", async () => {
 		vendorSessionId = undefined;
-		await manager.spawn({ role: "scout", tier: "senior", task: "look" });
+		await manager.spawn({ role: "scout", tier: "expert", task: "look" });
 
 		const code = await attachWorker({ workerId: "ro1", dryRun: true, write });
 

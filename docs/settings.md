@@ -6,8 +6,8 @@ win, user fields survive, and a backend's `env` and `tierModels` maps merge
 the same way. So with
 
 ```json
-user:    { "backends": { "opencode": { "tierModels": { "junior": "opencode/deepseek-v4-flash-free" } } } }
-project: { "backends": { "opencode": { "tierModels": { "staff": "openai/gpt-5.6-sol" } } } }
+user:    { "backends": { "opencode": { "tierModels": { "journeyman": "opencode/deepseek-v4-flash-free" } } } }
+project: { "backends": { "opencode": { "tierModels": { "architect": "openai/gpt-5.6-sol" } } } }
 ```
 
 the session has both tier models. Both files are optional; the defaults are
@@ -19,9 +19,10 @@ broken settings file should not stop you leading a session.
   "leader": { "backend": "claude", "strictMcp": false },
   "mux": { "mode": "auto", "panes": true },
   "tiers": {
-    "junior": { "backend": "claude", "model": "haiku" },
-    "senior": { "backend": "claude", "model": "sonnet" },
-    "staff":  { "backend": "claude", "model": "opus" }
+    "apprentice": { "backend": "claude", "model": "haiku" },
+    "journeyman": { "backend": "claude", "model": "sonnet" },
+    "expert": { "backend": "claude", "model": "opus[1m]" },
+    "architect":  { "backend": "claude", "model": "claude-fable-5[1m]" }
   },
   "backends": {
     "claude":   { "command": "npx", "args": ["-y", "@agentclientprotocol/claude-agent-acp@0.68.0"], "modelEnv": "ANTHROPIC_MODEL" },
@@ -67,17 +68,18 @@ vendors automatically. Explicit overrides pass through `backend` on spawn; use
 comments not preserved). Point a tier at another vendor:
 
 ```json
-{ "tiers": { "staff": { "backend": "codex" } } }
+{ "tiers": { "architect": { "backend": "codex" } } }
 ```
 
-gives you `gpt-5.6-sol[xhigh]` for staff work while the rest use spread policy.
+gives you `gpt-5.6-sol[max]` for architect work while the rest use spread policy.
 Shipped mappings:
 
 | Tier | claude | codex |
 | --- | --- | --- |
-| junior | `haiku` | `gpt-5.6-luna[medium]` |
-| senior | `sonnet` | `gpt-5.6-terra[high]` |
-| staff | `default` (Opus) | `gpt-5.6-sol[xhigh]` |
+| apprentice | `haiku` | `gpt-5.6-luna[high]` |
+| journeyman | `sonnet` | `gpt-5.6-terra[medium]` |
+| expert | `opus[1m]` | `gpt-5.6-sol[medium]` |
+| architect | `claude-fable-5[1m]` | `gpt-5.6-sol[max]` |
 
 Codex folds the reasoning level into the model id, so thinking depth is part of
 the choice: `gpt-5.6-sol[max]` is the same model thinking harder. Naming a
@@ -93,9 +95,10 @@ which one you logged into. Give its tiers meaning with `tierModels`:
   "backends": {
     "opencode": {
       "tierModels": {
-        "junior": "opencode/deepseek-v4-flash-free",
-        "senior": "openai/gpt-5.4",
-        "staff": "openai/gpt-5.6-sol"
+        "apprentice": "opencode/deepseek-v4-flash-free",
+        "journeyman": "openai/gpt-5.4",
+        "expert": "openai/gpt-5.6-sol",
+        "architect": "openai/gpt-5.6-sol"
       }
     }
   }
@@ -105,10 +108,14 @@ which one you logged into. Give its tiers meaning with `tierModels`:
 OpenCode model ids are provider-qualified (`provider/model`); Neta passes them
 through unchanged.
 
+Old settings keys remain silent aliases: `intern` maps to `apprentice`,
+`junior` to `journeyman`, `senior` to `expert`, and `staff` to `architect`.
+When an old and new key both appear, the new key wins.
+
 Neta selects the model over ACP, which is why this works the same on every
 backend: `session/set_config_option` where the bridge supports it, falling
 back to the legacy `session/set_model` extension where it does not. Codex's
-composite ids are split — `gpt-5.6-sol[xhigh]` becomes the model plus a
+composite ids are split — `gpt-5.6-sol[max]` becomes the model plus a
 thought-level option, selected separately. Selection is negotiated, not
 assumed: a model the backend does not offer, or a selection call that fails,
 is loudly logged in the worker's log and the worker runs on the backend's

@@ -18,7 +18,7 @@ export const LEADER_COMMANDS = new Set(["spawn", "workers", "status", "log", "wa
 const LEADER_HELP = `Leader channel commands (available where the leader token is set):
 
   ${APP_NAME} spawn --role <role> --tier <tier> [--writer] [--name <label>] [--note <id>] [--room <name>] [--backend <name>] <task>
-      Start a worker. Roles: scout, worker, reviewer, debater. Tiers: junior, senior, staff.
+      Start a worker. Roles: scout, worker, reviewer, debater. Tiers: apprentice, journeyman, expert, architect.
   ${APP_NAME} workers               List every worker and its state.
   ${APP_NAME} status                Show the writer slot, worker states and open notes.
   ${APP_NAME} log <id>              Read a worker's new log lines since you last looked.

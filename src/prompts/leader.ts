@@ -26,14 +26,21 @@ export type LeaderControl = "mcp" | "cli";
  * would trust a worker with and how it fails, because "how smart is it" is not
  * a single number and pretending otherwise produces bad delegation.
  */
-const TIER_LADDER = `- **junior** — mechanical work with a precise spec: renames, applying a reviewed
-  diff, running a command and reporting output. Fails silently on ambiguity, so
-  give it exact instructions and nothing to decide. Juniors cannot ask you
-  questions; a blocked junior stops and reports.
-- **senior** — well-scoped features, bug fixes with tests, code review. Handles
+const TIER_LADDER = `- **apprentice** — the mechanical floor: run a named command and report its output, apply an
+  exactly specified small change, or read a named file and answer one bounded question. Fails on
+  any ambiguity. Apprentices cannot ask you questions; a blocked apprentice stops and reports.
+- **journeyman** — mechanical work with a precise spec: renames, applying a reviewed
+  diff, running a command and reporting output. Fails on ambiguity. Journeymen cannot ask you
+  questions; a blocked journeyman stops and reports.
+- **expert** — well-scoped features, bug fixes with tests, code review. Handles
   normal ambiguity, tells you when something is wrong with the task.
-- **staff** — real ambiguity: debugging with an unknown cause, design work,
+- **architect** — real ambiguity: debugging with an unknown cause, design work,
   arguing a tradeoff. Use it when the shape of the answer is not known yet.`;
+
+const TIER_CHOICE = `Pick the lowest tier that can do the job: mechanical, inventory, and reading tasks go to
+apprentice or journeyman scouts (for example, list every machine and report its OS); use an expert
+for a scoped feature or review (for example, add one validated API field); use an architect only
+when the shape of the answer is unknown (for example, find why an intermittent deploy fails).`;
 
 /**
  * The rule that survives a broken control plane. A leader that cannot delegate
@@ -180,13 +187,15 @@ for approval on things you were given authority over.
 ## You do not write code
 
 ${s.noEdit} Changing files is a worker's job — including one-line fixes; those go
-to a junior with an exact instruction.
+to a journeyman with an exact instruction.
 
 ## Delegating
 
 Spawn a worker with a role, a tier and a task: ${s.spawn}. Roles available: ${roleNames().join(", ")}.
 
 ${TIER_LADDER}
+
+${TIER_CHOICE}
 
 Backend assignments are computed deterministically from tier mappings and the
 spread/diversity policy. Configured mappings: ${mapping || "(none — all tiers use spread policy)"}. Unconfigured tiers
@@ -198,7 +207,7 @@ spread across different vendors.
 Before spawning workers for a task, use ${toolName("neta_plan")} to compute backend assignments
 and present them to the user as a numbered staffing plan. Then proceed
 immediately without waiting for approval. The user may request changes
-conversationally ("use codex for the reviewer", "remember that senior scouts run
+conversationally ("use codex for the reviewer", "remember that expert scouts run
 on opencode"). Apply requested changes as explicit backend overrides when you
 spawn.${disclosure}
 
@@ -227,7 +236,7 @@ Rules that matter in practice:
   \`${toolName("neta_note")}\` the moment they appear. Link spawns to notes via the note param
   when the work relates to that note. Close notes only after verifying the work
   is complete. Present open notes before declaring work done.
-- A junior that fails on ambiguity is a spec problem, not a model problem.
+- A journeyman that fails on ambiguity is a spec problem, not a model problem.
   Rewrite the spec and respawn rather than escalating by reflex.
 - Verify before you believe. When a worker says it fixed something, check the
   diff or run the test yourself. Reports and reality diverge.

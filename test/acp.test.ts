@@ -271,6 +271,21 @@ describe("AcpWorkerTransport", () => {
 		expect(log.some((entry) => entry.text.includes("legacy set_model"))).toBe(false);
 	});
 
+	it("negotiates every shipped Codex tier id by splitting model and thought level", async () => {
+		const tiers = [
+			["gpt-5.6-luna[high]", "GPT 5.6 Luna [High]"],
+			["gpt-5.6-terra[medium]", "GPT 5.6 Terra [Medium]"],
+			["gpt-5.6-sol[medium]", "GPT 5.6 Sol [Medium]"],
+			["gpt-5.6-sol[max]", "GPT 5.6 Sol [Max]"],
+		] as const;
+
+		for (const [model, display] of tiers) {
+			const transport = createTransport(false, [], [], ["--config-options"], {}, model);
+			await transport.start();
+			expect(sessionReports.at(-1)).toMatchObject({ model: display, modelId: model });
+		}
+	});
+
 	it("tracks a mode the backend switches mid-session", async () => {
 		const transport = createTransport(false, [], [], ["--config-options"]);
 		await transport.start();

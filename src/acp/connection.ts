@@ -180,11 +180,14 @@ export class AcpConnection {
 		currentModelId?: string;
 		modes: string[];
 		currentMode?: string;
+		thoughtLevels: string[];
+		currentThoughtLevel?: string;
 		/** The ACP bridge in front of the backend, as "name@version". */
 		agentInfo?: string;
 	} = {
 		models: [],
 		modes: [],
+		thoughtLevels: [],
 	};
 	/** Display names for model and mode ids, learned from configOptions. */
 	private readonly modelNames = new Map<string, string>();
@@ -389,6 +392,10 @@ export class AcpConnection {
 			this.offered.currentModel = `${this.modelNames.get(model.currentValue) ?? model.currentValue}${thoughtDisplay}`;
 		}
 		if (mode) this.offered.currentMode = this.modeNames.get(mode.currentValue) ?? mode.currentValue;
+		if (thoughtLevel) {
+			this.offered.thoughtLevels = thoughtLevel.values;
+			this.offered.currentThoughtLevel = thoughtLevel.currentValue;
+		}
 		return { model, mode, thoughtLevel };
 	}
 

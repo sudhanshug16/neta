@@ -40,7 +40,7 @@ export function workerTools(address: string, workerId: string, token: string): M
 			name: "neta_ask",
 			description:
 				"Ask the leader a question and wait for the answer. You are blocked until it replies, so use it only " +
-				"when you genuinely cannot proceed; try to answer it from the code first. Junior workers cannot ask.",
+				"when you genuinely cannot proceed; try to answer it from the code first. Journeyman workers cannot ask.",
 			inputSchema: {
 				type: "object",
 				properties: { question: { type: "string" } },

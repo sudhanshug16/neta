@@ -317,6 +317,8 @@ h2 {
   flex: none;
 }
 
+.tier-muted .tier-head { color: #8f877a; }
+.tier-muted .swatch { background: #8f877a; }
 .tier-steel .tier-head { color: var(--steel); }
 .tier-steel .swatch { background: var(--steel); }
 .tier-phosphor .tier-head { color: var(--phosphor); }

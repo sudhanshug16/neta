@@ -54,9 +54,10 @@ describe("a leader session, end to end", () => {
 			JSON.stringify({
 				mux: { panes: false },
 				tiers: {
-					junior: { backend: "fake" },
-					senior: { backend: "fake" },
-					staff: { backend: "fake" },
+					apprentice: { backend: "fake" },
+					journeyman: { backend: "fake" },
+					expert: { backend: "fake" },
+					architect: { backend: "fake" },
 				},
 				backends: { fake: { command: process.execPath, args: [FAKE_AGENT] } },
 			}),
@@ -85,7 +86,7 @@ describe("a leader session, end to end", () => {
 		(await client.callTool({ name, arguments: args })) as CallToolResult;
 
 	it("spawns a real worker process and returns what it said", async () => {
-		const spawned = await call("neta_spawn", { role: "scout", tier: "senior", task: "map the auth flow" });
+		const spawned = await call("neta_spawn", { role: "scout", tier: "apprentice", task: "map the auth flow" });
 		expect(spawned.isError).toBeFalsy();
 
 		const waited = await call("neta_wait", { workerIds: ["ro1"], timeoutSeconds: 30 });
@@ -98,7 +99,7 @@ describe("a leader session, end to end", () => {
 	// The promise the manifesto makes: a read-only worker cannot edit, and it is
 	// the protocol that stops it, not the prompt.
 	it("rejects a read-only worker's edit and tells it why", async () => {
-		await call("neta_spawn", { role: "scout", tier: "senior", task: "EDIT the config" });
+		await call("neta_spawn", { role: "scout", tier: "expert", task: "EDIT the config" });
 
 		const waited = await call("neta_wait", { workerIds: ["ro1"], timeoutSeconds: 30 });
 		expect(bodyOf(waited)).toContain("permission=reject");
@@ -111,29 +112,29 @@ describe("a leader session, end to end", () => {
 	// Five chatty workers once returned 120,000 characters from one status call
 	// and buried the leader's context. Status is a status view now.
 	it("keeps a status listing small, whatever the workers have been saying", async () => {
-		await call("neta_spawn", { role: "scout", tier: "senior", task: "look around" });
+		await call("neta_spawn", { role: "scout", tier: "expert", task: "look around" });
 		await call("neta_wait", { workerIds: ["ro1"], timeoutSeconds: 30 });
 
 		const listed = bodyOf(await call("neta_workers"));
 
-		expect(listed).toContain("ro1 scout/senior");
+		expect(listed).toContain("ro1 scout/expert");
 		expect(listed.length).toBeLessThan(4000);
 		expect(listed).not.toContain("[output]");
 	});
 
 	it("lets the writer through", async () => {
-		await call("neta_spawn", { role: "worker", tier: "senior", task: "EDIT the config", writer: true });
+		await call("neta_spawn", { role: "worker", tier: "expert", task: "EDIT the config", writer: true });
 		const waited = await call("neta_wait", { workerIds: ["rw1"], timeoutSeconds: 30 });
 
 		expect(bodyOf(waited)).toContain("permission=allow");
 	});
 
 	it("queues writer activity notices for a running read-only fixture worker", async () => {
-		await call("neta_spawn", { role: "scout", tier: "senior", task: "WAIT_FOR_NOTICE" });
+		await call("neta_spawn", { role: "scout", tier: "expert", task: "WAIT_FOR_NOTICE" });
 		await new Promise((resolve) => setTimeout(resolve, 25));
 		await call("neta_spawn", {
 			role: "worker",
-			tier: "senior",
+			tier: "expert",
 			name: "config migration",
 			task: "Migrate config records\nVerify the new index.",
 			writer: true,
@@ -155,9 +156,9 @@ describe("a leader session, end to end", () => {
 	});
 
 	it("does not notify a terminal read-only worker about a writer", async () => {
-		await call("neta_spawn", { role: "scout", tier: "senior", task: "already done" });
+		await call("neta_spawn", { role: "scout", tier: "expert", task: "already done" });
 		await call("neta_wait", { workerIds: ["ro1"], timeoutSeconds: 30 });
-		await call("neta_spawn", { role: "worker", tier: "senior", task: "change config", writer: true });
+		await call("neta_spawn", { role: "worker", tier: "expert", task: "change config", writer: true });
 		await call("neta_wait", { workerIds: ["rw2"], timeoutSeconds: 30 });
 
 		const readerLog = bodyOf(await call("neta_log", { workerId: "ro1" }));
@@ -168,7 +169,7 @@ describe("a leader session, end to end", () => {
 	// that reawakens its session later. Neta only reports done after the ACP
 	// process itself is gone.
 	it("kills the fixture process before reporting a worker done", async () => {
-		await call("neta_spawn", { role: "worker", tier: "senior", task: "REPORT_PID", writer: true });
+		await call("neta_spawn", { role: "worker", tier: "expert", task: "REPORT_PID", writer: true });
 		const waited = await call("neta_wait", { workerIds: ["rw1"], timeoutSeconds: 30 });
 		const pid = pidFrom(bodyOf(waited));
 
@@ -176,7 +177,7 @@ describe("a leader session, end to end", () => {
 	});
 
 	it("records a running worker group for crash cleanup, then removes it at death", async () => {
-		await call("neta_spawn", { role: "scout", tier: "senior", task: "WAIT_FOR_NOTICE" });
+		await call("neta_spawn", { role: "scout", tier: "expert", task: "WAIT_FOR_NOTICE" });
 		const registry = join(agentDir, "sessions", "e2e.json");
 		expect(JSON.parse(readFileSync(registry, "utf-8")).workerGroups).toHaveLength(1);
 
@@ -185,7 +186,7 @@ describe("a leader session, end to end", () => {
 	});
 
 	it("awaits a repeated shutdown signal until a SIGTERM-resistant worker is dead", async () => {
-		await call("neta_spawn", { role: "worker", tier: "senior", task: "REPORT_PID TRAP_SIGTERM", writer: true });
+		await call("neta_spawn", { role: "worker", tier: "expert", task: "REPORT_PID TRAP_SIGTERM", writer: true });
 		const registry = join(agentDir, "sessions", "e2e.json");
 		const deadline = Date.now() + 3000;
 		let log = bodyOf(await call("neta_log", { workerId: "rw1" }));
@@ -213,7 +214,7 @@ describe("a leader session, end to end", () => {
 	});
 
 	it("starts a queued writer only after the previous fixture process dies", async () => {
-		await call("neta_spawn", { role: "worker", tier: "senior", task: "REPORT_PID TRAP_SIGTERM", writer: true });
+		await call("neta_spawn", { role: "worker", tier: "expert", task: "REPORT_PID TRAP_SIGTERM", writer: true });
 
 		const firstDeadline = Date.now() + 3000;
 		let firstLog = bodyOf(await call("neta_log", { workerId: "rw1" }));
@@ -223,10 +224,10 @@ describe("a leader session, end to end", () => {
 		}
 		const firstPid = pidFrom(firstLog);
 
-		const queued = await call("neta_spawn", { role: "worker", tier: "senior", task: "REPORT_PID", writer: true });
+		const queued = await call("neta_spawn", { role: "worker", tier: "expert", task: "REPORT_PID", writer: true });
 		expect(bodyOf(queued)).toContain("Queued");
 		await new Promise((resolve) => setTimeout(resolve, 100));
-		expect(bodyOf(await call("neta_workers"))).toContain("rw2 worker/senior | backend=fake | queued | writer");
+		expect(bodyOf(await call("neta_workers"))).toContain("rw2 worker/expert | backend=fake | queued | writer");
 
 		await call("neta_wait", { workerIds: ["rw1"], timeoutSeconds: 30 });
 		expect(isRunning(firstPid)).toBe(false);
@@ -242,7 +243,7 @@ describe("a leader session, end to end", () => {
 	});
 
 	it("hands the worker an MCP server pointing back at this session", async () => {
-		await call("neta_spawn", { role: "scout", tier: "senior", task: "MCP" });
+		await call("neta_spawn", { role: "scout", tier: "expert", task: "MCP" });
 		const waited = await call("neta_wait", { workerIds: ["ro1"], timeoutSeconds: 30 });
 
 		expect(bodyOf(waited)).toContain('"name":"neta"');
@@ -253,18 +254,18 @@ describe("a leader session, end to end", () => {
 	});
 
 	it("shows the worker to someone watching from another terminal", async () => {
-		await call("neta_spawn", { role: "scout", tier: "senior", task: "look around" });
+		await call("neta_spawn", { role: "scout", tier: "expert", task: "look around" });
 
 		const { stdout } = await run(process.execPath, [CLI, "workers", "--session", "e2e"], {
 			env: { ...process.env, NETA_DIR: agentDir, NETA_SOCKET: "", NETA_LEADER_TOKEN: "" },
 		});
 
-		expect(stdout).toContain("ro1 [scout/senior, read-only, test-model/test-mode]");
+		expect(stdout).toContain("ro1 [scout/expert, read-only, test-model/test-mode]");
 		expect(stdout).toContain("look around");
 	});
 
 	it("follows a finished worker's log with `neta watch`", async () => {
-		await call("neta_spawn", { role: "scout", tier: "senior", task: "look around" });
+		await call("neta_spawn", { role: "scout", tier: "expert", task: "look around" });
 		await call("neta_wait", { workerIds: ["ro1"], timeoutSeconds: 30 });
 
 		const { stdout } = await run(process.execPath, [CLI, "watch", "ro1", "--session", "e2e"], {
@@ -275,9 +276,9 @@ describe("a leader session, end to end", () => {
 	});
 
 	it("queues a second writer while one is working", async () => {
-		await call("neta_spawn", { role: "worker", tier: "senior", task: "hold the slot", writer: true });
+		await call("neta_spawn", { role: "worker", tier: "expert", task: "hold the slot", writer: true });
 
-		const second = await call("neta_spawn", { role: "worker", tier: "senior", task: "also write", writer: true });
+		const second = await call("neta_spawn", { role: "worker", tier: "expert", task: "also write", writer: true });
 
 		expect(second.isError).toBe(false);
 		expect(bodyOf(second)).toContain("Queued");

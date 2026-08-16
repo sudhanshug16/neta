@@ -696,10 +696,10 @@ export class WorkerManager implements ChannelHandler {
 	ask(workerId: string, text: string, signal: AbortSignal): Promise<ChannelResponse> {
 		const record = this.workers.get(workerId);
 		if (!record) return Promise.resolve({ ok: false, error: `Unknown worker ${workerId}.` });
-		if (record.tier === "junior") {
+		if (record.tier === "apprentice" || record.tier === "journeyman") {
 			return Promise.resolve({
 				ok: false,
-				error: "Junior workers cannot ask the leader. Stop and finish with a report describing what is missing.",
+				error: "Apprentice and journeyman workers cannot ask the leader. Stop and finish with a report describing what is missing.",
 			});
 		}
 		if (record.pendingAsk) {
