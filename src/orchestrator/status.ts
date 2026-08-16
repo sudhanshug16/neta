@@ -29,7 +29,10 @@ export function formatWorkerSummary(summary: WorkerSummary): string {
 	const usage = formatUsage(summary.usage, summary.modelId ?? summary.model);
 	if (usage) parts.push(usage);
 	if (summary.pendingQuestion) parts.push(`asking: ${summary.pendingQuestion}`);
-	return parts.join(" | ");
+	return [
+		parts.join(" | "),
+		...(summary.headlessReason ? [`Worker view: headless — ${summary.headlessReason}`] : []),
+	].join("\n");
 }
 
 function formatNotes(notes: Note[]): string[] {

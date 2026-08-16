@@ -108,8 +108,20 @@ export function killSessionArgs(sessionName: string): string[] {
  * at, not something that shrinks the window you are typing in. `--close-on-exit`
  * is what lets a finished worker's tab clean itself up.
  */
-export function newTabArgs(title: string, spec: ProcessSpec, cwd: string): string[] {
-	return ["action", "new-tab", "--name", title, "--cwd", cwd, "--close-on-exit", "--", spec.command, ...spec.args];
+export function newTabArgs(title: string, spec: ProcessSpec, cwd: string, sessionName?: string): string[] {
+	return [
+		...(sessionName ? ["--session", sessionName] : []),
+		"action",
+		"new-tab",
+		"--name",
+		title,
+		"--cwd",
+		cwd,
+		"--close-on-exit",
+		"--",
+		spec.command,
+		...spec.args,
+	];
 }
 
 export class ZellijAdapter implements MuxAdapter {
@@ -123,6 +135,10 @@ export class ZellijAdapter implements MuxAdapter {
 		return Boolean(process.env.ZELLIJ);
 	}
 
+	sessionName(): string | undefined {
+		return process.env.ZELLIJ || undefined;
+	}
+
 	wrapLeader(leader: ProcessSpec, sessionName: string, sessionDir: string): ProcessSpec | undefined {
 		if (this.inSession()) return undefined;
 		const layoutPath = join(sessionDir, "layout.kdl");
@@ -130,9 +146,9 @@ export class ZellijAdapter implements MuxAdapter {
 		return { command: "zellij", args: newSessionArgs(sessionName, layoutPath), env: leader.env };
 	}
 
-	openPane(title: string, spec: ProcessSpec, cwd: string): boolean {
-		if (!this.inSession()) return false;
-		const result = spawnSync("zellij", newTabArgs(title, spec, cwd), {
+	openPane(title: string, spec: ProcessSpec, cwd: string, sessionName?: string): boolean {
+		if (!sessionName && !this.inSession()) return false;
+		const result = spawnSync("zellij", newTabArgs(title, spec, cwd, sessionName), {
 			env: { ...process.env, ...spec.env },
 			encoding: "utf-8",
 		});
@@ -144,9 +160,16 @@ export class ZellijAdapter implements MuxAdapter {
 		// focus back to the leader's tab, which sessions Neta started always name
 		// "leader". In a session Neta did not start there is no such tab, so fall
 		// back to the positionally-previous one. Cosmetic either way, never fatal.
-		const back = spawnSync("zellij", ["action", "go-to-tab-name", "leader"], { env: process.env, encoding: "utf-8" });
+		const back = spawnSync(
+			"zellij",
+			[...(sessionName ? ["--session", sessionName] : []), "action", "go-to-tab-name", "leader"],
+			{ env: process.env, encoding: "utf-8" },
+		);
 		if (back.status !== 0) {
-			spawnSync("zellij", ["action", "go-to-previous-tab"], { env: process.env, encoding: "utf-8" });
+			spawnSync("zellij", [...(sessionName ? ["--session", sessionName] : []), "action", "go-to-previous-tab"], {
+				env: process.env,
+				encoding: "utf-8",
+			});
 		}
 		return true;
 	}

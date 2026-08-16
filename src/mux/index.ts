@@ -31,6 +31,10 @@ export class NoMux implements MuxAdapter {
 		return false;
 	}
 
+	sessionName(): undefined {
+		return undefined;
+	}
+
 	wrapLeader(): undefined {
 		return undefined;
 	}

@@ -16,6 +16,8 @@ import type { WorkerPaneHost } from "../orchestrator/manager.ts";
 import type { WorkerSummary } from "../types.ts";
 import type { MuxAdapter } from "./types.ts";
 
+export type PaneOpenOutcome = { opened: true } | { opened: false; reason: string };
+
 /**
  * What the tab is called. A tab bar has a few characters per tab before it
  * starts eliding, so the id comes first — it is what every command takes — and
@@ -32,12 +34,12 @@ export function createPaneHost(
 	sessionId: string,
 	cwd: string,
 	agentDir: string,
-	onFailure: (message: string) => void,
+	sessionName?: string,
 ): WorkerPaneHost | undefined {
-	if (mux.id === "none" || !mux.inSession()) return undefined;
+	if (mux.id === "none" || (!sessionName && !mux.inSession())) return undefined;
 
 	return {
-		open(worker: WorkerSummary) {
+		open(worker: WorkerSummary): PaneOpenOutcome {
 			try {
 				const opened = mux.openPane(
 					tabTitle(worker.id, worker.name),
@@ -46,14 +48,12 @@ export function createPaneHost(
 						args: [...invocation.prefixArgs, "watch", worker.id, "--session", sessionId, "--dir", agentDir],
 					},
 					cwd,
+					sessionName,
 				);
-				if (!opened) onFailure(`Could not open a ${mux.id} view for ${worker.id}; it runs headless.`);
+				if (opened) return { opened: true };
+				return { opened: false, reason: `could not open a ${mux.id} view` };
 			} catch (error) {
-				onFailure(
-					`Could not open a ${mux.id} view for ${worker.id}: ${
-						error instanceof Error ? error.message : String(error)
-					}`,
-				);
+				return { opened: false, reason: error instanceof Error ? error.message : String(error) };
 			}
 		},
 	};

@@ -105,11 +105,13 @@ interface WorkerRecord {
 	headAtStart?: string;
 	/** Detached ACP process group, for startup cleanup after a manager crash. */
 	processGroupId?: number;
+	/** Why this worker has no visible mux tab. */
+	headlessReason?: string;
 }
 
 /** Opens a pane per worker, when a multiplexer is running. */
 export interface WorkerPaneHost {
-	open(worker: WorkerSummary): void;
+	open(worker: WorkerSummary): { opened: true } | { opened: false; reason: string };
 }
 
 export type TransportFactory = (options: TransportOptions) => WorkerTransportDriver;
@@ -136,6 +138,8 @@ export interface WorkerManagerOptions {
 	workerMcpServers?: (workerId: string, scratchDir: string, token: string) => WorkerMcpServer[];
 	/** Opens a pane per worker. Omitted means headless. */
 	panes?: WorkerPaneHost;
+	/** The explicit reason every worker runs headless when there is no pane host. */
+	headlessReason?: string;
 	/** Persists a detached worker group while it can outlive the manager. */
 	onWorkerProcessGroup?: (workerId: string, pgid: number | undefined) => void;
 	/** Test seam: swap in a fake transport without touching real CLIs. */
@@ -354,14 +358,8 @@ export class WorkerManager implements ChannelHandler {
 				);
 		const task = writerContext ? `${writerContext}\n\n---\n\n# Task\n\n${request.task}` : request.task;
 		this.enqueue(record, this.withPendingBrief(record, task));
-		const summary = this.summarize(record);
-		// A pane is a convenience for the person watching; never let it fail a spawn.
-		try {
-			this.options.panes?.open(summary);
-		} catch {
-			this.appendLog(record, "error", "Could not open a pane for this worker; it is running headless.");
-		}
-		return summary;
+		this.openWorkerView(record);
+		return this.summarize(record);
 	}
 
 	send(workerId: string, message: string): WorkerSummary {
@@ -1229,13 +1227,16 @@ export class WorkerManager implements ChannelHandler {
 		const firstPrompt = this.withPendingBrief(record, fullTask);
 		this.enqueue(record, firstPrompt);
 
-		// Open pane for the newly started worker
-		const summary = this.summarize(record);
-		try {
-			this.options.panes?.open(summary);
-		} catch {
-			this.appendLog(record, "error", "Could not open a pane for this worker; it is running headless.");
-		}
+		this.openWorkerView(record);
+	}
+
+	/** A missing pane is visible in the spawn result; it never blocks the worker. */
+	private openWorkerView(record: WorkerRecord): void {
+		const outcome = this.options.panes?.open(this.summarize(record));
+		const reason = outcome && !outcome.opened ? outcome.reason : this.options.headlessReason;
+		if (!reason) return;
+		record.headlessReason = reason;
+		this.appendLog(record, "status", `Worker view: headless — ${reason}`);
 	}
 
 	private summarize(record: WorkerRecord): WorkerSummary {
@@ -1262,6 +1263,7 @@ export class WorkerManager implements ChannelHandler {
 			modelId: record.modelId,
 			mode: record.mode,
 			agentInfo: record.agentInfo,
+			headlessReason: record.headlessReason,
 		};
 	}
 }

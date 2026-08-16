@@ -170,6 +170,8 @@ export interface WorkerSummary {
 	mode?: string;
 	/** The ACP bridge the backend runs behind, as "name@version". */
 	agentInfo?: string;
+	/** Why this worker has no visible mux tab. */
+	headlessReason?: string;
 }
 
 /**

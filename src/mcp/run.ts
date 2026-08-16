@@ -88,14 +88,19 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 
 	const wantsPanes = (process.env.NETA_PANES ?? (config.mux.panes ? "1" : "0")) === "1";
 	const mux = selectMux(muxMode(config.mux.mode));
-	const panes = wantsPanes ? createPaneHost(mux, invocation, sessionId, cwd, agentDir, note) : undefined;
-	if (wantsPanes && !panes) {
+	const panes = wantsPanes ? createPaneHost(mux, invocation, sessionId, cwd, agentDir, muxName) : undefined;
+	const headlessReason = !wantsPanes
+		? "panes disabled"
+		: !panes
+			? mux.id === "none"
+				? "no multiplexer available"
+				: `not inside a ${mux.id} session`
+			: undefined;
+	if (headlessReason) {
 		// Silence here reads as "panes are broken". Usually it just means the
 		// leader is not running inside a multiplexer, which is fine and worth
 		// saying once rather than leaving the user to wonder where the tabs are.
-		note(
-			`workers run headless: ${mux.id === "none" ? "no multiplexer available" : `not inside a ${mux.id} session`}`,
-		);
+		note(`workers run headless: ${headlessReason}`);
 	}
 
 	let shimDir: string | undefined;
@@ -133,6 +138,7 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 		],
 		// `--mux` at launch decided this; settings answer when nobody did.
 		panes: wantsPanes ? panes : undefined,
+		headlessReason,
 		onWorkerProcessGroup: (workerId, pgid) => {
 			if (pgid === undefined) workerGroups.delete(workerId);
 			else {

@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NETA_SOCKET_ENV, NETA_WORKER_ENV, NETA_WORKER_TOKEN_ENV } from "../src/channel/protocol.ts";
+import { leaderTools } from "../src/mcp/leader.ts";
 import { WorkerManager } from "../src/orchestrator/manager.ts";
 import type { PromptOutcome, TransportOptions, WorkerTransportDriver } from "../src/orchestrator/transport.ts";
 import { NetaConfig } from "../src/settings.ts";
@@ -103,6 +104,32 @@ describe("WorkerManager", () => {
 		expect(transport.options.env[NETA_WORKER_ENV]).toBe(summary.id);
 		expect(transport.options.env[NETA_WORKER_TOKEN_ENV]).toMatch(/^[a-f0-9]{32}$/);
 		expect(transport.prompts[0]).toBe("map the auth flow");
+	});
+
+	it("returns the headless reason in neta_spawn output when no mux target exists", async () => {
+		const headlessManager = new WorkerManager({
+			cwd: process.cwd(),
+			agentDir: "/nonexistent-agent-dir",
+			config,
+			channelAddress: "/tmp/neta-headless.sock",
+			headlessReason: "not inside a tmux session",
+			onEvent: () => {},
+			createTransport: (options) => new FakeTransport(options),
+		});
+		try {
+			const spawn = leaderTools(headlessManager).find((tool) => tool.name === "neta_spawn");
+			if (!spawn) throw new Error("neta_spawn was not registered.");
+			const response = await spawn.run({ role: "scout", tier: "expert", task: "inspect" });
+			const output = response.content[0];
+
+			expect(output?.type).toBe("text");
+			if (output?.type === "text") {
+				expect(output.text).toContain("Worker view: headless — not inside a tmux session");
+			}
+		} finally {
+			await headlessManager.dispose();
+			rmSync("/tmp/neta-headless.sock", { force: true });
+		}
 	});
 
 	it("does not add writer context when no writers are active or queued", async () => {

@@ -35,8 +35,21 @@ export function killSessionArgs(sessionName: string): string[] {
  * into, and five workers make it unusable. `-d` leaves the leader focused, and
  * the window closes by itself when the watcher exits.
  */
-export function newWindowArgs(title: string, spec: ProcessSpec, cwd: string): string[] {
-	return ["new-window", "-d", "-n", title, "-c", cwd, "-e", `NETA_PANE=${title}`, "--", spec.command, ...spec.args];
+export function newWindowArgs(title: string, spec: ProcessSpec, cwd: string, sessionName?: string): string[] {
+	return [
+		"new-window",
+		...(sessionName ? ["-t", sessionName] : []),
+		"-d",
+		"-n",
+		title,
+		"-c",
+		cwd,
+		"-e",
+		`NETA_PANE=${title}`,
+		"--",
+		spec.command,
+		...spec.args,
+	];
 }
 
 export class TmuxAdapter implements MuxAdapter {
@@ -50,14 +63,20 @@ export class TmuxAdapter implements MuxAdapter {
 		return Boolean(process.env.TMUX);
 	}
 
+	sessionName(): string | undefined {
+		if (!this.inSession()) return undefined;
+		const result = spawnSync("tmux", ["display-message", "-p", "#S"], { encoding: "utf-8" });
+		return result.status === 0 ? result.stdout.trim() || undefined : undefined;
+	}
+
 	wrapLeader(leader: ProcessSpec, sessionName: string): ProcessSpec | undefined {
 		if (this.inSession()) return undefined;
 		return { command: "tmux", args: newSessionArgs(sessionName, leader), env: leader.env };
 	}
 
-	openPane(title: string, spec: ProcessSpec, cwd: string): boolean {
-		if (!this.inSession()) return false;
-		const result = spawnSync("tmux", newWindowArgs(title, spec, cwd), {
+	openPane(title: string, spec: ProcessSpec, cwd: string, sessionName?: string): boolean {
+		if (!sessionName && !this.inSession()) return false;
+		const result = spawnSync("tmux", newWindowArgs(title, spec, cwd, sessionName), {
 			env: { ...process.env, ...spec.env },
 			encoding: "utf-8",
 		});

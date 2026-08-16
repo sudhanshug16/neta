@@ -10,7 +10,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { newSessionArgs } from "../src/mux/tmux.ts";
+import { newSessionArgs, newWindowArgs } from "../src/mux/tmux.ts";
 import type { ProcessSpec } from "../src/mux/types.ts";
 import { waitFor } from "./helpers.ts";
 
@@ -49,6 +49,36 @@ afterEach(() => {
 });
 
 describe("tmux leader environment isolation", () => {
+	tmuxIt("opens a worker window in the explicit session on a custom tmux server", () => {
+		const socket = `neta-pane-${process.pid}-${Date.now()}`;
+		const name = `neta-pane-${process.pid}`;
+		try {
+			const started = spawnSync("tmux", ["-L", socket, "new-session", "-d", "-s", name, "sleep", "30"], {
+				encoding: "utf-8",
+			});
+			if (started.status !== 0) throw new Error(started.stderr || "Could not start tmux test session.");
+			const locator = spawnSync(
+				"tmux",
+				["-L", socket, "display-message", "-p", "#{socket_path},#{pid},#{window_index}"],
+				{
+					encoding: "utf-8",
+				},
+			).stdout.trim();
+			const opened = spawnSync(
+				"tmux",
+				newWindowArgs("worker", { command: "sleep", args: ["30"] }, process.cwd(), name),
+				{ env: { ...process.env, TMUX: locator }, encoding: "utf-8" },
+			);
+
+			expect(opened.status).toBe(0);
+			expect(
+				spawnSync("tmux", ["-L", socket, "list-windows", "-t", name, "-F", "#W"], { encoding: "utf-8" }).stdout,
+			).toContain("worker");
+		} finally {
+			spawnSync("tmux", ["-L", socket, "kill-server"], { stdio: "ignore" });
+		}
+	});
+
 	tmuxIt("gives two different NETA_DIR launches and two shared-dir launches their own socket and id", async () => {
 		const socket = `neta-test-${process.pid}-${Date.now()}`;
 		const records = scratch("neta-tmux-records-");

@@ -22,12 +22,14 @@ export interface MuxAdapter {
 	available(): boolean;
 	/** This process is running inside one of its sessions, so panes can be opened. */
 	inSession(): boolean;
+	/** The current session's name, when the multiplexer exposes one. */
+	sessionName(): string | undefined;
 	/**
 	 * Wrap the leader so it starts inside a fresh multiplexer session. Returns
 	 * undefined when it should be run as-is (already inside a session, or this
 	 * adapter does not manage sessions).
 	 */
 	wrapLeader(leader: ProcessSpec, sessionName: string, sessionDir: string): ProcessSpec | undefined;
-	/** Open a pane running the command. False means the pane could not be opened. */
-	openPane(title: string, spec: ProcessSpec, cwd: string): boolean;
+	/** Open a pane running the command, targeting a named session when one is known. */
+	openPane(title: string, spec: ProcessSpec, cwd: string, sessionName?: string): boolean;
 }

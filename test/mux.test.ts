@@ -69,10 +69,12 @@ describe("tmux", () => {
 	// A window, not a split. Splitting the leader's window shrinks the thing the
 	// user is typing into, and five workers made it unreadable.
 	it("puts a worker in its own window, leaving the leader focused", () => {
-		const args = newWindowArgs("ro1 scout", { command: "neta", args: ["watch", "ro1"] }, "/repo");
+		const args = newWindowArgs("ro1 scout", { command: "neta", args: ["watch", "ro1"] }, "/repo", "neta-1");
 
 		expect(args).toEqual([
 			"new-window",
+			"-t",
+			"neta-1",
 			"-d",
 			"-n",
 			"ro1 scout",
@@ -173,7 +175,9 @@ describe("zellij", () => {
 	// A tab of its own, and one that disposes of itself: --close-on-exit is what
 	// lets a finished worker's tab disappear when the watcher exits.
 	it("opens a worker in its own tab, set to close when it ends", () => {
-		expect(newTabArgs("ro1 scout", { command: "neta", args: ["watch", "ro1"] }, "/repo")).toEqual([
+		expect(newTabArgs("ro1 scout", { command: "neta", args: ["watch", "ro1"] }, "/repo", "neta-1")).toEqual([
+			"--session",
+			"neta-1",
 			"action",
 			"new-tab",
 			"--name",
@@ -245,9 +249,11 @@ describe("worker views", () => {
 				id: "tmux",
 				available: () => true,
 				inSession: () => true,
+				sessionName: () => "fallback",
 				wrapLeader: () => undefined,
-				openPane: (title, spec) => {
+				openPane: (title, spec, _cwd, sessionName) => {
 					calls.push({ title, args: spec.args });
+					expect(sessionName).toBe("neta-s7");
 					return true;
 				},
 			},
@@ -280,7 +286,7 @@ describe("worker views", () => {
 			"s7",
 			"/repo",
 			"/home/u/.neta",
-			() => {},
+			"neta-s7",
 		);
 
 		host?.open(worker);
@@ -290,31 +296,29 @@ describe("worker views", () => {
 	});
 
 	it("reports why a view could not open rather than losing it", () => {
-		const failures: string[] = [];
 		const mux: MuxAdapter = {
 			id: "tmux",
 			available: () => true,
 			inSession: () => true,
+			sessionName: () => "fallback",
 			wrapLeader: () => undefined,
 			openPane: () => {
 				throw new Error("tmux: no server running");
 			},
 		};
 
-		createPaneHost(mux, { command: "neta", prefixArgs: [] }, "s1", "/repo", "/n", (m) => failures.push(m))?.open(
+		const outcome = createPaneHost(mux, { command: "neta", prefixArgs: [] }, "s1", "/repo", "/n", "neta-s1")?.open(
 			worker,
 		);
 
-		expect(failures[0]).toContain("no server running");
+		expect(outcome).toEqual({ opened: false, reason: "tmux: no server running" });
 	});
 
 	it("opens nothing when the leader is not inside a multiplexer", () => {
 		const { mux } = recordingMux();
 		const outside: MuxAdapter = { ...mux, inSession: () => false };
 
-		expect(
-			createPaneHost(outside, { command: "neta", prefixArgs: [] }, "s1", "/repo", "/n", () => {}),
-		).toBeUndefined();
+		expect(createPaneHost(outside, { command: "neta", prefixArgs: [] }, "s1", "/repo", "/n")).toBeUndefined();
 	});
 });
 
@@ -324,6 +328,7 @@ describe("selecting a multiplexer", () => {
 			id,
 			available: () => available,
 			inSession: () => inSession,
+			sessionName: () => undefined,
 			wrapLeader: () => undefined,
 			openPane: () => true,
 		};

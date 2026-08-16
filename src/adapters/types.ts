@@ -12,6 +12,7 @@
 
 import type { CliInvocation } from "../cli-shim.ts";
 import type { DetectedLeaderBackend } from "../detect.ts";
+import type { MuxId } from "../mux/types.ts";
 
 export interface LeaderLaunchContext {
 	backend: DetectedLeaderBackend;
@@ -30,6 +31,13 @@ export interface LeaderLaunchContext {
 	strictMcp: boolean;
 	/** Arguments the user passed through to the vendor CLI. */
 	extraArgs: string[];
+	/** The pane target resolved by the launcher before this adapter registers MCP. */
+	mux: MuxId;
+	panes: boolean;
+	muxSessionName?: string;
+	/** Native mux locators, needed when a vendor clears the MCP child's environment. */
+	tmux?: string;
+	zellij?: string;
 }
 
 export interface LeaderLaunch {
@@ -66,6 +74,11 @@ export function controlPlaneEnv(context: LeaderLaunchContext): Record<string, st
 		NETA_LEADER_TOKEN: context.token,
 		NETA_SESSION_ID: context.sessionId,
 		NETA_LEADER_BACKEND: context.backend.id,
+		NETA_MUX: context.mux,
+		NETA_PANES: context.panes ? "1" : "0",
+		...(context.muxSessionName ? { NETA_MUX_SESSION_NAME: context.muxSessionName } : {}),
+		...(context.tmux ? { TMUX: context.tmux } : {}),
+		...(context.zellij ? { ZELLIJ: context.zellij } : {}),
 	};
 }
 

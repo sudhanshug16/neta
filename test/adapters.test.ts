@@ -11,7 +11,9 @@ import { join } from "node:path";
 import { ClaudeAdapter, DENIED_TOOLS } from "../src/adapters/claude.ts";
 import { CodexAdapter, createHomeOverlay, preserveRefreshedAuth } from "../src/adapters/codex.ts";
 import { OpenCodeAdapter, READ_ONLY_BASH_PATTERNS } from "../src/adapters/opencode.ts";
-import { type LeaderLaunchContext, MCP_SERVER_NAME } from "../src/adapters/types.ts";
+import { controlPlaneEnv, type LeaderLaunchContext, MCP_SERVER_NAME } from "../src/adapters/types.ts";
+import { createPaneHost } from "../src/mux/panes.ts";
+import type { MuxAdapter } from "../src/mux/types.ts";
 
 const dirs: string[] = [];
 
@@ -39,6 +41,8 @@ function context(overrides: Partial<LeaderLaunchContext> = {}): LeaderLaunchCont
 		invocation: { command: "/usr/bin/node", prefixArgs: ["/opt/neta/cli.js"] },
 		strictMcp: false,
 		extraArgs: [],
+		mux: "none",
+		panes: false,
 		...overrides,
 	};
 }
@@ -143,6 +147,68 @@ describe("Codex adapter", () => {
 		expect(launch.args.find((arg) => arg.startsWith("mcp_servers.neta.env="))).toContain(
 			'NETA_SOCKET = "/tmp/neta-s1.sock"',
 		);
+	});
+
+	it("keeps the mux target when Codex clears the MCP child environment", async () => {
+		const ctx = context({
+			backend: { id: "codex", name: "Codex", binary: "codex", install: "", path: "/usr/bin/codex" },
+			mux: "tmux",
+			panes: true,
+			muxSessionName: "neta-s1",
+			tmux: "/tmp/neta-tmux.sock,123,0",
+		});
+		const declared = controlPlaneEnv(ctx);
+		const launch = await new CodexAdapter().prepare(ctx);
+
+		// Codex's MCP child gets this declaration, not the surrounding process env.
+		expect(declared).toEqual({
+			NETA_SOCKET: "/tmp/neta-s1.sock",
+			NETA_LEADER_TOKEN: "tok",
+			NETA_SESSION_ID: "s1",
+			NETA_LEADER_BACKEND: "codex",
+			NETA_MUX: "tmux",
+			NETA_PANES: "1",
+			NETA_MUX_SESSION_NAME: "neta-s1",
+			TMUX: "/tmp/neta-tmux.sock,123,0",
+		});
+		expect(launch.args.find((arg) => arg.startsWith("mcp_servers.neta.env="))).toContain(
+			'NETA_MUX_SESSION_NAME = "neta-s1"',
+		);
+
+		let target: string | undefined;
+		const mux: MuxAdapter = {
+			id: "tmux",
+			available: () => true,
+			inSession: () => false,
+			sessionName: () => undefined,
+			wrapLeader: () => undefined,
+			openPane: (_title, _spec, _cwd, sessionName) => {
+				target = sessionName;
+				return true;
+			},
+		};
+		const outcome = createPaneHost(
+			mux,
+			{ command: "neta", prefixArgs: [] },
+			declared.NETA_SESSION_ID,
+			"/repo",
+			"/neta",
+			declared.NETA_MUX_SESSION_NAME,
+		)?.open({
+			id: "ro1",
+			name: "scout",
+			role: "scout",
+			tier: "expert",
+			backend: "codex",
+			writer: false,
+			state: "running",
+			task: "inspect",
+			startedAt: 0,
+			scratchDir: "/tmp/ro1",
+		});
+
+		expect(outcome).toEqual({ opened: true });
+		expect(target).toBe("neta-s1");
 	});
 
 	// Codex has no flag for extra instructions, so the session runs against a

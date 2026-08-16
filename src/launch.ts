@@ -180,6 +180,14 @@ export async function launchLeader(options: LaunchOptions): Promise<number> {
 		const sessionId = `${process.pid}-${randomBytes(3).toString("hex")}`;
 		const sessionDir = await mkdtemp(join(tmpdir(), `${APP_NAME}-session-`));
 		const invocation = resolveSelfInvocation();
+		// Resolve every value the control plane needs before registration. Codex
+		// starts MCP servers with a cleared environment, keeping only this explicit
+		// adapter config, so adding mux values after prepare() loses worker tabs.
+		const mux = selectMux(options.mux ? normalizeMux(options.mux) : config.mux.mode);
+		const showing = config.mux.panes && mux.id !== "none";
+		const muxSessionName = showing ? (mux.sessionName() ?? `neta-${sessionId}`) : undefined;
+		const tmux = mux.id === "tmux" ? process.env.TMUX : undefined;
+		const zellij = mux.id === "zellij" ? (process.env.ZELLIJ ?? muxSessionName) : undefined;
 
 		const adapter = adapterFor(backend.id);
 		const flavors = await materializeFlavors(agentDir, cwd).catch(() => []);
@@ -193,7 +201,7 @@ export async function launchLeader(options: LaunchOptions): Promise<number> {
 			toolName: (base) => adapter.toolName(base),
 		});
 
-		const launch = await adapter.prepare({
+		const launchContext = {
 			backend,
 			cwd,
 			sessionDir,
@@ -204,12 +212,16 @@ export async function launchLeader(options: LaunchOptions): Promise<number> {
 			invocation,
 			strictMcp: config.leader.strictMcp,
 			extraArgs: options.extraArgs,
-		});
+			mux: mux.id,
+			panes: showing,
+			muxSessionName,
+			tmux,
+			zellij,
+		};
+		const launch = await adapter.prepare(launchContext);
 
 		// Panes need a multiplexer session; if we are not in one, start one around
 		// the leader so its workers have somewhere to appear.
-		const mux = selectMux(options.mux ? normalizeMux(options.mux) : config.mux.mode);
-		const showing = config.mux.panes && mux.id !== "none";
 
 		for (const warning of launch.warnings) process.stderr.write(`${APP_NAME}: ${warning}\n`);
 
@@ -217,15 +229,11 @@ export async function launchLeader(options: LaunchOptions): Promise<number> {
 		// is, so it must not inherit the runtime of whatever agent session Neta was
 		// started from — running `neta` inside Claude Code otherwise hands the new
 		// leader its parent's session variables and job directory.
-		const muxSessionName = showing && !mux.inSession() ? `neta-${sessionId}` : undefined;
 		const env = {
 			...sanitizeInheritedEnv(process.env),
 			...launch.env,
-			NETA_MUX: mux.id,
-			NETA_PANES: showing ? "1" : "0",
 			NETA_SESSION_LOCK_PATH: lock.path,
 			NETA_SESSION_LOCK_TOKEN: lock.token,
-			...(muxSessionName ? { NETA_MUX_SESSION_NAME: muxSessionName } : {}),
 		};
 		// tmux keeps a server-global environment captured by its first session. The
 		// server otherwise gives every later leader that first leader's socket and
@@ -266,9 +274,28 @@ export async function launchLeader(options: LaunchOptions): Promise<number> {
 			process.stderr.write(
 				`${APP_NAME}: ${mux.id} exited immediately (${code}); starting ${backend.name} without panes.\n`,
 			);
-			const fallbackEnv = { ...env, NETA_MUX: "none", NETA_PANES: "0" };
-			delete fallbackEnv.NETA_MUX_SESSION_NAME;
-			code = await run({ ...leader, env: fallbackEnv });
+			// MCP configuration is generated before the vendor starts. Rebuild it for
+			// the fallback too: Codex clears the MCP child's inherited environment and
+			// would otherwise keep trying the failed mux from its original TOML env.
+			const fallbackLaunch = await adapter.prepare({
+				...launchContext,
+				mux: "none",
+				panes: false,
+				muxSessionName: undefined,
+				tmux: undefined,
+				zellij: undefined,
+			});
+			code = await run({
+				command: fallbackLaunch.command,
+				args: fallbackLaunch.args,
+				env: {
+					...sanitizeInheritedEnv(process.env),
+					...fallbackLaunch.env,
+					NETA_SESSION_LOCK_PATH: lock.path,
+					NETA_SESSION_LOCK_TOKEN: lock.token,
+				},
+			});
+			await fallbackLaunch.cleanup?.().catch(() => {});
 		}
 
 		await launch.cleanup?.().catch(() => {});

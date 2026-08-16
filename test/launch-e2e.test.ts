@@ -116,6 +116,8 @@ describe("neta (launching a leader)", () => {
 
 		const mcp = JSON.parse(launched.files[launched.argv[launched.argv.indexOf("--mcp-config") + 1]]);
 		expect(mcp.mcpServers.neta.args.at(-1)).toBe("mcp");
+		expect(mcp.mcpServers.neta.env.NETA_MUX).toBe("none");
+		expect(mcp.mcpServers.neta.env.NETA_PANES).toBe("0");
 
 		const settings = JSON.parse(launched.files[launched.argv[launched.argv.indexOf("--settings") + 1]]);
 		expect(settings.permissions.deny).toContain("Edit");
