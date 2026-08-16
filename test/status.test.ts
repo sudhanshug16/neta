@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { formatStatusSnapshot } from "../src/orchestrator/status.ts";
+import { formatStatusSnapshot, formatWorkerSummary } from "../src/orchestrator/status.ts";
 import type { WorkerStatusSnapshot, WorkerSummary } from "../src/types.ts";
 
 function worker(overrides: Partial<WorkerSummary> = {}): WorkerSummary {
@@ -50,9 +50,19 @@ describe("formatStatusSnapshot", () => {
 		expect(status).toContain("model=gpt-4o | mode=workspace-write | 2,000,000 tokens, est. $12.50");
 		expect(status).toContain('Writer queue:\n  w2 "docs pass" worker/senior | backend=codex | queued | writer');
 		expect(status).toContain(
-			'Waiting (blocked on leader answer):\n  w3 "db decision" worker/senior | backend=codex | waiting | asking: Use Postgres?',
+			'Waiting (blocked on leader answer):\n  w3 "db decision" worker/senior | backend=codex | waiting | ' +
+				"model unknown — backend default | asking: Use Postgres?",
 		);
-		expect(status).toContain("Terminal:\n  w4 scout/senior | backend=codex | done");
+		expect(status).toContain("Terminal:\n  w4 scout/senior | backend=codex | done | model unknown — backend default");
 		expect(status).toContain('Open notes:\n  n1 "finish the auth rollout" (w2 queued)');
+	});
+
+	// A blank where the model should be reads as "fine"; only a worker that has
+	// not started yet is allowed to say nothing.
+	it("says loudly when a started worker's model is unknown", () => {
+		expect(formatWorkerSummary(worker())).toContain("model unknown — backend default");
+		expect(formatWorkerSummary(worker({ state: "queued" }))).not.toContain("model unknown");
+		expect(formatWorkerSummary(worker({ state: "starting" }))).not.toContain("model unknown");
+		expect(formatWorkerSummary(worker({ model: "sonnet" }))).toContain("model=sonnet");
 	});
 });

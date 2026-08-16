@@ -140,13 +140,20 @@ describe("WorkerManager", () => {
 		expect(transports[0].options.model).toBe("sonnet");
 	});
 
-	it("surfaces the negotiated model and mode in the worker summary", async () => {
+	it("surfaces the negotiated model, mode and bridge in the worker summary", async () => {
 		const summary = await manager.spawn({ role: "scout", tier: "senior", task: "look" });
-		transports[0].options.events.session("negotiated-model", "negotiated-mode");
+		transports[0].options.events.session({
+			model: "negotiated-model",
+			modelId: "negotiated-model-id",
+			mode: "negotiated-mode",
+			agentInfo: "fake-bridge@1.0.0",
+		});
 
 		const updated = manager.get(summary.id);
 		expect(updated.model).toBe("negotiated-model");
+		expect(updated.modelId).toBe("negotiated-model-id");
 		expect(updated.mode).toBe("negotiated-mode");
+		expect(updated.agentInfo).toBe("fake-bridge@1.0.0");
 	});
 
 	it("queues a second writer and starts it automatically when the first finishes", async () => {

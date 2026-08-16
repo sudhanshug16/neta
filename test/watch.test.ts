@@ -94,7 +94,7 @@ describe("watch", () => {
 		const code = await watchWorker({ workerId: worker.id, once: true, hold: false, write });
 
 		expect(code).toBe(0);
-		expect(lines[0]).toBe(`${worker.id} · scout/senior · claude · read-only`);
+		expect(lines[0]).toBe(`${worker.id} · scout/senior · claude · read-only · model unknown — backend default`);
 		expect(lines[1]).toBe("task: map the auth flow");
 		expect(lines).toContain("» reading auth.ts");
 		// The tag-per-line noise is gone.

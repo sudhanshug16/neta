@@ -277,7 +277,9 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 				const summaries = workerId ? [manager.get(workerId)] : manager.list();
 				if (summaries.length === 0) return text("No workers have been spawned.");
 				const maxChars = workerId ? 20000 : MAX_RESULT_CHARS;
-				return text(statusReport(summaries, maxChars) + formatOpenNotes(manager));
+				// Bridge identity only in the single-worker view; list lines stay compact.
+				const bridge = workerId && summaries[0].agentInfo ? `\nBridge: ${summaries[0].agentInfo}` : "";
+				return text(statusReport(summaries, maxChars) + bridge + formatOpenNotes(manager));
 			},
 		},
 		{

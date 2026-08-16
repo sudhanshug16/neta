@@ -9,6 +9,18 @@
 
 import type { WorkerLogEntry, WorkerUsage } from "../types.ts";
 
+/** What a worker's session negotiated, as the backend reports it. */
+export interface NegotiatedSession {
+	/** Model as a person should read it: the backend's label when it names one, else the id. */
+	model?: string;
+	/** Raw model id, for cost estimation; same as `model` when the backend names nothing. */
+	modelId?: string;
+	/** Mode the session runs in. */
+	mode?: string;
+	/** The ACP bridge in front of the backend, as "name@version". */
+	agentInfo?: string;
+}
+
 export interface TransportEvents {
 	/** Narration for the worker's log. The leader pulls this; it never pushes. */
 	log(kind: WorkerLogEntry["kind"], text: string): void;
@@ -16,8 +28,8 @@ export interface TransportEvents {
 	usage(usage: WorkerUsage): void;
 	/** The backend's own id for this session, once it has one. */
 	vendorSession(sessionId: string): void;
-	/** The model and mode the backend negotiated and is running. */
-	session(model: string | undefined, mode: string | undefined): void;
+	/** What the backend negotiated and is running; re-fired whenever the backend reports a change. */
+	session(session: NegotiatedSession): void;
 }
 
 /**

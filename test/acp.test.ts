@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AcpConnection, chooseModel, sanitizeInheritedEnv } from "../src/acp/connection.ts";
 import { AcpWorkerTransport, describeToolCall, paragraphFlushIndex, renderDiffText } from "../src/acp/transport.ts";
-import type { TransportOptions, WorkerMcpServer } from "../src/orchestrator/transport.ts";
+import type { NegotiatedSession, TransportOptions, WorkerMcpServer } from "../src/orchestrator/transport.ts";
 import type { WorkerLogEntry, WorkerUsage } from "../src/types.ts";
 
 const fakeAgent = fileURLToPath(new URL("./fixtures/fake-acp-agent.mjs", import.meta.url));
@@ -22,12 +22,13 @@ describe("AcpWorkerTransport", () => {
 	});
 
 	const usageReports: WorkerUsage[] = [];
-	const sessionReports: Array<{ model?: string; mode?: string }> = [];
+	const sessionReports: NegotiatedSession[] = [];
 
 	function createTransport(
 		writer: boolean,
 		log: WorkerLogEntry[],
 		mcpServers: WorkerMcpServer[] = [],
+		agentArgs: string[] = [],
 	): AcpWorkerTransport {
 		const scratchDir = mkdtempSync(join(tmpdir(), "neta-acp-"));
 		tempDirs.push(scratchDir);
@@ -36,7 +37,7 @@ describe("AcpWorkerTransport", () => {
 			cwd: process.cwd(),
 			env: {},
 			command: process.execPath,
-			args: [fakeAgent],
+			args: [fakeAgent, ...agentArgs],
 			model: undefined,
 			writer,
 			systemPrompt: "You are a test worker.",
@@ -46,7 +47,7 @@ describe("AcpWorkerTransport", () => {
 				log: (kind, text) => log.push({ at: 0, kind, text }),
 				usage: (usage) => usageReports.push(usage),
 				vendorSession: () => {},
-				session: (model, mode) => sessionReports.push({ model, mode }),
+				session: (session) => sessionReports.push(session),
 			},
 		};
 		const transport = new AcpWorkerTransport(options);
@@ -178,12 +179,63 @@ describe("AcpWorkerTransport", () => {
 		expect(outcome.summary).toContain('{"name":"NETA_WORKER_ID","value":"w1"}');
 	});
 
-	it("reports the negotiated model and mode from the backend", async () => {
+	it("reports the negotiated model, mode and bridge from the backend", async () => {
 		const transport = createTransport(false, []);
 		await transport.start();
 
 		expect(sessionReports).toHaveLength(1);
-		expect(sessionReports[0]).toEqual({ model: "test-model", mode: "test-mode" });
+		expect(sessionReports[0]).toEqual({
+			model: "test-model",
+			modelId: "test-model",
+			mode: "test-mode",
+			agentInfo: "fake-acp-agent@1.0.0",
+		});
+	});
+
+	it("prefers configOptions over the legacy model fields and applies mid-session updates", async () => {
+		const transport = createTransport(false, [], [], ["--config-options"]);
+		await transport.start();
+
+		expect(sessionReports.at(-1)).toEqual({
+			model: "Fixture Default",
+			modelId: "fixture-default",
+			mode: "Always Ask",
+			agentInfo: "fake-acp-agent@1.0.0",
+		});
+
+		await transport.prompt("CONFIG_UPDATE");
+
+		expect(sessionReports.at(-1)).toEqual({
+			model: "Fixture Fast",
+			modelId: "fixture-fast",
+			mode: "Always Ask",
+			agentInfo: "fake-acp-agent@1.0.0",
+		});
+	});
+
+	it("tracks a mode the backend switches mid-session", async () => {
+		const transport = createTransport(false, [], [], ["--config-options"]);
+		await transport.start();
+
+		await transport.prompt("MODE_UPDATE");
+
+		expect(sessionReports.at(-1)).toMatchObject({ mode: "plan" });
+	});
+
+	it("says loudly when no model was requested and the backend reports none", async () => {
+		const log: WorkerLogEntry[] = [];
+		const transport = createTransport(false, log, [], ["--bare"]);
+		await transport.start();
+
+		expect(
+			log.some((entry) => entry.kind === "error" && entry.text === "no model requested; backend default in use"),
+		).toBe(true);
+		expect(sessionReports.at(-1)).toEqual({
+			model: undefined,
+			modelId: undefined,
+			mode: undefined,
+			agentInfo: "fake-acp-agent@1.0.0",
+		});
 	});
 
 	it("returns only text after the last tool call as the result", async () => {

@@ -125,7 +125,9 @@ describe("leader CLI over the real shim", () => {
 		expect(transports).toHaveLength(1);
 
 		const listed = await neta(["workers"], asLeader());
-		expect(listed.stdout).toContain("w1 [scout/senior, read-only] running — map the auth flow");
+		expect(listed.stdout).toContain(
+			"w1 [scout/senior, read-only, model unknown — backend default] running — map the auth flow",
+		);
 	});
 
 	it("carries the worker's own reply back to the leader", async () => {

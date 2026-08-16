@@ -4,16 +4,17 @@
  * same point-in-time view without duplicating state or formatting rules.
  */
 
-import { formatUsage, type Note, type WorkerStatusSnapshot, type WorkerSummary } from "../types.ts";
+import { displayModel, formatUsage, type Note, type WorkerStatusSnapshot, type WorkerSummary } from "../types.ts";
 
 export function formatWorkerSummary(summary: WorkerSummary): string {
 	const named = summary.name === summary.role ? summary.id : `${summary.id} "${summary.name}"`;
 	const parts = [`${named} ${summary.role}/${summary.tier}`, `backend=${summary.backend}`, summary.state];
 	if (summary.writer) parts.push("writer");
 	if (summary.room) parts.push(`room=${summary.room}`);
-	if (summary.model) parts.push(`model=${summary.model}`);
+	const model = displayModel(summary);
+	if (model) parts.push(summary.model ? `model=${summary.model}` : model);
 	if (summary.mode) parts.push(`mode=${summary.mode}`);
-	const usage = formatUsage(summary.usage, summary.model);
+	const usage = formatUsage(summary.usage, summary.modelId ?? summary.model);
 	if (usage) parts.push(usage);
 	if (summary.pendingQuestion) parts.push(`asking: ${summary.pendingQuestion}`);
 	return parts.join(" | ");

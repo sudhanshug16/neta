@@ -13,7 +13,14 @@ import { sendChannelRequest } from "./channel/client.ts";
 import { NETA_LEADER_ENV, NETA_SOCKET_ENV } from "./channel/protocol.ts";
 import { getAgentDir } from "./config.ts";
 import { findSession, listSessions } from "./session.ts";
-import { formatUsage, isTerminalState, type WorkerLogEntry, type WorkerLogPage, type WorkerSummary } from "./types.ts";
+import {
+	displayModel,
+	formatUsage,
+	isTerminalState,
+	type WorkerLogEntry,
+	type WorkerLogPage,
+	type WorkerSummary,
+} from "./types.ts";
 
 const POLL_MS = 400;
 const ARCHIVE_POLL_MS = 2000;
@@ -56,9 +63,12 @@ function formatLine(entry: WorkerLogEntry): string {
 function header(worker: WorkerSummary): string[] {
 	const access = worker.writer ? "writer" : "read-only";
 	const room = worker.room ? ` · room ${worker.room}` : "";
+	const model = displayModel(worker);
+	const session = model || worker.mode ? ` · ${[model, worker.mode].filter(Boolean).join("/")}` : "";
+	const bridge = worker.agentInfo ? ` · via ${worker.agentInfo}` : "";
 	const named = worker.name === worker.role ? worker.id : `${worker.id} ${worker.name}`;
 	return [
-		`${named} · ${worker.role}/${worker.tier} · ${worker.backend} · ${access}${room}`,
+		`${named} · ${worker.role}/${worker.tier} · ${worker.backend}${bridge} · ${access}${room}${session}`,
 		`task: ${worker.task.replace(/\s+/g, " ").trim().slice(0, 300)}`,
 		"─".repeat(60),
 	];
@@ -66,7 +76,7 @@ function header(worker: WorkerSummary): string[] {
 
 /** The line a pane ends on: how it went, and what it cost. */
 function footer(page: WorkerLogPage): string {
-	const usage = formatUsage(page.worker?.usage, page.worker?.model);
+	const usage = formatUsage(page.worker?.usage, page.worker?.modelId ?? page.worker?.model);
 	return `── ${page.worker?.id ?? "worker"} ${page.state}${usage ? ` · ${usage}` : ""} ──`;
 }
 

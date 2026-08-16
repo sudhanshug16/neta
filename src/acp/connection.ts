@@ -119,10 +119,31 @@ const MODE_PREFERENCE = {
 	readOnly: ["read-only", "default"],
 };
 
-/** What a session tells us it can be, beyond what the SDK's types describe. */
+/**
+ * Extension fields bridges used to report models through before the SDK grew
+ * `configOptions`. Some still do; read them as the fallback.
+ */
 interface SessionNegotiation {
 	models?: { availableModels?: { modelId: string }[]; currentModelId?: string } | null;
 	modes?: { availableModes?: { id: string }[]; currentModeId?: string } | null;
+}
+
+/** The current selection of a "select" config option: value ids and their display names. */
+interface ConfigSelection {
+	values: string[];
+	names: Map<string, string>;
+	currentValue: string;
+}
+
+function readSelect(option: acp.SessionConfigOption | undefined): ConfigSelection | undefined {
+	if (option?.type !== "select") return undefined;
+	const entries: Array<acp.SessionConfigSelectOption | acp.SessionConfigSelectGroup> = option.options;
+	const flat = entries.flatMap((entry) => ("group" in entry ? entry.options : [entry]));
+	return {
+		values: flat.map((value) => value.value),
+		names: new Map(flat.map((value) => [value.value, value.name])),
+		currentValue: option.currentValue,
+	};
 }
 
 /** Exact id first, then the family — "gpt-5.6-sol" should find "gpt-5.6-sol[xhigh]". */
@@ -138,11 +159,24 @@ export class AcpConnection {
 	private sessionId: string | undefined;
 	/** Shared so concurrent terminal paths wait for the same process-group exit. */
 	private killPromise: Promise<void> | undefined;
-	/** What this backend offered when the session opened. */
-	offered: { models: string[]; currentModel?: string; modes: string[]; currentMode?: string } = {
+	/** What this backend offered when the session opened, kept current as it reports changes. */
+	offered: {
+		models: string[];
+		/** Current model for display: the backend's label when it names one, else the id. */
+		currentModel?: string;
+		/** Raw id of the current model, for cost estimation. */
+		currentModelId?: string;
+		modes: string[];
+		currentMode?: string;
+		/** The ACP bridge in front of the backend, as "name@version". */
+		agentInfo?: string;
+	} = {
 		models: [],
 		modes: [],
 	};
+	/** Display names for model and mode ids, learned from configOptions. */
+	private readonly modelNames = new Map<string, string>();
+	private readonly modeNames = new Map<string, string>();
 	killed = false;
 	/** The worker reached a terminal state; permission requests are denied from here on. */
 	terminal = false;
@@ -186,11 +220,14 @@ export class AcpConnection {
 			.connect(stream);
 
 		try {
-			await this.connection.agent.request(acp.methods.agent.initialize, {
+			const initialized = await this.connection.agent.request(acp.methods.agent.initialize, {
 				protocolVersion: acp.PROTOCOL_VERSION,
 				clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
 				clientInfo: { name: "neta", version: VERSION },
 			});
+			if (initialized.agentInfo) {
+				this.offered.agentInfo = `${initialized.agentInfo.name}@${initialized.agentInfo.version}`;
+			}
 			const mcpServers: acp.McpServer[] = (this.options.mcpServers ?? []).map((server) => ({
 				name: server.name,
 				command: server.command,
@@ -225,30 +262,38 @@ export class AcpConnection {
 		const sessionId = this.sessionId;
 		if (!connection || !sessionId) return;
 		const chosen: string[] = [];
-		// The 1.3 SDK's types predate model selection, which both shipped bridges
-		// answer; read the fields defensively rather than pinning a newer SDK.
+		// configOptions is how the SDK reports models and modes now; bridges that
+		// predate it used these extension fields. Prefer the former, keep the latter.
 		const session = response as acp.NewSessionResponse & SessionNegotiation;
 
-		const available = (session.models?.availableModels ?? []).map((model) => model.modelId);
-		this.offered = {
-			models: available,
-			currentModel: session.models?.currentModelId,
-			modes: (session.modes?.availableModes ?? []).map((mode) => mode.id),
-			currentMode: session.modes?.currentModeId,
-		};
+		this.offered.models = (session.models?.availableModels ?? []).map((model) => model.modelId);
+		this.offered.modes = (session.modes?.availableModes ?? []).map((mode) => mode.id);
+		this.offered.currentModelId = session.models?.currentModelId;
+		this.offered.currentModel = session.models?.currentModelId;
+		this.offered.currentMode = session.modes?.currentModeId;
+		const config = this.applyConfigOptions(response.configOptions ?? []);
+		if (config.model) this.offered.models = config.model.values;
+		if (config.mode) this.offered.modes = config.mode.values;
+
+		const available = this.offered.models;
 		const wanted = this.options.model;
 		if (wanted && available.length > 0) {
 			const modelId = chooseModel(available, wanted);
 			if (!modelId) {
-				this.options.onStderr(`No model "${wanted}" here; running on ${session.models?.currentModelId}.`);
+				this.options.onStderr(`No model "${wanted}" here; running on ${this.offered.currentModel}.`);
 			} else {
 				try {
 					await connection.agent.request(SET_MODEL, { sessionId, modelId });
 					chosen.push(`model ${modelId}`);
+					this.offered.currentModelId = modelId;
+					this.offered.currentModel = this.modelNames.get(modelId) ?? modelId;
 				} catch (error) {
 					this.options.onStderr(`Could not select model "${modelId}": ${describe(error)}`);
 				}
 			}
+		}
+		if (!wanted && !this.offered.currentModel) {
+			this.options.onStderr("no model requested; backend default in use");
 		}
 
 		const modes = (session.modes?.availableModes ?? []).map((mode) => mode.id);
@@ -259,12 +304,36 @@ export class AcpConnection {
 			try {
 				await connection.agent.request(acp.methods.agent.session.setMode, { sessionId, modeId: preferred });
 				chosen.push(`mode ${preferred}`);
+				this.offered.currentMode = this.modeNames.get(preferred) ?? preferred;
 			} catch (error) {
 				this.options.onStderr(`Could not select mode "${preferred}": ${describe(error)}`);
 			}
 		}
 
 		if (chosen.length > 0) this.options.onSession?.(chosen.join(" · "));
+	}
+
+	/**
+	 * Record what a configOptions set says the session runs. Called with the
+	 * session/new offering and again on every config_option_update, which
+	 * carries the full set each time.
+	 */
+	applyConfigOptions(options: acp.SessionConfigOption[]): { model?: ConfigSelection; mode?: ConfigSelection } {
+		const model = readSelect(options.find((option) => option.category === "model"));
+		const mode = readSelect(options.find((option) => option.category === "mode"));
+		for (const [value, name] of model?.names ?? []) this.modelNames.set(value, name);
+		for (const [value, name] of mode?.names ?? []) this.modeNames.set(value, name);
+		if (model) {
+			this.offered.currentModelId = model.currentValue;
+			this.offered.currentModel = this.modelNames.get(model.currentValue) ?? model.currentValue;
+		}
+		if (mode) this.offered.currentMode = this.modeNames.get(mode.currentValue) ?? mode.currentValue;
+		return { model, mode };
+	}
+
+	/** The session switched modes, whether the backend's own doing or our set_mode confirmed. */
+	applyCurrentMode(modeId: string): void {
+		this.offered.currentMode = this.modeNames.get(modeId) ?? modeId;
 	}
 
 	/** Rejects on transport failure; protocol-level stops come back in the response. */

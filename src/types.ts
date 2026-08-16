@@ -151,8 +151,23 @@ export interface WorkerSummary {
 	vendorSessionId?: string;
 	/** The model this worker negotiated and is running on, if reported by the backend. */
 	model?: string;
+	/** Raw id of that model, for cost estimation; same as `model` unless the backend names it. */
+	modelId?: string;
 	/** The mode this worker negotiated and is running in, if reported by the backend. */
 	mode?: string;
+	/** The ACP bridge the backend runs behind, as "name@version". */
+	agentInfo?: string;
+}
+
+/**
+ * The model a worker line should show. Once a worker is past starting, an
+ * unreported model means the backend's own default is running — say so loudly
+ * instead of leaving a blank the reader takes as "fine".
+ */
+export function displayModel(summary: WorkerSummary): string | undefined {
+	if (summary.model) return summary.model;
+	if (summary.state === "queued" || summary.state === "starting") return undefined;
+	return "model unknown — backend default";
 }
 
 /** A worker linked to a note, tracked from spawn through its terminal state. */

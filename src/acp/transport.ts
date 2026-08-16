@@ -128,7 +128,19 @@ export class AcpWorkerTransport implements WorkerTransportDriver {
 				),
 		});
 		await this.connection.start();
-		this.options.events.session(this.connection.offered.currentModel, this.connection.offered.currentMode);
+		this.emitSession();
+	}
+
+	/** Report what the session runs as; called at start and again on every backend-reported change. */
+	private emitSession(): void {
+		const offered = this.connection?.offered;
+		if (!offered) return;
+		this.options.events.session({
+			model: offered.currentModel,
+			modelId: offered.currentModelId,
+			mode: offered.currentMode,
+			agentInfo: offered.agentInfo,
+		});
 	}
 
 	async prompt(text: string): Promise<PromptOutcome> {
@@ -189,6 +201,16 @@ export class AcpWorkerTransport implements WorkerTransportDriver {
 				break;
 			case "tool_call_update":
 				this.logDiffs(update.toolCallId, update.content);
+				break;
+			case "config_option_update":
+				// The record's model and mode must track what actually runs, or a
+				// backend-side switch leaves every listing showing a stale model.
+				this.connection?.applyConfigOptions(update.configOptions);
+				this.emitSession();
+				break;
+			case "current_mode_update":
+				this.connection?.applyCurrentMode(update.currentModeId);
+				this.emitSession();
 				break;
 			case "usage_update":
 				this.usage.contextUsed = update.used;

@@ -23,6 +23,7 @@ import { APP_NAME } from "../config.ts";
 import { loadRoleText, roleNames, workingAgreement } from "../prompts/roles.ts";
 import type { NetaConfig } from "../settings.ts";
 import {
+	displayModel,
 	formatUsage,
 	isTerminalState,
 	type Note,
@@ -74,7 +75,10 @@ interface WorkerRecord {
 	/** Finished, and superseded by a later batch: its view can close. */
 	archived?: boolean;
 	model?: string;
+	modelId?: string;
 	mode?: string;
+	/** The ACP bridge the backend runs behind, as "name@version". */
+	agentInfo?: string;
 	/** Note this worker is linked to. */
 	noteId?: string;
 	/** Writer holding the slot this worker is queued behind. */
@@ -289,9 +293,11 @@ export class WorkerManager implements ChannelHandler {
 				vendorSession: (sessionId) => {
 					record.vendorSessionId = sessionId;
 				},
-				session: (model, mode) => {
-					record.model = model;
-					record.mode = mode;
+				session: (session) => {
+					record.model = session.model;
+					record.modelId = session.modelId;
+					record.mode = session.mode;
+					record.agentInfo = session.agentInfo;
 				},
 			},
 		};
@@ -763,12 +769,10 @@ export class WorkerManager implements ChannelHandler {
 	private statusLine(summary: WorkerSummary, resultLimit?: number): string {
 		const access = summary.writer ? "writer" : "read-only";
 		const room = summary.room ? `, room ${summary.room}` : "";
-		const session =
-			summary.model || summary.mode
-				? `, ${summary.model ?? ""}${summary.model && summary.mode ? "/" : ""}${summary.mode ?? ""}`.trim()
-				: "";
+		const model = displayModel(summary);
+		const session = model || summary.mode ? `, ${[model, summary.mode].filter(Boolean).join("/")}` : "";
 		let line = `${summary.id} [${summary.role}/${summary.tier}, ${access}${room}${session}] ${summary.state} — ${summary.task}`;
-		const usage = formatUsage(summary.usage, summary.model);
+		const usage = formatUsage(summary.usage, summary.modelId ?? summary.model);
 		if (usage) line += `\n  usage: ${usage}`;
 		if (summary.pendingQuestion) line += `\n  asks: ${summary.pendingQuestion}`;
 		if (summary.result) {
@@ -983,9 +987,11 @@ export class WorkerManager implements ChannelHandler {
 				vendorSession: (sessionId) => {
 					record.vendorSessionId = sessionId;
 				},
-				session: (model, mode) => {
-					record.model = model;
-					record.mode = mode;
+				session: (session) => {
+					record.model = session.model;
+					record.modelId = session.modelId;
+					record.mode = session.mode;
+					record.agentInfo = session.agentInfo;
 				},
 			},
 		};
@@ -1040,7 +1046,9 @@ export class WorkerManager implements ChannelHandler {
 			usage: record.usage,
 			vendorSessionId: record.vendorSessionId,
 			model: record.model,
+			modelId: record.modelId,
 			mode: record.mode,
+			agentInfo: record.agentInfo,
 		};
 	}
 }

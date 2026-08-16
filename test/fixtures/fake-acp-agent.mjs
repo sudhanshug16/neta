@@ -16,7 +16,17 @@
  *   DIFF  - emits a tool call whose content is a file diff, then repeats the
  *           same content in a tool_call_update, the way real bridges do
  *   TRAP_SIGTERM - traps SIGTERM and ignores it (to test kill escalation)
+ *   CONFIG_UPDATE - emits a config_option_update switching the model to
+ *           "fixture-fast", the way a backend reports a mid-session change
+ *   MODE_UPDATE - emits a current_mode_update switching the mode to "plan"
  * Anything else is echoed back as the assistant message.
+ *
+ * Flags:
+ *   --config-options - session/new also returns configOptions, with values
+ *           that differ from the legacy models/modes extension fields so a
+ *           test can tell which one the client preferred
+ *   --bare - session/new returns only the sessionId: no models, no modes,
+ *           no configOptions, like a backend that reports nothing
  */
 
 import { Readable, Writable } from "node:stream";
@@ -24,10 +34,38 @@ import * as acp from "@agentclientprotocol/sdk";
 
 let _trapSigterm = false;
 
+const useConfigOptions = process.argv.includes("--config-options");
+const bare = process.argv.includes("--bare");
+
 const sessions = new Set();
 let counter = 0;
 /** Whatever the client asked us to launch at session/new, echoed back on request. */
 let mcpServers = [];
+
+/** The configOptions wire shape, with `current` as the selected model. */
+function configOptions(current) {
+	return [
+		{
+			id: "model",
+			name: "Model",
+			category: "model",
+			type: "select",
+			currentValue: current,
+			options: [
+				{ value: "fixture-default", name: "Fixture Default" },
+				{ value: "fixture-fast", name: "Fixture Fast" },
+			],
+		},
+		{
+			id: "mode",
+			name: "Mode",
+			category: "mode",
+			type: "select",
+			currentValue: "ask",
+			options: [{ value: "ask", name: "Always Ask" }],
+		},
+	];
+}
 
 async function say(cx, sessionId, text) {
 	await cx.notify(acp.methods.client.session.update, {
@@ -151,6 +189,24 @@ async function prompt(params, cx) {
 		});
 	}
 
+	if (text.includes("CONFIG_UPDATE")) {
+		await cx.notify(acp.methods.client.session.update, {
+			sessionId,
+			update: { sessionUpdate: "config_option_update", configOptions: configOptions("fixture-fast") },
+		});
+		await say(cx, sessionId, "config updated");
+		return { stopReason: "end_turn" };
+	}
+
+	if (text.includes("MODE_UPDATE")) {
+		await cx.notify(acp.methods.client.session.update, {
+			sessionId,
+			update: { sessionUpdate: "current_mode_update", currentModeId: "plan" },
+		});
+		await say(cx, sessionId, "mode updated");
+		return { stopReason: "end_turn" };
+	}
+
 	if (text.includes("TRAP_SIGTERM")) {
 		_trapSigterm = true;
 		process.on("SIGTERM", () => {
@@ -167,12 +223,17 @@ async function prompt(params, cx) {
 const stream = acp.ndJsonStream(Writable.toWeb(process.stdout), Readable.toWeb(process.stdin));
 
 acp.agent({ name: "fake-acp-agent" })
-	.onRequest("initialize", () => ({ protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: {} }))
+	.onRequest("initialize", () => ({
+		protocolVersion: acp.PROTOCOL_VERSION,
+		agentCapabilities: {},
+		agentInfo: { name: "fake-acp-agent", version: "1.0.0" },
+	}))
 	.onRequest("session/new", (ctx) => {
 		mcpServers = ctx.params.mcpServers ?? [];
 		const sessionId = `s${sessions.size + 1}`;
 		sessions.add(sessionId);
-		return {
+		if (bare) return { sessionId };
+		const response = {
 			sessionId,
 			models: {
 				availableModels: [{ modelId: "test-model" }],
@@ -183,6 +244,8 @@ acp.agent({ name: "fake-acp-agent" })
 				currentModeId: "test-mode",
 			},
 		};
+		if (useConfigOptions) response.configOptions = configOptions("fixture-default");
+		return response;
 	})
 	.onRequest("authenticate", () => ({}))
 	.onRequest("session/prompt", (ctx) => prompt(ctx.params, ctx.client))

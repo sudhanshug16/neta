@@ -23,7 +23,14 @@ import {
 } from "@earendil-works/pi-tui";
 import { sendChannelRequest } from "./channel/client.ts";
 import { APP_NAME } from "./config.ts";
-import { formatUsage, isTerminalState, type WorkerLogEntry, type WorkerLogPage, type WorkerSummary } from "./types.ts";
+import {
+	displayModel,
+	formatUsage,
+	isTerminalState,
+	type WorkerLogEntry,
+	type WorkerLogPage,
+	type WorkerSummary,
+} from "./types.ts";
 import { resolveTarget } from "./watch.ts";
 
 const POLL_MS = 400;
@@ -170,13 +177,12 @@ export class TranscriptView extends Container {
 function headerText(worker: WorkerSummary): string {
 	const access = worker.writer ? "writer" : "read-only";
 	const room = worker.room ? ` · room ${worker.room}` : "";
-	const session =
-		worker.model || worker.mode
-			? ` · ${worker.model ?? ""}${worker.model && worker.mode ? "/" : ""}${worker.mode ?? ""}`.trim()
-			: "";
+	const model = displayModel(worker);
+	const session = model || worker.mode ? ` · ${[model, worker.mode].filter(Boolean).join("/")}` : "";
+	const bridge = worker.agentInfo ? ` · via ${worker.agentInfo}` : "";
 	const named = worker.name === worker.role ? worker.id : `${worker.id} ${worker.name}`;
 	return [
-		`${style.bold(named)} ${style.dim(`· ${worker.role}/${worker.tier} · ${worker.backend} · ${access}${room}${session}`)}`,
+		`${style.bold(named)} ${style.dim(`· ${worker.role}/${worker.tier} · ${worker.backend}${bridge} · ${access}${room}${session}`)}`,
 		style.dim(`task: ${worker.task.replace(/\s+/g, " ").trim().slice(0, 300)}`),
 	].join("\n");
 }
@@ -184,7 +190,7 @@ function headerText(worker: WorkerSummary): string {
 function footerMessage(page: WorkerLogPage): string {
 	const question = page.worker?.pendingQuestion;
 	if (question) return `waiting — asks: ${question}`;
-	const usage = formatUsage(page.worker?.usage, page.worker?.model);
+	const usage = formatUsage(page.worker?.usage, page.worker?.modelId ?? page.worker?.model);
 	return usage ? `${page.state} · ${usage}` : page.state;
 }
 
@@ -237,7 +243,7 @@ export async function watchWorkerTui(options: WatchTuiOptions): Promise<number> 
 		finished = true;
 		loader.stop();
 		footerSlot.clear();
-		const usage = formatUsage(finalPage.worker?.usage, finalPage.worker?.model);
+		const usage = formatUsage(finalPage.worker?.usage, finalPage.worker?.modelId ?? finalPage.worker?.model);
 		footerSlot.addChild(
 			new Text(
 				style.dim(

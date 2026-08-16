@@ -224,11 +224,14 @@ describe("leader MCP tools", () => {
 
 	it("shows the worker's negotiated model and mode when the backend reports them", async () => {
 		await call("neta_spawn", { role: "scout", tier: "senior", task: "look" });
-		transports[0].options.events.session("test-model", "test-mode");
+		transports[0].options.events.session({ model: "test-model", mode: "test-mode", agentInfo: "bridge@2.0.0" });
 
 		const workers = bodyOf(await call("neta_workers"));
 		expect(workers).toContain("model=test-model");
 		expect(workers).toContain("mode=test-mode");
+		// List lines stay compact; the bridge shows in the single-worker view.
+		expect(workers).not.toContain("bridge@2.0.0");
+		expect(bodyOf(await call("neta_workers", { workerId: "w1" }))).toContain("Bridge: bridge@2.0.0");
 	});
 
 	it("names the workers that exist when asked about one that does not", async () => {
