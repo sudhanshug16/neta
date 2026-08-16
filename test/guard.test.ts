@@ -59,6 +59,42 @@ describe("bash guard", () => {
 		}
 	});
 
+	it("denies newly-covered write bypasses", () => {
+		for (const command of [
+			'python -c \'open("file", "w")\'',
+			"python3 write.py",
+			'node -e \'require("fs").writeFileSync("file", "x")\'',
+			'ruby -e \'File.write("file", "x")\'',
+			"perl -e 'open FH, \">file\"'",
+			"sh -c 'echo x > file'",
+			"python - <<'PY'\nopen('file', 'w')\nPY",
+			"npm install",
+			"pnpm add typescript",
+			"yarn ci",
+			"bun install",
+			"rsync source/ target/",
+			"dd if=/dev/zero of=file",
+			"install source target",
+			"tee file",
+			"tar -xzf archive.tgz",
+			"unzip archive.zip",
+			"chmod +x script.sh",
+			"chown user file",
+			"ln -s source target",
+			"git am patch.mbox",
+			"git apply patch.diff",
+			"git checkout -- file",
+			"git restore file",
+			"git stash pop",
+			"curl -o file https://example.test/file",
+			"curl -O https://example.test/file",
+			"curl --output=file https://example.test/file",
+			"wget https://example.test/file",
+		]) {
+			expect(denied(command), command).toBe(true);
+		}
+	});
+
 	it("sees through env prefixes, sudo and absolute paths", () => {
 		expect(denied("FOO=1 rm -rf dist")).toBe(true);
 		expect(denied("sudo rm -rf /etc/hosts")).toBe(true);

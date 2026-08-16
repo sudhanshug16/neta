@@ -7,7 +7,13 @@
 
 import { connect } from "node:net";
 import { APP_NAME } from "../config.ts";
-import { type ChannelRequest, type ChannelResponse, NETA_SOCKET_ENV, NETA_WORKER_ENV } from "./protocol.ts";
+import {
+	type ChannelRequest,
+	type ChannelResponse,
+	NETA_SOCKET_ENV,
+	NETA_WORKER_ENV,
+	NETA_WORKER_TOKEN_ENV,
+} from "./protocol.ts";
 
 const CHANNEL_COMMANDS = new Set(["progress", "ask", "say", "room", "status"]);
 
@@ -79,8 +85,14 @@ function parseTail(args: string[]): number | undefined {
 export async function handleWorkerChannelCommand(args: string[]): Promise<boolean> {
 	const address = process.env[NETA_SOCKET_ENV];
 	const workerId = process.env[NETA_WORKER_ENV];
+	const token = process.env[NETA_WORKER_TOKEN_ENV];
 	const command = args[0];
 	if (!address || !workerId || !command || !CHANNEL_COMMANDS.has(command)) return false;
+	if (!token) {
+		console.error("Worker channel token is missing.");
+		process.exitCode = 1;
+		return true;
+	}
 
 	const rest = args.slice(1);
 	if (rest.includes("--help") || rest.includes("-h")) {
@@ -90,14 +102,14 @@ export async function handleWorkerChannelCommand(args: string[]): Promise<boolea
 
 	let request: ChannelRequest;
 	if (command === "room") {
-		request = { type: "room", workerId, tail: parseTail(rest) };
+		request = { type: "room", workerId, token, tail: parseTail(rest) };
 	} else if (command === "status") {
 		if (rest.length !== 1 || rest[0] !== "--writers") {
 			console.error(`Usage: ${APP_NAME} status --writers`);
 			process.exitCode = 1;
 			return true;
 		}
-		request = { type: "writer-status", workerId };
+		request = { type: "writer-status", workerId, token };
 	} else {
 		const text = rest.join(" ").trim();
 		if (!text) {
@@ -105,7 +117,7 @@ export async function handleWorkerChannelCommand(args: string[]): Promise<boolea
 			process.exitCode = 1;
 			return true;
 		}
-		request = { type: command as "progress" | "ask" | "say", workerId, text };
+		request = { type: command as "progress" | "ask" | "say", workerId, token, text };
 	}
 
 	try {

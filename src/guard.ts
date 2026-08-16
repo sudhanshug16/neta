@@ -31,7 +31,16 @@ const WRITE_COMMANDS = new Set([
 	"truncate",
 	"chmod",
 	"chown",
+	"rsync",
+	"unzip",
 ]);
+
+/** Package-manager subcommands that install or rewrite dependencies and lockfiles. */
+const PACKAGE_MANAGER_WRITES = new Set(["install", "add", "ci"]);
+
+/** Interpreters can write through inline code or a supplied script. */
+const SCRIPT_INTERPRETERS = new Set(["python", "python3", "node", "ruby", "perl", "sh", "bash", "zsh"]);
+const INTERPRETER_INSPECTION_FLAGS = new Set(["--help", "-h", "--version", "-v"]);
 
 /** Git subcommands that write to the tree, the index, or history. */
 const WRITE_GIT_SUBCOMMANDS = new Set([
@@ -112,6 +121,34 @@ export function inspectBashCommand(command: string): GuardVerdict {
 		const rest = parts.slice(index + 1);
 
 		if (WRITE_COMMANDS.has(head)) return deny(`\`${head}\` changes files.`);
+		const packageWrite = rest.find((word) => PACKAGE_MANAGER_WRITES.has(word));
+		if (["npm", "pnpm", "yarn", "bun"].includes(head) && packageWrite) {
+			return deny(`\`${head} ${packageWrite}\` writes dependencies or a lockfile.`);
+		}
+
+		if (SCRIPT_INTERPRETERS.has(head)) {
+			const meaningfulArguments = rest.filter((word) => !/^\d*>{1,2}/.test(word));
+			if (meaningfulArguments.some((word) => !INTERPRETER_INSPECTION_FLAGS.has(word))) {
+				return deny(`\`${head}\` can run code that writes files.`);
+			}
+		}
+
+		if (head === "tar" && rest.some((word) => word === "--extract" || /^-?[A-Za-z]*x[A-Za-z]*$/.test(word))) {
+			return deny("`tar` extraction writes files.");
+		}
+		if (
+			head === "curl" &&
+			rest.some(
+				(word) =>
+					/^-(?:o|O)/.test(word) ||
+					word === "--output" ||
+					word.startsWith("--output=") ||
+					word === "--remote-name",
+			)
+		) {
+			return deny("`curl` output writes files.");
+		}
+		if (head === "wget") return deny("`wget` writes downloaded files.");
 
 		if (head === "git") {
 			const subcommand = rest.find((word) => !word.startsWith("-"));

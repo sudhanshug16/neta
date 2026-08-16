@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ClaudeAdapter, DENIED_TOOLS } from "../src/adapters/claude.ts";
 import { CodexAdapter, createHomeOverlay, preserveRefreshedAuth } from "../src/adapters/codex.ts";
-import { OpenCodeAdapter } from "../src/adapters/opencode.ts";
+import { OpenCodeAdapter, READ_ONLY_BASH_PATTERNS } from "../src/adapters/opencode.ts";
 import { type LeaderLaunchContext, MCP_SERVER_NAME } from "../src/adapters/types.ts";
 
 const dirs: string[] = [];
@@ -207,8 +207,10 @@ describe("OpenCode adapter", () => {
 		expect(existsSync(config.instructions[0])).toBe(true);
 		expect(readFileSync(config.instructions[0], "utf-8")).toContain("You are Neta");
 		expect(config.permission.edit).toBe("deny");
-		expect(config.permission.bash["sed -i*"]).toBe("deny");
-		expect(config.permission.bash["*"]).toBe("allow");
+		expect(config.permission.bash).toEqual({
+			"*": "deny",
+			...Object.fromEntries(READ_ONLY_BASH_PATTERNS.map((pattern) => [pattern, "allow"])),
+		});
 		expect(config.mcp.neta.command).toEqual(["/usr/bin/node", "/opt/neta/cli.js", "mcp"]);
 		expect(config.mcp.neta.environment.NETA_LEADER_TOKEN).toBe("tok");
 	});

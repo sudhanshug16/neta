@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { rmSync } from "node:fs";
-import { NETA_SOCKET_ENV, NETA_WORKER_ENV } from "../src/channel/protocol.ts";
+import { NETA_SOCKET_ENV, NETA_WORKER_ENV, NETA_WORKER_TOKEN_ENV } from "../src/channel/protocol.ts";
 import { WorkerManager } from "../src/orchestrator/manager.ts";
 import type { PromptOutcome, TransportOptions, WorkerTransportDriver } from "../src/orchestrator/transport.ts";
 import { NetaConfig } from "../src/settings.ts";
@@ -97,6 +97,7 @@ describe("WorkerManager", () => {
 		expect(transport.options.systemPrompt).toContain("You are read-only");
 		expect(transport.options.env[NETA_SOCKET_ENV]).toBe("/tmp/neta-test.sock");
 		expect(transport.options.env[NETA_WORKER_ENV]).toBe(summary.id);
+		expect(transport.options.env[NETA_WORKER_TOKEN_ENV]).toMatch(/^[a-f0-9]{32}$/);
 		expect(transport.prompts[0]).toBe("map the auth flow");
 	});
 

@@ -59,14 +59,17 @@ The leader is read-only, enforced with each vendor's own machinery:
 | --- | --- | --- |
 | Claude Code | `permissions.deny` on Edit/Write/NotebookEdit | PreToolUse hook running `neta guard` |
 | Codex | kernel sandbox | same kernel sandbox (`sandbox_mode = "read-only"`) |
-| OpenCode | `permission.edit: deny` | denied bash patterns |
+| OpenCode | `permission.edit: deny` | bash denied by default; explicit read-only command allowlist |
 
 Codex's is the strongest: the kernel refuses the write, so there is no pattern
-to outsmart. Claude Code and OpenCode rely on Neta's guard, which denies
-redirects into files, in-place editors, `tee`, `patch`, the file-moving
-commands, and the git subcommands that change a repository. The guard is a
-list, and a list can be incomplete — that is stated here rather than papered
-over.
+to outsmart. Claude Code relies on Neta's guard, which denies redirects into
+files, in-place editors, `tee`, `patch`, the file-moving commands, and git
+subcommands that change a repository. OpenCode instead denies bash by default
+and allows only listed read-only inspection commands; both approaches are
+weaker than a kernel sandbox.
+
+All Neta processes run as the same OS user; tokens separate sessions and roles,
+not a malicious process running as that same user.
 
 Workers are restricted at the ACP layer: a worker without the writer slot has
 its file-editing tool calls rejected by Neta, whatever its prompt says. Its

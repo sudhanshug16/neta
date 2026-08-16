@@ -20,7 +20,7 @@ async function send(address: string, request: ChannelRequest, okText: string) {
 	return text(response.text ?? okText);
 }
 
-export function workerTools(address: string, workerId: string): McpTool[] {
+export function workerTools(address: string, workerId: string, token: string): McpTool[] {
 	return [
 		{
 			name: "neta_progress",
@@ -33,7 +33,8 @@ export function workerTools(address: string, workerId: string): McpTool[] {
 				properties: { message: { type: "string" } },
 				required: ["message"],
 			},
-			run: (args) => send(address, { type: "progress", workerId, text: requireString(args, "message") }, "ok"),
+			run: (args) =>
+				send(address, { type: "progress", workerId, token, text: requireString(args, "message") }, "ok"),
 		},
 		{
 			name: "neta_ask",
@@ -45,7 +46,8 @@ export function workerTools(address: string, workerId: string): McpTool[] {
 				properties: { question: { type: "string" } },
 				required: ["question"],
 			},
-			run: (args) => send(address, { type: "ask", workerId, text: requireString(args, "question") }, "(no answer)"),
+			run: (args) =>
+				send(address, { type: "ask", workerId, token, text: requireString(args, "question") }, "(no answer)"),
 		},
 		{
 			name: "neta_say",
@@ -55,7 +57,7 @@ export function workerTools(address: string, workerId: string): McpTool[] {
 				properties: { message: { type: "string" } },
 				required: ["message"],
 			},
-			run: (args) => send(address, { type: "say", workerId, text: requireString(args, "message") }, "ok"),
+			run: (args) => send(address, { type: "say", workerId, token, text: requireString(args, "message") }, "ok"),
 		},
 		{
 			name: "neta_room",
@@ -65,7 +67,7 @@ export function workerTools(address: string, workerId: string): McpTool[] {
 				properties: { tail: { type: "number", description: "Only the last N posts." } },
 			},
 			run: (args) =>
-				send(address, { type: "room", workerId, tail: optionalNumber(args, "tail") }, "(room is empty)"),
+				send(address, { type: "room", workerId, token, tail: optionalNumber(args, "tail") }, "(room is empty)"),
 		},
 		{
 			name: "neta_status",
@@ -73,7 +75,7 @@ export function workerTools(address: string, workerId: string): McpTool[] {
 				"Show only active, queued and finished writers. Use this before inspecting files while another worker may " +
 				"have uncommitted changes in the shared checkout.",
 			inputSchema: { type: "object" },
-			run: () => send(address, { type: "writer-status", workerId }, "(no writers)"),
+			run: () => send(address, { type: "writer-status", workerId, token }, "(no writers)"),
 		},
 	];
 }

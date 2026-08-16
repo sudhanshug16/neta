@@ -11,7 +11,7 @@
 import { APP_NAME } from "../config.ts";
 import { findSession, listSessions } from "../session.ts";
 import { sendChannelRequest } from "./client.ts";
-import { type LeaderChannelRequest, NETA_LEADER_ENV, NETA_SOCKET_ENV } from "./protocol.ts";
+import { type LeaderChannelRequest, NETA_LEADER_ENV, NETA_SOCKET_ENV, NETA_WORKER_ENV } from "./protocol.ts";
 
 export const LEADER_COMMANDS = new Set(["spawn", "workers", "status", "log", "wait", "send", "answer", "kill"]);
 
@@ -132,6 +132,9 @@ interface Target {
  * `neta workers` work while you watch from a second window.
  */
 function resolveTarget(args: string[]): Target | undefined {
+	// A worker must never borrow a same-user session-registry token. The registry
+	// is only the convenience path for a person in another terminal.
+	if (process.env[NETA_WORKER_ENV]) return undefined;
 	const index = args.indexOf("--session");
 	const sessionId = index === -1 ? undefined : args[index + 1];
 	const rest = index === -1 ? args : [...args.slice(0, index), ...args.slice(index + 2)];

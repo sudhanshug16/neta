@@ -5,9 +5,10 @@ import { join } from "node:path";
 import { handleWorkerChannelCommand, sendChannelRequest } from "../src/channel/client.ts";
 import { handleLeaderChannelCommand } from "../src/channel/leader-cli.ts";
 import type { ChannelResponse, LeaderChannelRequest } from "../src/channel/protocol.ts";
-import { NETA_LEADER_ENV, NETA_SOCKET_ENV, NETA_WORKER_ENV } from "../src/channel/protocol.ts";
+import { NETA_LEADER_ENV, NETA_SOCKET_ENV, NETA_WORKER_ENV, NETA_WORKER_TOKEN_ENV } from "../src/channel/protocol.ts";
 import type { ChannelHandler } from "../src/channel/server.ts";
 import { ChannelServer } from "../src/channel/server.ts";
+import { writeSessionRecord } from "../src/session.ts";
 import { EnvStub, waitFor } from "./helpers.ts";
 
 const env = new EnvStub();
@@ -21,6 +22,13 @@ describe("worker channel", () => {
 	let leaderRequests: LeaderChannelRequest[];
 
 	const handler: ChannelHandler = {
+		authenticateWorker(workerId, token) {
+			return workerId === "ro1" || workerId === "ro7"
+				? token === "worker-token"
+					? { ok: true }
+					: { ok: false, error: `Invalid worker token for ${workerId}.` }
+				: { ok: false, error: `Invalid worker token for ${workerId}.` };
+		},
 		progress(workerId, text) {
 			notified.push({ workerId, text });
 			return { ok: true };
@@ -76,14 +84,24 @@ describe("worker channel", () => {
 	});
 
 	it("answers progress immediately", async () => {
-		const response = await sendChannelRequest(address, { type: "progress", workerId: "ro1", text: "halfway" });
+		const response = await sendChannelRequest(address, {
+			type: "progress",
+			workerId: "ro1",
+			token: "worker-token",
+			text: "halfway",
+		});
 
 		expect(response).toEqual({ ok: true });
 		expect(notified).toEqual([{ workerId: "ro1", text: "halfway" }]);
 	});
 
 	it("keeps an ask open until the leader answers", async () => {
-		const pending = sendChannelRequest(address, { type: "ask", workerId: "ro1", text: "which db?" });
+		const pending = sendChannelRequest(address, {
+			type: "ask",
+			workerId: "ro1",
+			token: "worker-token",
+			text: "which db?",
+		});
 		await waitFor(() => expect(asked).toHaveLength(1));
 
 		asked[0].resolve({ ok: true, text: "postgres" });
@@ -98,10 +116,29 @@ describe("worker channel", () => {
 		expect(response.ok === false && response.error).toContain("Unknown request type");
 	});
 
+	it("rejects missing or incorrect worker tokens before dispatching", async () => {
+		const missing = await sendChannelRequest(address, {
+			type: "progress",
+			workerId: "ro1",
+			text: "halfway",
+		} as never);
+		const wrong = await sendChannelRequest(address, {
+			type: "progress",
+			workerId: "ro1",
+			token: "wrong-token",
+			text: "halfway",
+		});
+
+		expect(missing).toEqual({ ok: false, error: "Invalid worker token for ro1." });
+		expect(wrong).toEqual({ ok: false, error: "Invalid worker token for ro1." });
+		expect(notified).toEqual([]);
+	});
+
 	describe("CLI subcommands", () => {
 		beforeEach(() => {
 			env.set(NETA_SOCKET_ENV, address);
 			env.set(NETA_WORKER_ENV, "ro7");
+			env.set(NETA_WORKER_TOKEN_ENV, "worker-token");
 		});
 
 		it("sends progress through the channel", async () => {
@@ -167,6 +204,25 @@ describe("worker channel", () => {
 
 		await expect(handleWorkerChannelCommand(["progress", "the team about the outage"])).resolves.toBe(false);
 		expect(notified).toEqual([]);
+	});
+
+	it("does not resolve a registry target when the caller is a worker", async () => {
+		writeSessionRecord(
+			{
+				id: "leader-session",
+				socket: address,
+				token: "leader-token",
+				cwd: process.cwd(),
+				leader: "claude",
+				pid: process.pid,
+				startedAt: Date.now(),
+			},
+			tempDir,
+		);
+		env.set(NETA_WORKER_ENV, "ro7");
+
+		await expect(handleLeaderChannelCommand(["workers"])).resolves.toBe(false);
+		expect(leaderRequests).toEqual([]);
 	});
 
 	describe("leader CLI subcommands", () => {

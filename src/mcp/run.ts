@@ -13,7 +13,13 @@
 import { randomBytes } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { createChannelAddress, NETA_LEADER_ENV, NETA_SOCKET_ENV, NETA_WORKER_ENV } from "../channel/protocol.ts";
+import {
+	createChannelAddress,
+	NETA_LEADER_ENV,
+	NETA_SOCKET_ENV,
+	NETA_WORKER_ENV,
+	NETA_WORKER_TOKEN_ENV,
+} from "../channel/protocol.ts";
 import { ChannelServer } from "../channel/server.ts";
 import { type CliInvocation, createLeaderCliShim, prependToPath, resolveSelfInvocation } from "../cli-shim.ts";
 import { getAgentDir } from "../config.ts";
@@ -105,12 +111,12 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 			shimDir ??= await createLeaderCliShim(invocation);
 			return { PATH: prependToPath(shimDir, process.env.PATH) };
 		},
-		workerMcpServers: (workerId) => [
+		workerMcpServers: (workerId, _scratchDir, token) => [
 			{
 				name: "neta",
 				command: invocation.command,
 				args: [...invocation.prefixArgs, "mcp", "--worker"],
-				env: { [NETA_SOCKET_ENV]: address, [NETA_WORKER_ENV]: workerId },
+				env: { [NETA_SOCKET_ENV]: address, [NETA_WORKER_ENV]: workerId, [NETA_WORKER_TOKEN_ENV]: token },
 			},
 		],
 		// `--mux` at launch decided this; settings answer when nobody did.
@@ -162,16 +168,17 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 export async function runWorkerBridge(): Promise<void> {
 	const address = process.env[NETA_SOCKET_ENV];
 	const workerId = process.env[NETA_WORKER_ENV];
-	if (!address || !workerId) {
+	const token = process.env[NETA_WORKER_TOKEN_ENV];
+	if (!address || !workerId || !token) {
 		process.stderr.write(
-			`[neta] ${NETA_SOCKET_ENV} and ${NETA_WORKER_ENV} must be set; this server only runs inside a Neta worker.\n`,
+			`[neta] ${NETA_SOCKET_ENV}, ${NETA_WORKER_ENV} and ${NETA_WORKER_TOKEN_ENV} must be set; this server only runs inside a Neta worker.\n`,
 		);
 		process.exitCode = 1;
 		return;
 	}
 	const mcp = createMcpServer(
 		"neta-worker",
-		workerTools(address, workerId),
+		workerTools(address, workerId, token),
 		"Report progress milestones to your leader with neta_progress, and use neta_ask when you are blocked.",
 	);
 	await mcp.connect(new StdioServerTransport());

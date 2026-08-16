@@ -17,6 +17,8 @@ import { join } from "node:path";
 export const NETA_SOCKET_ENV = "NETA_SOCKET";
 /** Set on every worker process so the leader knows which worker is calling. */
 export const NETA_WORKER_ENV = "NETA_WORKER_ID";
+/** Per-worker capability token. It authorizes worker-channel requests for that one worker. */
+export const NETA_WORKER_TOKEN_ENV = "NETA_WORKER_TOKEN";
 /** Scratch directory outside the repo, one per worker. */
 export const NETA_SCRATCH_ENV = "NETA_SCRATCH";
 /**
@@ -27,15 +29,15 @@ export const NETA_LEADER_ENV = "NETA_LEADER_TOKEN";
 
 export type WorkerChannelRequest =
 	/** Record a progress milestone in this worker's log. The leader pulls it; nothing is pushed. */
-	| { type: "progress"; workerId: string; text: string }
+	| { type: "progress"; workerId: string; token: string; text: string }
 	/** Block until the leader answers. Not available to juniors. */
-	| { type: "ask"; workerId: string; text: string }
+	| { type: "ask"; workerId: string; token: string; text: string }
 	/** Post to the worker's room transcript. */
-	| { type: "say"; workerId: string; text: string }
+	| { type: "say"; workerId: string; token: string; text: string }
 	/** Read the worker's room transcript. */
-	| { type: "room"; workerId: string; tail?: number }
+	| { type: "room"; workerId: string; token: string; tail?: number }
 	/** Read only active, queued and finished writers. */
-	| { type: "writer-status"; workerId: string };
+	| { type: "writer-status"; workerId: string; token: string };
 
 /**
  * Requests only a token holder may make. These mirror the leader's MCP tools,

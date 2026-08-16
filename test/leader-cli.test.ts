@@ -12,11 +12,18 @@ import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createChannelAddress, NETA_LEADER_ENV, NETA_SOCKET_ENV, NETA_WORKER_ENV } from "../src/channel/protocol.ts";
+import {
+	createChannelAddress,
+	NETA_LEADER_ENV,
+	NETA_SOCKET_ENV,
+	NETA_WORKER_ENV,
+	NETA_WORKER_TOKEN_ENV,
+} from "../src/channel/protocol.ts";
 import { ChannelServer } from "../src/channel/server.ts";
 import { createLeaderCliShim, prependToPath } from "../src/cli-shim.ts";
 import { WorkerManager } from "../src/orchestrator/manager.ts";
 import type { PromptOutcome, TransportOptions, WorkerTransportDriver } from "../src/orchestrator/transport.ts";
+import { writeSessionRecord } from "../src/session.ts";
 import { NetaConfig } from "../src/settings.ts";
 
 class FakeTransport implements WorkerTransportDriver {
@@ -80,6 +87,8 @@ describe("leader CLI over the real shim", () => {
 	const asLeader = (): Record<string, string> => ({
 		[NETA_SOCKET_ENV]: address,
 		[NETA_LEADER_ENV]: manager.leaderToken,
+		[NETA_WORKER_ENV]: "",
+		[NETA_WORKER_TOKEN_ENV]: "",
 	});
 
 	// Under vitest, process.argv[1] is the test runner, so name our CLI directly.
@@ -165,6 +174,8 @@ describe("leader CLI over the real shim", () => {
 				NETA_DIR: emptyDir,
 				[NETA_SOCKET_ENV]: "",
 				[NETA_LEADER_ENV]: "",
+				[NETA_WORKER_ENV]: "",
+				[NETA_WORKER_TOKEN_ENV]: "",
 			});
 
 			expect(result.code).toBe(0);
@@ -191,6 +202,7 @@ describe("leader CLI over the real shim", () => {
 		const progressed = await neta(["progress", "reading auth.ts"], {
 			[NETA_SOCKET_ENV]: address,
 			[NETA_WORKER_ENV]: "ro1",
+			[NETA_WORKER_TOKEN_ENV]: transports[0].options.env[NETA_WORKER_TOKEN_ENV],
 		});
 
 		expect(progressed.code).toBe(0);
@@ -207,16 +219,32 @@ describe("leader CLI over the real shim", () => {
 		expect(result.stderr).toContain('Unknown command "notify"');
 	});
 
-	it("refuses leader commands from a worker, which never holds the token", async () => {
+	it("refuses leader words from a worker and skips the session registry", async () => {
+		const registry = mkdtempSync(join(tmpdir(), "neta-worker-registry-"));
+		writeSessionRecord(
+			{
+				id: "leader-session",
+				socket: address,
+				token: manager.leaderToken,
+				cwd: process.cwd(),
+				leader: "claude",
+				pid: process.pid,
+				startedAt: Date.now(),
+			},
+			registry,
+		);
 		const result = await neta(["spawn", "--role", "scout", "--tier", "senior", "escalate"], {
+			NETA_DIR: registry,
 			[NETA_SOCKET_ENV]: address,
 			[NETA_WORKER_ENV]: "ro1",
-			[NETA_LEADER_ENV]: "guessed-token",
+			[NETA_WORKER_TOKEN_ENV]: "worker-token",
 		});
 
 		expect(result.code).toBe(1);
-		expect(result.stderr).toContain("Invalid leader token");
+		expect(result.stderr).toContain("Workers cannot run leader command `spawn`");
+		expect(result.stderr).toContain("progress, ask, say, room, status --writers");
 		expect(transports).toHaveLength(0);
+		await rm(registry, { recursive: true, force: true });
 	});
 
 	it("reports an unknown worker instead of failing silently", async () => {

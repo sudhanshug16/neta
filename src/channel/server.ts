@@ -17,6 +17,8 @@ import {
 } from "./protocol.ts";
 
 export interface ChannelHandler {
+	/** Reject a caller that does not hold the capability issued for this worker. */
+	authenticateWorker(workerId: string, token: string | undefined): ChannelResponse;
 	progress(workerId: string, text: string): ChannelResponse;
 	ask(workerId: string, text: string, signal: AbortSignal): Promise<ChannelResponse>;
 	say(workerId: string, text: string): ChannelResponse;
@@ -113,18 +115,23 @@ export class ChannelServer {
 			try {
 				switch (request.type) {
 					case "progress":
+						if (!this.authenticateWorker(request, handler, respond)) return;
 						respond(handler.progress(request.workerId, request.text));
 						break;
 					case "say":
+						if (!this.authenticateWorker(request, handler, respond)) return;
 						respond(handler.say(request.workerId, request.text));
 						break;
 					case "room":
+						if (!this.authenticateWorker(request, handler, respond)) return;
 						respond(handler.room(request.workerId, request.tail));
 						break;
 					case "writer-status":
+						if (!this.authenticateWorker(request, handler, respond)) return;
 						respond(handler.writerStatus(request.workerId));
 						break;
 					case "ask":
+						if (!this.authenticateWorker(request, handler, respond)) return;
 						respond(await handler.ask(request.workerId, request.text, abort.signal));
 						break;
 					default:
@@ -138,5 +145,16 @@ export class ChannelServer {
 				respond({ ok: false, error: error instanceof Error ? error.message : String(error) });
 			}
 		});
+	}
+
+	private authenticateWorker(
+		request: Extract<ChannelRequest, { workerId: string }> & { token?: string },
+		handler: ChannelHandler,
+		respond: (response: ChannelResponse) => void,
+	): boolean {
+		const response = handler.authenticateWorker(request.workerId, request.token);
+		if (response.ok) return true;
+		respond(response);
+		return false;
 	}
 }

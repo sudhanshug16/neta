@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AcpWorkerTransport } from "../acp/transport.ts";
 import type { ChannelResponse, LeaderChannelRequest } from "../channel/protocol.ts";
-import { NETA_SCRATCH_ENV, NETA_SOCKET_ENV, NETA_WORKER_ENV } from "../channel/protocol.ts";
+import { NETA_SCRATCH_ENV, NETA_SOCKET_ENV, NETA_WORKER_ENV, NETA_WORKER_TOKEN_ENV } from "../channel/protocol.ts";
 import type { ChannelHandler } from "../channel/server.ts";
 import { APP_NAME } from "../config.ts";
 import { loadRoleText, roleNames, workingAgreement } from "../prompts/roles.ts";
@@ -66,6 +66,8 @@ interface WorkerRecord {
 	endedAt?: number;
 	result?: string;
 	scratchDir: string;
+	/** Capability token for this worker's channel requests. */
+	channelToken: string;
 	driver: WorkerTransportDriver;
 	log: WorkerLogEntry[];
 	/** Log entries the leader has already been shown. */
@@ -129,7 +131,7 @@ export interface WorkerManagerOptions {
 	 * door a sandboxed worker uses to reach Neta, since its shell may not be
 	 * allowed to open a socket.
 	 */
-	workerMcpServers?: (workerId: string, scratchDir: string) => WorkerMcpServer[];
+	workerMcpServers?: (workerId: string, scratchDir: string, token: string) => WorkerMcpServer[];
 	/** Opens a pane per worker. Omitted means headless. */
 	panes?: WorkerPaneHost;
 	/** Persists a detached worker group while it can outlive the manager. */
@@ -278,6 +280,7 @@ export class WorkerManager implements ChannelHandler {
 			state: shouldQueue ? "queued" : "starting",
 			startedAt: Date.now(),
 			scratchDir,
+			channelToken: randomBytes(16).toString("hex"),
 			log: [],
 			logCursor: 0,
 			queue: Promise.resolve(),
@@ -322,6 +325,7 @@ export class WorkerManager implements ChannelHandler {
 				...backend.env,
 				[NETA_SOCKET_ENV]: this.options.channelAddress,
 				[NETA_WORKER_ENV]: id,
+				[NETA_WORKER_TOKEN_ENV]: record.channelToken,
 				[NETA_SCRATCH_ENV]: scratchDir,
 			},
 			command: backend.command,
@@ -330,7 +334,7 @@ export class WorkerManager implements ChannelHandler {
 			writer,
 			systemPrompt,
 			scratchDir,
-			mcpServers: this.options.workerMcpServers?.(id, scratchDir) ?? [],
+			mcpServers: this.options.workerMcpServers?.(id, scratchDir, record.channelToken) ?? [],
 			events: {
 				log: (kind, text) => this.appendLog(record, kind, text),
 				usage: (usage) => {
@@ -690,6 +694,14 @@ export class WorkerManager implements ChannelHandler {
 		if (!record) return { ok: false, error: `Unknown worker ${workerId}.` };
 		record.lastProgress = { text, at: Date.now() };
 		this.appendLog(record, "progress", text);
+		return { ok: true };
+	}
+
+	authenticateWorker(workerId: string, token: string | undefined): ChannelResponse {
+		const record = this.workers.get(workerId);
+		if (!record || !token || record.channelToken !== token) {
+			return { ok: false, error: `Invalid worker token for ${workerId}.` };
+		}
 		return { ok: true };
 	}
 
@@ -1183,6 +1195,7 @@ export class WorkerManager implements ChannelHandler {
 				...backend.env,
 				[NETA_SOCKET_ENV]: this.options.channelAddress,
 				[NETA_WORKER_ENV]: record.id,
+				[NETA_WORKER_TOKEN_ENV]: record.channelToken,
 				[NETA_SCRATCH_ENV]: record.scratchDir,
 			},
 			command: backend.command,
@@ -1191,7 +1204,7 @@ export class WorkerManager implements ChannelHandler {
 			writer: true,
 			systemPrompt,
 			scratchDir: record.scratchDir,
-			mcpServers: this.options.workerMcpServers?.(record.id, record.scratchDir) ?? [],
+			mcpServers: this.options.workerMcpServers?.(record.id, record.scratchDir, record.channelToken) ?? [],
 			events: {
 				log: (kind, text) => this.appendLog(record, kind, text),
 				usage: (usage) => {

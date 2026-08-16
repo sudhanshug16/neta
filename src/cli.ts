@@ -20,6 +20,7 @@
 import { attachWorker } from "./attach.ts";
 import { handleWorkerChannelCommand } from "./channel/client.ts";
 import { handleLeaderChannelCommand, LEADER_COMMANDS } from "./channel/leader-cli.ts";
+import { NETA_WORKER_ENV } from "./channel/protocol.ts";
 import { APP_NAME, VERSION } from "./config.ts";
 import { detectLeaderBackends } from "./detect.ts";
 import { runGuard } from "./guard.ts";
@@ -92,6 +93,13 @@ async function main(argv: string[]): Promise<void> {
 	const command = args[0];
 
 	if (await handleWorkerChannelCommand(args)) return;
+	if (command && LEADER_COMMANDS.has(command) && process.env[NETA_WORKER_ENV]) {
+		console.error(
+			`Workers cannot run leader command \`${command}\`. Use worker channel commands: progress, ask, say, room, status --writers.`,
+		);
+		process.exitCode = 1;
+		return;
+	}
 	if (await handleLeaderChannelCommand(args)) return;
 
 	switch (command) {

@@ -9,10 +9,10 @@
  * - `mcp.neta` registers the control plane as a local server.
  * - `permission.edit: "deny"` removes the edit tools.
  *
- * OpenCode's permission model does not sandbox the shell, so bash writes are
- * caught by the same guard Claude Code uses, wired in as a bash permission
- * pattern list. That is a weaker guarantee than Codex's kernel sandbox, and the
- * launcher says so rather than implying they are equivalent.
+ * OpenCode's permission config accepts ordered glob rules for bash commands.
+ * Start from deny and allow only read-only inspection commands. This remains
+ * weaker than Codex's kernel sandbox, but avoids a denylist that silently lets
+ * a newly-shaped write command through.
  */
 
 import { writeFile } from "node:fs/promises";
@@ -26,23 +26,56 @@ import {
 	MCP_SERVER_NAME,
 } from "./types.ts";
 
-/** Shell shapes that edit files. Denied outright for a leader. */
-export const DENIED_BASH_PATTERNS = [
-	"sed -i*",
-	"tee *",
-	"patch *",
-	"git commit*",
-	"git apply*",
-	"git checkout*",
-	"git restore*",
-	"git reset*",
+/** Explicit inspection commands allowed after the catch-all deny rule. */
+export const READ_ONLY_BASH_PATTERNS = [
+	"ls",
+	"ls *",
+	"cat",
+	"cat *",
+	"grep",
+	"grep *",
+	"rg",
+	"rg *",
+	"find",
+	"find *",
+	"head",
+	"head *",
+	"tail",
+	"tail *",
+	"wc",
+	"wc *",
+	"pwd",
+	"which *",
+	"type *",
+	"stat *",
+	"file *",
+	"du *",
+	"df",
+	"df *",
+	"git status",
+	"git status *",
+	"git log",
+	"git log *",
+	"git diff",
+	"git diff *",
+	"git show",
+	"git show *",
+	"git branch",
+	"git branch *",
+	"git rev-parse *",
+	"git ls-files",
+	"git ls-files *",
+	"git grep *",
+	"git blame *",
+	"git show-ref",
+	"git show-ref *",
+	"git worktree list",
 ];
 
 export function openCodeConfig(context: LeaderLaunchContext, instructionsPath: string): string {
 	const { command, args } = controlPlaneCommand(context);
-	const bash: Record<string, "allow" | "deny"> = {};
-	for (const pattern of DENIED_BASH_PATTERNS) bash[pattern] = "deny";
-	bash["*"] = "allow";
+	const bash: Record<string, "allow" | "deny"> = { "*": "deny" };
+	for (const pattern of READ_ONLY_BASH_PATTERNS) bash[pattern] = "allow";
 
 	return JSON.stringify(
 		{
@@ -80,7 +113,7 @@ export class OpenCodeAdapter implements LeaderAdapter {
 			args: [...context.extraArgs],
 			env: { ...controlPlaneEnv(context), OPENCODE_CONFIG_CONTENT: openCodeConfig(context, instructionsPath) },
 			warnings: [
-				"OpenCode has no kernel sandbox: shell writes are blocked by permission patterns, which is weaker than Codex's read-only sandbox.",
+				"OpenCode has no kernel sandbox: bash is denied by default and only read-only inspection commands are allowed, which is weaker than Codex's read-only sandbox.",
 			],
 		};
 	}

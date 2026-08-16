@@ -150,5 +150,5 @@ work, put writers on Codex, or add backend flags of your own:
 | Variable | Meaning |
 | --- | --- |
 | `NETA_DIR` | Overrides `~/.neta` (settings, roles, skills, session registry). |
-| `NETA_SOCKET`, `NETA_WORKER_ID`, `NETA_SCRATCH` | Set on every worker process. |
+| `NETA_SOCKET`, `NETA_WORKER_ID`, `NETA_WORKER_TOKEN`, `NETA_SCRATCH` | Set on every worker process. |
 | `NETA_LEADER_TOKEN` | Authorizes worker management; set on the leader's process only. |

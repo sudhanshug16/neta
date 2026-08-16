@@ -394,6 +394,7 @@ describe("worker MCP tools", () => {
 	let server: ChannelServer;
 	let manager: WorkerManager;
 	let client: Client;
+	let workerToken: string;
 
 	beforeEach(async () => {
 		dir = mkdtempSync(join(tmpdir(), "neta-worker-mcp-"));
@@ -404,14 +405,17 @@ describe("worker MCP tools", () => {
 			config: new NetaConfig(),
 			channelAddress: address,
 			onEvent: () => {},
-			createTransport: (options) => new FakeTransport(options),
+			createTransport: (options) => {
+				workerToken = options.env.NETA_WORKER_TOKEN;
+				return new FakeTransport(options);
+			},
 		});
 		server = new ChannelServer(address, manager);
 		await server.start();
 		await manager.spawn({ role: "scout", tier: "senior", task: "look" });
 
 		const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
-		await createMcpServer("neta-worker", workerTools(address, "ro1")).connect(serverSide);
+		await createMcpServer("neta-worker", workerTools(address, "ro1", workerToken)).connect(serverSide);
 		client = new Client({ name: "test-worker", version: "0.0.0" });
 		await client.connect(clientSide);
 	});
