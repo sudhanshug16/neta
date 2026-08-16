@@ -1,6 +1,6 @@
 {
 	"name": "@intervene/neta",
-	"version": "1.0.0",
+	"version": "1.1.0",
 	"description": "A leader agent that delegates to tiered worker agents behind the coding-agent CLI you already use.",
 	"license": "MIT",
 	"author": "Sudhanshu Gautam",
