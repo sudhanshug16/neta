@@ -158,6 +158,15 @@ function tier(args: Record<string, unknown>, name = "tier") {
 	return value;
 }
 
+function spawnWaitReminder(summaries: WorkerSummary[]): string {
+	const object = summaries.length === 1 ? "it" : "them";
+	if (summaries.some((summary) => summary.state === "running")) {
+		return `Running — collect ${object} with neta_wait before ending your turn; a worker that finishes after your turn ends reaches nobody.`;
+	}
+	const subject = summaries.length === 1 ? "it" : "they";
+	return `Queued — when ${subject} start${summaries.length === 1 ? "s" : ""}, collect ${object} with neta_wait before ending your turn; a worker that finishes after your turn ends reaches nobody.`;
+}
+
 export function leaderTools(manager: WorkerManager): McpTool[] {
 	const roles = roleNames().join(", ");
 
@@ -233,7 +242,9 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 					summary.state === "queued"
 						? `Queued behind ${summary.queuedBehind}; starts automatically when the writer slot frees.`
 						: "Spawned";
-				return text(`${headline}\n${describe(summary)}\nScratch: ${summary.scratchDir}`);
+				return text(
+					`${headline}\n${describe(summary)}\nScratch: ${summary.scratchDir}\n${spawnWaitReminder([summary])}`,
+				);
 			},
 		},
 		{
@@ -331,6 +342,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 				}
 				const lines = spawned.map(describe);
 				if (failures.length > 0) lines.push(`Failed to spawn: ${failures.join("; ")}`);
+				if (spawned.length > 0) lines.push(spawnWaitReminder(spawned));
 				return text(`Room "${room}"\n${lines.join("\n")}`, spawned.length === 0);
 			},
 		},

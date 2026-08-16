@@ -110,6 +110,9 @@ describe("leader MCP tools", () => {
 
 		expect(result.isError).toBeFalsy();
 		expect(bodyOf(result)).toContain("ro1 scout/apprentice");
+		expect(bodyOf(result)).toContain(
+			"Running — collect it with neta_wait before ending your turn; a worker that finishes after your turn ends reaches nobody.",
+		);
 		expect(transports[0].options.systemPrompt).toContain("You are a scout");
 	});
 
@@ -120,6 +123,9 @@ describe("leader MCP tools", () => {
 
 		expect(second.isError).toBe(false);
 		expect(bodyOf(second)).toContain("Queued");
+		expect(bodyOf(second)).toContain(
+			"Queued — when it starts, collect it with neta_wait before ending your turn; a worker that finishes after your turn ends reaches nobody.",
+		);
 	});
 
 	it("shows linked worker progress in the open-notes footer", async () => {
@@ -250,11 +256,17 @@ describe("leader MCP tools", () => {
 			members: [
 				{ role: "debater", tier: "architect", task: "argue for postgres" },
 				{ role: "debater", tier: "architect", task: "argue for sqlite" },
+				{ role: "debater", tier: "architect", task: "argue for mysql" },
 			],
 		});
 
 		expect(bodyOf(result)).toContain("room=db");
-		expect(transports).toHaveLength(2);
+		expect(
+			bodyOf(result).match(
+				/Running — collect them with neta_wait before ending your turn; a worker that finishes after your turn ends reaches nobody\./g,
+			),
+		).toHaveLength(1);
+		expect(transports).toHaveLength(3);
 		expect(bodyOf(await call("neta_room", { room: "db" }))).toContain("Postgres or SQLite?");
 	});
 

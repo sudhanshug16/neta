@@ -753,12 +753,16 @@ export class WorkerManager implements ChannelHandler {
 					if (summary.state === "queued") {
 						return {
 							ok: true,
-							text: `Queued ${summary.id} (writer) behind ${summary.queuedBehind}; starts automatically when the writer slot frees.`,
+							text:
+								`Queued ${summary.id} (writer) behind ${summary.queuedBehind}; starts automatically when the writer slot frees.\n` +
+								"Queued — when it starts, collect it with neta wait before ending your turn; a worker that finishes after your turn ends reaches nobody.",
 						};
 					}
 					return {
 						ok: true,
-						text: `Spawned ${summary.id} (${summary.role}/${summary.tier}, ${access}, backend ${summary.backend}). You get a message when it finishes or asks a question.`,
+						text:
+							`Spawned ${summary.id} (${summary.role}/${summary.tier}, ${access}, backend ${summary.backend}). You get a message when it finishes or asks a question.\n` +
+							"Running — collect it with neta wait before ending your turn; a worker that finishes after your turn ends reaches nobody.",
 					};
 				}
 				case "workers": {

@@ -950,6 +950,9 @@ describe("WorkerManager", () => {
 
 			expect(response.ok).toBe(true);
 			expect(response.ok && response.text).toContain("scout/expert, read-only");
+			expect(response.ok && response.text).toContain(
+				"Running — collect it with neta wait before ending your turn; a worker that finishes after your turn ends reaches nobody.",
+			);
 			expect(transports[0].prompts[0]).toBe("map auth");
 		});
 
@@ -977,6 +980,9 @@ describe("WorkerManager", () => {
 			expect(response.ok).toBe(true);
 			expect(response.ok && response.text).toContain("Queued");
 			expect(response.ok && response.text).toContain("rw1");
+			expect(response.ok && response.text).toContain(
+				"Queued — when it starts, collect it with neta wait before ending your turn; a worker that finishes after your turn ends reaches nobody.",
+			);
 		});
 
 		it("lists workers, drains a log, and answers a blocked worker", async () => {
