@@ -77,7 +77,24 @@ family without a level (`gpt-5.6-sol`) takes that family's first level.
 Run **`neta models`** to see what a backend actually offers — the ids come from
 the backend itself, so they stay right when a vendor adds a model. OpenCode
 ships no defaults here on purpose: it fronts many providers, and only you know
-which one you logged into.
+which one you logged into. Give its tiers meaning with `tierModels`:
+
+```json
+{
+  "backends": {
+    "opencode": {
+      "tierModels": {
+        "junior": "opencode/deepseek-v4-flash-free",
+        "senior": "openai/gpt-5.4",
+        "staff": "openai/gpt-5.6-sol"
+      }
+    }
+  }
+}
+```
+
+OpenCode model ids are provider-qualified (`provider/model`); Neta passes them
+through unchanged over ACP `session/set_model`.
 
 Neta selects the model over ACP (`session/set_model`), which is why this works
 the same on every backend. It also picks the session's mode: a worker without
@@ -95,6 +112,7 @@ How a worker process is launched. Every worker speaks ACP over stdio.
 | `args` | Its arguments. |
 | `modelArgs` | Appended when a model is requested; `{model}` is substituted. |
 | `modelEnv` | Environment variable carrying the model id, for backends with no model flag. |
+| `tierModels` | Which of this backend's models each tier means, used when a tier names this backend but no model. `neta models <backend>` lists the ids. |
 | `env` | Extra environment for the worker process. |
 | `readOnlyArgs` | Extra arguments for a worker without the writer slot. |
 | `writerArgs` | Extra arguments for the worker that holds it. |
