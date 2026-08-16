@@ -352,6 +352,42 @@ describe("WorkerManager", () => {
 	});
 
 	describe("writer queue", () => {
+		it("reserves the writer slot before asynchronous spawn setup", async () => {
+			let releaseSetup: (() => void) | undefined;
+			const setupGate = new Promise<void>((resolve) => {
+				releaseSetup = resolve;
+			});
+			const parallelTransports: FakeTransport[] = [];
+			const parallel = new WorkerManager({
+				cwd: process.cwd(),
+				agentDir: "/nonexistent-agent-dir",
+				config,
+				channelAddress: "/tmp/neta-parallel-test.sock",
+				onEvent: () => {},
+				prepareEnv: async () => {
+					await setupGate;
+					return {};
+				},
+				createTransport: (options) => {
+					const transport = new FakeTransport(options);
+					parallelTransports.push(transport);
+					return transport;
+				},
+			});
+
+			const firstSpawn = parallel.spawn({ role: "worker", tier: "senior", task: "first", writer: true });
+			const secondSpawn = parallel.spawn({ role: "worker", tier: "senior", task: "second", writer: true });
+			await flush();
+			releaseSetup?.();
+			const [first, second] = await Promise.all([firstSpawn, secondSpawn]);
+
+			expect(first.state).toBe("running");
+			expect(second.state).toBe("queued");
+			expect(parallelTransports).toHaveLength(1);
+			await parallel.dispose();
+			rmSync("/tmp/neta-parallel-test.sock", { force: true });
+		});
+
 		it("queues third writer in FIFO order", async () => {
 			const first = await manager.spawn({ role: "worker", tier: "senior", task: "first", writer: true });
 			const second = await manager.spawn({ role: "worker", tier: "senior", task: "second", writer: true });
@@ -573,6 +609,39 @@ describe("WorkerManager", () => {
 		await expect(
 			manager.spawn({ role: "worker", tier: "senior", task: "next", writer: true }),
 		).resolves.toBeDefined();
+	});
+
+	it("reports a running turn killed instead of failed when the leader stops it", async () => {
+		const summary = await manager.spawn({ role: "worker", tier: "senior", task: "do it", writer: true });
+		const releaseKill = transports[0].delayKill();
+
+		const killing = manager.kill(summary.id);
+		await flush();
+		transports[0].finish({ ok: false, summary: "transport closed" });
+		releaseKill();
+		await killing;
+		await flush();
+
+		expect(manager.get(summary.id).state).toBe("killed");
+		expect(events).not.toContainEqual({ type: "failed", workerId: summary.id, error: "transport closed" });
+	});
+
+	it("shuts down a running and queued writer without starting the queued worker", async () => {
+		await manager.spawn({ role: "worker", tier: "senior", task: "first", writer: true });
+		await manager.spawn({ role: "worker", tier: "senior", task: "second", writer: true });
+		const releaseKill = transports[0].delayKill();
+		let disposed = false;
+		const shutdown = manager.dispose().then(() => {
+			disposed = true;
+		});
+
+		await flush();
+		expect(disposed).toBe(false);
+		expect(transports[0].killed).toBe(true);
+		releaseKill();
+		await shutdown;
+
+		expect(transports).toHaveLength(1);
 	});
 
 	it("waits for the named workers and returns their results", async () => {

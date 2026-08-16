@@ -79,6 +79,8 @@ interface WorkerRecord {
 	queuedPrompts: number;
 	/** Terminal result is captured and its ACP process is being stopped. */
 	finishing?: Promise<void>;
+	/** A leader-initiated stop must beat a rejected in-flight prompt. */
+	killReason?: string;
 	waiters: Array<() => void>;
 	usage?: WorkerUsage;
 	vendorSessionId?: string;
@@ -181,6 +183,8 @@ export class WorkerManager implements ChannelHandler {
 	private noteCounter = 0;
 	/** FIFO queue of writer worker IDs waiting for the slot. */
 	private readonly writerQueue: string[] = [];
+	/** Shutdown has begun; no queued writer may acquire the slot. */
+	private disposed = false;
 
 	constructor(options: WorkerManagerOptions) {
 		this.options = options;
@@ -205,7 +209,6 @@ export class WorkerManager implements ChannelHandler {
 
 	async spawn(request: SpawnRequest): Promise<WorkerSummary> {
 		const writer = request.writer ?? false;
-		const shouldQueue = writer && this.activeWriter;
 
 		// Validate note linkage
 		if (request.note) {
@@ -219,7 +222,6 @@ export class WorkerManager implements ChannelHandler {
 		if (!roleText) {
 			throw new Error(`Unknown role "${request.role}". Available roles: ${roleNames().join(", ")}.`);
 		}
-
 		// Starting a batch while the last one is finished means the last one has
 		// been read, or never will be: let those views close so a long session
 		// does not bury the leader in the tabs of workers that ended an hour ago.
@@ -234,9 +236,23 @@ export class WorkerManager implements ChannelHandler {
 			roomDebaterBackends: this.roomDebaterBackends,
 		});
 		const backend = this.options.config.resolve(request.tier, backendName, writer);
-		const runtimeEnv = (await this.options.prepareEnv?.()) ?? {};
 		const id = `${writer ? "rw" : "ro"}${++this.counter}`;
-		const scratchDir = await mkdtemp(join(tmpdir(), `neta-${id}-`));
+		const reservedWriterSlot = writer && !this.activeWriter;
+		if (reservedWriterSlot) this.activeWriter = id;
+		let runtimeEnv: Record<string, string>;
+		let scratchDir: string;
+		try {
+			runtimeEnv = (await this.options.prepareEnv?.()) ?? {};
+			scratchDir = await mkdtemp(join(tmpdir(), `neta-${id}-`));
+		} catch (error) {
+			if (reservedWriterSlot && this.activeWriter === id) {
+				this.activeWriter = undefined;
+				void this.dequeueNextWriter();
+			}
+			throw error;
+		}
+		const shouldQueue = writer && this.activeWriter !== id;
+		if (writer && !this.activeWriter) this.activeWriter = id;
 
 		const systemPrompt = [
 			roleText.trim(),
@@ -331,7 +347,6 @@ export class WorkerManager implements ChannelHandler {
 		record.driver = this.createTransport(transportOptions);
 		if (writer) {
 			record.headAtStart = gitHead(this.options.cwd);
-			this.activeWriter = id;
 			this.lastWriterBackend = backend.name;
 		}
 
@@ -351,10 +366,11 @@ export class WorkerManager implements ChannelHandler {
 
 		this.setState(record, "running");
 		if (writer) this.notifyReadOnlyWorkers(record, "started");
+		const activeWriter = this.activeWriter ? this.workers.get(this.activeWriter) : undefined;
 		const writerContext = writer
 			? undefined
 			: formatWriterContext(
-					this.activeWriter ? this.summarize(this.require(this.activeWriter)) : undefined,
+					activeWriter ? this.summarize(activeWriter) : undefined,
 					this.writerQueue.flatMap((workerId) => {
 						const queued = this.workers.get(workerId);
 						return queued ? [this.summarize(queued)] : [];
@@ -405,13 +421,15 @@ export class WorkerManager implements ChannelHandler {
 	async kill(workerId: string): Promise<WorkerSummary> {
 		const record = this.require(workerId);
 		if (!isTerminalState(record.state)) {
+			record.killReason = "Killed by the leader.";
+			record.driver?.markTerminal();
 			if (record.state === "queued") {
 				// Remove from queue and mark killed without starting driver
 				const index = this.writerQueue.indexOf(workerId);
 				if (index >= 0) this.writerQueue.splice(index, 1);
 				await this.finish(record, "killed", "Killed by the leader.");
 			} else {
-				await record.driver.kill();
+				await record.driver?.kill();
 				await this.finish(record, "killed", "Killed by the leader.");
 			}
 		}
@@ -569,14 +587,35 @@ export class WorkerManager implements ChannelHandler {
 	}
 
 	async dispose(): Promise<void> {
-		for (const record of this.workers.values()) {
-			if (!isTerminalState(record.state)) {
-				// Fire-and-forget during shutdown: we're tearing down everything anyway.
-				void record.driver?.kill();
-				void this.finish(record, "killed", "Leader shut down.");
-			}
-			await rm(record.scratchDir, { recursive: true, force: true }).catch(() => {});
-		}
+		this.disposed = true;
+		const records = [...this.workers.values()];
+		await Promise.all(
+			records.map(async (record) => {
+				if (!isTerminalState(record.state)) {
+					record.killReason = "Leader shut down.";
+					record.driver?.markTerminal();
+					try {
+						await record.driver?.kill();
+					} catch (error) {
+						this.appendLog(
+							record,
+							"error",
+							`Could not stop worker: ${error instanceof Error ? error.message : String(error)}`,
+						);
+					}
+					try {
+						await this.finish(record, "killed", "Leader shut down.");
+					} catch (error) {
+						this.appendLog(
+							record,
+							"error",
+							`Could not finish shutdown: ${error instanceof Error ? error.message : String(error)}`,
+						);
+					}
+				}
+				await rm(record.scratchDir, { recursive: true, force: true }).catch(() => {});
+			}),
+		);
 		this.workers.clear();
 	}
 
@@ -925,9 +964,9 @@ export class WorkerManager implements ChannelHandler {
 		record.queuedPrompts += 1;
 		record.queue = record.queue.then(async () => {
 			try {
-				if (isTerminalState(record.state) || record.finishing) return;
+				if (isTerminalState(record.state) || record.finishing || record.killReason) return;
 				const outcome = await record.driver.prompt(message);
-				if (isTerminalState(record.state) || record.finishing) return;
+				if (isTerminalState(record.state) || record.finishing || record.killReason) return;
 				if (!outcome.ok) {
 					await this.finish(record, "failed", outcome.summary);
 					return;
@@ -997,6 +1036,10 @@ export class WorkerManager implements ChannelHandler {
 	}
 
 	private finish(record: WorkerRecord, state: WorkerState, result: string): Promise<void> {
+		if (record.killReason && state !== "killed") {
+			state = "killed";
+			result = record.killReason;
+		}
 		if (record.finishing) return record.finishing;
 		// This is the backstop during shutdown: a late ACP write is rejected while
 		// the process-group kill below is still waiting for its exit event.
@@ -1005,6 +1048,10 @@ export class WorkerManager implements ChannelHandler {
 			const startedWriter = record.writer && record.state !== "queued";
 			if (state !== "killed") {
 				await record.driver?.kill();
+			}
+			if (record.killReason) {
+				state = "killed";
+				result = record.killReason;
 			}
 			const dirtyFiles = state === "done" && startedWriter ? await gitDirtyFiles(this.options.cwd) : [];
 			const changes = startedWriter ? await this.writerChangeStatus(record, state) : undefined;
@@ -1086,6 +1133,7 @@ export class WorkerManager implements ChannelHandler {
 	}
 
 	private async dequeueNextWriter(): Promise<void> {
+		if (this.disposed) return;
 		if (this.writerQueue.length === 0) return;
 		const nextId = this.writerQueue.shift();
 		if (!nextId) return;
@@ -1103,6 +1151,7 @@ export class WorkerManager implements ChannelHandler {
 		// Prepare backend and transport
 		const backend = this.options.config.resolve(record.tier, record.backend, true);
 		const runtimeEnv = (await this.options.prepareEnv?.()) ?? {};
+		if (this.disposed || record.state !== "queued") return;
 		const roleText = loadRoleText(record.role, this.options.cwd, this.options.agentDir);
 
 		const systemPrompt = [
