@@ -65,8 +65,8 @@ transport, so there is one code path rather than one conditional per vendor:
 
 | Backend | ACP entry point | Auth |
 | --- | --- | --- |
-| Claude Code | `claude-code-acp` (Zed-maintained, Agent SDK) | Claude subscription |
-| Codex | `codex-acp` | ChatGPT subscription |
+| Claude Code | `@agentclientprotocol/claude-agent-acp` | Claude subscription |
+| Codex | `@agentclientprotocol/codex-acp` | ChatGPT subscription |
 | OpenCode | `opencode acp` (native) | its own config |
 
 A spawn is **role + tier + task**, plus optional writer flag and room.

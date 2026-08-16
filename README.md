@@ -3,61 +3,14 @@
 [![ci](https://github.com/sudhanshug16/neta/actions/workflows/ci.yml/badge.svg)](https://github.com/sudhanshug16/neta/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/@intervene/neta)](https://www.npmjs.com/package/@intervene/neta)
 
-Neta is a leader agent. You talk to a leader; it delegates work to tiered
-worker agents and drives them until the problem is done. The leader never
-edits files — that restriction is enforced, not suggested.
-
-Neta is not a TUI. You live in the native UI of the coding agent you already
-use and pay for — Claude Code, Codex, or OpenCode:
-
-```
-neta
-```
-
-That detects the agent CLIs you have, launches one as the leader with Neta's
-instructions and worker tools injected, and stays behind it. The leader spawns
-workers, collects their results, and reports once.
-
-## What you get
-
-- **A lead, not an implementer.** The leader reads, decides, delegates and
-  verifies. Its edit tools are removed by the vendor's own permission system,
-  and shell writes (`sed -i`, `echo > file`, `git commit`) are blocked too — a
-  leader with a way to edit eventually edits.
-- **Workers on your subscription.** Every worker is a real agent CLI driven
-  over ACP, so it runs on the login you already have rather than on API credit.
-  Tiers are unconfigured by default and spread deterministically across
-  installed backends; configure them in settings.
-- **Tiers, not model names.** The leader asks for a junior, senior or staff
-  worker; you decide which model each tier means, and can mix vendors —
-  `"staff": { "backend": "codex" }` puts staff work on `gpt-5.6-sol[xhigh]`
-  while the rest stay on Claude. `neta models` lists what each backend offers.
-- **One writer at a time.** Reads parallelize; writes serialize. A second
-  writer queues instead of racing.
-- **Write access in every worker id.** Writers are `rw<N>` and read-only
-  workers are `ro<N>`. They share one session counter, so a session might show
-  `rw1`, `ro2`, `ro3`, `rw4`.
-- **Workers you can take over.** A worker is an ordinary Claude Code or Codex
-  session — same history, same id — so `neta attach ro1` opens it in that CLI's
-  own interface, where you can read what it did and keep talking to it
-  yourself. Neta drove it; you can finish it.
-- **A tab per worker, if you run a multiplexer.** With Zellij or tmux, each
-  worker opens its own tab streaming its log, so the leader you are typing into
-  keeps its window. Finished tabs stay until the leader starts new workers,
-  then close themselves. Without a multiplexer, workers run headless.
-- **Visible spend.** `neta workers` shows tokens and cost per worker, as the
-  backends report them.
-
-How the leader is held to read-only depends on which CLI leads:
-
-| Leader | Typed edit tools | Its shell |
-| --- | --- | --- |
-| Claude Code | denied by permission rules | `neta guard` runs as a PreToolUse hook |
-| Codex | kernel sandbox | same kernel sandbox (`sandbox_mode = "read-only"`) |
-| OpenCode | `permission.edit: deny` | denied bash patterns |
-
-Codex's is the strongest — the kernel refuses the write. The other two rely on
-Neta's guard, which is a denylist, and a denylist can be incomplete.
+Neta (Hindi: leader) is a leader agent behind the coding-agent CLI you already
+use. You talk to Claude Code, Codex or OpenCode in its own interface; Neta
+launches it as the leader — instructions injected, worker tools registered as
+an MCP server, write access removed with that vendor's own permission
+machinery — and gives it a team of worker agents, each a real agent CLI driven
+over ACP on the subscription you already pay for. The leader reads, decides,
+delegates and verifies; workers do the work; one writer at a time. Neta owns
+no UI of its own — it stays behind the CLI and gets out of the way.
 
 ## Install
 
@@ -74,55 +27,150 @@ npm install -g @openai/codex               # or
 npm install -g opencode-ai
 ```
 
-From a checkout instead — the toolchain is [Bun](https://bun.sh):
+## Quickstart
 
 ```
-bun install
-bun run build
-bun link          # puts `neta` on PATH
+cd your-repo
+neta
 ```
 
-## Using it
+That detects the agent CLIs you have, launches one as the leader (it asks
+which when several are installed; `--leader codex` picks), and stays behind
+it. You are in that CLI's ordinary interface. With Zellij or tmux, each worker
+gets a tab streaming its log; without one, workers run headless (`--mux none`
+forces that). Arguments after `--` pass through to the vendor CLI:
+`neta -- --model opus`.
+
+Then delegate:
+
+> Find out why the release workflow is flaky, and fix it.
+
+The leader presents a numbered staffing plan — which backend each worker would
+run on — then spawns the workers, blocks on `neta_wait` until they finish or
+ask a question, and reports once. It never edits files itself; that
+restriction is a mechanism, not a prompt:
+
+| Leader | Typed edit tools | Its shell |
+| --- | --- | --- |
+| Claude Code | denied by permission rules | `neta guard` runs as a PreToolUse hook |
+| Codex | kernel sandbox | same kernel sandbox (`sandbox_mode = "read-only"`) |
+| OpenCode | `permission.edit: deny` | denied bash patterns |
+
+Codex's is the strongest — the kernel refuses the write. The other two rely on
+Neta's guard, which is a denylist, and a denylist can be incomplete.
+
+## Workers, tiers, backends
+
+Every worker is a real agent CLI driven over ACP (Agent Client Protocol):
+Claude Code and Codex through their ACP bridges
+(`@agentclientprotocol/claude-agent-acp`, `@agentclientprotocol/codex-acp`),
+OpenCode natively (`opencode acp`). One transport, so every backend behaves
+the same — and every worker runs on the login you already have rather than on
+API credit.
+
+The leader asks for a tier, never a model. A tier is what you would trust a
+worker with:
+
+- **junior** — mechanical work with a precise spec; fails fast on ambiguity.
+- **senior** — well-scoped features, bug fixes with tests, code review.
+- **staff** — ambiguity: unknown-cause debugging, design work, debates.
+
+Tiers ship unconfigured, and unconfigured tiers follow the spread policy:
+deterministic round-robin across installed backends, stable per session, with
+two diversity rules — reviewers and debaters prefer a different backend than
+the most recent writer, and debaters in one room are spread across vendors.
+The first staffing plan of an unconfigured session states this policy, so you
+learn it exists before it spends anything.
+
+Settings pin tiers down. `{ "tiers": { "staff": { "backend": "codex" } } }`
+puts staff work on `gpt-5.6-sol[xhigh]` while the rest keep the spread, and
+`tierModels` on a backend names which of its models each tier means. OpenCode
+ships no tier models on purpose — it fronts many providers, and only you know
+which one you logged into — so its ids are provider-qualified
+(`"senior": "openai/gpt-5.4"`); [docs/settings.md](docs/settings.md) has the
+full example. `"disabled": true` removes a backend from assignment and leader
+selection. `neta models [backend]` lists the ids, straight from the backend.
+
+## The leader's tools
+
+Inside the session, worker control is MCP tools — they run in the vendor's
+host process, outside any sandbox:
+
+| Tool | What it does |
+| --- | --- |
+| `neta_spawn` | Start a worker: role + tier + task, optional writer slot. |
+| `neta_spawn_group` | Spawn several workers into one room with a shared transcript. |
+| `neta_plan` | Compute backend assignments without spawning — the staffing plan. |
+| `neta_workers` | List workers with state, token usage and results. |
+| `neta_status` | One snapshot: writer slot, queue, workers by state, open notes. |
+| `neta_log` | A worker's new log lines since the leader last looked. |
+| `neta_wait` | Block until watched workers finish, ask a question, or a room posts. |
+| `neta_send` | Follow-up instruction, delivered as the worker's next turn. |
+| `neta_answer` | Answer a worker blocked on a question. |
+| `neta_kill` | Terminate a worker, releasing the writer slot. |
+| `neta_room` | Read a room's transcript, optionally post to it. |
+| `neta_note` | Open-notes ledger: parked work, pending decisions, follow-ups. |
+| `neta_remember` | Persist a tier-to-backend override to `.neta/settings.json`. |
+
+## The worker channel
+
+Workers report back through their own MCP tools — `neta_progress`,
+`neta_ask`, `neta_say`, `neta_room`, `neta_status` — or the same commands in
+their shell; both doors reach the same socket:
 
 ```
-neta                       # start a leader session here
-neta --leader codex        # pick the backend explicitly
-neta --mux none            # no panes; workers run headless
-neta -- --model opus       # pass arguments through to the agent CLI
-
-neta workers               # what is running, and what it has cost
-neta status                # writer slot, worker states, queue and open notes
-neta watch ro1             # watch one read-only worker, and type to talk to it
-neta attach ro1            # open that worker in its own CLI and take over
-neta log ro1               # its new lines since you last looked
-neta send rw2 <message>    # give a writer more instructions
-neta answer ro1 <text>     # unblock a worker that asked you something
-neta kill rw2              # stop it
-neta sessions              # leader sessions running on this machine
-neta --backends            # which agent CLIs are installed
+neta progress <message>    record a progress milestone; the leader pulls it
+neta ask <question>        block until the leader answers (juniors cannot ask)
+neta say <message>         post to your room
+neta room [--tail N]       read your room's transcript
+neta status --writers      show active, queued and finished writers
 ```
 
-Those worker commands work from any terminal, not just inside the session:
-Neta records each live session in `~/.neta/sessions/`, so a second window can
-reach the same leader. Add `--session <id>` when more than one is running.
+Writes serialize. There is one writer slot per session: a worker spawned with
+the writer flag holds it, a second writer queues (FIFO) and starts when the
+slot frees, and ids show access at a glance — writers are `rw<N>`, read-only
+workers `ro<N>`, one counter for the session. A read-only worker has its
+file-editing tool calls rejected at the ACP layer on every backend; only
+Codex's kernel sandbox covers the worker's shell as well. Read-only workers
+are kept aware of the writer: spawned alongside one, they are told who holds
+the slot and what it is doing; when a writer starts or finishes, they get a
+notice — the finish notice says whether it committed and whether uncommitted
+changes remain; `neta status --writers` answers on demand. Writers commit
+everything before finishing, so the next writer is briefed from `git log`.
 
-Inside a session the leader gets MCP tools — `neta_spawn`, `neta_spawn_group`,
-`neta_workers`, `neta_status`, `neta_log`, `neta_wait`, `neta_send`, `neta_answer`,
-`neta_kill`, `neta_room` — and workers get `neta_progress`, `neta_ask`,
-`neta_say`, `neta_room`, `neta_status`, plus the same commands in their shell.
-Read-only workers can run `neta status --writers` to see active, queued and
-finished writers before inspecting a shared checkout.
+## Sessions
+
+Each `neta` launch is one session, and several can run at once. Neta records
+each in `~/.neta/sessions/`, so any terminal reaches them; add
+`--session <id>` when more than one is running.
+
+```
+neta sessions              leader sessions running on this machine
+neta status                writer slot, worker states, queue and open notes
+neta workers               what is running, and what it has cost
+neta watch ro1             watch one worker live, and type to talk to it
+neta attach ro1            open that worker in its own CLI and take over
+neta log ro1               its new lines since you last looked
+neta send rw2 <message>    give a worker more instructions
+neta answer ro1 <text>     unblock a worker that asked something
+neta kill rw2              stop it
+neta --backends            which agent CLIs are installed
+```
+
+`neta attach` works because a worker is an ordinary Claude Code or Codex
+session — same history, same id — so it opens in that CLI's own interface,
+where you can read what it did and keep talking to it yourself. Neta drove it;
+you can finish it.
 
 ## Configuring it
 
-- **Settings** live in `~/.neta/settings.json`, overridden per project by
-  `.neta/settings.json`: which CLI leads, which model each tier means, how
-  workers are launched, whether panes open. See [docs/settings.md](docs/settings.md).
+- **Settings** live in `~/.neta/settings.json`, overridden key by key by the
+  project's `.neta/settings.json`: which CLI leads, tiers, backends,
+  multiplexer. See [docs/settings.md](docs/settings.md).
 - **CHARTER.md** in your project says which decisions the leader may take on
-  your behalf and which ones stop and ask — see
-  [CHARTER.example.md](CHARTER.example.md). Neta also loads
-  `~/.neta/CHARTER.md`; when both exist, it embeds the project charter first,
-  then the user charter, with both source paths labelled. Without either one,
+  your behalf and which stop and ask — see
+  [CHARTER.example.md](CHARTER.example.md). `~/.neta/CHARTER.md` is also
+  loaded; when both exist, the project charter comes first. Without either,
   the leader decides routine technical matters and asks before anything
   expensive, destructive, or outward-facing.
 - **Roles** are prompts (`scout`, `worker`, `reviewer`, `debater`); **flavors**
@@ -141,37 +189,19 @@ finished writers before inspecting a shared checkout.
 
 ## Development
 
+The toolchain is [Bun](https://bun.sh):
+
 ```
 bun install
-bun test          # 161 tests, incl. real worker processes over a real socket
+bun test          # integration tests drive real worker processes over a real socket
 bun run check     # biome + tsc --noEmit
 bun run build     # dist/cli.js — one file, targets Node
 ```
 
-Tests never call a provider: worker backends are a fixture ACP agent.
+Tests never call a provider: worker backends are a fixture ACP agent. From a
+checkout, `bun run build && bun link` puts `neta` on PATH.
 
 To release, bump `version` in `package.json` and push to `main`. CI publishes
 that version to npm if the registry does not already have it, and tags the
-commit; ordinary pushes just run the checks. The CLI reads its version from
-`package.json`, so there is nothing else to bump.
-
-## Status
-
-Working end to end, and young.
-
-Verified: every vendor mechanism was checked against the installed CLI before
-being coded, the test suite drives the real control plane, real worker
-processes and a real socket, and the published package was installed from its
-tarball and driven through a full session.
-
-Not verified, and worth knowing:
-
-- **Only Codex workers are sandboxed.** Every read-only worker has its typed
-  edits rejected by Neta, and Codex workers additionally run in its `read-only`
-  kernel sandbox, which covers the shell. On Claude Code and OpenCode a
-  determined worker could still write through `bash`.
-- **No long-running real-model use yet.** The leader's honesty rule (report a
-  blocker rather than fake delegation) is enforced by prompt and tools, not by
-  a test.
-
-Vendor flags change often; that is where breakage will show up first.
+commit. The CLI reads its version from `package.json`, so there is nothing
+else to bump.
