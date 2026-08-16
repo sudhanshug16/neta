@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -59,14 +59,20 @@ describe("NetaConfig", () => {
 		expect(() => new NetaConfig().resolve("senior", "nope")).toThrow(/Unknown worker backend "nope".*claude/s);
 	});
 
-	it("returns installed backends filtered by command on PATH", () => {
+	it("detects shipped backends by their vendor CLIs, not npx", () => {
+		const binDir = mkdtempSync(join(tmpdir(), "neta-vendor-bin-"));
+		for (const command of ["npx", "codex"]) {
+			const executable = join(binDir, command);
+			writeFileSync(executable, "#!/bin/sh\n", "utf-8");
+			chmodSync(executable, 0o755);
+		}
 		const config = new NetaConfig();
-		// Mock env with npx on PATH (for claude/codex) but not opencode
-		const _mockEnv = { PATH: "/usr/bin:/bin" };
-		const _mockFindOnPath = (cmd: string) => (cmd === "npx" ? "/usr/bin/npx" : undefined);
 
-		// We can't easily mock findOnPath here, so let's just verify the method exists
-		expect(typeof config.installedBackends).toBe("function");
+		try {
+			expect(config.installedBackends({ PATH: binDir })).toEqual(["codex"]);
+		} finally {
+			rmSync(binDir, { recursive: true, force: true });
+		}
 	});
 
 	it("excludes disabled backends from automatic selection and rejects explicit use", () => {
@@ -136,6 +142,48 @@ describe("loadNetaSettings", () => {
 		expect(settings.tiers).toEqual({ junior: { backend: "opencode" }, staff: { backend: "codex" } });
 	});
 
+	it("merges sibling backend and tier fields from user and project settings", () => {
+		const agentDir = scratch();
+		const cwd = scratch();
+		writeFileSync(
+			join(agentDir, "settings.json"),
+			JSON.stringify({
+				backends: {
+					opencode: {
+						command: "user-opencode",
+						env: { API_KEY: "user-key" },
+						tierModels: { staff: "user-staff" },
+					},
+				},
+				tiers: { staff: { backend: "opencode" } },
+			}),
+		);
+		mkdirSync(join(cwd, CONFIG_DIR_NAME));
+		writeFileSync(
+			join(cwd, CONFIG_DIR_NAME, "settings.json"),
+			JSON.stringify({
+				backends: {
+					opencode: {
+						disabled: false,
+						env: { BASE_URL: "project-url" },
+						tierModels: { senior: "project-senior" },
+					},
+				},
+				tiers: { staff: { model: "project-staff" } },
+			}),
+		);
+
+		const settings = loadNetaSettings(cwd, agentDir);
+
+		expect(settings.backends?.opencode).toEqual({
+			command: "user-opencode",
+			disabled: false,
+			env: { API_KEY: "user-key", BASE_URL: "project-url" },
+			tierModels: { staff: "user-staff", senior: "project-senior" },
+		});
+		expect(settings.tiers?.staff).toEqual({ backend: "opencode", model: "project-staff" });
+	});
+
 	it("lets a project re-enable a backend disabled in user settings", () => {
 		const agentDir = scratch();
 		const cwd = scratch();
@@ -154,11 +202,32 @@ describe("loadNetaSettings", () => {
 
 	// A broken settings file must not stop the leader from starting; the defaults
 	// are usable on their own.
-	it("ignores a malformed settings file instead of throwing", () => {
+	it("warns when it ignores a malformed settings file", () => {
 		const agentDir = scratch();
-		writeFileSync(join(agentDir, "settings.json"), "{ not json");
+		const settingsPath = join(agentDir, "settings.json");
+		writeFileSync(settingsPath, "{ not json");
+		const error = spyOn(console, "error").mockImplementation(() => {});
 
-		expect(loadNetaSettings(scratch(), agentDir)).toEqual({ leader: {}, mux: {}, tiers: {}, backends: {} });
+		try {
+			expect(loadNetaSettings(scratch(), agentDir)).toEqual({ leader: {}, mux: {}, tiers: {}, backends: {} });
+			expect(error).toHaveBeenCalledWith(`Warning: ignoring invalid Neta settings file ${settingsPath}.`);
+		} finally {
+			error.mockRestore();
+		}
+	});
+
+	it("warns when a settings file has an invalid structure", () => {
+		const agentDir = scratch();
+		const settingsPath = join(agentDir, "settings.json");
+		writeFileSync(settingsPath, JSON.stringify({ backends: [] }));
+		const error = spyOn(console, "error").mockImplementation(() => {});
+
+		try {
+			loadNetaSettings(scratch(), agentDir);
+			expect(error).toHaveBeenCalledWith(`Warning: ignoring invalid Neta settings file ${settingsPath}.`);
+		} finally {
+			error.mockRestore();
+		}
 	});
 
 	it("persists a tier override to .neta/settings.json without clobbering other tiers", async () => {

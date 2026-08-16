@@ -14,7 +14,7 @@ import { execFile, execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { AcpWorkerTransport } from "../acp/transport.ts";
 import type { ChannelResponse, LeaderChannelRequest } from "../channel/protocol.ts";
 import { NETA_SCRATCH_ENV, NETA_SOCKET_ENV, NETA_WORKER_ENV, NETA_WORKER_TOKEN_ENV } from "../channel/protocol.ts";
@@ -945,12 +945,15 @@ export class WorkerManager implements ChannelHandler {
 		runtimeEnv: Record<string, string>,
 		systemPrompt: string,
 	): WorkerTransportDriver {
+		const backendPath = backend.env.PATH;
+		const runtimePath = runtimeEnv.PATH;
 		return this.createTransport({
 			workerId: record.id,
 			cwd: this.options.cwd,
 			env: {
 				...runtimeEnv,
 				...backend.env,
+				...(backendPath && runtimePath ? { PATH: `${runtimePath}${delimiter}${backendPath}` } : {}),
 				[NETA_SOCKET_ENV]: this.options.channelAddress,
 				[NETA_WORKER_ENV]: record.id,
 				[NETA_WORKER_TOKEN_ENV]: record.channelToken,

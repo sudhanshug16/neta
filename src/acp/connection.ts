@@ -107,10 +107,7 @@ export interface AcpConnectionOptions {
 	onProcessGroup?: (pgid: number) => void;
 }
 
-/**
- * Selecting a model is `session/set_model`, which both shipped bridges answer
- * but the 1.3 SDK has no constant for.
- */
+/** Legacy bridges select a model through this extension method. */
 const SET_MODEL = "session/set_model";
 
 /**
@@ -137,6 +134,7 @@ interface SessionNegotiation {
 
 /** The current selection of a "select" config option: value ids and their display names. */
 interface ConfigSelection {
+	id: string;
 	values: string[];
 	names: Map<string, string>;
 	currentValue: string;
@@ -147,10 +145,17 @@ function readSelect(option: acp.SessionConfigOption | undefined): ConfigSelectio
 	const entries: Array<acp.SessionConfigSelectOption | acp.SessionConfigSelectGroup> = option.options;
 	const flat = entries.flatMap((entry) => ("group" in entry ? entry.options : [entry]));
 	return {
+		id: option.id,
 		values: flat.map((value) => value.value),
 		names: new Map(flat.map((value) => [value.value, value.name])),
 		currentValue: option.currentValue,
 	};
+}
+
+/** Codex puts its thought level in the configured model id, while ACP exposes it separately. */
+function splitModelAndThoughtLevel(model: string): { model: string; thoughtLevel?: string } {
+	const match = /^(.*)\[([^\]]+)]$/.exec(model);
+	return match ? { model: match[1], thoughtLevel: match[2] } : { model };
 }
 
 /** Exact id first, then the family — "gpt-5.6-sol" should find "gpt-5.6-sol[xhigh]". */
@@ -184,6 +189,7 @@ export class AcpConnection {
 	/** Display names for model and mode ids, learned from configOptions. */
 	private readonly modelNames = new Map<string, string>();
 	private readonly modeNames = new Map<string, string>();
+	private readonly thoughtLevelNames = new Map<string, string>();
 	killed = false;
 	/** The worker reached a terminal state; permission requests are denied from here on. */
 	terminal = false;
@@ -283,10 +289,47 @@ export class AcpConnection {
 		if (config.model) this.offered.models = config.model.values;
 		if (config.mode) this.offered.modes = config.mode.values;
 
-		const available = this.offered.models;
 		const wanted = this.options.model;
-		if (wanted && available.length > 0) {
-			const modelId = chooseModel(available, wanted);
+		if (wanted && config.model) {
+			const desired = splitModelAndThoughtLevel(wanted);
+			const modelId = chooseModel(config.model.values, wanted) ?? chooseModel(config.model.values, desired.model);
+			if (!modelId) {
+				this.options.onStderr(`No model "${wanted}" here; running on ${this.offered.currentModel}.`);
+			} else {
+				try {
+					let selected = await connection.agent.request(acp.methods.agent.session.setConfigOption, {
+						sessionId,
+						configId: config.model.id,
+						value: modelId,
+					});
+					let confirmed = this.applyConfigOptions(selected.configOptions);
+					chosen.push(`model ${modelId}`);
+
+					if (desired.thoughtLevel && confirmed.thoughtLevel) {
+						const thoughtLevel = chooseModel(confirmed.thoughtLevel.values, desired.thoughtLevel);
+						if (!thoughtLevel) {
+							this.options.onStderr(
+								`No thought level "${desired.thoughtLevel}" here; running on ${this.offered.currentModel}.`,
+							);
+						} else {
+							selected = await connection.agent.request(acp.methods.agent.session.setConfigOption, {
+								sessionId,
+								configId: confirmed.thoughtLevel.id,
+								value: thoughtLevel,
+							});
+							confirmed = this.applyConfigOptions(selected.configOptions);
+							chosen.push(`thought level ${thoughtLevel}`);
+						}
+					}
+					// set_config_option returns all current values. Reading its last response
+					// is the confirmation, rather than recording what we merely requested.
+					this.applyConfigOptions(selected.configOptions);
+				} catch (error) {
+					this.options.onStderr(`Could not select model "${wanted}": ${describe(error)}`);
+				}
+			}
+		} else if (wanted && session.models?.availableModels?.length) {
+			const modelId = chooseModel(this.offered.models, wanted);
 			if (!modelId) {
 				this.options.onStderr(`No model "${wanted}" here; running on ${this.offered.currentModel}.`);
 			} else {
@@ -326,17 +369,27 @@ export class AcpConnection {
 	 * session/new offering and again on every config_option_update, which
 	 * carries the full set each time.
 	 */
-	applyConfigOptions(options: acp.SessionConfigOption[]): { model?: ConfigSelection; mode?: ConfigSelection } {
+	applyConfigOptions(options: acp.SessionConfigOption[]): {
+		model?: ConfigSelection;
+		mode?: ConfigSelection;
+		thoughtLevel?: ConfigSelection;
+	} {
 		const model = readSelect(options.find((option) => option.category === "model"));
 		const mode = readSelect(options.find((option) => option.category === "mode"));
+		const thoughtLevel = readSelect(options.find((option) => option.category === "thought_level"));
 		for (const [value, name] of model?.names ?? []) this.modelNames.set(value, name);
 		for (const [value, name] of mode?.names ?? []) this.modeNames.set(value, name);
+		for (const [value, name] of thoughtLevel?.names ?? []) this.thoughtLevelNames.set(value, name);
 		if (model) {
-			this.offered.currentModelId = model.currentValue;
-			this.offered.currentModel = this.modelNames.get(model.currentValue) ?? model.currentValue;
+			const thoughtSuffix = thoughtLevel ? `[${thoughtLevel.currentValue}]` : "";
+			const thoughtDisplay = thoughtLevel
+				? ` [${this.thoughtLevelNames.get(thoughtLevel.currentValue) ?? thoughtLevel.currentValue}]`
+				: "";
+			this.offered.currentModelId = `${model.currentValue}${thoughtSuffix}`;
+			this.offered.currentModel = `${this.modelNames.get(model.currentValue) ?? model.currentValue}${thoughtDisplay}`;
 		}
 		if (mode) this.offered.currentMode = this.modeNames.get(mode.currentValue) ?? mode.currentValue;
-		return { model, mode };
+		return { model, mode, thoughtLevel };
 	}
 
 	/** The session switched modes, whether the backend's own doing or our set_mode confirmed. */

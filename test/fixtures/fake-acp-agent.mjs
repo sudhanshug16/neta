@@ -44,9 +44,11 @@ const sessions = new Set();
 let counter = 0;
 /** Whatever the client asked us to launch at session/new, echoed back on request. */
 let mcpServers = [];
+const selectedConfig = new Map();
+let selectedLegacyModel = "test-model";
 
-/** The configOptions wire shape, with `current` as the selected model. */
-function configOptions(current) {
+/** The configOptions wire shape, with the selected model and thought level. */
+function configOptions(current, thoughtLevel = "medium") {
 	return [
 		{
 			id: "model",
@@ -57,6 +59,18 @@ function configOptions(current) {
 			options: [
 				{ value: "fixture-default", name: "Fixture Default" },
 				{ value: "fixture-fast", name: "Fixture Fast" },
+				{ value: "gpt-5.6-sol", name: "GPT 5.6 Sol" },
+			],
+		},
+		{
+			id: "thought-level",
+			name: "Thought Level",
+			category: "thought_level",
+			type: "select",
+			currentValue: thoughtLevel,
+			options: [
+				{ value: "medium", name: "Medium" },
+				{ value: "xhigh", name: "Extra High" },
 			],
 		},
 		{
@@ -269,16 +283,31 @@ acp.agent({ name: "fake-acp-agent" })
 		const response = {
 			sessionId,
 			models: {
-				availableModels: [{ modelId: "test-model" }],
-				currentModelId: "test-model",
+				availableModels: [{ modelId: "test-model" }, { modelId: "legacy-other" }],
+				currentModelId: selectedLegacyModel,
 			},
 			modes: {
 				availableModes: [{ id: "test-mode" }],
 				currentModeId: "test-mode",
 			},
 		};
-		if (useConfigOptions) response.configOptions = configOptions("fixture-default");
+		if (useConfigOptions) {
+			selectedConfig.set(sessionId, { model: "fixture-default", thoughtLevel: "medium" });
+			response.configOptions = configOptions("fixture-default");
+		}
 		return response;
+	})
+	.onRequest(acp.methods.agent.session.setConfigOption, (ctx) => {
+		const selected = selectedConfig.get(ctx.params.sessionId);
+		if (!selected) throw new Error("config options are not supported");
+		if (ctx.params.configId === "model") selected.model = ctx.params.value;
+		if (ctx.params.configId === "thought-level") selected.thoughtLevel = ctx.params.value;
+		return { configOptions: configOptions(selected.model, selected.thoughtLevel) };
+	})
+	.onRequest("session/set_model", { parse: (params) => params }, (ctx) => {
+		if (useConfigOptions) throw new Error("legacy set_model is not supported");
+		selectedLegacyModel = ctx.params.modelId;
+		return {};
 	})
 	.onRequest("authenticate", () => ({}))
 	.onRequest("session/prompt", (ctx) => prompt(ctx.params, ctx.client))

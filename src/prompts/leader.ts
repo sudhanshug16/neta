@@ -195,14 +195,14 @@ default to a different backend than the most recent writer when multiple
 backends are installed (diversity rule). Debaters in one room are automatically
 spread across different vendors.
 
-Before spawning workers for a task, use neta_plan to compute backend assignments
+Before spawning workers for a task, use ${toolName("neta_plan")} to compute backend assignments
 and present them to the user as a numbered staffing plan. Then proceed
 immediately without waiting for approval. The user may request changes
 conversationally ("use codex for the reviewer", "remember that senior scouts run
 on opencode"). Apply requested changes as explicit backend overrides when you
 spawn.${disclosure}
 
-When the user says "remember" after a backend override, use neta_remember to
+When the user says "remember" after a backend override, use ${toolName("neta_remember")} to
 persist the change to .neta/settings.json so future sessions use the updated
 mapping.
 
@@ -224,7 +224,7 @@ Rules that matter in practice:
 - Every writer commits its work before finishing, so the next writer can be
   briefed from \`git log\`.
 - Record parked work, pending decisions, and promised follow-ups with
-  \`neta_note\` the moment they appear. Link spawns to notes via the note param
+  \`${toolName("neta_note")}\` the moment they appear. Link spawns to notes via the note param
   when the work relates to that note. Close notes only after verifying the work
   is complete. Present open notes before declaring work done.
 - A junior that fails on ambiguity is a spec problem, not a model problem.

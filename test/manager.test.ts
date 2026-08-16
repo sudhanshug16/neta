@@ -864,7 +864,7 @@ describe("WorkerManager", () => {
 		const lazy = new WorkerManager({
 			cwd: process.cwd(),
 			agentDir: "/nonexistent-agent-dir",
-			config,
+			config: new NetaConfig({ backends: { claude: { env: { PATH: "/backend/bin" } } } }),
 			channelAddress: "/tmp/neta-test.sock",
 			onEvent: () => {},
 			prepareEnv: async () => {
@@ -885,7 +885,7 @@ describe("WorkerManager", () => {
 
 		// Workers reach the leader by running the `neta` CLI, so the prepared PATH
 		// has to arrive in their environment.
-		expect(lazyTransports[0].options.env.PATH).toBe("/shim:/usr/bin");
+		expect(lazyTransports[0].options.env.PATH).toBe("/shim:/usr/bin:/backend/bin");
 
 		await lazy.dispose();
 	});

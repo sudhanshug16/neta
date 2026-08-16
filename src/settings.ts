@@ -17,6 +17,8 @@ import { TIERS, type Tier } from "./types.ts";
 export interface NetaBackendSettings {
 	/** Exclude this backend from automatic selection and reject explicit use. */
 	disabled?: boolean;
+	/** Executable whose presence on PATH means this backend's vendor CLI is installed. */
+	detect?: string;
 	/** Executable that speaks ACP over stdio. */
 	command?: string;
 	args?: string[];
@@ -97,6 +99,7 @@ export interface NetaSettings {
  */
 export const DEFAULT_BACKENDS: Record<string, NetaBackendSettings> = {
 	claude: {
+		detect: "claude",
 		command: "npx",
 		args: ["-y", "@agentclientprotocol/claude-agent-acp@0.68.0"],
 		tierModels: { junior: "haiku", senior: "sonnet", staff: "default" },
@@ -104,6 +107,7 @@ export const DEFAULT_BACKENDS: Record<string, NetaBackendSettings> = {
 		resume: { command: "claude", args: ["--resume", "{session}"] },
 	},
 	codex: {
+		detect: "codex",
 		command: "npx",
 		args: ["-y", "@agentclientprotocol/codex-acp@1.3.0"],
 		tierModels: {
@@ -116,6 +120,7 @@ export const DEFAULT_BACKENDS: Record<string, NetaBackendSettings> = {
 	// OpenCode fronts many providers, so there is no honest default here: the
 	// user says which model each tier means, in settings.
 	opencode: {
+		detect: "opencode",
 		command: "opencode",
 		args: ["acp"],
 		resume: { command: "opencode", args: ["--session", "{session}"] },
@@ -156,7 +161,7 @@ export class NetaConfig {
 		}
 		this.backends = { ...DEFAULT_BACKENDS };
 		for (const [name, override] of Object.entries(settings?.backends ?? {})) {
-			this.backends[name] = { ...this.backends[name], ...override };
+			this.backends[name] = mergeBackendSettings(this.backends[name], override);
 		}
 	}
 
@@ -171,14 +176,15 @@ export class NetaConfig {
 	}
 
 	/**
-	 * Backend names whose launch commands are actually installed (on PATH).
-	 * For npx-based backends, this checks if npx itself is installed.
+	 * Backend names whose vendor CLIs are actually installed (on PATH). Custom
+	 * backends without a detect hint use their launch command.
 	 */
 	installedBackends(env: Record<string, string | undefined> = process.env): string[] {
 		const installed: string[] = [];
 		for (const name of this.backendNames()) {
 			const backend = this.backends[name];
-			if (backend.command && findOnPath(backend.command, env)) {
+			const binary = backend.detect ?? backend.command;
+			if (binary && findOnPath(binary, env)) {
 				installed.push(name);
 			}
 		}
@@ -249,21 +255,113 @@ export class NetaConfig {
 	}
 }
 
-/** Unreadable or malformed settings are ignored rather than fatal. */
+function mergeBackendSettings(
+	base: NetaBackendSettings | undefined,
+	override: NetaBackendSettings,
+): NetaBackendSettings {
+	const env = base?.env || override.env ? { ...base?.env, ...override.env } : undefined;
+	const tierModels =
+		base?.tierModels || override.tierModels ? { ...base?.tierModels, ...override.tierModels } : undefined;
+	return {
+		...base,
+		...override,
+		...(env ? { env } : {}),
+		...(tierModels ? { tierModels } : {}),
+	};
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isStringArray(value: unknown): boolean {
+	return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function isOptionalString(value: unknown): boolean {
+	return value === undefined || typeof value === "string";
+}
+
+function isOptionalBoolean(value: unknown): boolean {
+	return value === undefined || typeof value === "boolean";
+}
+
+function validBackend(value: unknown): boolean {
+	if (!isRecord(value)) return false;
+	if (!isOptionalBoolean(value.disabled)) return false;
+	for (const field of ["detect", "command", "modelEnv"] as const) {
+		if (!isOptionalString(value[field])) return false;
+	}
+	for (const field of ["args", "modelArgs", "readOnlyArgs", "writerArgs"] as const) {
+		if (value[field] !== undefined && !isStringArray(value[field])) return false;
+	}
+	if (
+		value.env !== undefined &&
+		(!isRecord(value.env) || Object.values(value.env).some((item) => typeof item !== "string"))
+	) {
+		return false;
+	}
+	if (
+		value.tierModels !== undefined &&
+		(!isRecord(value.tierModels) || Object.values(value.tierModels).some((item) => typeof item !== "string"))
+	) {
+		return false;
+	}
+	if (value.resume !== undefined) {
+		if (!isRecord(value.resume) || typeof value.resume.command !== "string" || !isStringArray(value.resume.args))
+			return false;
+	}
+	return true;
+}
+
+function validTier(value: unknown): boolean {
+	return isRecord(value) && isOptionalString(value.backend) && isOptionalString(value.model);
+}
+
+function validSettings(value: unknown): value is NetaSettings {
+	if (!isRecord(value)) return false;
+	if (
+		value.leader !== undefined &&
+		(!isRecord(value.leader) || !isOptionalString(value.leader.backend) || !isOptionalBoolean(value.leader.strictMcp))
+	) {
+		return false;
+	}
+	if (
+		value.mux !== undefined &&
+		(!isRecord(value.mux) || !isOptionalString(value.mux.mode) || !isOptionalBoolean(value.mux.panes))
+	) {
+		return false;
+	}
+	if (
+		value.tiers !== undefined &&
+		(!isRecord(value.tiers) || Object.values(value.tiers).some((tier) => !validTier(tier)))
+	)
+		return false;
+	if (
+		value.backends !== undefined &&
+		(!isRecord(value.backends) || Object.values(value.backends).some((backend) => !validBackend(backend)))
+	) {
+		return false;
+	}
+	return true;
+}
+
+/** Unreadable or malformed settings are ignored rather than fatal, but never silently. */
 function readSettingsFile(path: string): NetaSettings {
 	if (!existsSync(path)) return {};
 	try {
 		const parsed: unknown = JSON.parse(readFileSync(path, "utf-8"));
-		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-		return parsed as NetaSettings;
+		if (validSettings(parsed)) return parsed;
 	} catch {
-		return {};
+		// The warning below names the file while keeping leader startup resilient.
 	}
+	console.error(`Warning: ignoring invalid Neta settings file ${path}.`);
+	return {};
 }
 
 /**
- * User settings, then project settings on top. Merged one level deep, so a
- * project can remap a single tier without restating the others.
+ * User settings, then project settings on top. Tiers and backend entries merge
+ * independently, so a project can override one field without losing siblings.
  */
 export function loadNetaSettings(cwd: string, agentDir: string = getAgentDir()): NetaSettings {
 	const user = readSettingsFile(join(agentDir, "settings.json"));
@@ -271,8 +369,17 @@ export function loadNetaSettings(cwd: string, agentDir: string = getAgentDir()):
 	return {
 		leader: { ...user.leader, ...project.leader },
 		mux: { ...user.mux, ...project.mux },
-		tiers: { ...user.tiers, ...project.tiers },
-		backends: { ...user.backends, ...project.backends },
+		tiers: Object.fromEntries(
+			TIERS.flatMap((tier) => {
+				const merged = { ...user.tiers?.[tier], ...project.tiers?.[tier] };
+				return Object.keys(merged).length > 0 ? [[tier, merged]] : [];
+			}),
+		),
+		backends: Object.fromEntries(
+			Array.from(new Set([...Object.keys(user.backends ?? {}), ...Object.keys(project.backends ?? {})])).map(
+				(name) => [name, mergeBackendSettings(user.backends?.[name], project.backends?.[name] ?? {})],
+			),
+		),
 	};
 }
 

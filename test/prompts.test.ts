@@ -47,11 +47,21 @@ describe("leader prompt", () => {
 			toolName: (base) => `mcp__neta__${base}`,
 		});
 
-		for (const tool of ["neta_spawn", "neta_wait", "neta_workers", "neta_status", "neta_log", "neta_answer"]) {
+		for (const tool of [
+			"neta_spawn",
+			"neta_wait",
+			"neta_workers",
+			"neta_status",
+			"neta_log",
+			"neta_answer",
+			"neta_plan",
+			"neta_remember",
+			"neta_note",
+		]) {
 			expect(prompt).toContain(`mcp__neta__${tool}`);
 		}
 		// No bare name survives to be copied by mistake.
-		expect(prompt).not.toMatch(/`neta_(spawn|wait|workers|log|answer)`/);
+		expect(prompt).not.toMatch(/`neta_(spawn|wait|workers|log|answer|plan|remember|note)`/);
 	});
 
 	// If a host renames tools again, the leader should look before giving up.

@@ -37,6 +37,7 @@ describe("AcpWorkerTransport", () => {
 		mcpServers: WorkerMcpServer[] = [],
 		agentArgs: string[] = [],
 		env: Record<string, string> = {},
+		model: string | undefined = undefined,
 	): AcpWorkerTransport {
 		const scratchDir = mkdtempSync(join(tmpdir(), "neta-acp-"));
 		tempDirs.push(scratchDir);
@@ -46,7 +47,7 @@ describe("AcpWorkerTransport", () => {
 			env,
 			command: process.execPath,
 			args: [fakeAgent, ...agentArgs],
-			model: undefined,
+			model,
 			writer,
 			systemPrompt: "You are a test worker.",
 			scratchDir,
@@ -170,6 +171,16 @@ describe("AcpWorkerTransport", () => {
 		});
 	});
 
+	it("accumulates token usage over follow-up turns", async () => {
+		const transport = createTransport(false, []);
+		await transport.start();
+
+		await transport.prompt("USAGE first turn");
+		await transport.prompt("USAGE second turn");
+
+		expect(usageReports.at(-1)).toMatchObject({ totalTokens: 3000, inputTokens: 2000, outputTokens: 1000 });
+	});
+
 	// A sandboxed worker cannot open our socket from its shell, so the backend
 	// starts Neta's MCP server for it instead.
 	it("hands the backend the worker's MCP server at session start", async () => {
@@ -220,13 +231,20 @@ describe("AcpWorkerTransport", () => {
 		});
 	});
 
+	it("uses legacy set_model only when the backend offers legacy models", async () => {
+		const transport = createTransport(false, [], [], [], {}, "legacy-other");
+		await transport.start();
+
+		expect(sessionReports.at(-1)).toMatchObject({ model: "legacy-other", modelId: "legacy-other" });
+	});
+
 	it("prefers configOptions over the legacy model fields and applies mid-session updates", async () => {
 		const transport = createTransport(false, [], [], ["--config-options"]);
 		await transport.start();
 
 		expect(sessionReports.at(-1)).toEqual({
-			model: "Fixture Default",
-			modelId: "fixture-default",
+			model: "Fixture Default [Medium]",
+			modelId: "fixture-default[medium]",
 			mode: "Always Ask",
 			agentInfo: "fake-acp-agent@1.0.0",
 		});
@@ -234,11 +252,23 @@ describe("AcpWorkerTransport", () => {
 		await transport.prompt("CONFIG_UPDATE");
 
 		expect(sessionReports.at(-1)).toEqual({
-			model: "Fixture Fast",
-			modelId: "fixture-fast",
+			model: "Fixture Fast [Medium]",
+			modelId: "fixture-fast[medium]",
 			mode: "Always Ask",
 			agentInfo: "fake-acp-agent@1.0.0",
 		});
+	});
+
+	it("selects a composite Codex model through config options and confirms the active values", async () => {
+		const log: WorkerLogEntry[] = [];
+		const transport = createTransport(false, log, [], ["--config-options"], {}, "gpt-5.6-sol[xhigh]");
+		await transport.start();
+
+		expect(sessionReports.at(-1)).toMatchObject({
+			model: "GPT 5.6 Sol [Extra High]",
+			modelId: "gpt-5.6-sol[xhigh]",
+		});
+		expect(log.some((entry) => entry.text.includes("legacy set_model"))).toBe(false);
 	});
 
 	it("tracks a mode the backend switches mid-session", async () => {

@@ -156,9 +156,10 @@ export class AcpWorkerTransport implements WorkerTransportDriver {
 			const response = await connection.prompt(message);
 			this.flushStreaming();
 			if (response.usage) {
-				this.usage.inputTokens = response.usage.inputTokens;
-				this.usage.outputTokens = response.usage.outputTokens;
-				this.usage.totalTokens = response.usage.totalTokens;
+				for (const field of ["inputTokens", "outputTokens", "totalTokens"] as const) {
+					const value = response.usage[field];
+					if (value !== undefined) this.usage[field] = (this.usage[field] ?? 0) + value;
+				}
 				this.options.events.usage({ ...this.usage });
 			}
 			const summary = this.assistantText.trim() || "(no output)";
