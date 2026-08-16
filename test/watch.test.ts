@@ -96,6 +96,8 @@ describe("watch", () => {
 		expect(lines[0]).toBe(`${worker.id} · scout/senior · claude · read-only · model unknown — backend default`);
 		expect(lines[1]).toBe("task: map the auth flow");
 		expect(lines).toContain("» reading auth.ts");
+		// The metadata line every state change reprints, here for the first state seen.
+		expect(lines).toContain(`· ${worker.id} · model unknown — backend default · running`);
 		// The tag-per-line noise is gone.
 		expect(lines.join("\n")).not.toContain("[progress]");
 	});
@@ -119,6 +121,20 @@ describe("watch", () => {
 
 		expect(await watching).toBe(0);
 		expect(lines).toContain("» halfway");
+		expect(lines.at(-1)).toBe(`── ${worker.id} done ──`);
+	});
+
+	// A headless reader scrolls too: the metadata reprints on every state change,
+	// current as of the newest model and usage reports from the backend.
+	it("reprints current metadata when the state changes", async () => {
+		const worker = await manager.spawn({ role: "scout", tier: "senior", task: "look" });
+		const watching = watchWorker({ workerId: worker.id, hold: false, write });
+		transports[0].options.events.session({ model: "Claude Opus 4.5", modelId: "claude-opus-4-5" });
+		transports[0].options.events.usage({ inputTokens: 60_000, outputTokens: 8_000 });
+		transports[0].finish({ ok: true, summary: "done looking" });
+
+		expect(await watching).toBe(0);
+		expect(lines).toContain(`· ${worker.id} · Claude Opus 4.5 · done · 68,000 tokens · est. $0.50`);
 		expect(lines.at(-1)).toBe(`── ${worker.id} done ──`);
 	});
 

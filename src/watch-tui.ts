@@ -11,6 +11,7 @@
  */
 
 import {
+	type Component,
 	Container,
 	Editor,
 	type EditorTheme,
@@ -20,18 +21,20 @@ import {
 	ProcessTerminal,
 	Text,
 	TuiMainScreen,
+	truncateToWidth,
+	visibleWidth,
 } from "@earendil-works/pi-tui";
 import { sendChannelRequest } from "./channel/client.ts";
 import { APP_NAME } from "./config.ts";
 import {
 	displayModel,
-	formatUsage,
 	isTerminalState,
 	type WorkerLogEntry,
 	type WorkerLogPage,
+	type WorkerState,
 	type WorkerSummary,
 } from "./types.ts";
-import { resolveTarget } from "./watch.ts";
+import { metadataCandidates, resolveTarget } from "./watch.ts";
 
 const POLL_MS = 400;
 
@@ -187,11 +190,33 @@ function headerText(worker: WorkerSummary): string {
 	].join("\n");
 }
 
+/** The loader's message: state, or the question the worker is blocked on. Metadata lives on the status line. */
 function footerMessage(page: WorkerLogPage): string {
 	const question = page.worker?.pendingQuestion;
-	if (question) return `waiting — asks: ${question}`;
-	const usage = formatUsage(page.worker?.usage, page.worker?.modelId ?? page.worker?.model);
-	return usage ? `${page.state} · ${usage}` : page.state;
+	return question ? `waiting — asks: ${question}` : page.state;
+}
+
+/**
+ * The pinned line under the input box. The header says who a worker is, but
+ * the header scrolls away with the transcript; this line does not. It renders
+ * the widest metadata candidate that fits, so a narrow pane sheds cost first,
+ * then tokens, and always keeps id, model and state.
+ */
+export class StatusLine implements Component {
+	private candidates: string[] = [];
+
+	update(worker: WorkerSummary, state: WorkerState): void {
+		this.candidates = metadataCandidates(worker, state);
+	}
+
+	invalidate(): void {}
+
+	render(width: number): string[] {
+		const narrowest = this.candidates.at(-1);
+		if (narrowest === undefined) return [];
+		const fitting = this.candidates.find((candidate) => visibleWidth(candidate) <= width) ?? narrowest;
+		return [style.dim(truncateToWidth(fitting, width, "…"))];
+	}
 }
 
 export interface WatchTuiOptions {
@@ -212,12 +237,13 @@ export async function watchWorkerTui(options: WatchTuiOptions): Promise<number> 
 	const transcript = new TranscriptView();
 	const footerSlot = new Container();
 	const inputSlot = new Container();
+	const statusLine = new StatusLine();
 	const loader = new Loader(tui, style.cyan, style.dim, "connecting");
 	const editor = new Editor(tui, editorTheme);
 	footerSlot.addChild(loader);
 	inputSlot.addChild(editor);
 	inputSlot.addChild(new Text(style.dim("enter sends to the worker · ctrl+c closes this view"), 0, 0));
-	for (const child of [header, transcript, footerSlot, inputSlot]) tui.addChild(child);
+	for (const child of [header, transcript, footerSlot, inputSlot, statusLine]) tui.addChild(child);
 
 	let page: WorkerLogPage | undefined;
 	let finished = false;
@@ -243,15 +269,8 @@ export async function watchWorkerTui(options: WatchTuiOptions): Promise<number> 
 		finished = true;
 		loader.stop();
 		footerSlot.clear();
-		const usage = formatUsage(finalPage.worker?.usage, finalPage.worker?.modelId ?? finalPage.worker?.model);
 		footerSlot.addChild(
-			new Text(
-				style.dim(
-					`── ${finalPage.worker?.id ?? options.workerId} ${finalPage.state}${usage ? ` · ${usage}` : ""} ──`,
-				),
-				0,
-				1,
-			),
+			new Text(style.dim(`── ${finalPage.worker?.id ?? options.workerId} ${finalPage.state} ──`), 0, 1),
 		);
 		inputSlot.clear();
 		inputSlot.addChild(
@@ -338,7 +357,10 @@ export async function watchWorkerTui(options: WatchTuiOptions): Promise<number> 
 				return;
 			}
 			page = next;
-			if (next.worker) header.setText(headerText(next.worker));
+			if (next.worker) {
+				header.setText(headerText(next.worker));
+				statusLine.update(next.worker, next.state);
+			}
 			for (const entry of next.entries) transcript.append(entry);
 			since = next.cursor;
 			if (isTerminalState(next.state) && !finished) finish(next);

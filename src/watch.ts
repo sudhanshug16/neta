@@ -12,13 +12,14 @@
 import { sendChannelRequest } from "./channel/client.ts";
 import { NETA_LEADER_ENV, NETA_SOCKET_ENV } from "./channel/protocol.ts";
 import { getAgentDir } from "./config.ts";
+import { estimateCost } from "./pricing.ts";
 import { findSession, listSessions } from "./session.ts";
 import {
 	displayModel,
-	formatUsage,
 	isTerminalState,
 	type WorkerLogEntry,
 	type WorkerLogPage,
+	type WorkerState,
 	type WorkerSummary,
 } from "./types.ts";
 
@@ -74,10 +75,52 @@ function header(worker: WorkerSummary): string[] {
 	];
 }
 
-/** The line a pane ends on: how it went, and what it cost. */
+/** The line a pane ends on: how it went. The metadata line just above carries model and cost. */
 function footer(page: WorkerLogPage): string {
-	const usage = formatUsage(page.worker?.usage, page.worker?.modelId ?? page.worker?.model);
-	return `── ${page.worker?.id ?? "worker"} ${page.state}${usage ? ` · ${usage}` : ""} ──`;
+	return `── ${page.worker?.id ?? "worker"} ${page.state} ──`;
+}
+
+/**
+ * The metadata a watcher must never lose to a scrolled-off header: identity,
+ * model, mode, state and spend, as one " · "-separated line. Returned widest
+ * first; each following candidate drops the least essential remaining field —
+ * cost, then tokens, then context, then mode, then name — so however narrow
+ * the pane, id, model and state survive.
+ */
+export function metadataCandidates(worker: WorkerSummary, state: WorkerState): string[] {
+	const usage = worker.usage;
+	const context =
+		usage?.contextUsed !== undefined && usage.contextSize
+			? `context ${Math.round((usage.contextUsed / usage.contextSize) * 100)}%`
+			: undefined;
+	const counted =
+		usage === undefined
+			? undefined
+			: (usage.totalTokens ??
+				(usage.inputTokens !== undefined || usage.outputTokens !== undefined
+					? (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0)
+					: undefined));
+	const tokens = counted !== undefined ? `${counted.toLocaleString("en-US")} tokens` : undefined;
+	const estimated =
+		usage && usage.costAmount === undefined ? estimateCost(worker.modelId ?? worker.model, usage) : undefined;
+	const cost =
+		usage?.costAmount !== undefined
+			? `${usage.costAmount.toFixed(2)} ${usage.costCurrency ?? "USD"}`
+			: estimated !== undefined
+				? `est. $${estimated.toFixed(2)}`
+				: undefined;
+	const named = worker.name === worker.role ? worker.id : `${worker.id} ${worker.name}`;
+	const model = displayModel(worker);
+	const line = (fields: (string | undefined)[]) => fields.filter((field) => field !== undefined).join(" · ");
+	const candidates = [
+		line([named, model, worker.mode, state, context, tokens, cost]),
+		line([named, model, worker.mode, state, context, tokens]),
+		line([named, model, worker.mode, state, context]),
+		line([named, model, worker.mode, state]),
+		line([named, model, state]),
+		line([worker.id, model, state]),
+	];
+	return candidates.filter((candidate, index) => index === 0 || candidate !== candidates[index - 1]);
 }
 
 export interface WatchTarget {
@@ -144,6 +187,7 @@ export async function watchWorker(options: WatchOptions): Promise<number> {
 
 	let since = 0;
 	let introduced = false;
+	let shownState: WorkerState | undefined;
 	for (;;) {
 		const response = await sendChannelRequest(target.address, {
 			type: "tail",
@@ -167,6 +211,13 @@ export async function watchWorker(options: WatchOptions): Promise<number> {
 		}
 		for (const entry of page.entries) write(formatLine(entry));
 		since = page.cursor;
+		// The header scrolls away with the log; the metadata must not. Every state
+		// change reprints it as one line — current model and spend included — so a
+		// headless reader always has it nearby.
+		if (page.worker && page.state !== shownState) {
+			write(`· ${metadataCandidates(page.worker, page.state)[0]}`);
+			shownState = page.state;
+		}
 
 		if (isTerminalState(page.state) || options.once) {
 			if (isTerminalState(page.state)) write(footer(page));
