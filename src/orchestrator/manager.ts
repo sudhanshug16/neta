@@ -10,7 +10,7 @@
  *   pulls. Only completion, failure and a blocking question push.
  */
 
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -39,7 +39,7 @@ import {
 	type WorkerSummary,
 	type WorkerUsage,
 } from "../types.ts";
-import { formatStatusSnapshot, formatWriterContext, formatWriterStatus } from "./status.ts";
+import { formatStatusSnapshot, formatWriterActivityNotice, formatWriterContext, formatWriterStatus } from "./status.ts";
 import type { TransportOptions, WorkerMcpServer, WorkerTransportDriver } from "./transport.ts";
 
 const MAX_LOG_ENTRIES = 500;
@@ -83,8 +83,10 @@ interface WorkerRecord {
 	noteId?: string;
 	/** Writer holding the slot this worker is queued behind. */
 	queuedBehind?: string;
-	/** Messages sent while queued, delivered when started. */
+	/** Messages held until this worker's first prompt can accept them. */
 	pendingBrief: string[];
+	/** HEAD when a writer began, used to report commit state without guessing. */
+	headAtStart?: string;
 }
 
 /** Opens a pane per worker, when a multiplexer is running. */
@@ -135,6 +137,18 @@ async function gitDirtyFiles(cwd: string): Promise<string[]> {
 			);
 		});
 	});
+}
+
+function gitHead(cwd: string): string | undefined {
+	try {
+		return execFileSync("git", ["rev-parse", "HEAD"], {
+			cwd,
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "ignore"],
+		}).trim();
+	} catch {
+		return undefined;
+	}
 }
 
 export class WorkerManager implements ChannelHandler {
@@ -304,6 +318,7 @@ export class WorkerManager implements ChannelHandler {
 
 		record.driver = this.createTransport(transportOptions);
 		if (writer) {
+			record.headAtStart = gitHead(this.options.cwd);
 			this.activeWriter = id;
 			this.lastWriterBackend = backend.name;
 		}
@@ -323,6 +338,7 @@ export class WorkerManager implements ChannelHandler {
 		}
 
 		this.setState(record, "running");
+		if (writer) this.notifyReadOnlyWorkers(record, "started");
 		const writerContext = writer
 			? undefined
 			: formatWriterContext(
@@ -333,7 +349,7 @@ export class WorkerManager implements ChannelHandler {
 					}),
 				);
 		const task = writerContext ? `${writerContext}\n\n---\n\n# Task\n\n${request.task}` : request.task;
-		this.enqueue(record, task);
+		this.enqueue(record, this.withPendingBrief(record, task));
 		const summary = this.summarize(record);
 		// A pane is a convenience for the person watching; never let it fail a spawn.
 		try {
@@ -495,7 +511,7 @@ export class WorkerManager implements ChannelHandler {
 		for (const record of this.workers.values()) {
 			if (!isTerminalState(record.state)) {
 				// Fire-and-forget during shutdown: we're tearing down everything anyway.
-				void record.driver.kill();
+				void record.driver?.kill();
 				void this.finish(record, "killed", "Leader shut down.");
 			}
 			await rm(record.scratchDir, { recursive: true, force: true }).catch(() => {});
@@ -864,16 +880,64 @@ export class WorkerManager implements ChannelHandler {
 		});
 	}
 
+	/**
+	 * ACP's session/prompt request owns an entire prompt turn; neither the SDK
+	 * nor any supported bridge exposes a way to inject text into a live turn.
+	 * Notices are therefore appended as the worker's next prompt and also logged.
+	 */
+	private notifyReadOnlyWorkers(writer: WorkerRecord, activity: "started" | "finished", changes?: string): void {
+		const notice = formatWriterActivityNotice(this.summarize(writer), activity, changes);
+		for (const record of this.workers.values()) {
+			if (record.writer || record.state === "queued" || isTerminalState(record.state)) continue;
+			this.appendLog(record, "status", notice);
+			if (record.state === "starting") {
+				record.pendingBrief.push(notice);
+			} else {
+				this.enqueue(record, notice);
+			}
+		}
+	}
+
+	private withPendingBrief(record: WorkerRecord, task: string): string {
+		if (record.pendingBrief.length === 0) return task;
+		const messages = record.pendingBrief.join("\n\n");
+		record.pendingBrief = [];
+		return `${task}\n\n---\n\n# Pending messages\n\n${messages}`;
+	}
+
+	private async writerChangeStatus(record: WorkerRecord, state: WorkerState): Promise<string> {
+		const [head, dirtyFiles] = await Promise.all([
+			Promise.resolve(gitHead(this.options.cwd)),
+			gitDirtyFiles(this.options.cwd),
+		]);
+		const committed = record.headAtStart !== undefined && head !== undefined && head !== record.headAtStart;
+		const clean = dirtyFiles.length === 0;
+		if (state === "killed") {
+			const commitStatus = committed
+				? `committed before it was killed (${head?.slice(0, 7)})`
+				: "not committed before it was killed";
+			const checkoutStatus = clean
+				? "no uncommitted changes remain"
+				: `${dirtyFiles.length} uncommitted change(s) remain`;
+			return `${commitStatus}; ${checkoutStatus}. Neta did not discard shared-checkout changes`;
+		}
+		if (committed && clean) return `committed (${head?.slice(0, 7)})`;
+		if (!clean) return `${dirtyFiles.length} uncommitted change(s) remain`;
+		return "no repository changes were committed";
+	}
+
 	private finish(record: WorkerRecord, state: WorkerState, result: string): Promise<void> {
 		if (record.finishing) return record.finishing;
 		// This is the backstop during shutdown: a late ACP write is rejected while
 		// the process-group kill below is still waiting for its exit event.
 		record.driver?.markTerminal();
 		const finishing = (async () => {
+			const startedWriter = record.writer && record.state !== "queued";
 			if (state !== "killed") {
 				await record.driver?.kill();
 			}
-			const dirtyFiles = state === "done" && record.writer ? await gitDirtyFiles(this.options.cwd) : [];
+			const dirtyFiles = state === "done" && startedWriter ? await gitDirtyFiles(this.options.cwd) : [];
+			const changes = startedWriter ? await this.writerChangeStatus(record, state) : undefined;
 
 			this.setState(record, state);
 			record.endedAt = Date.now();
@@ -900,6 +964,7 @@ export class WorkerManager implements ChannelHandler {
 			}
 
 			const wasActiveWriter = this.activeWriter === record.id;
+			if (startedWriter) this.notifyReadOnlyWorkers(record, "finished", changes);
 			if (wasActiveWriter) this.activeWriter = undefined;
 
 			record.pendingAsk?.resolve({ ok: false, error: `Worker ${state}.` });
@@ -1013,6 +1078,7 @@ export class WorkerManager implements ChannelHandler {
 		};
 
 		record.driver = this.createTransport(transportOptions);
+		record.headAtStart = gitHead(this.options.cwd);
 		this.setState(record, "starting");
 		this.appendLog(record, "status", "Dequeued and starting...");
 
@@ -1024,13 +1090,10 @@ export class WorkerManager implements ChannelHandler {
 		}
 
 		this.setState(record, "running");
+		this.notifyReadOnlyWorkers(record, "started");
 
 		// Enqueue task with staleness guard and any pending messages delivered together
-		let firstPrompt = fullTask;
-		if (record.pendingBrief.length > 0) {
-			firstPrompt = `${fullTask}\n\n---\n\n# Queued messages from leader\n\n${record.pendingBrief.join("\n\n")}`;
-			record.pendingBrief = [];
-		}
+		const firstPrompt = this.withPendingBrief(record, fullTask);
 		this.enqueue(record, firstPrompt);
 
 		// Open pane for the newly started worker

@@ -19,6 +19,7 @@
  *   CONFIG_UPDATE - emits a config_option_update switching the model to
  *           "fixture-fast", the way a backend reports a mid-session change
  *   MODE_UPDATE - emits a current_mode_update switching the mode to "plan"
+ *   WAIT_FOR_NOTICE - pauses the first turn so a test can queue a notice
  * Anything else is echoed back as the assistant message.
  *
  * Flags:
@@ -81,6 +82,10 @@ async function prompt(params, cx) {
 	if (text.includes("FAIL")) {
 		await say(cx, sessionId, "giving up");
 		return { stopReason: "refusal" };
+	}
+
+	if (text.includes("WAIT_FOR_NOTICE")) {
+		await new Promise((resolve) => setTimeout(resolve, 200));
 	}
 
 	if (text.includes("REPORT_PID")) await say(cx, sessionId, `pid:${process.pid}\n\n`);

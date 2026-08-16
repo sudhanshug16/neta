@@ -229,6 +229,22 @@ describe("WorkerManager", () => {
 		expect(transports[2].prompts[0]).toContain("other change");
 	});
 
+	it("does not send writer notices to queued writers", async () => {
+		const first = await manager.spawn({ role: "worker", tier: "senior", task: "first", writer: true });
+		await manager.spawn({ role: "scout", tier: "senior", task: "inspect" });
+		const queued = await manager.spawn({ role: "worker", tier: "senior", task: "second", writer: true });
+
+		transports[0].finish({ ok: true, summary: "first done" });
+		await manager.waitFor([first.id], 5000);
+		await flush();
+
+		const queuedLog = manager
+			.tailLog(queued.id)
+			.entries.map((entry) => entry.text)
+			.join("\n");
+		expect(queuedLog).not.toContain("Neta system notice");
+	});
+
 	it("keeps the writer slot until the finished worker's process is dead", async () => {
 		const first = await manager.spawn({ role: "worker", tier: "senior", task: "first", writer: true });
 		const second = await manager.spawn({ role: "worker", tier: "senior", task: "second", writer: true });

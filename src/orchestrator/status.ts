@@ -48,6 +48,23 @@ export function formatWriterObjective(summary: WorkerSummary): string {
 	return `${objective.slice(0, OBJECTIVE_LIMIT - 3).trimEnd()}...`;
 }
 
+/** A machine-generated heads-up for readers whose checkout may change under them. */
+export function formatWriterActivityNotice(
+	summary: WorkerSummary,
+	activity: "started" | "finished",
+	changes?: string,
+): string {
+	const name = summary.name === summary.role ? summary.name : `"${summary.name}"`;
+	const lines = [
+		"[Neta system notice — automatic heads-up, not a new instruction. Your task is unchanged.]",
+		`Writer ${summary.id} ${name} ${activity}.`,
+		`Objective: ${formatWriterObjective(summary)}`,
+	];
+	if (changes) lines.push(`Changes: ${changes}`);
+	lines.push("Use `git show HEAD:<path>` to read the committed version.");
+	return lines.join("\n");
+}
+
 function formatWriter(summary: WorkerSummary): string {
 	const name = summary.name === summary.role ? summary.name : `"${summary.name}"`;
 	return `${summary.id} ${name} | ${formatWriterObjective(summary)}`;

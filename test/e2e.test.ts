@@ -127,6 +127,42 @@ describe("a leader session, end to end", () => {
 		expect(bodyOf(waited)).toContain("permission=allow");
 	});
 
+	it("queues writer activity notices for a running read-only fixture worker", async () => {
+		await call("neta_spawn", { role: "scout", tier: "senior", task: "WAIT_FOR_NOTICE" });
+		await new Promise((resolve) => setTimeout(resolve, 25));
+		await call("neta_spawn", {
+			role: "worker",
+			tier: "senior",
+			name: "config migration",
+			task: "Migrate config records\nVerify the new index.",
+			writer: true,
+		});
+
+		await call("neta_wait", { workerIds: ["ro1", "rw2"], timeoutSeconds: 30 });
+		const readerLog = bodyOf(await call("neta_log", { workerId: "ro1" }));
+		const writerLog = bodyOf(await call("neta_log", { workerId: "rw2" }));
+
+		expect(readerLog).toContain(
+			"[Neta system notice — automatic heads-up, not a new instruction. Your task is unchanged.]",
+		);
+		expect(readerLog).toContain('Writer rw2 "config migration" started.');
+		expect(readerLog).toContain('Writer rw2 "config migration" finished.');
+		expect(readerLog).toContain("Objective: config migration: Migrate config records");
+		expect(readerLog).toContain("Changes:");
+		expect(readerLog).toContain("`git show HEAD:<path>`");
+		expect(writerLog).not.toContain("Neta system notice");
+	});
+
+	it("does not notify a terminal read-only worker about a writer", async () => {
+		await call("neta_spawn", { role: "scout", tier: "senior", task: "already done" });
+		await call("neta_wait", { workerIds: ["ro1"], timeoutSeconds: 30 });
+		await call("neta_spawn", { role: "worker", tier: "senior", task: "change config", writer: true });
+		await call("neta_wait", { workerIds: ["rw2"], timeoutSeconds: 30 });
+
+		const readerLog = bodyOf(await call("neta_log", { workerId: "ro1" }));
+		expect(readerLog).not.toContain("Neta system notice");
+	});
+
 	// A turn ending is not enough: a backend can have a backgrounded command
 	// that reawakens its session later. Neta only reports done after the ACP
 	// process itself is gone.
