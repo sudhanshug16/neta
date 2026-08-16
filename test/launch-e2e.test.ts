@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { writeSessionRecord } from "../src/session.ts";
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const FAKE_LEADER = fileURLToPath(new URL("./fixtures/fake-leader.mjs", import.meta.url));
@@ -42,11 +43,16 @@ function fakeBackend(name: string): string {
 	return dir;
 }
 
-async function launch(backend: string, extra: string[] = []): Promise<LaunchRecord> {
+async function launch(
+	backend: string,
+	extra: string[] = [],
+	beforeLaunch?: (agentDir: string) => void,
+): Promise<LaunchRecord> {
 	const binDir = fakeBackend(backend);
 	const agentDir = scratch("neta-home-");
 	const cwd = scratch("neta-repo-");
 	const record = join(scratch("neta-record-"), "launch.json");
+	beforeLaunch?.(agentDir);
 
 	await run(process.execPath, [CLI, "--leader", backend, "--mux", "none", ...extra], {
 		cwd,
@@ -112,13 +118,35 @@ describe("neta (launching a leader)", () => {
 		const launched = await launch("claude");
 
 		expect(launched.env.NETA_MUX).toBe("none");
-		expect(launched.env.NETA_PANES).toBe("1");
+		expect(launched.env.NETA_PANES).toBe("0");
 	});
 
 	it("passes arguments after -- through to the vendor CLI", async () => {
 		const launched = await launch("claude", ["--", "--model", "opus"]);
 
 		expect(launched.argv.slice(-2)).toEqual(["--model", "opus"]);
+	});
+
+	it("sweeps a crashed session before starting a leader", async () => {
+		const socket = join(tmpdir(), `neta-launch-stale-${process.pid}-${Date.now()}.sock`);
+		const launched = await launch("claude", [], (agentDir) => {
+			writeFileSync(socket, "stale");
+			writeSessionRecord(
+				{
+					id: "dead",
+					socket,
+					token: "token",
+					cwd: "/stale",
+					leader: "claude",
+					pid: 2147483646,
+					startedAt: 0,
+				},
+				agentDir,
+			);
+		});
+
+		expect(launched.env.NETA_SOCKET).toMatch(/neta-.*\.sock$/);
+		expect(existsSync(socket)).toBe(false);
 	});
 
 	// Generated config carries a token; leaving it in /tmp after the session

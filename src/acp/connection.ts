@@ -99,6 +99,8 @@ export interface AcpConnectionOptions {
 	 * the worker in that CLI's own interface.
 	 */
 	onVendorSession?: (sessionId: string) => void;
+	/** The detached ACP process group, so a crashed manager can clean it up later. */
+	onProcessGroup?: (pgid: number) => void;
 }
 
 /**
@@ -199,6 +201,7 @@ export class AcpConnection {
 			detached: true,
 		});
 		this.child = child;
+		if (child.pid !== undefined) this.options.onProcessGroup?.(child.pid);
 
 		child.on("error", (error) => {
 			this.options.onStderr(`Backend "${command}" failed to start: ${error.message}`);

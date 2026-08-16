@@ -99,6 +99,8 @@ interface WorkerRecord {
 	pendingBrief: string[];
 	/** HEAD when a writer began, used to report commit state without guessing. */
 	headAtStart?: string;
+	/** Detached ACP process group, for startup cleanup after a manager crash. */
+	processGroupId?: number;
 }
 
 /** Opens a pane per worker, when a multiplexer is running. */
@@ -130,6 +132,8 @@ export interface WorkerManagerOptions {
 	workerMcpServers?: (workerId: string, scratchDir: string) => WorkerMcpServer[];
 	/** Opens a pane per worker. Omitted means headless. */
 	panes?: WorkerPaneHost;
+	/** Persists a detached worker group while it can outlive the manager. */
+	onWorkerProcessGroup?: (workerId: string, pgid: number | undefined) => void;
 	/** Test seam: swap in a fake transport without touching real CLIs. */
 	createTransport?: TransportFactory;
 }
@@ -340,6 +344,10 @@ export class WorkerManager implements ChannelHandler {
 					record.modelId = session.modelId;
 					record.mode = session.mode;
 					record.agentInfo = session.agentInfo;
+				},
+				processGroup: (pgid) => {
+					record.processGroupId = pgid;
+					this.options.onWorkerProcessGroup?.(record.id, pgid);
 				},
 			},
 		};
@@ -1049,6 +1057,10 @@ export class WorkerManager implements ChannelHandler {
 			const startedWriter = record.writer && record.state !== "queued";
 			if (state !== "killed") {
 				await record.driver?.kill();
+			}
+			if (record.processGroupId !== undefined) {
+				this.options.onWorkerProcessGroup?.(record.id, undefined);
+				record.processGroupId = undefined;
 			}
 			if (record.killReason) {
 				state = "killed";

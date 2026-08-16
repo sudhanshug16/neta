@@ -25,6 +25,26 @@ describe("tmux", () => {
 		]);
 	});
 
+	it("sets each leader's session environment explicitly", () => {
+		expect(
+			tmuxSessionArgs("neta-2", {
+				command: "leader",
+				args: [],
+				env: { NETA_SOCKET: "/tmp/neta-2.sock", NETA_SESSION_ID: "2" },
+			}),
+		).toEqual([
+			"new-session",
+			"-s",
+			"neta-2",
+			"-e",
+			"NETA_SESSION_ID=2",
+			"-e",
+			"NETA_SOCKET=/tmp/neta-2.sock",
+			"--",
+			"leader",
+		]);
+	});
+
 	// A window, not a split. Splitting the leader's window shrinks the thing the
 	// user is typing into, and five workers made it unreadable.
 	it("puts a worker in its own window, leaving the leader focused", () => {
@@ -68,6 +88,13 @@ describe("zellij", () => {
 
 		expect(layout).toContain('command="/usr/local/bin/claude"');
 		expect(layout).toContain('args "--append-system-prompt" "be a lead"');
+	});
+
+	it("passes a leader's environment through the layout command", () => {
+		const layout = leaderLayout({ command: "leader", args: [], env: { NETA_SESSION_ID: "2" } });
+
+		expect(layout).toContain('command="/usr/bin/env"');
+		expect(layout).toContain('args "NETA_SESSION_ID=2" "leader"');
 	});
 
 	// A custom layout replaces zellij's own UI. Without these the user gets

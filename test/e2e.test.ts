@@ -7,7 +7,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { execFile } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -172,6 +172,15 @@ describe("a leader session, end to end", () => {
 		const pid = pidFrom(bodyOf(waited));
 
 		expect(isRunning(pid)).toBe(false);
+	});
+
+	it("records a running worker group for crash cleanup, then removes it at death", async () => {
+		await call("neta_spawn", { role: "scout", tier: "senior", task: "WAIT_FOR_NOTICE" });
+		const registry = join(agentDir, "sessions", "e2e.json");
+		expect(JSON.parse(readFileSync(registry, "utf-8")).workerPgids).toHaveLength(1);
+
+		await call("neta_wait", { workerIds: ["ro1"], timeoutSeconds: 30 });
+		expect(JSON.parse(readFileSync(registry, "utf-8")).workerPgids).toEqual([]);
 	});
 
 	it("starts a queued writer only after the previous fixture process dies", async () => {

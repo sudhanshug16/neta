@@ -30,6 +30,8 @@ export interface TransportEvents {
 	vendorSession(sessionId: string): void;
 	/** What the backend negotiated and is running; re-fired whenever the backend reports a change. */
 	session(session: NegotiatedSession): void;
+	/** Detached worker process group, retained for crash cleanup. */
+	processGroup?(pgid: number): void;
 }
 
 /**

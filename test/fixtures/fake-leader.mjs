@@ -34,6 +34,7 @@ if (target) {
 			cwd: process.cwd(),
 			files: capture([...process.argv.slice(2), codexAgents]),
 			env: {
+				NETA_DIR: process.env.NETA_DIR ?? null,
 				NETA_SOCKET: process.env.NETA_SOCKET ?? null,
 				NETA_LEADER_TOKEN: process.env.NETA_LEADER_TOKEN ?? null,
 				NETA_SESSION_ID: process.env.NETA_SESSION_ID ?? null,
@@ -47,5 +48,8 @@ if (target) {
 		"utf-8",
 	);
 }
+
+const holdMs = Number.parseInt(process.env.FAKE_LEADER_HOLD_MS ?? "0", 10);
+if (holdMs > 0) await new Promise((resolve) => setTimeout(resolve, holdMs));
 
 process.exit(Number.parseInt(process.env.FAKE_LEADER_EXIT ?? "0", 10));

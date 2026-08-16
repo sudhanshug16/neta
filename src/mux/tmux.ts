@@ -9,9 +9,12 @@ import { spawnSync } from "node:child_process";
 import { findOnPath } from "../detect.ts";
 import type { MuxAdapter, ProcessSpec } from "./types.ts";
 
-/** `tmux new-session -s <name> -- cmd args…` */
+/** `tmux new-session -s <name> -e VAR=value -- cmd args…` */
 export function newSessionArgs(sessionName: string, leader: ProcessSpec): string[] {
-	return ["new-session", "-s", sessionName, "--", leader.command, ...leader.args];
+	const environment = Object.entries(leader.env ?? {})
+		.sort(([left], [right]) => left.localeCompare(right))
+		.flatMap(([name, value]) => ["-e", `${name}=${value}`]);
+	return ["new-session", "-s", sessionName, ...environment, "--", leader.command, ...leader.args];
 }
 
 /**

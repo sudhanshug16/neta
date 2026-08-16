@@ -28,7 +28,20 @@ function kdlString(value: string): string {
  * multiplexer they did not ask to be in.
  */
 export function leaderLayout(leader: ProcessSpec): string {
-	const args = leader.args.map(kdlString).join(" ");
+	// Zellij sessions have their own server process. Starting the leader through
+	// `env` makes this launch's values explicit even if a future server reuses an
+	// earlier session's environment.
+	const command = leader.env ? "/usr/bin/env" : leader.command;
+	const args = leader.env
+		? [
+				...Object.entries(leader.env)
+					.sort(([left], [right]) => left.localeCompare(right))
+					.map(([name, value]) => `${name}=${value}`),
+				leader.command,
+				...leader.args,
+			]
+		: leader.args;
+	const renderedArgs = args.map(kdlString).join(" ");
 	const lines = [
 		"layout {",
 		"    default_tab_template {",
@@ -44,8 +57,8 @@ export function leaderLayout(leader: ProcessSpec): string {
 		// level becomes a tab that skips the template, which is why the leader's
 		// tab had no tab bar while every worker tab did.
 		`    tab name=${kdlString("leader")} {`,
-		`        pane name=${kdlString("neta leader")} close_on_exit=true command=${kdlString(leader.command)} {`,
-		args ? `            args ${args}` : undefined,
+		`        pane name=${kdlString("neta leader")} close_on_exit=true command=${kdlString(command)} {`,
+		renderedArgs ? `            args ${renderedArgs}` : undefined,
 		"        }",
 		"    }",
 		"}",

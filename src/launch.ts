@@ -27,6 +27,7 @@ import { selectMux } from "./mux/index.ts";
 import { loadCharter } from "./prompts/charter.ts";
 import { materializeFlavors } from "./prompts/flavors.ts";
 import { buildLeaderPrompt } from "./prompts/leader.ts";
+import { sweepStaleSessions } from "./session.ts";
 import { loadConfig } from "./settings.ts";
 
 export interface LaunchOptions {
@@ -95,6 +96,7 @@ export async function chooseBackend(
 export async function launchLeader(options: LaunchOptions): Promise<number> {
 	const cwd = options.cwd;
 	const agentDir = options.agentDir ?? getAgentDir();
+	sweepStaleSessions(agentDir);
 	const config = loadConfig(cwd, agentDir);
 	const preferredLeader = options.leader ?? config.leader.backend;
 	if (preferredLeader && config.isBackendDisabled(preferredLeader)) {
@@ -135,19 +137,9 @@ export async function launchLeader(options: LaunchOptions): Promise<number> {
 	// Panes need a multiplexer session; if we are not in one, start one around
 	// the leader so its workers have somewhere to appear.
 	const mux = selectMux(options.mux ? normalizeMux(options.mux) : config.mux.mode);
-	const wrapped =
-		config.mux.panes && mux.id !== "none"
-			? (mux.wrapLeader({ command: launch.command, args: launch.args }, `neta-${sessionId}`, sessionDir) ?? launch)
-			: launch;
+	const showing = config.mux.panes && mux.id !== "none";
 
 	for (const warning of launch.warnings) process.stderr.write(`${APP_NAME}: ${warning}\n`);
-	const showing = config.mux.panes && mux.id !== "none";
-	process.stderr.write(
-		`${APP_NAME}: leading with ${backend.name} · workers ${showing ? `in ${mux.id} tabs` : "headless"}` +
-			// Being dropped inside a multiplexer you did not choose, with no idea how
-			// to leave, is its own kind of trap.
-			`${wrapped !== launch ? " · quitting the leader ends the session" : ""}\n`,
-	);
 
 	// The leader is a fresh session of that vendor's CLI, exactly like a worker
 	// is, so it must not inherit the runtime of whatever agent session Neta was
@@ -157,13 +149,27 @@ export async function launchLeader(options: LaunchOptions): Promise<number> {
 		...sanitizeInheritedEnv(process.env),
 		...launch.env,
 		NETA_MUX: mux.id,
-		NETA_PANES: config.mux.panes ? "1" : "0",
+		NETA_PANES: showing ? "1" : "0",
 	};
-	const run = (spec: { command: string; args: string[] }) =>
+	// tmux keeps a server-global environment captured by its first session. The
+	// server otherwise gives every later leader that first leader's socket and
+	// token. Adapters receive the complete launch environment so they can pass it
+	// directly to the process they start, rather than relying on that inheritance.
+	const leader = { command: launch.command, args: launch.args, env };
+	const wrapped = showing ? (mux.wrapLeader(leader, `neta-${sessionId}`, sessionDir) ?? leader) : leader;
+
+	process.stderr.write(
+		`${APP_NAME}: leading with ${backend.name} · workers ${showing ? `in ${mux.id} tabs` : "headless"}` +
+			// Being dropped inside a multiplexer you did not choose, with no idea how
+			// to leave, is its own kind of trap.
+			`${wrapped !== leader ? " · quitting the leader ends the session" : ""}\n`,
+	);
+
+	const run = (spec: { command: string; args: string[]; env?: Record<string, string> }) =>
 		new Promise<number>((resolve) => {
 			// The control plane is the process that opens panes, and it is a child
 			// of the leader rather than of us, so the choice travels by environment.
-			const child = spawn(spec.command, spec.args, { cwd, env, stdio: "inherit" });
+			const child = spawn(spec.command, spec.args, { cwd, env: spec.env ?? env, stdio: "inherit" });
 			child.on("error", (error) => {
 				process.stderr.write(`${APP_NAME}: could not start ${spec.command}: ${error.message}\n`);
 				resolve(1);
@@ -178,11 +184,11 @@ export async function launchLeader(options: LaunchOptions): Promise<number> {
 	// multiplexer that fails this fast never started one: when the leader itself
 	// exits, the multiplexer keeps its session open rather than returning an
 	// error in a second.
-	if (wrapped !== launch && code !== 0 && Date.now() - startedAt < MUX_STARTUP_MS) {
+	if (wrapped !== leader && code !== 0 && Date.now() - startedAt < MUX_STARTUP_MS) {
 		process.stderr.write(
 			`${APP_NAME}: ${mux.id} exited immediately (${code}); starting ${backend.name} without panes.\n`,
 		);
-		code = await run(launch);
+		code = await run(leader);
 	}
 
 	await launch.cleanup?.().catch(() => {});

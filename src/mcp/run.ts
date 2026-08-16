@@ -20,7 +20,7 @@ import { getAgentDir } from "../config.ts";
 import { selectMux } from "../mux/index.ts";
 import { createPaneHost } from "../mux/panes.ts";
 import { WorkerManager } from "../orchestrator/manager.ts";
-import { removeSessionRecord, writeSessionRecord } from "../session.ts";
+import { removeSessionRecord, type SessionRecord, writeSessionRecord } from "../session.ts";
 import { loadConfig, type MuxMode } from "../settings.ts";
 import type { WorkerEvent } from "../types.ts";
 import { leaderTools } from "./leader.ts";
@@ -82,6 +82,18 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 	}
 
 	let shimDir: string | undefined;
+	const workerPgids = new Map<string, number>();
+	const sessionRecord: SessionRecord = {
+		id: sessionId,
+		socket: address,
+		token,
+		cwd,
+		leader: options.leader ?? process.env.NETA_LEADER_BACKEND ?? "unknown",
+		pid: process.pid,
+		startedAt: Date.now(),
+	};
+	const writeRegistry = () =>
+		writeSessionRecord({ ...sessionRecord, workerPgids: [...workerPgids.values()] }, agentDir);
 	const manager: WorkerManager = new WorkerManager({
 		cwd,
 		agentDir,
@@ -103,22 +115,16 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 		],
 		// `--mux` at launch decided this; settings answer when nobody did.
 		panes: wantsPanes ? panes : undefined,
+		onWorkerProcessGroup: (workerId, pgid) => {
+			if (pgid === undefined) workerPgids.delete(workerId);
+			else workerPgids.set(workerId, pgid);
+			writeRegistry();
+		},
 	});
 
 	const server = new ChannelServer(address, manager);
 	await server.start();
-	writeSessionRecord(
-		{
-			id: sessionId,
-			socket: address,
-			token,
-			cwd,
-			leader: options.leader ?? process.env.NETA_LEADER_BACKEND ?? "unknown",
-			pid: process.pid,
-			startedAt: Date.now(),
-		},
-		agentDir,
-	);
+	writeRegistry();
 
 	let shuttingDown = false;
 	const shutdown = async () => {
