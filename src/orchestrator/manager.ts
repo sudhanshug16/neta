@@ -31,7 +31,7 @@ import {
 import { APP_NAME } from "../config.ts";
 import { loadRoleText, roleNames, workingAgreement } from "../prompts/roles.ts";
 import { canonicalizeCwd } from "../session.ts";
-import { assertClaudeModelAllowed, type NetaConfig, type ResolvedBackend } from "../settings.ts";
+import { assertClaudeModelAllowed, CLAUDE_OPUS_MAX, type NetaConfig, type ResolvedBackend } from "../settings.ts";
 import {
 	displayModel,
 	formatUsage,
@@ -491,7 +491,7 @@ export class WorkerManager implements ChannelHandler {
 			roomDebaterBackends: this.roomDebaterBackends,
 		});
 		const backend = this.options.config.resolve(request.tier, backendName, writer);
-		assertClaudeModelAllowed(backend.name, backend.model, `runtime ${request.tier} assignment`);
+		assertClaudeModelAllowed(backend.claudeLineage, backend.model, `runtime ${request.tier} assignment`);
 		const id = `${writer ? "rw" : "ro"}${++this.counter}`;
 		const reservedWriterSlot = writer && !this.activeWriter;
 		if (reservedWriterSlot) this.activeWriter = id;
@@ -1280,7 +1280,7 @@ export class WorkerManager implements ChannelHandler {
 		if (!record.channelToken) throw new Error(`Worker ${record.id} has no live channel token.`);
 		// Last guard before ACP process creation. Settings validation is defense in depth;
 		// this is the boundary that guarantees a forbidden model cannot reach a provider.
-		assertClaudeModelAllowed(backend.name, backend.model, `runtime worker ${record.id}`);
+		assertClaudeModelAllowed(backend.claudeLineage, backend.model, `runtime worker ${record.id}`);
 		const backendPath = backend.env.PATH;
 		const runtimePath = runtimeEnv.PATH;
 		return this.createTransport({
@@ -1298,6 +1298,7 @@ export class WorkerManager implements ChannelHandler {
 			command: backend.command,
 			args: backend.args,
 			model: backend.model,
+			requireExactModel: backend.claudeLineage && backend.model === CLAUDE_OPUS_MAX,
 			writer: record.writer,
 			systemPrompt,
 			scratchDir: record.scratchDir,
@@ -1556,28 +1557,27 @@ export class WorkerManager implements ChannelHandler {
 			"Note: you were queued behind another writer that has since finished. Check `git log` and `git status` for the repo's current state before starting.";
 		const fullTask = `${stalenessGuard}\n\n---\n\n# Task\n\n${record.task}`;
 
-		// Prepare backend and transport
-		const backend = this.options.config.resolve(record.tier, record.backend, true);
-		assertClaudeModelAllowed(backend.name, backend.model, `runtime ${record.tier} assignment`);
-		const runtimeEnv = (await this.options.prepareEnv?.()) ?? {};
-		if (this.disposed || record.state !== "queued") return;
-		const roleText = loadRoleText(record.role, this.options.cwd, this.options.agentDir);
-
-		const systemPrompt = [
-			roleText?.trim() ?? "",
-			"",
-			workingAgreement({ tier: record.tier, writer: true, room: record.room, binary: APP_NAME }),
-			"",
-			`Your scratch directory (outside the repository) is ${record.scratchDir ?? "unavailable"}. Use it for notes and throwaway files.`,
-		].join("\n");
-
-		record.driver = this.createWorkerTransport(record, backend, runtimeEnv, systemPrompt);
-		record.headAtStart = gitHead(this.options.cwd);
-		this.lastWriterBackend = backend.name;
-		this.setState(record, "starting");
-		this.appendLog(record, "status", "Dequeued and starting...");
-
 		try {
+			// Resolve again at dequeue: settings may have changed while this writer
+			// waited. Every preparation failure becomes the worker's honest result.
+			const backend = this.options.config.resolve(record.tier, record.backend, true);
+			assertClaudeModelAllowed(backend.claudeLineage, backend.model, `runtime ${record.tier} assignment`);
+			const runtimeEnv = (await this.options.prepareEnv?.()) ?? {};
+			if (this.disposed || record.state !== "queued") return;
+			const roleText = loadRoleText(record.role, this.options.cwd, this.options.agentDir);
+			const systemPrompt = [
+				roleText?.trim() ?? "",
+				"",
+				workingAgreement({ tier: record.tier, writer: true, room: record.room, binary: APP_NAME }),
+				"",
+				`Your scratch directory (outside the repository) is ${record.scratchDir ?? "unavailable"}. Use it for notes and throwaway files.`,
+			].join("\n");
+
+			record.driver = this.createWorkerTransport(record, backend, runtimeEnv, systemPrompt);
+			record.headAtStart = gitHead(this.options.cwd);
+			this.lastWriterBackend = backend.name;
+			this.setState(record, "starting");
+			this.appendLog(record, "status", "Dequeued and starting...");
 			await record.driver.start();
 		} catch (error) {
 			await this.finish(record, "failed", error instanceof Error ? error.message : String(error));

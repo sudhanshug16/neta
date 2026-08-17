@@ -32,6 +32,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 
@@ -39,6 +40,11 @@ let _trapSigterm = false;
 
 const useConfigOptions = process.argv.includes("--config-options");
 const bare = process.argv.includes("--bare");
+const missingExactOpus = process.argv.includes("--missing-exact-opus");
+const missingMax = process.argv.includes("--missing-max");
+const failSetConfig = process.argv.includes("--fail-set-config");
+const promptMarkerIndex = process.argv.indexOf("--prompt-marker");
+const promptMarker = promptMarkerIndex === -1 ? undefined : process.argv[promptMarkerIndex + 1];
 
 const sessions = new Set();
 let counter = 0;
@@ -49,6 +55,9 @@ let selectedLegacyModel = "test-model";
 
 /** The configOptions wire shape, with the selected model and thought level. */
 function configOptions(current, thoughtLevel = "medium") {
+	const opusOption = missingExactOpus
+		? { value: "opus[1m][high]", name: "Claude Opus 1M High" }
+		: { value: "opus[1m]", name: "Claude Opus 1M" };
 	return [
 		{
 			id: "model",
@@ -62,7 +71,7 @@ function configOptions(current, thoughtLevel = "medium") {
 				{ value: "gpt-5.6-luna", name: "GPT 5.6 Luna" },
 				{ value: "gpt-5.6-terra", name: "GPT 5.6 Terra" },
 				{ value: "gpt-5.6-sol", name: "GPT 5.6 Sol" },
-				{ value: "opus[1m]", name: "Claude Opus 1M" },
+				opusOption,
 			],
 		},
 		{
@@ -75,7 +84,7 @@ function configOptions(current, thoughtLevel = "medium") {
 				{ value: "medium", name: "Medium" },
 				{ value: "high", name: "High" },
 				{ value: "xhigh", name: "Extra High" },
-				{ value: "max", name: "Max" },
+				...(!missingMax ? [{ value: "max", name: "Max" }] : []),
 			],
 		},
 		{
@@ -97,6 +106,7 @@ async function say(cx, sessionId, text) {
 }
 
 async function prompt(params, cx) {
+	if (promptMarker) writeFileSync(promptMarker, "prompted\n", "utf-8");
 	const sessionId = params.sessionId;
 	const text = params.prompt.map((block) => (block.type === "text" ? block.text : "")).join("");
 
@@ -308,6 +318,7 @@ acp.agent({ name: "fake-acp-agent" })
 		return response;
 	})
 	.onRequest(acp.methods.agent.session.setConfigOption, (ctx) => {
+		if (failSetConfig) throw new Error("fixture setConfig failure");
 		const selected = selectedConfig.get(ctx.params.sessionId);
 		if (!selected) throw new Error("config options are not supported");
 		if (ctx.params.configId === "model") selected.model = ctx.params.value;

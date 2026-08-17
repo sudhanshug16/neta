@@ -24,7 +24,7 @@ interface ProviderData {
 	[key: string]: unknown;
 }
 
-interface ApiData {
+export interface ApiData {
 	[provider: string]: ProviderData;
 }
 
@@ -35,9 +35,35 @@ interface TrimmedProviderData {
 	};
 }
 
-interface TrimmedData {
+export interface TrimmedData {
 	anthropic: TrimmedProviderData;
 	openai: TrimmedProviderData;
+}
+
+/** Kept only so completed historical Fable runs retain an honest cost. */
+const HISTORICAL_PRICING: TrimmedProviderData = {
+	"claude-fable-5": { input: 10, output: 50 },
+};
+
+export function buildPricingSnapshot(data: ApiData): TrimmedData {
+	const trimmed: TrimmedData = {
+		anthropic: {},
+		openai: {},
+	};
+
+	for (const provider of ["anthropic", "openai"] as const) {
+		const providerData = data[provider];
+		if (!providerData?.models) continue;
+		for (const [modelId, modelEntry] of Object.entries(providerData.models)) {
+			const cost = modelEntry.cost;
+			if (cost?.input !== undefined && cost?.output !== undefined) {
+				trimmed[provider][modelId] = { input: cost.input, output: cost.output };
+			}
+		}
+	}
+
+	Object.assign(trimmed.anthropic, HISTORICAL_PRICING);
+	return trimmed;
 }
 
 async function main() {
@@ -49,28 +75,10 @@ async function main() {
 
 	const data = (await response.json()) as ApiData;
 
-	const trimmed: TrimmedData = {
-		anthropic: {},
-		openai: {},
-	};
-
 	for (const provider of ["anthropic", "openai"] as const) {
-		const providerData = data[provider];
-		if (!providerData?.models) {
-			console.warn(`Provider ${provider} has no models data`);
-			continue;
-		}
-
-		for (const [modelId, modelEntry] of Object.entries(providerData.models)) {
-			const cost = modelEntry.cost;
-			if (cost?.input !== undefined && cost?.output !== undefined) {
-				trimmed[provider][modelId] = {
-					input: cost.input,
-					output: cost.output,
-				};
-			}
-		}
+		if (!data[provider]?.models) console.warn(`Provider ${provider} has no models data`);
 	}
+	const trimmed = buildPricingSnapshot(data);
 
 	const anthropicCount = Object.keys(trimmed.anthropic).length;
 	const openaiCount = Object.keys(trimmed.openai).length;
@@ -93,7 +101,9 @@ export const PRICING_SNAPSHOT = ${JSON.stringify(trimmed, null, "\t")} as const;
 	console.log(`Wrote pricing snapshot to ${OUTPUT_PATH}`);
 }
 
-main().catch((error) => {
-	console.error("Failed to refresh pricing:", error);
-	process.exit(1);
-});
+if (import.meta.main) {
+	main().catch((error) => {
+		console.error("Failed to refresh pricing:", error);
+		process.exit(1);
+	});
+}

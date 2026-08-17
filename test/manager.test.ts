@@ -341,7 +341,8 @@ describe("WorkerManager", () => {
 	it("fails closed before transport creation if a forbidden Claude model escapes settings validation", async () => {
 		const unsafeConfig = fixtureBackendConfig();
 		unsafeConfig.resolve = () => ({
-			name: "claude",
+			name: "innocent-alias",
+			claudeLineage: true,
 			command: process.execPath,
 			args: [],
 			model: "claude-fable-5[1m]",
@@ -368,6 +369,79 @@ describe("WorkerManager", () => {
 		} finally {
 			await unsafeManager.dispose();
 			rmSync("/tmp/neta-policy-test.sock", { force: true });
+		}
+	});
+
+	it("records model negotiation startup failures honestly without sending a task prompt", async () => {
+		const failedTransports: FakeTransport[] = [];
+		const failureManager = new WorkerManager({
+			cwd: process.cwd(),
+			agentDir: "/nonexistent-agent-dir",
+			config: fixtureBackendConfig(),
+			channelAddress: "/tmp/neta-selection-failure-test.sock",
+			onEvent: () => {},
+			createTransport: (options) => {
+				const transport = new FakeTransport(options);
+				transport.start = () => Promise.reject(new Error("Required model selection failed before prompt."));
+				failedTransports.push(transport);
+				return transport;
+			},
+		});
+
+		try {
+			await expect(
+				failureManager.spawn({ role: "scout", tier: "architect", task: "must never be sent" }),
+			).rejects.toThrow(/Required model selection failed before prompt/);
+			expect(failureManager.get("ro1")).toMatchObject({
+				state: "failed",
+				result: "Required model selection failed before prompt.",
+			});
+			expect(failedTransports[0].prompts).toEqual([]);
+		} finally {
+			await failureManager.dispose();
+			rmSync("/tmp/neta-selection-failure-test.sock", { force: true });
+		}
+	});
+
+	it("fails a dequeued custom Claude writer if its resolved model becomes Fable", async () => {
+		const dynamicConfig = fixtureBackendConfig();
+		const dynamicTransports: FakeTransport[] = [];
+		const queueManager = new WorkerManager({
+			cwd: process.cwd(),
+			agentDir: "/nonexistent-agent-dir",
+			config: dynamicConfig,
+			channelAddress: "/tmp/neta-dequeued-policy-test.sock",
+			onEvent: () => {},
+			createTransport: (options) => {
+				const transport = new FakeTransport(options);
+				dynamicTransports.push(transport);
+				return transport;
+			},
+		});
+
+		try {
+			const first = await queueManager.spawn({ role: "worker", tier: "expert", task: "first", writer: true });
+			const second = await queueManager.spawn({ role: "worker", tier: "architect", task: "second", writer: true });
+			dynamicConfig.resolve = () => ({
+				name: "review-primary",
+				claudeLineage: true,
+				command: process.execPath,
+				args: [],
+				model: "anthropic/claude-fable-5-20260817-v1",
+				env: {},
+			});
+
+			dynamicTransports[0].finish({ ok: true, summary: "first done" });
+			await queueManager.waitFor([first.id, second.id], 5000);
+
+			expect(queueManager.get(second.id)).toMatchObject({
+				state: "failed",
+				result: expect.stringContaining("Claude Fable model"),
+			});
+			expect(dynamicTransports).toHaveLength(1);
+		} finally {
+			await queueManager.dispose();
+			rmSync("/tmp/neta-dequeued-policy-test.sock", { force: true });
 		}
 	});
 

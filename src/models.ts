@@ -38,7 +38,7 @@ export async function listBackendModels(backendName: string | undefined, cwd: st
 		try {
 			await connection.start();
 			const { currentModel, modes, currentMode, thoughtLevels, currentThoughtLevel } = connection.offered;
-			const models = selectableBackendModels(name, connection.offered.models);
+			const models = selectableBackendModels(config.isClaudeBackend(name), connection.offered.models);
 			console.log(`\n${name}`);
 			console.log(`  models: ${models.length === 0 ? "(none advertised)" : ""}`);
 			for (const model of models) console.log(`    ${model}${model === currentModel ? "  (default)" : ""}`);
@@ -66,6 +66,6 @@ export async function listBackendModels(backendName: string | undefined, cwd: st
 	return 0;
 }
 
-export function selectableBackendModels(backend: string, models: string[]): string[] {
-	return backend === "claude" ? models.filter((model) => !isForbiddenClaudeModel(model)) : [...models];
+export function selectableBackendModels(claudeLineage: boolean, models: string[]): string[] {
+	return claudeLineage ? models.filter((model) => !isForbiddenClaudeModel(model)) : [...models];
 }

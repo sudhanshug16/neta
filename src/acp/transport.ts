@@ -115,6 +115,7 @@ export class AcpWorkerTransport implements WorkerTransportDriver {
 			allowMutations: this.options.writer,
 			mcpServers: this.options.mcpServers,
 			model: this.options.model,
+			requireExactModel: this.options.requireExactModel,
 			onUpdate: (update) => this.sessionUpdate(update),
 			onSession: (description) => this.options.events.log("status", `Running as ${description}.`),
 			onVendorSession: (sessionId) => this.options.events.vendorSession(sessionId),

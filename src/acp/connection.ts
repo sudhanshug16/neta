@@ -92,6 +92,8 @@ export interface AcpConnectionOptions {
 	mcpServers?: AcpMcpServer[];
 	/** Model id this backend advertises, e.g. "haiku" or "gpt-5.6-sol[xhigh]". */
 	model?: string;
+	/** Reject startup unless the exact composite model selection is confirmed. */
+	requireExactModel?: boolean;
 	onUpdate: (update: AcpSessionUpdate) => void;
 	onStderr: (text: string) => void;
 	onDenied: (kind: string, title: string, reason: "read-only" | "terminal") => void;
@@ -269,10 +271,9 @@ export class AcpConnection {
 	 * Ask the session to be what this worker needs: the tier's model, and the
 	 * strictest mode that still lets the work happen.
 	 *
-	 * Both are best-effort. A backend that offers neither still runs the worker,
-	 * and saying which model actually ran beats assuming the one we asked for —
-	 * an earlier version set ANTHROPIC_MODEL and every worker quietly ran on the
-	 * most expensive model there is.
+	 * Ordinary model requests are best-effort. Policy selections set
+	 * requireExactModel and fail startup unless both model and thought level are
+	 * confirmed, so the caller cannot silently spend a turn on a fallback.
 	 */
 	private async negotiate(response: acp.NewSessionResponse): Promise<void> {
 		const connection = this.connection;
@@ -293,10 +294,21 @@ export class AcpConnection {
 		if (config.mode) this.offered.modes = config.mode.values;
 
 		const wanted = this.options.model;
+		const requireExact = this.options.requireExactModel === true;
+		const selectionError = (reason: string): Error =>
+			new Error(`Required model selection "${wanted}" failed: ${reason}. No task prompt was sent.`);
+		if (requireExact && (!wanted || !config.model)) {
+			throw selectionError("the backend did not advertise configurable models and thought levels");
+		}
 		if (wanted && config.model) {
 			const desired = splitModelAndThoughtLevel(wanted);
-			const modelId = chooseModel(config.model.values, wanted) ?? chooseModel(config.model.values, desired.model);
+			const modelId = requireExact
+				? config.model.values.includes(desired.model)
+					? desired.model
+					: undefined
+				: (chooseModel(config.model.values, wanted) ?? chooseModel(config.model.values, desired.model));
 			if (!modelId) {
+				if (requireExact) throw selectionError(`exact model "${desired.model}" is unavailable`);
 				this.options.onStderr(`No model "${wanted}" here; running on ${this.offered.currentModel}.`);
 			} else {
 				try {
@@ -306,28 +318,49 @@ export class AcpConnection {
 						value: modelId,
 					});
 					let confirmed = this.applyConfigOptions(selected.configOptions);
+					if (requireExact && confirmed.model?.currentValue !== desired.model) {
+						throw selectionError(`the backend did not confirm exact model "${desired.model}"`);
+					}
 					chosen.push(`model ${modelId}`);
 
-					if (desired.thoughtLevel && confirmed.thoughtLevel) {
-						const thoughtLevel = chooseModel(confirmed.thoughtLevel.values, desired.thoughtLevel);
-						if (!thoughtLevel) {
-							this.options.onStderr(
-								`No thought level "${desired.thoughtLevel}" here; running on ${this.offered.currentModel}.`,
-							);
+					if (desired.thoughtLevel) {
+						if (!confirmed.thoughtLevel) {
+							if (requireExact) throw selectionError("the backend did not advertise a thought-level option");
 						} else {
-							selected = await connection.agent.request(acp.methods.agent.session.setConfigOption, {
-								sessionId,
-								configId: confirmed.thoughtLevel.id,
-								value: thoughtLevel,
-							});
-							confirmed = this.applyConfigOptions(selected.configOptions);
-							chosen.push(`thought level ${thoughtLevel}`);
+							const thoughtLevel = requireExact
+								? confirmed.thoughtLevel.values.includes(desired.thoughtLevel)
+									? desired.thoughtLevel
+									: undefined
+								: chooseModel(confirmed.thoughtLevel.values, desired.thoughtLevel);
+							if (!thoughtLevel) {
+								if (requireExact) {
+									throw selectionError(`exact thought level "${desired.thoughtLevel}" is unavailable`);
+								}
+								this.options.onStderr(
+									`No thought level "${desired.thoughtLevel}" here; running on ${this.offered.currentModel}.`,
+								);
+							} else {
+								selected = await connection.agent.request(acp.methods.agent.session.setConfigOption, {
+									sessionId,
+									configId: confirmed.thoughtLevel.id,
+									value: thoughtLevel,
+								});
+								confirmed = this.applyConfigOptions(selected.configOptions);
+								if (requireExact && confirmed.thoughtLevel?.currentValue !== desired.thoughtLevel) {
+									throw selectionError(`the backend did not confirm thought level "${desired.thoughtLevel}"`);
+								}
+								chosen.push(`thought level ${thoughtLevel}`);
+							}
 						}
 					}
 					// set_config_option returns all current values. Reading its last response
 					// is the confirmation, rather than recording what we merely requested.
 					this.applyConfigOptions(selected.configOptions);
 				} catch (error) {
+					if (requireExact) {
+						if (error instanceof Error && error.message.startsWith("Required model selection")) throw error;
+						throw selectionError(`configuration request failed: ${describe(error)}`);
+					}
 					this.options.onStderr(`Could not select model "${wanted}": ${describe(error)}`);
 				}
 			}

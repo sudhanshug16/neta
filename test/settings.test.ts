@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CONFIG_DIR_NAME } from "../src/config.ts";
-import { loadNetaSettings, NetaConfig, persistTierOverride } from "../src/settings.ts";
+import { isForbiddenClaudeModel, loadNetaSettings, NetaConfig, persistTierOverride } from "../src/settings.ts";
 
 describe("NetaConfig", () => {
 	// A tier means a different model on each vendor, so the backend says what its
@@ -59,6 +59,52 @@ describe("NetaConfig", () => {
 				"opencode",
 			).model,
 		).toBe("fable");
+	});
+
+	it("detects the Fable family across aliases without substring false positives", () => {
+		const cases = [
+			["fable", true],
+			["FABLE", true],
+			["claude-fable-5-latest", true],
+			["anthropic/claude-fable-5-20260817-v1", true],
+			["claude-fable-5[1m][max]", true],
+			["fable.5:high", true],
+			["fablefish", false],
+			["claude-fablefish-5", false],
+			["other/fable", false],
+			["storybook/claude-fable-5", false],
+			["anthropic/claude-opus-fable", false],
+		] as const;
+
+		for (const [model, forbidden] of cases) expect(isForbiddenClaudeModel(model)).toBe(forbidden);
+	});
+
+	it("applies Claude policy to structurally derived aliases, not arbitrary backend names or models", () => {
+		const claudeAlias = {
+			command: "npx",
+			args: ["-y", "@agentclientprotocol/claude-agent-acp@0.68.0"],
+		};
+		const safeAlias = new NetaConfig({ backends: { "review-primary": claudeAlias } });
+		expect(safeAlias.resolve("architect", "review-primary")).toMatchObject({
+			claudeLineage: true,
+			model: "opus[1m][max]",
+		});
+		expect(
+			() =>
+				new NetaConfig({
+					tiers: { architect: { backend: "review-primary", model: "claude-fable-5-latest" } },
+					backends: { "review-primary": claudeAlias },
+				}),
+		).toThrow(/Claude Fable model.*tiers\.architect\.model/);
+
+		const unrelated = new NetaConfig({
+			tiers: { architect: { backend: "claude-looking-name", model: "fable" } },
+			backends: { "claude-looking-name": { command: "custom-acp" } },
+		});
+		expect(unrelated.resolve("architect", "claude-looking-name")).toMatchObject({
+			claudeLineage: false,
+			model: "fable",
+		});
 	});
 
 	it("substitutes the model into backend arguments for backends that take a flag", () => {
@@ -355,6 +401,34 @@ describe("loadNetaSettings", () => {
 		}
 	});
 
+	it("quarantines old Fable values for a custom Claude alias without rewriting settings", () => {
+		const agentDir = scratch();
+		const cwd = scratch();
+		const settingsPath = join(agentDir, "settings.json");
+		const contents = JSON.stringify({
+			tiers: { architect: { backend: "review-primary", model: "claude-fable-5-latest" } },
+			backends: {
+				"review-primary": {
+					command: "npx",
+					args: ["-y", "@agentclientprotocol/claude-agent-acp@0.68.0"],
+					tierModels: { expert: "anthropic/claude-fable-5-20260817-v1" },
+				},
+			},
+		});
+		writeFileSync(settingsPath, contents);
+		const error = spyOn(console, "error").mockImplementation(() => {});
+
+		try {
+			const settings = loadNetaSettings(cwd, agentDir);
+			expect(settings.tiers?.architect?.model).toBeUndefined();
+			expect(settings.backends?.["review-primary"]?.tierModels?.expert).toBeUndefined();
+			expect(readFileSync(settingsPath, "utf-8")).toBe(contents);
+			expect(error).toHaveBeenCalledWith(expect.stringContaining("backends.review-primary.tierModels.expert"));
+		} finally {
+			error.mockRestore();
+		}
+	});
+
 	it("persists a tier override to .neta/settings.json without clobbering other tiers", async () => {
 		const cwd = scratch();
 		mkdirSync(join(cwd, CONFIG_DIR_NAME));
@@ -389,6 +463,30 @@ describe("loadNetaSettings", () => {
 			/Claude Fable model.*disabled.*tiers\.architect\.model/,
 		);
 		expect(existsSync(join(cwd, CONFIG_DIR_NAME, "settings.json"))).toBe(false);
+	});
+
+	it("rejects persisting Fable through a custom Claude alias before writing", async () => {
+		const cwd = scratch();
+		const settingsDir = join(cwd, CONFIG_DIR_NAME);
+		const settingsPath = join(settingsDir, "settings.json");
+		mkdirSync(settingsDir);
+		writeFileSync(
+			settingsPath,
+			JSON.stringify({
+				backends: {
+					"review-primary": {
+						command: "npx",
+						args: ["-y", "@agentclientprotocol/claude-agent-acp@0.68.0"],
+					},
+				},
+			}),
+		);
+		const before = readFileSync(settingsPath, "utf-8");
+
+		await expect(
+			persistTierOverride(cwd, "architect", { backend: "review-primary", model: "fable-5-latest" }),
+		).rejects.toThrow(/Claude Fable model.*tiers\.architect\.model/);
+		expect(readFileSync(settingsPath, "utf-8")).toBe(before);
 	});
 
 	it("drops a quarantined Fable value when persisting another setting and preserves unrelated keys", async () => {

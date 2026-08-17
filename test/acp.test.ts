@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -38,6 +38,7 @@ describe("AcpWorkerTransport", () => {
 		agentArgs: string[] = [],
 		env: Record<string, string> = {},
 		model: string | undefined = undefined,
+		requireExactModel = false,
 	): AcpWorkerTransport {
 		const scratchDir = mkdtempSync(join(tmpdir(), "neta-acp-"));
 		tempDirs.push(scratchDir);
@@ -48,6 +49,7 @@ describe("AcpWorkerTransport", () => {
 			command: process.execPath,
 			args: [fakeAgent, ...agentArgs],
 			model,
+			requireExactModel,
 			writer,
 			systemPrompt: "You are a test worker.",
 			scratchDir,
@@ -287,7 +289,7 @@ describe("AcpWorkerTransport", () => {
 	});
 
 	it("selects the exact Claude Opus 1M model and separate Max effort", async () => {
-		const transport = createTransport(false, [], [], ["--config-options"], {}, "opus[1m][max]");
+		const transport = createTransport(false, [], [], ["--config-options"], {}, "opus[1m][max]", true);
 		await transport.start();
 
 		expect(sessionReports.at(-1)).toMatchObject({
@@ -295,6 +297,30 @@ describe("AcpWorkerTransport", () => {
 			modelId: "opus[1m][max]",
 		});
 	});
+
+	for (const [name, fixtureFlag, error] of [
+		["exact Opus 1M is absent", "--missing-exact-opus", /exact model "opus\[1m\]" is unavailable/],
+		["Max effort is absent", "--missing-max", /exact thought level "max" is unavailable/],
+		["setConfig fails", "--fail-set-config", /configuration request failed: Internal error/],
+	] as const) {
+		it(`fails closed before the task prompt when ${name}`, async () => {
+			const markerDir = mkdtempSync(join(tmpdir(), "neta-prompt-marker-"));
+			tempDirs.push(markerDir);
+			const marker = join(markerDir, "prompted");
+			const transport = createTransport(
+				false,
+				[],
+				[],
+				["--config-options", fixtureFlag, "--prompt-marker", marker],
+				{},
+				"opus[1m][max]",
+				true,
+			);
+
+			await expect(transport.start()).rejects.toThrow(error);
+			expect(existsSync(marker)).toBe(false);
+		});
+	}
 
 	it("tracks a mode the backend switches mid-session", async () => {
 		const transport = createTransport(false, [], [], ["--config-options"]);

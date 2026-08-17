@@ -54,6 +54,8 @@ export interface TransportOptions {
 	command: string | undefined;
 	args: string[];
 	model: string | undefined;
+	/** Policy selections must be confirmed exactly before any task prompt is sent. */
+	requireExactModel?: boolean;
 	/** Writers may edit and write files; everyone else is denied at the protocol layer. */
 	writer: boolean;
 	/** Role prompt, prepended to the worker's first message. */

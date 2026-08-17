@@ -9,7 +9,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir } from "./config.ts";
 import { findOnPath } from "./detect.ts";
 import { LEGACY_TIER_ALIASES, TIERS, type Tier, type TierSettingsKey } from "./types.ts";
@@ -84,19 +84,39 @@ export interface NetaSettings {
 }
 
 /** Claude Fable is historical-only: costs remain known, but Neta must never select it. */
-const CLAUDE_FABLE_MODEL = /^(?:anthropic\/)?(?:claude-)?fable(?:[-.]\d+)*(?:-\d+m|\[\d+m\])?(?:\[[^\]]+\])?$/i;
+const CLAUDE_ACP_PACKAGE = "@agentclientprotocol/claude-agent-acp";
 export const CLAUDE_OPUS_MAX = "opus[1m][max]";
 
 export function isForbiddenClaudeModel(model: string): boolean {
-	return CLAUDE_FABLE_MODEL.test(model.trim());
+	const parts = model.trim().toLowerCase().split("/");
+	if (parts.length > 2 || (parts.length === 2 && parts[0] !== "anthropic")) return false;
+	const id = parts.at(-1);
+	if (!id) return false;
+	const family = id.startsWith("claude-") ? id.slice("claude-".length) : id;
+	if (family === "fable") return true;
+	if (!family.startsWith("fable")) return false;
+	return ["-", ".", "[", ":"].includes(family.charAt("fable".length));
 }
 
-export function assertClaudeModelAllowed(backend: string, model: string | undefined, field: string): void {
-	if (backend === "claude" && model && isForbiddenClaudeModel(model)) {
+export function assertClaudeModelAllowed(claudeLineage: boolean, model: string | undefined, field: string): void {
+	if (claudeLineage && model && isForbiddenClaudeModel(model)) {
 		throw new Error(
 			`Claude Fable model "${model}" is disabled by Neta policy at ${field}. Use ${CLAUDE_OPUS_MAX} or a lower Claude tier.`,
 		);
 	}
+}
+
+/**
+ * Claude policy follows the effective launcher, not its user-chosen key. The
+ * shipped ACP package, Claude detection hint, and Claude resume command are
+ * stable structural signals retained by aliases made from the shipped config.
+ */
+export function isEffectiveClaudeBackend(name: string, backend: NetaBackendSettings): boolean {
+	if (name === "claude") return true;
+	if (backend.detect === "claude") return true;
+	if (backend.resume?.command === "claude" && backend.resume.args.includes("--resume")) return true;
+	if (backend.command && basename(backend.command) === "claude-agent-acp") return true;
+	return (backend.args ?? []).some((arg) => arg === CLAUDE_ACP_PACKAGE || arg.startsWith(`${CLAUDE_ACP_PACKAGE}@`));
 }
 
 /**
@@ -158,6 +178,8 @@ export const DEFAULT_TIERS: Partial<Record<Tier, NetaTierSettings>> = {};
 
 export interface ResolvedBackend {
 	name: string;
+	/** True when the effective launcher is Claude-derived, regardless of its key. */
+	claudeLineage: boolean;
 	command: string | undefined;
 	args: string[];
 	model: string | undefined;
@@ -171,7 +193,6 @@ export class NetaConfig {
 	readonly mux: Required<NetaMuxSettings>;
 
 	constructor(settings?: NetaSettings) {
-		assertSettingsClaudePolicy(settings ?? {});
 		const normalized = normalizeSettings(settings ?? {});
 		this.leader = { backend: normalized.leader?.backend, strictMcp: normalized.leader?.strictMcp ?? false };
 		this.mux = { mode: normalized.mux?.mode ?? "auto", panes: normalized.mux?.panes ?? true };
@@ -183,10 +204,8 @@ export class NetaConfig {
 				this.tiers[tier] = base ? { ...base, ...override } : override;
 			}
 		}
-		this.backends = { ...DEFAULT_BACKENDS };
-		for (const [name, override] of Object.entries(normalized.backends ?? {})) {
-			this.backends[name] = mergeBackendSettings(this.backends[name], override);
-		}
+		this.backends = effectiveBackendSettings(normalized);
+		assertSettingsClaudePolicy(normalized, this.backends);
 	}
 
 	backendNames(): string[] {
@@ -197,6 +216,11 @@ export class NetaConfig {
 
 	isBackendDisabled(name: string): boolean {
 		return this.backends[name]?.disabled === true;
+	}
+
+	isClaudeBackend(name: string): boolean {
+		const backend = this.backends[name];
+		return backend ? isEffectiveClaudeBackend(name, backend) : false;
 	}
 
 	/**
@@ -239,6 +263,7 @@ export class NetaConfig {
 		if (backend.disabled) throw new Error(`Backend "${name}" is disabled in settings.`);
 		return {
 			name,
+			claudeLineage: this.isClaudeBackend(name),
 			command: backend.command,
 			args: [...(backend.args ?? [])],
 			model: undefined,
@@ -266,8 +291,12 @@ export class NetaConfig {
 		// tier's model (it belongs to a different backend's naming scheme) — but
 		// the backend's own idea of what this tier means still applies.
 		const tierModel = mapping?.backend && backendName !== mapping.backend ? undefined : mapping?.model;
-		const model = tierModel ?? backend.tierModels?.[tier];
-		assertClaudeModelAllowed(backendName, model, `resolved ${tier} model`);
+		const claudeLineage = this.isClaudeBackend(backendName);
+		const model =
+			tierModel ??
+			backend.tierModels?.[tier] ??
+			(claudeLineage ? DEFAULT_BACKENDS.claude.tierModels?.[tier] : undefined);
+		assertClaudeModelAllowed(claudeLineage, model, `resolved ${tier} model`);
 		const args = [...(backend.args ?? [])];
 		const env = { ...(backend.env ?? {}) };
 		if (model) {
@@ -276,18 +305,29 @@ export class NetaConfig {
 		}
 		args.push(...((writer ? backend.writerArgs : backend.readOnlyArgs) ?? []));
 
-		return { name: backendName, command: backend.command, args, model, env };
+		return { name: backendName, claudeLineage, command: backend.command, args, model, env };
 	}
 }
 
-function assertSettingsClaudePolicy(settings: NetaSettings): void {
+function assertSettingsClaudePolicy(
+	settings: NetaSettings,
+	effectiveBackends: Record<string, NetaBackendSettings>,
+): void {
 	for (const [tier, setting] of Object.entries(settings.tiers ?? {})) {
-		if (setting.model && (setting.backend === undefined || setting.backend === "claude")) {
-			assertClaudeModelAllowed("claude", setting.model, `tiers.${tier}.model`);
+		if (setting.model) {
+			const claudeLineage =
+				setting.backend === undefined ||
+				(effectiveBackends[setting.backend] !== undefined &&
+					isEffectiveClaudeBackend(setting.backend, effectiveBackends[setting.backend]));
+			assertClaudeModelAllowed(claudeLineage, setting.model, `tiers.${tier}.model`);
 		}
 	}
-	for (const [tier, model] of Object.entries(settings.backends?.claude?.tierModels ?? {})) {
-		assertClaudeModelAllowed("claude", model, `backends.claude.tierModels.${tier}`);
+	for (const [name, configured] of Object.entries(settings.backends ?? {})) {
+		const effective = effectiveBackends[name];
+		if (!effective || !isEffectiveClaudeBackend(name, effective)) continue;
+		for (const [tier, model] of Object.entries(configured.tierModels ?? {})) {
+			assertClaudeModelAllowed(true, model, `backends.${name}.tierModels.${tier}`);
+		}
 	}
 }
 
@@ -306,6 +346,14 @@ function mergeBackendSettings(
 		...(env ? { env } : {}),
 		...(tierModels ? { tierModels } : {}),
 	};
+}
+
+function effectiveBackendSettings(settings: NetaSettings): Record<string, NetaBackendSettings> {
+	const effective = { ...DEFAULT_BACKENDS };
+	for (const [name, override] of Object.entries(settings.backends ?? {})) {
+		effective[name] = mergeBackendSettings(effective[name], override);
+	}
+	return effective;
 }
 
 function normalizeTierModels(tierModels: NetaBackendSettings["tierModels"] | undefined): Partial<Record<Tier, string>> {
@@ -441,26 +489,28 @@ function readSettingsFile(path: string): NetaSettings {
 
 function quarantineForbiddenClaudeModels(settings: NetaSettings, path: string): NetaSettings {
 	const quarantined = structuredClone(settings);
+	const effectiveBackends = effectiveBackendSettings(quarantined);
 	for (const [tier, setting] of Object.entries(quarantined.tiers ?? {})) {
-		if (
-			setting.model &&
-			setting.backend !== "opencode" &&
-			setting.backend !== "codex" &&
-			isForbiddenClaudeModel(setting.model)
-		) {
+		const claudeLineage =
+			setting.backend === undefined ||
+			(effectiveBackends[setting.backend] !== undefined &&
+				isEffectiveClaudeBackend(setting.backend, effectiveBackends[setting.backend]));
+		if (setting.model && claudeLineage && isForbiddenClaudeModel(setting.model)) {
 			console.error(
 				`Warning: blocked forbidden Claude Fable model "${setting.model}" in ${path} at tiers.${tier}.model; using the shipped safe Claude tier model.`,
 			);
 			delete setting.model;
 		}
 	}
-	const tierModels = quarantined.backends?.claude?.tierModels;
-	for (const [tier, model] of Object.entries(tierModels ?? {})) {
-		if (isForbiddenClaudeModel(model)) {
+	for (const [name, configured] of Object.entries(quarantined.backends ?? {})) {
+		const effective = effectiveBackends[name];
+		if (!effective || !isEffectiveClaudeBackend(name, effective)) continue;
+		for (const [tier, model] of Object.entries(configured.tierModels ?? {})) {
+			if (!isForbiddenClaudeModel(model)) continue;
 			console.error(
-				`Warning: blocked forbidden Claude Fable model "${model}" in ${path} at backends.claude.tierModels.${tier}; using the shipped safe Claude tier model.`,
+				`Warning: blocked forbidden Claude Fable model "${model}" in ${path} at backends.${name}.tierModels.${tier}; using the shipped safe Claude tier model.`,
 			);
-			delete tierModels?.[tier as TierSettingsKey];
+			delete configured.tierModels?.[tier as TierSettingsKey];
 		}
 	}
 	return quarantined;
@@ -490,13 +540,30 @@ export function loadNetaSettings(cwd: string, agentDir: string = getAgentDir()):
 			),
 		),
 	};
+	const effectiveBackends = effectiveBackendSettings(merged);
 	for (const [tier, setting] of Object.entries(merged.tiers ?? {})) {
-		if (setting.backend !== "claude" || !setting.model || !isForbiddenClaudeModel(setting.model)) continue;
+		const claudeLineage =
+			setting.backend === undefined ||
+			(effectiveBackends[setting.backend] !== undefined &&
+				isEffectiveClaudeBackend(setting.backend, effectiveBackends[setting.backend]));
+		if (!claudeLineage || !setting.model || !isForbiddenClaudeModel(setting.model)) continue;
 		const sourcePath = project.tiers?.[tier as Tier]?.model ? projectPath : userPath;
 		console.error(
 			`Warning: blocked forbidden Claude Fable model "${setting.model}" in ${sourcePath} at tiers.${tier}.model after settings merge; using the shipped safe Claude tier model.`,
 		);
 		delete setting.model;
+	}
+	for (const [name, configured] of Object.entries(merged.backends ?? {})) {
+		const effective = effectiveBackends[name];
+		if (!effective || !isEffectiveClaudeBackend(name, effective)) continue;
+		for (const [tier, model] of Object.entries(configured.tierModels ?? {})) {
+			if (!isForbiddenClaudeModel(model)) continue;
+			const sourcePath = project.backends?.[name]?.tierModels?.[tier as Tier] ? projectPath : userPath;
+			console.error(
+				`Warning: blocked forbidden Claude Fable model "${model}" in ${sourcePath} at backends.${name}.tierModels.${tier} after settings merge; using the shipped safe Claude tier model.`,
+			);
+			delete configured.tierModels?.[tier as TierSettingsKey];
+		}
 	}
 	return merged;
 }
@@ -515,14 +582,8 @@ export function loadConfig(cwd: string, agentDir: string = getAgentDir()): NetaC
  * are not preserved, as the settings files are JSON, not JSONC.
  */
 export async function persistTierOverride(cwd: string, tier: Tier, override: NetaTierSettings): Promise<void> {
-	if (override.model) assertClaudeModelAllowed(override.backend ?? "claude", override.model, `tiers.${tier}.model`);
 	const settingsDir = join(cwd, CONFIG_DIR_NAME);
 	const settingsPath = join(settingsDir, "settings.json");
-
-	// Create .neta directory if it does not exist
-	if (!existsSync(settingsDir)) {
-		mkdirSync(settingsDir, { recursive: true });
-	}
 
 	// Read existing settings or start with empty object
 	const existing = readSettingsFile(settingsPath);
@@ -535,6 +596,11 @@ export async function persistTierOverride(cwd: string, tier: Tier, override: Net
 			[tier]: override,
 		},
 	};
+	// Validate the prospective effective backend before touching disk. This is
+	// what makes custom Claude aliases obey the same persistence boundary.
+	new NetaConfig(updated);
+
+	if (!existsSync(settingsDir)) mkdirSync(settingsDir, { recursive: true });
 
 	// Write back with pretty-printing
 	writeFileSync(settingsPath, `${JSON.stringify(updated, null, 2)}\n`, "utf-8");

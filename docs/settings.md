@@ -85,7 +85,10 @@ Neta's composite notation names the exact model and thought level. For Claude,
 `opus[1m][max]` selects the advertised `opus[1m]` model and its separate `max`
 effort option. For Codex, `gpt-5.6-sol[max]` does the same. Claude Fable is not
 selectable: new overrides are rejected, while old settings are warned about
-and fall back in memory without being rewritten during load.
+and fall back in memory without being rewritten during load. This also applies
+to custom backend keys whose effective launcher retains the shipped Claude ACP
+package, Claude detection hint, or Claude resume command; their names do not
+control the policy. OpenCode and unrelated custom launchers remain unchanged.
 
 Run **`neta models`** to see what a backend actually offers — the ids come from
 the backend itself, so they stay right when a vendor adds a model. OpenCode
@@ -119,9 +122,11 @@ backend: `session/set_config_option` where the bridge supports it, falling
 back to the legacy `session/set_model` extension where it does not.
 Composite ids are split from the right — `opus[1m][max]` becomes exact model
 `opus[1m]` plus thought level `max`, selected separately. Selection is negotiated, not
-assumed: a model the backend does not offer, or a selection call that fails,
-is loudly logged in the worker's log and the worker runs on the backend's
-default — and listings show what actually ran, not what was asked for. Neta
+assumed. Claude architect selection is fail-closed: exact `opus[1m]` and exact
+`max` must both be advertised and confirmed, or the worker fails before its
+task prompt is sent. Ordinary non-policy requests retain the permissive behavior:
+an unavailable model or failed selection is logged and the worker runs on the
+backend default. Listings show what actually ran, not what was asked for. Neta
 also picks the session's mode: a worker without the writer slot gets the
 backend's read-only mode where one is advertised — on Codex that is a kernel
 sandbox, which covers the worker's shell as well as its tools.
