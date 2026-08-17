@@ -263,7 +263,12 @@ function openedZellijTab(before: string, after: string, title: string): boolean 
 	return added.length === 1 && added[0][1] === title;
 }
 
-function isZellijTabActive(stdout: string, tabId: number): boolean {
+/**
+ * A session may have no attached clients, or several clients each focused on a
+ * different tab. In both cases `active` is client-local rather than a unique
+ * session-wide property.
+ */
+export function zellijFocusRestored(stdout: string, tabId: number): boolean {
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(stdout) as unknown;
@@ -271,8 +276,36 @@ function isZellijTabActive(stdout: string, tabId: number): boolean {
 		return false;
 	}
 	if (!Array.isArray(parsed)) return false;
-	const matches = parsed.filter((row) => isRecord(row) && row.tab_id === tabId && row.active === true);
-	return matches.length === 1;
+	const activeTabs: number[] = [];
+	for (const row of parsed) {
+		if (
+			!isRecord(row) ||
+			typeof row.tab_id !== "number" ||
+			!Number.isInteger(row.tab_id) ||
+			typeof row.active !== "boolean"
+		) {
+			return false;
+		}
+		if (row.active) activeTabs.push(row.tab_id);
+	}
+	// A detached session has no client focus to restore. It is already safe to
+	// leave the new worker tab behind because no user's view was moved.
+	return activeTabs.length === 0 || activeTabs.includes(tabId);
+}
+
+function commandFailure(result: CommandResult): string | undefined {
+	if (result.error?.message) return result.error.message;
+	if (result.stderr?.trim()) return result.stderr.trim();
+	if (result.status !== 0) return `exit ${result.status ?? "unknown"}`;
+	// Zellij 0.44.3 has actions that can print a missing-session error while
+	// reporting status zero. Treat that as an error, not a successful command.
+	if (/\b(?:session .+ not found|no active session)\b/i.test(result.stdout)) return result.stdout.trim();
+	return undefined;
+}
+
+function zellijCommandError(result: CommandResult): Error | undefined {
+	const reason = commandFailure(result);
+	return reason ? new Error(`zellij: ${reason}`) : undefined;
 }
 
 /** Best-effort status rename: every missing or ambiguous fact fails closed. */
@@ -330,23 +363,49 @@ export class ZellijAdapter implements MuxAdapter {
 		const paneId = this.env.ZELLIJ_PANE_ID;
 		if (!targetSession || !paneId || (!sessionName && !this.inSession())) return false;
 
-		const before = this.run("zellij", listTabPanesArgs(targetSession));
-		if (before.status !== 0) return false;
+		let before: CommandResult;
+		try {
+			before = this.run("zellij", listTabPanesArgs(targetSession));
+		} catch (error) {
+			throw new Error(`zellij: ${error instanceof Error ? error.message : String(error)}`);
+		}
+		const beforeError = zellijCommandError(before);
+		if (beforeError) throw beforeError;
 		const originalTab = zellijTabForPane(before.stdout, paneId);
 		if (!originalTab) return false;
 
-		this.run("zellij", newTabArgs(title, spec, cwd, targetSession), {
-			env: { ...this.env, ...spec.env },
-		});
-		const after = this.run("zellij", listTabPanesArgs(targetSession));
-		const opened = after.status === 0 && openedZellijTab(before.stdout, after.stdout, title);
+		let created: CommandResult;
+		let after: CommandResult;
+		try {
+			created = this.run("zellij", newTabArgs(title, spec, cwd, targetSession), {
+				env: { ...this.env, ...spec.env },
+			});
+			after = this.run("zellij", listTabPanesArgs(targetSession));
+		} catch (error) {
+			throw new Error(`zellij: ${error instanceof Error ? error.message : String(error)}`);
+		}
+		const createdError = zellijCommandError(created);
+		if (createdError) throw createdError;
+		const afterError = zellijCommandError(after);
+		if (afterError) throw afterError;
+		const opened = openedZellijTab(before.stdout, after.stdout, title);
 
 		// new-tab always focuses the new tab. Restore the exact stable id belonging
 		// to the calling pane, then verify active state because actions can report
 		// success while printing errors such as "session not found".
-		this.run("zellij", goToTabByIdArgs(targetSession, originalTab.id));
-		const focused = this.run("zellij", listTabsArgs(targetSession));
-		const restored = focused.status === 0 && isZellijTabActive(focused.stdout, originalTab.id);
+		let restoredFocus: CommandResult;
+		let focused: CommandResult;
+		try {
+			restoredFocus = this.run("zellij", goToTabByIdArgs(targetSession, originalTab.id));
+			focused = this.run("zellij", listTabsArgs(targetSession));
+		} catch (error) {
+			throw new Error(`zellij: ${error instanceof Error ? error.message : String(error)}`);
+		}
+		const restoreError = zellijCommandError(restoredFocus);
+		if (restoreError) throw restoreError;
+		const focusedError = zellijCommandError(focused);
+		if (focusedError) throw focusedError;
+		const restored = zellijFocusRestored(focused.stdout, originalTab.id);
 		if (!opened) return false;
 		if (!restored) throw new Error(`zellij: opened tab but could not restore focus to ${originalTab.name}`);
 		return true;

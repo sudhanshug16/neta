@@ -25,6 +25,7 @@ import {
 	renameZellijTab,
 	ZellijAdapter,
 	attachSessionArgs as zellijAttachSessionArgs,
+	zellijFocusRestored,
 	killSessionArgs as zellijKillSessionArgs,
 	zellijTabForPane,
 	zellijTabId,
@@ -325,13 +326,112 @@ describe("zellij", () => {
 		expect(calls.flatMap((call) => call.args)).not.toContain("go-to-previous-tab");
 	});
 
+	it.each([
+		["no attached clients", [], true],
+		["one attached client on the original tab", [{ tab_id: 7, active: true }], true],
+		[
+			"two attached clients on different tabs",
+			[
+				{ tab_id: 7, active: true },
+				{ tab_id: 12, active: true },
+			],
+			true,
+		],
+		["an attached client on another tab only", [{ tab_id: 12, active: true }], false],
+	] as const)("recognizes focus restoration with %s", (_caseName, rows, restored) => {
+		expect(zellijFocusRestored(JSON.stringify(rows), 7)).toBe(restored);
+	});
+
+	it.each([
+		["detached", []],
+		[
+			"multiple clients",
+			[
+				{ tab_id: 7, active: true },
+				{ tab_id: 8, active: true },
+			],
+		],
+	])("reports an opened tab end to end when the session is %s", (_caseName, activeRows) => {
+		const before = JSON.stringify([{ id: 41, is_plugin: false, tab_id: 7, tab_name: "user-work" }]);
+		const after = JSON.stringify([
+			{ id: 41, is_plugin: false, tab_id: 7, tab_name: "user-work" },
+			{ id: 42, is_plugin: false, tab_id: 8, tab_name: "ro1 auth" },
+		]);
+		const responses = [
+			{ status: 0, stdout: before },
+			{ status: 0, stdout: "8\n" },
+			{ status: 0, stdout: after },
+			{ status: 0, stdout: "" },
+			{ status: 0, stdout: JSON.stringify(activeRows) },
+		];
+		let call = 0;
+		const adapter = new ZellijAdapter(() => responses[call++], {
+			ZELLIJ: "0",
+			ZELLIJ_SESSION_NAME: "s1",
+			ZELLIJ_PANE_ID: "41",
+		});
+
+		expect(adapter.openPane("ro1 auth", { command: "neta", args: [] }, "/repo")).toBe(true);
+		expect(call).toBe(5);
+	});
+
+	it("fails after opening when attached clients do not include the original tab", () => {
+		const before = JSON.stringify([{ id: 41, is_plugin: false, tab_id: 7, tab_name: "user-work" }]);
+		const after = JSON.stringify([
+			{ id: 41, is_plugin: false, tab_id: 7, tab_name: "user-work" },
+			{ id: 42, is_plugin: false, tab_id: 8, tab_name: "ro1 auth" },
+		]);
+		const responses = [
+			{ status: 0, stdout: before },
+			{ status: 0, stdout: "8\n" },
+			{ status: 0, stdout: after },
+			{ status: 0, stdout: "" },
+			{ status: 0, stdout: JSON.stringify([{ tab_id: 8, active: true }]) },
+		];
+		let call = 0;
+		const adapter = new ZellijAdapter(() => responses[call++], {
+			ZELLIJ: "0",
+			ZELLIJ_SESSION_NAME: "s1",
+			ZELLIJ_PANE_ID: "41",
+		});
+
+		expect(() => adapter.openPane("ro1 auth", { command: "neta", args: [] }, "/repo")).toThrow(
+			"opened tab but could not restore focus to user-work",
+		);
+	});
+
+	it("surfaces false-zero missing-session diagnostics from Zellij", () => {
+		const adapter = new ZellijAdapter(() => ({ status: 0, stdout: "[]", stderr: "Session 'gone' not found" }), {
+			ZELLIJ: "0",
+			ZELLIJ_SESSION_NAME: "gone",
+			ZELLIJ_PANE_ID: "41",
+		});
+
+		expect(() => adapter.openPane("ro1 auth", { command: "neta", args: [] }, "/repo")).toThrow(
+			"zellij: Session 'gone' not found",
+		);
+	});
+
+	it("surfaces thrown Zellij command errors", () => {
+		const adapter = new ZellijAdapter(
+			() => {
+				throw new Error("spawn zellij ENOENT");
+			},
+			{ ZELLIJ: "0", ZELLIJ_SESSION_NAME: "s1", ZELLIJ_PANE_ID: "41" },
+		);
+
+		expect(() => adapter.openPane("ro1 auth", { command: "neta", args: [] }, "/repo")).toThrow(
+			"zellij: spawn zellij ENOENT",
+		);
+	});
+
 	it("returns false when Zellij reports success but no stable tab was added", () => {
 		const before = JSON.stringify([{ id: 41, is_plugin: false, tab_id: 7, tab_name: "user-work" }]);
 		const responses = [
 			{ status: 0, stdout: before },
-			{ status: 0, stdout: "Session 'gone' not found" },
+			{ status: 0, stdout: "8\n" },
 			{ status: 0, stdout: before },
-			{ status: 0, stdout: "Session 'gone' not found" },
+			{ status: 0, stdout: "" },
 			{ status: 0, stdout: JSON.stringify([{ tab_id: 7, active: true }]) },
 		];
 		let call = 0;
