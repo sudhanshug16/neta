@@ -19,7 +19,8 @@ worker control is MCP and not a CLI.
 
 The control plane has no daemon and no lifetime of its own: when the leader
 exits, its stdio closes, and the control plane kills every worker it started
-and removes its session file. If it dies without cleaning up (a crash,
+and removes its live session file. It retains a separate durable checkpoint.
+If it dies without cleaning up (a crash,
 `kill -9`), the next `neta` invocation sweeps the residue: the stale session
 file, its socket, and any recorded worker process groups — each checked
 against its recorded start time first, so a recycled pid is never killed.
@@ -37,6 +38,30 @@ and the `workers`, `watch`, `kill`, and OS `kill` routes. Different directories
 and Git worktrees have different real paths, so each can run its own session.
 That normally means one writer slot per directory; separate subdirectories of
 one repository still have separate sessions and writer slots.
+
+## Durable checkpoints
+
+The live registry and the recovery checkpoint have different jobs:
+
+- `~/.neta/sessions/<manager-id>.json` is an ephemeral lease. It contains the
+  socket, authorization token, process identity, and crash-cleanup process
+  groups. Graceful cleanup and stale-session sweep remove it.
+- `~/.neta/checkpoints/<logical-id>.json` is durable, versioned semantic state.
+  It contains worker outcomes and logs, notes, rooms, assignment cursors, and
+  writer queue history. It never contains tokens, sockets, environment, process
+  ids for workers, scratch paths, transports, callbacks, or other live objects.
+
+Checkpoint files are written by rename from a same-directory temporary file,
+after syncing the file; the directory is synced after rename. The directory is
+mode `0700` and files are `0600`. Corrupt files and unknown schema versions fail
+closed and are never overwritten.
+
+Hydration is inert: it creates no worker process, prompt, pane, callback, or
+scratch directory. `starting`, `running`, `waiting`, and `queued` workers become
+terminal `interrupted` records carrying their previous state. Queued writer
+order and history remain visible, but nothing starts automatically. The writer
+slot stays held until a later recovery boundary proves the old processes dead.
+Completed, failed, and killed outcomes remain unchanged.
 
 ## The two doors
 

@@ -46,10 +46,12 @@ export type WorkerState =
 	/** Crashed, refused, or was rejected by its backend. */
 	| "failed"
 	/** Terminated by the leader. */
-	| "killed";
+	| "killed"
+	/** Recovered after its owning runtime stopped; never restarted automatically. */
+	| "interrupted";
 
 export function isTerminalState(state: WorkerState): boolean {
-	return state === "done" || state === "failed" || state === "killed";
+	return state === "done" || state === "failed" || state === "killed" || state === "interrupted";
 }
 
 /**
@@ -160,6 +162,8 @@ export interface WorkerSummary {
 	task: string;
 	startedAt: number;
 	endedAt?: number;
+	/** Original nonterminal state when recovery made this worker interrupted. */
+	stateBeforeStop?: Exclude<WorkerState, "done" | "failed" | "killed" | "interrupted">;
 	/** Set once the worker reaches a terminal state. */
 	result?: string;
 	/** Writer holding the slot, while this worker's state is "queued". */
@@ -168,7 +172,8 @@ export interface WorkerSummary {
 	pendingQuestion?: string;
 	/** The worker's most recent `neta progress`, for a "last:" line in listings. */
 	lastProgress?: { text: string; at: number };
-	scratchDir: string;
+	/** Live scratch path. Absent after checkpoint hydration because scratch state is never persisted. */
+	scratchDir?: string;
 	usage?: WorkerUsage;
 	/**
 	 * The backend's own session id for this worker.

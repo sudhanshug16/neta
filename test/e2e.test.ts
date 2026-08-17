@@ -69,7 +69,15 @@ describe("a leader session, end to end", () => {
 			cwd: repo,
 			// A test can itself run under Neta, whose socket belongs to the parent
 			// control plane. The fixture must own its own socket.
-			env: { ...process.env, NETA_DIR: agentDir, NETA_SESSION_ID: "e2e", NETA_SOCKET: "" } as Record<string, string>,
+			env: {
+				...process.env,
+				NETA_DIR: agentDir,
+				NETA_SESSION_ID: "e2e",
+				NETA_CHECKPOINT_ID: "e2e",
+				NETA_SOCKET: "",
+				NETA_WORKER_ID: "",
+				NETA_WORKER_TOKEN: "",
+			} as Record<string, string>,
 			stderr: "ignore",
 		});
 		client = new Client({ name: "vendor-cli", version: "0.0.0" });
@@ -130,7 +138,7 @@ describe("a leader session, end to end", () => {
 	});
 
 	it("queues writer activity notices for a running read-only fixture worker", async () => {
-		await call("neta_spawn", { role: "scout", tier: "expert", task: "WAIT_FOR_NOTICE" });
+		await call("neta_spawn", { role: "scout", tier: "expert", task: "WAIT_FOR_NOTICE SUBSTANTIVE_HANDOFF" });
 		await new Promise((resolve) => setTimeout(resolve, 25));
 		await call("neta_spawn", {
 			role: "worker",
@@ -140,9 +148,11 @@ describe("a leader session, end to end", () => {
 			writer: true,
 		});
 
-		await call("neta_wait", { workerIds: ["ro1", "rw2"], timeoutSeconds: 30 });
+		const waited = bodyOf(await call("neta_wait", { workerIds: ["ro1", "rw2"], timeoutSeconds: 30 }));
 		const readerLog = bodyOf(await call("neta_log", { workerId: "ro1" }));
 		const writerLog = bodyOf(await call("neta_log", { workerId: "rw2" }));
+		const listed = bodyOf(await call("neta_workers"));
+		const checkpoint = JSON.parse(readFileSync(join(agentDir, "checkpoints", "e2e.json"), "utf8"));
 
 		expect(readerLog).toContain(
 			"[Neta system notice — automatic heads-up, not a new instruction. Your task is unchanged.]",
@@ -153,6 +163,14 @@ describe("a leader session, end to end", () => {
 		expect(readerLog).toContain("Changes:");
 		expect(readerLog).toContain("`git show HEAD:<path>`");
 		expect(writerLog).not.toContain("Neta system notice");
+		expect(waited).toContain("Substantive report: audited the control path");
+		expect(listed).toContain("Substantive report: audited the control path");
+		expect(checkpoint.workers.find((worker: { id: string }) => worker.id === "ro1")?.finalResult).toContain(
+			"Substantive report: audited the control path",
+		);
+		expect(checkpoint.workers.find((worker: { id: string }) => worker.id === "ro1")?.lastResponse).not.toContain(
+			"Substantive report: audited the control path",
+		);
 	});
 
 	it("does not notify a terminal read-only worker about a writer", async () => {
@@ -257,7 +275,14 @@ describe("a leader session, end to end", () => {
 		await call("neta_spawn", { role: "scout", tier: "expert", task: "look around" });
 
 		const { stdout } = await run(process.execPath, [CLI, "workers", "--session", "e2e"], {
-			env: { ...process.env, NETA_DIR: agentDir, NETA_SOCKET: "", NETA_LEADER_TOKEN: "" },
+			env: {
+				...process.env,
+				NETA_DIR: agentDir,
+				NETA_SOCKET: "",
+				NETA_LEADER_TOKEN: "",
+				NETA_WORKER_ID: "",
+				NETA_WORKER_TOKEN: "",
+			},
 		});
 
 		expect(stdout).toContain("ro1 [scout/expert, read-only, test-model/test-mode]");
@@ -269,7 +294,14 @@ describe("a leader session, end to end", () => {
 		await call("neta_wait", { workerIds: ["ro1"], timeoutSeconds: 30 });
 
 		const { stdout } = await run(process.execPath, [CLI, "watch", "ro1", "--session", "e2e"], {
-			env: { ...process.env, NETA_DIR: agentDir, NETA_SOCKET: "", NETA_LEADER_TOKEN: "" },
+			env: {
+				...process.env,
+				NETA_DIR: agentDir,
+				NETA_SOCKET: "",
+				NETA_LEADER_TOKEN: "",
+				NETA_WORKER_ID: "",
+				NETA_WORKER_TOKEN: "",
+			},
 		});
 
 		expect(stdout).toContain("── ro1 done");

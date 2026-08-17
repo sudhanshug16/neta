@@ -20,8 +20,17 @@ import { workerResumeCommand } from "../attach.ts";
 import type { ChannelResponse, LeaderChannelRequest } from "../channel/protocol.ts";
 import { NETA_SCRATCH_ENV, NETA_SOCKET_ENV, NETA_WORKER_ENV, NETA_WORKER_TOKEN_ENV } from "../channel/protocol.ts";
 import type { ChannelHandler } from "../channel/server.ts";
+import {
+	type CheckpointLiveLease,
+	type CheckpointWriter,
+	type CheckpointWriterQueueEvent,
+	type HydratableCheckpoint,
+	newCheckpointBase,
+	type SessionCheckpoint,
+} from "../checkpoint.ts";
 import { APP_NAME } from "../config.ts";
 import { loadRoleText, roleNames, workingAgreement } from "../prompts/roles.ts";
+import { canonicalizeCwd } from "../session.ts";
 import { assertClaudeModelAllowed, type NetaConfig, type ResolvedBackend } from "../settings.ts";
 import {
 	displayModel,
@@ -53,6 +62,7 @@ import {
 import type { TransportOptions, WorkerMcpServer, WorkerTransportDriver } from "./transport.ts";
 
 const MAX_LOG_ENTRIES = 500;
+type ActiveWorkerState = "starting" | "running" | "waiting" | "queued";
 
 interface WorkerRecord {
 	id: string;
@@ -64,19 +74,27 @@ interface WorkerRecord {
 	room: string | undefined;
 	task: string;
 	state: WorkerState;
+	stateBeforeStop?: ActiveWorkerState;
 	startedAt: number;
+	updatedAt: number;
 	endedAt?: number;
 	result?: string;
-	scratchDir: string;
+	/** Latest response to a real task/follow-up, never an automatic system notice. */
+	substantiveResponse?: string;
+	/** Most recent prompt response, including automatic system notices. */
+	lastResponse?: string;
+	scratchDir?: string;
 	/** Capability token for this worker's channel requests. */
-	channelToken: string;
-	driver: WorkerTransportDriver;
+	channelToken?: string;
+	driver?: WorkerTransportDriver;
 	log: WorkerLogEntry[];
 	/** Absolute index of the first retained log entry. */
 	logFirstIndex: number;
 	/** Log entries the leader has already been shown. */
 	logCursor: number;
 	pendingAsk?: { question: string; resolve: (response: ChannelResponse) => void };
+	/** Hydrated question text retained without recreating its live resolver callback. */
+	pendingQuestion?: string;
 	/** The worker's most recent `neta progress`, for a "last:" line in listings. */
 	lastProgress?: { text: string; at: number };
 	/** Serializes prompts for this worker. */
@@ -157,6 +175,15 @@ export interface WorkerManagerOptions {
 	onWorkerProcessGroup?: (workerId: string, pgid: number | undefined) => void;
 	/** Test seam: swap in a fake transport without touching real CLIs. */
 	createTransport?: TransportFactory;
+	/** Durable semantic checkpoint. Live channel and process data never enters it. */
+	checkpoint?: {
+		id: string;
+		leaderBackend: string;
+		leaderVendorConversationId?: string;
+		liveLease?: CheckpointLiveLease;
+		writer: CheckpointWriter;
+		createdAt?: number;
+	};
 }
 
 async function gitDirtyFiles(cwd: string): Promise<string[]> {
@@ -210,24 +237,216 @@ export class WorkerManager implements ChannelHandler {
 	private noteCounter = 0;
 	/** FIFO queue of writer worker IDs waiting for the slot. */
 	private readonly writerQueue: string[] = [];
+	private readonly writerQueueHistory: CheckpointWriterQueueEvent[] = [];
 	/** Shutdown has begun; no queued writer may acquire the slot. */
 	private disposed = false;
+	/** Hydrated writers remain held until phase 2 proves their old processes are dead. */
+	private recoveryWriterSlotHeld = false;
+	private readonly checkpointCreatedAt: number;
+	private checkpointCwd: string;
 
 	constructor(options: WorkerManagerOptions) {
 		this.options = options;
 		this.leaderToken = options.leaderToken ?? randomBytes(16).toString("hex");
 		this.createTransport =
 			options.createTransport ?? ((transportOptions) => new AcpWorkerTransport(transportOptions));
+		this.checkpointCreatedAt = options.checkpoint?.createdAt ?? Date.now();
+		this.checkpointCwd = options.checkpoint ? canonicalizeCwd(options.cwd) : options.cwd;
+	}
+
+	/** Build an inert manager from safe semantic state. No transports, prompts, panes or scratch directories are created. */
+	static hydrate(options: WorkerManagerOptions, checkpoint: HydratableCheckpoint): WorkerManager {
+		if (options.checkpoint && options.checkpoint.id !== checkpoint.id) {
+			throw new Error(`Checkpoint id mismatch: expected ${options.checkpoint.id}, got ${checkpoint.id}.`);
+		}
+		const manager = new WorkerManager({
+			...options,
+			cwd: checkpoint.canonicalCwd,
+			checkpoint: options.checkpoint ? { ...options.checkpoint, createdAt: checkpoint.createdAt } : undefined,
+		});
+		manager.counter = checkpoint.counter;
+		manager.noteCounter = checkpoint.noteCounter;
+		manager.activeWriter = checkpoint.activeWriter;
+		manager.writerQueue.push(...checkpoint.writerQueue);
+		manager.writerQueueHistory.push(...checkpoint.writerQueueHistory.map((event) => ({ ...event })));
+		manager.lastWriterBackend = checkpoint.lastWriterBackend;
+		for (const { tier, cursor } of checkpoint.spreadCursors) manager.spreadCursors.set(tier, cursor);
+		for (const { room, backends } of checkpoint.roomDebaterBackends)
+			manager.roomDebaterBackends.set(room, [...backends]);
+		for (const note of checkpoint.notes)
+			manager.notes.set(note.id, { ...note, workers: note.workers.map((worker) => ({ ...worker })) });
+		for (const room of checkpoint.rooms)
+			manager.rooms.set(
+				room.name,
+				room.posts.map((post) => ({ ...post })),
+			);
+		const recoveredAt = Date.now();
+		for (const worker of checkpoint.workers) {
+			const wasActive = !isTerminalState(worker.state);
+			const state = wasActive ? "interrupted" : worker.state;
+			const stateBeforeStop = wasActive ? (worker.state as ActiveWorkerState) : worker.stateBeforeStop;
+			manager.workers.set(worker.id, {
+				id: worker.id,
+				name: worker.name,
+				role: worker.role,
+				tier: worker.tier,
+				backend: worker.backend,
+				writer: worker.writer,
+				room: worker.room,
+				task: worker.task,
+				state,
+				stateBeforeStop,
+				startedAt: worker.startedAt,
+				updatedAt: wasActive ? recoveredAt : worker.updatedAt,
+				endedAt: wasActive ? recoveredAt : worker.endedAt,
+				result:
+					worker.finalResult ??
+					(wasActive ? `Interrupted during recovery (was ${worker.state}); review before continuing.` : undefined),
+				substantiveResponse: worker.substantiveResponse,
+				lastResponse: worker.lastResponse,
+				log: worker.log.map((entry) => ({ ...entry })),
+				logFirstIndex: worker.logFirstIndex,
+				logCursor: worker.logCursor,
+				pendingQuestion: worker.pendingQuestion,
+				lastProgress: worker.lastProgress ? { ...worker.lastProgress } : undefined,
+				queue: Promise.resolve(),
+				queuedPrompts: 0,
+				waiters: [],
+				usage: worker.usage ? { ...worker.usage } : undefined,
+				vendorSessionId: worker.vendorSessionId,
+				archived: worker.archived,
+				model: worker.model,
+				modelId: worker.modelId,
+				mode: worker.mode,
+				agentInfo: worker.agentInfo,
+				noteId: worker.noteId,
+				queuedBehind: worker.queuedBehind,
+				pendingBrief: [...worker.pendingBrief],
+				headAtStart: worker.headAtStart,
+				headlessReason: worker.headlessReason,
+			});
+			if (wasActive) {
+				const link = worker.noteId
+					? manager.notes.get(worker.noteId)?.workers.find((item) => item.workerId === worker.id)
+					: undefined;
+				if (link) link.state = "interrupted";
+			}
+		}
+		manager.recoveryWriterSlotHeld = checkpoint.workers.some(
+			(worker) => worker.writer && !isTerminalState(worker.state),
+		);
+		manager.checkpointChanged();
+		return manager;
 	}
 
 	/** Rebind to a different working directory or settings. */
 	configure(options: { cwd: string; agentDir: string; config: NetaConfig }): void {
 		this.options = { ...this.options, ...options };
+		if (this.options.checkpoint) this.checkpointCwd = canonicalizeCwd(options.cwd);
+		this.checkpointChanged();
 	}
 
 	/** Current working directory. */
 	get cwd(): string {
 		return this.options.cwd;
+	}
+
+	get logicalSessionId(): string | undefined {
+		return this.options.checkpoint?.id;
+	}
+
+	/** Phase 2 records the leader vendor's exact resumable conversation id here. */
+	setLeaderVendorConversationId(vendorConversationId: string): void {
+		const checkpoint = this.options.checkpoint;
+		if (!checkpoint) throw new Error("This manager has no durable checkpoint configured.");
+		checkpoint.leaderVendorConversationId = vendorConversationId;
+		this.checkpointChanged();
+	}
+
+	/** Secret-free semantic state suitable for durable storage and phase-2 inspection. */
+	checkpointSnapshot(): SessionCheckpoint {
+		const checkpoint = this.options.checkpoint;
+		if (!checkpoint) throw new Error("This manager has no durable checkpoint configured.");
+		return {
+			...newCheckpointBase({
+				id: checkpoint.id,
+				canonicalCwd: this.checkpointCwd,
+				leaderBackend: checkpoint.leaderBackend,
+				leaderVendorConversationId: checkpoint.leaderVendorConversationId,
+				liveLease: checkpoint.liveLease,
+				createdAt: this.checkpointCreatedAt,
+			}),
+			updatedAt: Date.now(),
+			counter: this.counter,
+			noteCounter: this.noteCounter,
+			workers: [...this.workers.values()].map((record) => ({
+				id: record.id,
+				name: record.name,
+				role: record.role,
+				tier: record.tier,
+				backend: record.backend,
+				writer: record.writer,
+				room: record.room,
+				task: record.task,
+				state: record.state,
+				stateBeforeStop: record.stateBeforeStop,
+				startedAt: record.startedAt,
+				updatedAt: record.updatedAt,
+				endedAt: record.endedAt,
+				finalResult: record.result,
+				substantiveResponse: record.substantiveResponse,
+				lastResponse: record.lastResponse,
+				log: record.log.map((entry) => ({ ...entry })),
+				logFirstIndex: record.logFirstIndex,
+				logCursor: record.logCursor,
+				pendingQuestion: record.pendingAsk?.question ?? record.pendingQuestion,
+				lastProgress: record.lastProgress ? { ...record.lastProgress } : undefined,
+				usage: record.usage ? { ...record.usage } : undefined,
+				vendorSessionId: record.vendorSessionId,
+				archived: record.archived,
+				model: record.model,
+				modelId: record.modelId,
+				mode: record.mode,
+				agentInfo: record.agentInfo,
+				noteId: record.noteId,
+				queuedBehind: record.queuedBehind,
+				pendingBrief: [...record.pendingBrief],
+				headAtStart: record.headAtStart,
+				headlessReason: record.headlessReason,
+			})),
+			activeWriter: this.activeWriter,
+			writerQueue: [...this.writerQueue],
+			writerQueueHistory: this.writerQueueHistory.map((event) => ({ ...event })),
+			notes: [...this.notes.values()].map((note) => ({
+				...note,
+				workers: note.workers.map((worker) => ({ ...worker })),
+			})),
+			rooms: [...this.rooms].map(([name, posts]) => ({ name, posts: posts.map((post) => ({ ...post })) })),
+			spreadCursors: [...this.spreadCursors].map(([tier, cursor]) => ({ tier, cursor })),
+			lastWriterBackend: this.lastWriterBackend,
+			roomDebaterBackends: [...this.roomDebaterBackends].map(([room, backends]) => ({
+				room,
+				backends: [...backends],
+			})),
+		};
+	}
+
+	/** Wait until every checkpoint mutation scheduled before this call is durable. */
+	async flushCheckpoint(): Promise<void> {
+		await this.options.checkpoint?.writer.flush();
+	}
+
+	/** Phase 2 calls this only after stale worker process groups have been reaped. */
+	releaseRecoveredWriterSlot(priorProcessesStopped: true): void {
+		if (!priorProcessesStopped)
+			throw new Error("Prior worker process death must be proven before releasing the writer slot.");
+		if (!this.recoveryWriterSlotHeld) return;
+		const at = Date.now();
+		for (const workerId of this.writerQueue) this.writerQueueHistory.push({ workerId, action: "removed", at });
+		this.writerQueue.length = 0;
+		this.activeWriter = undefined;
+		this.recoveryWriterSlotHeld = false;
+		this.checkpointChanged();
 	}
 
 	// =========================================================================
@@ -236,6 +455,9 @@ export class WorkerManager implements ChannelHandler {
 
 	async spawn(request: SpawnRequest): Promise<WorkerSummary> {
 		const writer = request.writer ?? false;
+		if (writer && this.recoveryWriterSlotHeld) {
+			throw new Error("Recovered writer slot is held until prior worker process death is proven.");
+		}
 
 		// Validate note linkage
 		if (request.note) {
@@ -254,7 +476,10 @@ export class WorkerManager implements ChannelHandler {
 		// does not bury the leader in the tabs of workers that ended an hour ago.
 		const existing = [...this.workers.values()];
 		if (existing.length > 0 && existing.every((record) => isTerminalState(record.state))) {
-			for (const record of existing) record.archived = true;
+			for (const record of existing) {
+				record.archived = true;
+				record.updatedAt = Date.now();
+			}
 			// Room views close with the batch they belonged to; a room joined again
 			// later gets a fresh pane.
 			this.roomPanesOpened.clear();
@@ -304,6 +529,7 @@ export class WorkerManager implements ChannelHandler {
 			task: request.task,
 			state: shouldQueue ? "queued" : "starting",
 			startedAt: Date.now(),
+			updatedAt: Date.now(),
 			scratchDir,
 			channelToken: randomBytes(16).toString("hex"),
 			log: [],
@@ -318,6 +544,7 @@ export class WorkerManager implements ChannelHandler {
 		};
 
 		this.workers.set(id, record);
+		this.checkpointChanged(record);
 		if (request.room) this.ensureRoom(request.room);
 
 		// Linked at spawn, not at finish: the ledger shows the note as being
@@ -331,6 +558,7 @@ export class WorkerManager implements ChannelHandler {
 		// record.result and every listing showed it as the worker's output.
 		if (shouldQueue) {
 			this.writerQueue.push(id);
+			this.writerQueueHistory.push({ workerId: id, action: "queued", at: Date.now() });
 			const queuedBehind = this.activeWriter;
 			const holderInfo = queuedBehind ? this.workers.get(queuedBehind) : undefined;
 			record.queuedBehind = queuedBehind;
@@ -378,6 +606,7 @@ export class WorkerManager implements ChannelHandler {
 		const task = writerContext ? `${writerContext}\n\n---\n\n# Task\n\n${request.task}` : request.task;
 		this.enqueue(record, this.withPendingBrief(record, task));
 		this.openWorkerView(record);
+		this.checkpointChanged();
 		return this.summarize(record);
 	}
 
@@ -397,6 +626,7 @@ export class WorkerManager implements ChannelHandler {
 			this.appendLog(record, "status", `Leader: ${message}`);
 			this.enqueue(record, message);
 		}
+		this.checkpointChanged(record);
 		return this.summarize(record);
 	}
 
@@ -405,9 +635,11 @@ export class WorkerManager implements ChannelHandler {
 		const pending = record.pendingAsk;
 		if (!pending) throw new Error(`Worker ${workerId} is not waiting for an answer.`);
 		record.pendingAsk = undefined;
+		record.pendingQuestion = undefined;
 		this.appendLog(record, "status", `Leader answered: ${answer}`);
 		this.setState(record, "running");
 		pending.resolve({ ok: true, text: answer });
+		this.checkpointChanged(record);
 		return this.summarize(record);
 	}
 
@@ -419,7 +651,10 @@ export class WorkerManager implements ChannelHandler {
 			if (record.state === "queued") {
 				// Remove from queue and mark killed without starting driver
 				const index = this.writerQueue.indexOf(workerId);
-				if (index >= 0) this.writerQueue.splice(index, 1);
+				if (index >= 0) {
+					this.writerQueue.splice(index, 1);
+					this.writerQueueHistory.push({ workerId, action: "removed", at: Date.now() });
+				}
 				await this.finish(record, "killed", "Killed by the leader.");
 			} else {
 				await record.driver?.kill();
@@ -497,6 +732,7 @@ export class WorkerManager implements ChannelHandler {
 		const from = Math.max(record.logCursor, record.logFirstIndex);
 		const entries = record.log.slice(from - record.logFirstIndex);
 		record.logCursor = record.logFirstIndex + record.log.length;
+		this.checkpointChanged(record);
 		return entries;
 	}
 
@@ -549,6 +785,7 @@ export class WorkerManager implements ChannelHandler {
 
 	postToRoom(room: string, from: string, label: string, text: string): void {
 		this.ensureRoom(room).push({ at: Date.now(), from, label, text });
+		this.checkpointChanged();
 		for (const watcher of [...(this.roomWatchers.get(room) ?? [])]) watcher();
 	}
 
@@ -634,7 +871,7 @@ export class WorkerManager implements ChannelHandler {
 		await Promise.all(
 			records.map(async (record) => {
 				if (!isTerminalState(record.state)) {
-					record.killReason = "Leader shut down.";
+					record.stateBeforeStop = record.state as ActiveWorkerState;
 					record.driver?.markTerminal();
 					try {
 						await record.driver?.kill();
@@ -646,7 +883,7 @@ export class WorkerManager implements ChannelHandler {
 						);
 					}
 					try {
-						await this.finish(record, "killed", "Leader shut down.");
+						await this.finish(record, "interrupted", "Leader shut down; review this worker before continuing.");
 					} catch (error) {
 						this.appendLog(
 							record,
@@ -655,9 +892,11 @@ export class WorkerManager implements ChannelHandler {
 						);
 					}
 				}
-				await rm(record.scratchDir, { recursive: true, force: true }).catch(() => {});
+				if (record.scratchDir) await rm(record.scratchDir, { recursive: true, force: true }).catch(() => {});
 			}),
 		);
+		this.checkpointChanged();
+		await this.flushCheckpoint();
 		this.workers.clear();
 	}
 
@@ -778,6 +1017,7 @@ export class WorkerManager implements ChannelHandler {
 				resolve(response);
 			};
 			record.pendingAsk = { question: text, resolve: settle };
+			record.pendingQuestion = text;
 			this.appendLog(record, "status", `Asked the leader: ${text}`);
 			this.setState(record, "waiting");
 			signal.addEventListener(
@@ -785,6 +1025,7 @@ export class WorkerManager implements ChannelHandler {
 				() => {
 					if (record.pendingAsk?.resolve !== settle) return;
 					record.pendingAsk = undefined;
+					record.pendingQuestion = undefined;
 					if (record.state === "waiting") this.setState(record, "running");
 				},
 				{ once: true },
@@ -1019,6 +1260,13 @@ export class WorkerManager implements ChannelHandler {
 			record.logFirstIndex += dropped;
 			record.logCursor = Math.max(record.logCursor, record.logFirstIndex);
 		}
+		this.checkpointChanged(record);
+	}
+
+	private checkpointChanged(record?: WorkerRecord): void {
+		if (record) record.updatedAt = Date.now();
+		const checkpoint = this.options.checkpoint;
+		if (checkpoint) checkpoint.writer.schedule(this.checkpointSnapshot());
 	}
 
 	/** One transport shape for immediate and dequeued workers, including crash-recovery registration. */
@@ -1028,6 +1276,8 @@ export class WorkerManager implements ChannelHandler {
 		runtimeEnv: Record<string, string>,
 		systemPrompt: string,
 	): WorkerTransportDriver {
+		if (!record.scratchDir) throw new Error(`Worker ${record.id} has no live scratch directory.`);
+		if (!record.channelToken) throw new Error(`Worker ${record.id} has no live channel token.`);
 		// Last guard before ACP process creation. Settings validation is defense in depth;
 		// this is the boundary that guarantees a forbidden model cannot reach a provider.
 		assertClaudeModelAllowed(backend.name, backend.model, `runtime worker ${record.id}`);
@@ -1056,15 +1306,18 @@ export class WorkerManager implements ChannelHandler {
 				log: (kind, text) => this.appendLog(record, kind, text),
 				usage: (usage) => {
 					record.usage = usage;
+					this.checkpointChanged(record);
 				},
 				vendorSession: (sessionId) => {
 					record.vendorSessionId = sessionId;
+					this.checkpointChanged(record);
 				},
 				session: (session) => {
 					record.model = session.model;
 					record.modelId = session.modelId;
 					record.mode = session.mode;
 					record.agentInfo = session.agentInfo;
+					this.checkpointChanged(record);
 				},
 				processGroup: (pgid) => {
 					record.processGroupId = pgid;
@@ -1076,6 +1329,7 @@ export class WorkerManager implements ChannelHandler {
 
 	private setState(record: WorkerRecord, state: WorkerState): void {
 		record.state = state;
+		record.updatedAt = Date.now();
 		// A worker blocking on ask wakes any wait watching it: an unanswered
 		// question is more urgent than continuing to block. Unlike finish(), the
 		// waiters stay registered — a wait that does not settle keeps listening.
@@ -1086,19 +1340,26 @@ export class WorkerManager implements ChannelHandler {
 			const link = this.notes.get(record.noteId)?.workers.find((w) => w.workerId === record.id);
 			if (link) link.state = state;
 		}
+		this.checkpointChanged(record);
 	}
 
-	private enqueue(record: WorkerRecord, message: string): void {
+	private enqueue(record: WorkerRecord, message: string, automatic = false): void {
 		record.queuedPrompts += 1;
+		this.checkpointChanged(record);
 		record.queue = record.queue.then(async () => {
 			try {
 				if (isTerminalState(record.state) || record.finishing || record.killReason) return;
-				const outcome = await record.driver.prompt(message);
+				const driver = record.driver;
+				if (!driver) throw new Error(`Worker ${record.id} has no live transport.`);
+				const outcome = await driver.prompt(message);
 				if (isTerminalState(record.state) || record.finishing || record.killReason) return;
 				if (!outcome.ok) {
 					await this.finish(record, "failed", outcome.summary);
 					return;
 				}
+				record.lastResponse = outcome.summary;
+				if (!automatic) record.substantiveResponse = outcome.summary;
+				this.checkpointChanged(record);
 				// A follow-up arrived while this turn ran. An earlier version
 				// finished the worker here anyway, which silently dropped every
 				// message sent to a running worker: it was logged, queued, and then
@@ -1110,9 +1371,14 @@ export class WorkerManager implements ChannelHandler {
 				// The turn result is immutable now, but a backend can still reawaken a
 				// session. Stop its process before we make this worker terminal or hand
 				// the writer slot to anyone else.
-				await this.finish(record, "done", outcome.summary);
+				await this.finish(
+					record,
+					"done",
+					automatic ? (record.substantiveResponse ?? outcome.summary) : outcome.summary,
+				);
 			} finally {
 				record.queuedPrompts -= 1;
+				this.checkpointChanged(record);
 			}
 		});
 	}
@@ -1130,7 +1396,7 @@ export class WorkerManager implements ChannelHandler {
 			if (record.state === "starting") {
 				record.pendingBrief.push(notice);
 			} else {
-				this.enqueue(record, notice);
+				this.enqueue(record, notice, true);
 			}
 		}
 	}
@@ -1174,7 +1440,7 @@ export class WorkerManager implements ChannelHandler {
 		record.driver?.markTerminal();
 		const finishing = (async () => {
 			const startedWriter = record.writer && record.state !== "queued";
-			if (state !== "killed") {
+			if (state !== "killed" && state !== "interrupted") {
 				await record.driver?.kill();
 			}
 			if (record.processGroupId !== undefined) {
@@ -1192,6 +1458,8 @@ export class WorkerManager implements ChannelHandler {
 			this.setState(record, state);
 			record.endedAt = Date.now();
 			record.result = result;
+			record.lastResponse ??= result;
+			this.checkpointChanged(record);
 			// A finished worker's prose already streamed into the log, so logging the
 			// full result here printed the whole final message a second time, raw, in
 			// every pane. The state is the news; the text is not. Failures still carry
@@ -1216,9 +1484,12 @@ export class WorkerManager implements ChannelHandler {
 			const wasActiveWriter = this.activeWriter === record.id;
 			if (startedWriter) this.notifyReadOnlyWorkers(record, "finished", changes);
 			if (wasActiveWriter) this.activeWriter = undefined;
+			this.checkpointChanged(record);
 
 			record.pendingAsk?.resolve({ ok: false, error: `Worker ${state}.` });
 			record.pendingAsk = undefined;
+			if (state !== "interrupted") record.pendingQuestion = undefined;
+			this.checkpointChanged(record);
 			const waiters = record.waiters;
 			record.waiters = [];
 			for (const waiter of waiters) waiter();
@@ -1246,6 +1517,7 @@ export class WorkerManager implements ChannelHandler {
 			workers: [],
 		};
 		this.notes.set(id, note);
+		this.checkpointChanged();
 		return note;
 	}
 
@@ -1254,6 +1526,7 @@ export class WorkerManager implements ChannelHandler {
 		if (!note) throw new Error(`Unknown note id "${noteId}".`);
 		note.open = false;
 		note.closedAt = Date.now();
+		this.checkpointChanged();
 		return note;
 	}
 
@@ -1273,6 +1546,8 @@ export class WorkerManager implements ChannelHandler {
 
 		const record = this.workers.get(nextId);
 		if (!record || record.state !== "queued") return;
+		this.writerQueueHistory.push({ workerId: nextId, action: "started", at: Date.now() });
+		this.checkpointChanged(record);
 
 		this.activeWriter = nextId;
 
@@ -1293,7 +1568,7 @@ export class WorkerManager implements ChannelHandler {
 			"",
 			workingAgreement({ tier: record.tier, writer: true, room: record.room, binary: APP_NAME }),
 			"",
-			`Your scratch directory (outside the repository) is ${record.scratchDir}. Use it for notes and throwaway files.`,
+			`Your scratch directory (outside the repository) is ${record.scratchDir ?? "unavailable"}. Use it for notes and throwaway files.`,
 		].join("\n");
 
 		record.driver = this.createWorkerTransport(record, backend, runtimeEnv, systemPrompt);
@@ -1352,9 +1627,10 @@ export class WorkerManager implements ChannelHandler {
 			task: record.task,
 			startedAt: record.startedAt,
 			endedAt: record.endedAt,
+			stateBeforeStop: record.stateBeforeStop,
 			result: record.result,
 			queuedBehind: record.state === "queued" ? record.queuedBehind : undefined,
-			pendingQuestion: record.pendingAsk?.question,
+			pendingQuestion: record.pendingAsk?.question ?? record.pendingQuestion,
 			lastProgress: record.lastProgress,
 			scratchDir: record.scratchDir,
 			usage: record.usage,

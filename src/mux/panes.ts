@@ -37,7 +37,8 @@ function clampTitle(label: string, suffix: string, limit: number): string {
 export function tabTitle(id: string, name: string, stateOrLimit?: WorkerState | number, limit = TITLE_LIMIT): string {
 	const state = typeof stateOrLimit === "number" ? undefined : stateOrLimit;
 	if (typeof stateOrLimit === "number") limit = stateOrLimit;
-	const marker = state === "done" ? "✓" : state === "failed" ? "✗" : state === "killed" ? "⊘" : "";
+	const marker =
+		state === "done" ? "✓" : state === "failed" ? "✗" : state === "killed" ? "⊘" : state === "interrupted" ? "!" : "";
 	const suffix = marker ? ` ${marker}` : "";
 	const label = `${id} ${name}`.replace(/\s+/g, " ").trim();
 	return clampTitle(label, suffix, limit);

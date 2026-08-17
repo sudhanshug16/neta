@@ -189,6 +189,7 @@ export async function launchLeader(options: LaunchOptions): Promise<number> {
 		const backend = await chooseBackend(detected, options.leader, config.leader.backend);
 
 		const sessionId = `${process.pid}-${randomBytes(3).toString("hex")}`;
+		const logicalSessionId = randomBytes(12).toString("hex");
 		const sessionDir = await mkdtemp(join(tmpdir(), `${APP_NAME}-session-`));
 		const invocation = resolveSelfInvocation();
 		// Resolve every value the control plane needs before registration. Codex
@@ -226,6 +227,7 @@ export async function launchLeader(options: LaunchOptions): Promise<number> {
 			cwd,
 			sessionDir,
 			sessionId,
+			logicalSessionId,
 			socket: createChannelAddress(),
 			token: randomBytes(16).toString("hex"),
 			leaderPrompt,

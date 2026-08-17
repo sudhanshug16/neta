@@ -35,6 +35,8 @@ export interface SessionRecord {
 	/** Backend the leader runs in, e.g. "claude". */
 	leader: string;
 	pid: number;
+	/** Process identity used to reject PID reuse when matching a durable checkpoint lease. */
+	processStartedAt?: string;
 	startedAt: number;
 	/** The multiplexer session that contains the leader, when Neta started one. */
 	mux?: SessionMux;
@@ -166,6 +168,24 @@ function isAlive(pid: number): boolean {
 /** A session can be reattached only while the process that owns it is alive. */
 export function isSessionAlive(record: Pick<SessionRecord, "pid">): boolean {
 	return isAlive(record.pid);
+}
+
+/** True only when the durable lease still names this exact live manager process. */
+export function isSessionLeaseAlive(
+	lease: { managerId: string; processStartedAt?: string },
+	agentDir: string = getAgentDir(),
+): boolean {
+	let record: SessionRecord;
+	try {
+		record = JSON.parse(
+			readFileSync(join(sessionsDir(agentDir), `${lease.managerId}.json`), "utf8"),
+		) as SessionRecord;
+	} catch {
+		return false;
+	}
+	if (record.id !== lease.managerId || !isSessionAlive(record)) return false;
+	const expected = lease.processStartedAt ?? record.processStartedAt;
+	return expected === undefined || processStartTime(record.pid) === expected;
 }
 
 /** A process identity stable across PID reuse for the lifetime of one boot. */

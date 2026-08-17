@@ -22,12 +22,14 @@ import {
 	NETA_WORKER_TOKEN_ENV,
 } from "../channel/protocol.ts";
 import { ChannelServer } from "../channel/server.ts";
+import { CheckpointWriter } from "../checkpoint.ts";
 import { type CliInvocation, createLeaderCliShim, prependToPath, resolveSelfInvocation } from "../cli-shim.ts";
 import { getAgentDir } from "../config.ts";
 import { selectMux } from "../mux/index.ts";
 import { createPaneHost } from "../mux/panes.ts";
 import { WorkerManager } from "../orchestrator/manager.ts";
 import {
+	canonicalizeCwd,
 	processStartTime,
 	releaseSessionLock,
 	removeSessionRecord,
@@ -88,6 +90,7 @@ export interface ControlPlaneOptions {
 	cwd?: string;
 	agentDir?: string;
 	sessionId?: string;
+	checkpointId?: string;
 	/** Backend the leader runs in, recorded so `neta sessions` can name it. */
 	leader?: string;
 	invocation?: CliInvocation;
@@ -95,7 +98,7 @@ export interface ControlPlaneOptions {
 
 export async function runControlPlane(options: ControlPlaneOptions = {}): Promise<void> {
 	restoreZellijIdentity();
-	const cwd = options.cwd ?? process.cwd();
+	const cwd = canonicalizeCwd(options.cwd ?? process.cwd());
 	const agentDir = options.agentDir ?? getAgentDir();
 	const config = loadConfig(cwd, agentDir);
 	const invocation = options.invocation ?? resolveSelfInvocation();
@@ -105,6 +108,7 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 	const address = process.env[NETA_SOCKET_ENV] || createChannelAddress();
 	const token = process.env[NETA_LEADER_ENV] || randomBytes(16).toString("hex");
 	const sessionId = options.sessionId ?? process.env.NETA_SESSION_ID ?? `s${process.pid}`;
+	const checkpointId = options.checkpointId ?? process.env.NETA_CHECKPOINT_ID ?? sessionId;
 	const lockPath = process.env.NETA_SESSION_LOCK_PATH;
 	const lockToken = process.env.NETA_SESSION_LOCK_TOKEN;
 	const muxName = process.env.NETA_MUX_SESSION_NAME;
@@ -136,9 +140,11 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 		cwd,
 		leader: options.leader ?? process.env.NETA_LEADER_BACKEND ?? "unknown",
 		pid: process.pid,
+		processStartedAt: processStartTime(process.pid),
 		startedAt: Date.now(),
 		...(muxName && (muxId === "zellij" || muxId === "tmux") ? { mux: { id: muxId, name: muxName } } : {}),
 	};
+	const checkpointWriter = new CheckpointWriter(agentDir, note);
 	const writeRegistry = () =>
 		writeSessionRecord({ ...sessionRecord, workerGroups: [...workerGroups.values()] }, agentDir);
 	const manager: WorkerManager = new WorkerManager({
@@ -171,10 +177,21 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 			}
 			writeRegistry();
 		},
+		checkpoint: {
+			id: checkpointId,
+			leaderBackend: sessionRecord.leader,
+			liveLease: {
+				managerId: sessionId,
+				processStartedAt: sessionRecord.processStartedAt,
+			},
+			writer: checkpointWriter,
+		},
 	});
 
 	const server = new ChannelServer(address, manager);
 	await server.start();
+	checkpointWriter.schedule(manager.checkpointSnapshot());
+	await checkpointWriter.flush();
 	writeRegistry();
 	if (lockPath && lockToken) releaseSessionLock({ path: lockPath, token: lockToken });
 

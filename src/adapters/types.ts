@@ -20,6 +20,8 @@ export interface LeaderLaunchContext {
 	/** Scratch directory for generated config; removed when the session ends. */
 	sessionDir: string;
 	sessionId: string;
+	/** Stable durable id; phase 2 may pair it with a fresh ephemeral sessionId. */
+	logicalSessionId?: string;
 	/** Worker channel address and the token that authorizes managing workers. */
 	socket: string;
 	token: string;
@@ -77,6 +79,7 @@ export function controlPlaneEnv(context: LeaderLaunchContext): Record<string, st
 		NETA_SOCKET: context.socket,
 		NETA_LEADER_TOKEN: context.token,
 		NETA_SESSION_ID: context.sessionId,
+		NETA_CHECKPOINT_ID: context.logicalSessionId ?? context.sessionId,
 		NETA_LEADER_BACKEND: context.backend.id,
 		NETA_MUX: context.mux,
 		NETA_PANES: context.panes ? "1" : "0",
