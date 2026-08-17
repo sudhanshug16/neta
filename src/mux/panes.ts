@@ -46,6 +46,12 @@ export function tabTitle(id: string, name: string, stateOrLimit?: WorkerState | 
 export const NETA_PANE_ENV = "NETA_PANE";
 export const NETA_MUX_ENV = "NETA_MUX";
 
+type TerminalPaneAdapter = Pick<MuxAdapter, "renameCurrentPane">;
+export type TerminalPaneAdapterLookup = (mux: "tmux" | "zellij") => TerminalPaneAdapter;
+
+const terminalPaneAdapter: TerminalPaneAdapterLookup = (mux) =>
+	mux === "tmux" ? new TmuxAdapter() : new ZellijAdapter();
+
 /** Keep the native-TUI identity visible even after a long worker name is clamped. */
 export function tuiTabTitle(id: string, name: string, limit = TITLE_LIMIT): string {
 	return clampTitle(`${id} ${name}`.replace(/\s+/g, " ").trim(), " tui", limit);
@@ -58,14 +64,11 @@ export function tuiTabTitle(id: string, name: string, limit = TITLE_LIMIT): stri
 export function markWorkerPaneTerminal(
 	worker: WorkerSummary,
 	env: Record<string, string | undefined> = process.env,
+	adapterFor: TerminalPaneAdapterLookup = terminalPaneAdapter,
 ): boolean {
 	if (!isTerminalState(worker.state) || !env[NETA_PANE_ENV]) return false;
-	const mux =
-		env[NETA_MUX_ENV] === "tmux"
-			? new TmuxAdapter()
-			: env[NETA_MUX_ENV] === "zellij"
-				? new ZellijAdapter()
-				: undefined;
+	const muxId = env[NETA_MUX_ENV];
+	const mux = muxId === "tmux" || muxId === "zellij" ? adapterFor(muxId) : undefined;
 	return mux?.renameCurrentPane?.(tabTitle(worker.id, worker.name, worker.state), env) ?? false;
 }
 

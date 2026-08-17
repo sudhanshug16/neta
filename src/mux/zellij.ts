@@ -15,11 +15,18 @@ import type { MuxAdapter, ProcessSpec } from "./types.ts";
 interface CommandResult {
 	status: number | null;
 	stdout: string;
+	stderr?: string;
+	error?: { message: string };
 }
 
-type CommandRunner = (command: string, args: string[]) => CommandResult;
+interface CommandOptions {
+	env?: Record<string, string | undefined>;
+}
 
-const runCommand: CommandRunner = (command, args) => spawnSync(command, args, { encoding: "utf-8" });
+export type ZellijCommandRunner = (command: string, args: string[], options?: CommandOptions) => CommandResult;
+
+const runCommand: ZellijCommandRunner = (command, args, options) =>
+	spawnSync(command, args, { encoding: "utf-8", env: options?.env });
 
 /** KDL strings escape backslash and double quote; nothing else needs quoting here. */
 function kdlString(value: string): string {
@@ -143,9 +150,19 @@ export function newTabArgs(title: string, spec: ProcessSpec, cwd: string, sessio
 	];
 }
 
-/** Inspect only the calling pane's tab in the recorded session. */
+/** `--tab` adds tab fields to every pane in the session; it does not filter to one tab. */
 export function listTabPanesArgs(sessionName: string): string[] {
 	return ["--session", sessionName, "action", "list-panes", "--tab", "--json"];
+}
+
+/** Inspect stable tab ids and active state after a targeted focus action. */
+export function listTabsArgs(sessionName: string): string[] {
+	return ["--session", sessionName, "action", "list-tabs", "--state", "--json"];
+}
+
+/** Restore focus to one exact stable tab id without relying on its mutable name. */
+export function goToTabByIdArgs(sessionName: string, tabId: number): string[] {
+	return ["--session", sessionName, "action", "go-to-tab-by-id", String(tabId)];
 }
 
 /** Rename one proven tab id without focusing it. */
@@ -160,6 +177,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /**
  * Zellij 0.44.3 exposes pane and tab ids as different fields. Resolve the tab
  * only when one non-plugin pane proves both the pane id and original tab name.
+ * Both filters are load-bearing because pane ids and tab titles are separate,
+ * and titles need not be unique.
  */
 export function zellijTabId(stdout: string, paneId: string, originalTitle: string): number | undefined {
 	let parsed: unknown;
@@ -183,11 +202,84 @@ export function zellijTabId(stdout: string, paneId: string, originalTitle: strin
 	return matches[0].tab_id as number;
 }
 
+interface ZellijTab {
+	id: number;
+	name: string;
+}
+
+/** Resolve the calling terminal pane to exactly one stable tab id. */
+export function zellijTabForPane(stdout: string, paneId: string): ZellijTab | undefined {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(stdout) as unknown;
+	} catch {
+		return undefined;
+	}
+	if (!Array.isArray(parsed)) return undefined;
+	const matches = parsed.filter(
+		(row) =>
+			isRecord(row) &&
+			row.is_plugin === false &&
+			(typeof row.id === "string" || typeof row.id === "number") &&
+			String(row.id) === paneId &&
+			typeof row.tab_id === "number" &&
+			Number.isInteger(row.tab_id) &&
+			typeof row.tab_name === "string",
+	);
+	if (matches.length !== 1) return undefined;
+	return { id: matches[0].tab_id as number, name: matches[0].tab_name as string };
+}
+
+function zellijTabs(stdout: string): Map<number, string> | undefined {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(stdout) as unknown;
+	} catch {
+		return undefined;
+	}
+	if (!Array.isArray(parsed) || parsed.length === 0) return undefined;
+	const tabs = new Map<number, string>();
+	for (const row of parsed) {
+		if (
+			!isRecord(row) ||
+			typeof row.tab_id !== "number" ||
+			!Number.isInteger(row.tab_id) ||
+			typeof row.tab_name !== "string"
+		) {
+			return undefined;
+		}
+		const previous = tabs.get(row.tab_id);
+		if (previous !== undefined && previous !== row.tab_name) return undefined;
+		tabs.set(row.tab_id, row.tab_name);
+	}
+	return tabs;
+}
+
+function openedZellijTab(before: string, after: string, title: string): boolean {
+	const beforeTabs = zellijTabs(before);
+	const afterTabs = zellijTabs(after);
+	if (!beforeTabs || !afterTabs) return false;
+	const added = [...afterTabs].filter(([id]) => !beforeTabs.has(id));
+	return added.length === 1 && added[0][1] === title;
+}
+
+function isZellijTabActive(stdout: string, tabId: number): boolean {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(stdout) as unknown;
+	} catch {
+		return false;
+	}
+	if (!Array.isArray(parsed)) return false;
+	const matches = parsed.filter((row) => isRecord(row) && row.tab_id === tabId && row.active === true);
+	return matches.length === 1;
+}
+
 /** Best-effort status rename: every missing or ambiguous fact fails closed. */
 export function renameZellijTab(
 	title: string,
 	env: Record<string, string | undefined> = process.env,
-	run: CommandRunner = runCommand,
+	run: ZellijCommandRunner = runCommand,
 ): boolean {
 	const sessionName = env.ZELLIJ_SESSION_NAME;
 	const originalTitle = env.NETA_PANE;
@@ -206,17 +298,24 @@ export function renameZellijTab(
 
 export class ZellijAdapter implements MuxAdapter {
 	readonly id = "zellij" as const;
+	private readonly run: ZellijCommandRunner;
+	private readonly env: Record<string, string | undefined>;
+
+	constructor(run: ZellijCommandRunner = runCommand, env: Record<string, string | undefined> = process.env) {
+		this.run = run;
+		this.env = env;
+	}
 
 	available(): boolean {
 		return findOnPath("zellij") !== undefined;
 	}
 
 	inSession(): boolean {
-		return Boolean(process.env.ZELLIJ);
+		return Boolean(this.env.ZELLIJ);
 	}
 
 	sessionName(): string | undefined {
-		return process.env.ZELLIJ_SESSION_NAME || undefined;
+		return this.env.ZELLIJ_SESSION_NAME || undefined;
 	}
 
 	wrapLeader(leader: ProcessSpec, sessionName: string, sessionDir: string): ProcessSpec | undefined {
@@ -227,34 +326,33 @@ export class ZellijAdapter implements MuxAdapter {
 	}
 
 	openPane(title: string, spec: ProcessSpec, cwd: string, sessionName?: string): boolean {
-		if (!sessionName && !this.inSession()) return false;
-		const result = spawnSync("zellij", newTabArgs(title, spec, cwd, sessionName), {
-			env: { ...process.env, ...spec.env },
-			encoding: "utf-8",
+		const targetSession = sessionName ?? this.sessionName();
+		const paneId = this.env.ZELLIJ_PANE_ID;
+		if (!targetSession || !paneId || (!sessionName && !this.inSession())) return false;
+
+		const before = this.run("zellij", listTabPanesArgs(targetSession));
+		if (before.status !== 0) return false;
+		const originalTab = zellijTabForPane(before.stdout, paneId);
+		if (!originalTab) return false;
+
+		this.run("zellij", newTabArgs(title, spec, cwd, targetSession), {
+			env: { ...this.env, ...spec.env },
 		});
-		if (result.status !== 0) {
-			throw new Error(`zellij: ${(result.stderr || result.error?.message || `exit ${result.status}`).trim()}`);
-		}
-		// `action new-tab` has no background option, so every spawn yanked the user
-		// off the leader and onto the new worker. Workers open behind you: hand
-		// focus back to the leader's tab, which sessions Neta started always name
-		// "leader". In a session Neta did not start there is no such tab, so fall
-		// back to the positionally-previous one. Cosmetic either way, never fatal.
-		const back = spawnSync(
-			"zellij",
-			[...(sessionName ? ["--session", sessionName] : []), "action", "go-to-tab-name", "leader"],
-			{ env: process.env, encoding: "utf-8" },
-		);
-		if (back.status !== 0) {
-			spawnSync("zellij", [...(sessionName ? ["--session", sessionName] : []), "action", "go-to-previous-tab"], {
-				env: process.env,
-				encoding: "utf-8",
-			});
-		}
+		const after = this.run("zellij", listTabPanesArgs(targetSession));
+		const opened = after.status === 0 && openedZellijTab(before.stdout, after.stdout, title);
+
+		// new-tab always focuses the new tab. Restore the exact stable id belonging
+		// to the calling pane, then verify active state because actions can report
+		// success while printing errors such as "session not found".
+		this.run("zellij", goToTabByIdArgs(targetSession, originalTab.id));
+		const focused = this.run("zellij", listTabsArgs(targetSession));
+		const restored = focused.status === 0 && isZellijTabActive(focused.stdout, originalTab.id);
+		if (!opened) return false;
+		if (!restored) throw new Error(`zellij: opened tab but could not restore focus to ${originalTab.name}`);
 		return true;
 	}
 
 	renameCurrentPane(title: string, env: Record<string, string | undefined> = process.env): boolean {
-		return renameZellijTab(title, env);
+		return renameZellijTab(title, env, this.run);
 	}
 }

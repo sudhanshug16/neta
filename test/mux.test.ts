@@ -10,12 +10,15 @@ import {
 	TmuxAdapter,
 	attachSessionArgs as tmuxAttachSessionArgs,
 	killSessionArgs as tmuxKillSessionArgs,
+	tmuxLiteralTitle,
 	newSessionArgs as tmuxSessionArgs,
 } from "../src/mux/tmux.ts";
 import type { MuxAdapter, ProcessSpec } from "../src/mux/types.ts";
 import {
+	goToTabByIdArgs,
 	leaderLayout,
 	listTabPanesArgs,
+	listTabsArgs,
 	newSessionArgs,
 	newTabArgs,
 	renameTabByIdArgs,
@@ -23,6 +26,7 @@ import {
 	ZellijAdapter,
 	attachSessionArgs as zellijAttachSessionArgs,
 	killSessionArgs as zellijKillSessionArgs,
+	zellijTabForPane,
 	zellijTabId,
 } from "../src/mux/zellij.ts";
 
@@ -104,6 +108,36 @@ describe("tmux", () => {
 
 	it("targets the calling watcher's exact tmux window", () => {
 		expect(renameWindowArgs("%17", "ro1 auth ✓")).toEqual(["rename-window", "-t", "%17", "ro1 auth ✓"]);
+	});
+
+	it("keeps tmux format sequences literal in new and renamed worker titles", () => {
+		const title = tabTitle("ro1", "#S #{session_name} overflow", "done");
+		const escaped = tmuxLiteralTitle(title);
+		const opened = newWindowArgs(title, { command: "neta", args: ["watch", "ro1"] }, "/repo", "neta-1");
+
+		expect(title.length).toBeLessThanOrEqual(22);
+		expect(title).toEndWith(" ✓");
+		expect(escaped).toContain("##S");
+		expect(escaped).toContain("##{");
+		expect(opened[opened.indexOf("-n") + 1]).toBe(escaped);
+		expect(renameWindowArgs("%17", title)).toEqual(["rename-window", "-t", "%17", escaped]);
+	});
+
+	it("renames the exact tmux pane through an injected runner and fails closed", () => {
+		const calls: Array<{ command: string; args: string[] }> = [];
+		const adapter = new TmuxAdapter((command, args) => {
+			calls.push({ command, args });
+			return { status: 0, stdout: "" };
+		});
+		const complete = { NETA_MUX: "tmux", NETA_PANE: "ro1 #S", TMUX_PANE: "%17" };
+
+		expect(adapter.renameCurrentPane("ro1 #S ✓", complete)).toBe(true);
+		expect(calls).toEqual([{ command: "tmux", args: ["rename-window", "-t", "%17", "ro1 ##S ✓"] }]);
+		for (const key of Object.keys(complete)) {
+			expect(adapter.renameCurrentPane("ignored", { ...complete, [key]: undefined })).toBe(false);
+		}
+		expect(calls).toHaveLength(1);
+		expect(new TmuxAdapter(() => ({ status: 1, stdout: "" })).renameCurrentPane("x", complete)).toBe(false);
 	});
 
 	it("does not invent marker environment for an unmarked process", () => {
@@ -247,6 +281,118 @@ describe("zellij", () => {
 		]);
 	});
 
+	it.each(["leader", "user-work"])("opens behind and restores the exact %s tab by stable id", (originalName) => {
+		const calls: Array<{ command: string; args: string[] }> = [];
+		const before = JSON.stringify([
+			{ id: 41, is_plugin: false, tab_id: 7, tab_name: originalName },
+			{ id: 42, is_plugin: false, tab_id: 9, tab_name: "ro1 duplicate" },
+		]);
+		const after = JSON.stringify([
+			{ id: 41, is_plugin: false, tab_id: 7, tab_name: originalName },
+			{ id: 42, is_plugin: false, tab_id: 9, tab_name: "ro1 duplicate" },
+			{ id: 43, is_plugin: false, tab_id: 12, tab_name: "ro1 duplicate" },
+		]);
+		const responses = [
+			{ status: 0, stdout: before },
+			{ status: 0, stdout: "12\n" },
+			{ status: 0, stdout: after },
+			{ status: 0, stdout: "" },
+			{
+				status: 0,
+				stdout: JSON.stringify([
+					{ tab_id: 7, active: true },
+					{ tab_id: 12, active: false },
+				]),
+			},
+		];
+		const adapter = new ZellijAdapter(
+			(command, args) => {
+				calls.push({ command, args });
+				return responses[calls.length - 1];
+			},
+			{ ZELLIJ: "0", ZELLIJ_SESSION_NAME: "user-session", ZELLIJ_PANE_ID: "41" },
+		);
+
+		expect(adapter.openPane("ro1 duplicate", { command: "neta", args: ["watch", "ro1"] }, "/repo")).toBe(true);
+		expect(calls.map((call) => call.args)).toEqual([
+			listTabPanesArgs("user-session"),
+			newTabArgs("ro1 duplicate", { command: "neta", args: ["watch", "ro1"] }, "/repo", "user-session"),
+			listTabPanesArgs("user-session"),
+			goToTabByIdArgs("user-session", 7),
+			listTabsArgs("user-session"),
+		]);
+		expect(calls.flatMap((call) => call.args)).not.toContain("go-to-tab-name");
+		expect(calls.flatMap((call) => call.args)).not.toContain("go-to-previous-tab");
+	});
+
+	it("returns false when Zellij reports success but no stable tab was added", () => {
+		const before = JSON.stringify([{ id: 41, is_plugin: false, tab_id: 7, tab_name: "user-work" }]);
+		const responses = [
+			{ status: 0, stdout: before },
+			{ status: 0, stdout: "Session 'gone' not found" },
+			{ status: 0, stdout: before },
+			{ status: 0, stdout: "Session 'gone' not found" },
+			{ status: 0, stdout: JSON.stringify([{ tab_id: 7, active: true }]) },
+		];
+		let call = 0;
+		const adapter = new ZellijAdapter(() => responses[call++], {
+			ZELLIJ: "0",
+			ZELLIJ_SESSION_NAME: "gone",
+			ZELLIJ_PANE_ID: "41",
+		});
+
+		expect(adapter.openPane("ro1 auth", { command: "neta", args: [] }, "/repo")).toBe(false);
+		expect(call).toBe(5);
+	});
+
+	it("reports an opened Zellij tab when targeted focus restoration cannot be verified", () => {
+		const before = JSON.stringify([{ id: 41, is_plugin: false, tab_id: 7, tab_name: "user-work" }]);
+		const after = JSON.stringify([
+			{ id: 41, is_plugin: false, tab_id: 7, tab_name: "user-work" },
+			{ id: 42, is_plugin: false, tab_id: 8, tab_name: "ro1 auth" },
+		]);
+		const responses = [
+			{ status: 0, stdout: before },
+			{ status: 0, stdout: "8\n" },
+			{ status: 0, stdout: after },
+			{ status: 0, stdout: "session not found" },
+			{ status: 0, stdout: JSON.stringify([{ tab_id: 8, active: true }]) },
+		];
+		let call = 0;
+		const adapter = new ZellijAdapter(() => responses[call++], {
+			ZELLIJ: "0",
+			ZELLIJ_SESSION_NAME: "s1",
+			ZELLIJ_PANE_ID: "41",
+		});
+
+		expect(() => adapter.openPane("ro1 auth", { command: "neta", args: [] }, "/repo")).toThrow(
+			"opened tab but could not restore focus to user-work",
+		);
+		expect(call).toBe(5);
+	});
+
+	it("does not open when original Zellij pane output is malformed or ambiguous", () => {
+		for (const stdout of [
+			"session not found",
+			"[]",
+			JSON.stringify([
+				{ id: 41, is_plugin: false, tab_id: 7, tab_name: "one" },
+				{ id: 41, is_plugin: false, tab_id: 8, tab_name: "two" },
+			]),
+		]) {
+			let calls = 0;
+			const adapter = new ZellijAdapter(
+				() => {
+					calls += 1;
+					return { status: 0, stdout };
+				},
+				{ ZELLIJ: "0", ZELLIJ_SESSION_NAME: "s1", ZELLIJ_PANE_ID: "41" },
+			);
+			expect(adapter.openPane("ro1 auth", { command: "neta", args: [] }, "/repo")).toBe(false);
+			expect(calls).toBe(1);
+		}
+	});
+
 	it("maps a divergent pane id to its tab id and renames that exact tab", () => {
 		const calls: Array<{ command: string; args: string[] }> = [];
 		const rows = JSON.stringify([
@@ -338,6 +484,10 @@ describe("zellij", () => {
 			"7",
 			"ro1 auth ⊘",
 		]);
+		expect(zellijTabForPane("not json", "41")).toBeUndefined();
+		expect(
+			zellijTabForPane(JSON.stringify([{ id: 41, is_plugin: false, tab_id: 7.5, tab_name: "x" }]), "41"),
+		).toBeUndefined();
 	});
 
 	it("uses ZELLIJ_SESSION_NAME because ZELLIJ is only an installed marker", () => {
@@ -464,6 +614,48 @@ describe("worker views", () => {
 		expect(markWorkerPaneTerminal(worker, { NETA_MUX: "tmux", NETA_PANE: "ro1 auth flow", TMUX_PANE: "%1" })).toBe(
 			false,
 		);
+	});
+
+	it("dispatches terminal marks to tmux and Zellij success paths", () => {
+		const terminal = { ...worker, state: "done" as const };
+		const tmuxCalls: string[][] = [];
+		const tmuxEnv = { NETA_MUX: "tmux", NETA_PANE: "ro1 auth flow", TMUX_PANE: "%17" };
+		expect(
+			markWorkerPaneTerminal(terminal, tmuxEnv, (mux) => {
+				expect(mux).toBe("tmux");
+				return new TmuxAdapter((_command, args) => {
+					tmuxCalls.push(args);
+					return { status: 0, stdout: "" };
+				});
+			}),
+		).toBe(true);
+		expect(tmuxCalls).toEqual([["rename-window", "-t", "%17", "ro1 auth flow ✓"]]);
+
+		const zellijCalls: string[][] = [];
+		const zellijEnv = {
+			NETA_MUX: "zellij",
+			NETA_PANE: "ro1 auth flow",
+			ZELLIJ_SESSION_NAME: "s1",
+			ZELLIJ_PANE_ID: "41",
+		};
+		expect(
+			markWorkerPaneTerminal(terminal, zellijEnv, (mux) => {
+				expect(mux).toBe("zellij");
+				let call = 0;
+				return new ZellijAdapter((_command, args) => {
+					call += 1;
+					zellijCalls.push(args);
+					return {
+						status: 0,
+						stdout:
+							call === 1
+								? JSON.stringify([{ id: 41, is_plugin: false, tab_id: 7, tab_name: "ro1 auth flow" }])
+								: "",
+					};
+				});
+			}),
+		).toBe(true);
+		expect(zellijCalls).toEqual([listTabPanesArgs("s1"), renameTabByIdArgs("s1", 7, "ro1 auth flow ✓")]);
 	});
 
 	// Multiplexers start these from their own server process, which does not have

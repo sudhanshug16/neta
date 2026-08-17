@@ -9,6 +9,27 @@ import { spawnSync } from "node:child_process";
 import { findOnPath } from "../detect.ts";
 import type { MuxAdapter, ProcessSpec } from "./types.ts";
 
+interface CommandResult {
+	status: number | null;
+	stdout: string;
+	stderr?: string;
+	error?: { message: string };
+}
+
+interface CommandOptions {
+	env?: Record<string, string | undefined>;
+}
+
+export type TmuxCommandRunner = (command: string, args: string[], options?: CommandOptions) => CommandResult;
+
+const runCommand: TmuxCommandRunner = (command, args, options) =>
+	spawnSync(command, args, { encoding: "utf-8", env: options?.env });
+
+/** tmux expands `#` sequences in format-aware title arguments; `##` is a literal `#`. */
+export function tmuxLiteralTitle(title: string): string {
+	return title.replaceAll("#", "##");
+}
+
 /** `tmux new-session -s <name> -e VAR=value -- cmd args…` */
 export function newSessionArgs(sessionName: string, leader: ProcessSpec): string[] {
 	const environment = Object.entries(leader.env ?? {})
@@ -44,7 +65,7 @@ export function newWindowArgs(title: string, spec: ProcessSpec, cwd: string, ses
 		...(sessionName ? ["-t", sessionName] : []),
 		"-d",
 		"-n",
-		title,
+		tmuxLiteralTitle(title),
 		"-c",
 		cwd,
 		...environment,
@@ -56,11 +77,16 @@ export function newWindowArgs(title: string, spec: ProcessSpec, cwd: string, ses
 
 /** Rename only the window containing the calling watcher. */
 export function renameWindowArgs(target: string, title: string): string[] {
-	return ["rename-window", "-t", target, title];
+	return ["rename-window", "-t", target, tmuxLiteralTitle(title)];
 }
 
 export class TmuxAdapter implements MuxAdapter {
 	readonly id = "tmux" as const;
+	private readonly run: TmuxCommandRunner;
+
+	constructor(run: TmuxCommandRunner = runCommand) {
+		this.run = run;
+	}
 
 	available(): boolean {
 		return findOnPath("tmux") !== undefined;
@@ -72,7 +98,7 @@ export class TmuxAdapter implements MuxAdapter {
 
 	sessionName(): string | undefined {
 		if (!this.inSession()) return undefined;
-		const result = spawnSync("tmux", ["display-message", "-p", "#S"], { encoding: "utf-8" });
+		const result = this.run("tmux", ["display-message", "-p", "#S"]);
 		return result.status === 0 ? result.stdout.trim() || undefined : undefined;
 	}
 
@@ -83,9 +109,8 @@ export class TmuxAdapter implements MuxAdapter {
 
 	openPane(title: string, spec: ProcessSpec, cwd: string, sessionName?: string): boolean {
 		if (!sessionName && !this.inSession()) return false;
-		const result = spawnSync("tmux", newWindowArgs(title, spec, cwd, sessionName), {
+		const result = this.run("tmux", newWindowArgs(title, spec, cwd, sessionName), {
 			env: { ...process.env, ...spec.env },
-			encoding: "utf-8",
 		});
 		if (result.status === 0) return true;
 		// tmux explains itself on stderr; throwing that away leaves a user with a
@@ -96,7 +121,7 @@ export class TmuxAdapter implements MuxAdapter {
 	renameCurrentPane(title: string, env: Record<string, string | undefined> = process.env): boolean {
 		const target = env.TMUX_PANE;
 		if (env.NETA_MUX !== this.id || !env.NETA_PANE || !target) return false;
-		const result = spawnSync("tmux", renameWindowArgs(target, title), { encoding: "utf-8" });
+		const result = this.run("tmux", renameWindowArgs(target, title));
 		return result.status === 0;
 	}
 }

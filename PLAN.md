@@ -111,16 +111,17 @@ not assumed:
   environment}` shape of its MCP entries.
 - ACP SDK types: `usage_update` and `PromptResponse.usage` for cost;
   `McpServerStdio` for worker MCP registration.
-- tmux 3.4, live: the exact `new-session`/`split-window` argument forms Neta
-  emits.
+- tmux 3.4 and Zellij 0.44.3, live: worker views open without stealing final
+  focus, terminal status targets the exact worker window/tab, and closing a
+  worker view preserves the original user tab and session.
 
 Automated coverage is in `test/`: unit tests for the pure parts, and
 integration tests that run the real `neta mcp` process, spawn real ACP worker
 processes (a fixture agent — no provider is ever called), talk over a real
 socket, and drive it all through a real MCP client.
 
-Zellij could not be exercised live (not installed here); its command
-construction is unit-tested only.
+Zellij command construction and fail-closed parsing are unit-tested in
+addition to the live adapter probe.
 
 ## Acceptance
 
