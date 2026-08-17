@@ -198,12 +198,27 @@ describe("a session saved by an older Neta, reopened by the current build", () =
 		const bundle = buildCurrentBundle();
 		const agentDir = scratch("neta-upgrade-home-");
 		const promptMarker = join(scratch("neta-upgrade-marker-"), "prompted");
+		const scoutBarrier = join(scratch("neta-upgrade-barrier-"), "release-scout");
+		const scoutBarrierReady = join(scratch("neta-upgrade-barrier-ready-"), "scout-ready");
 		writeFileSync(
 			join(agentDir, "settings.json"),
 			JSON.stringify({
 				mux: { panes: false },
 				tiers: { expert: { backend: "fake" }, architect: { backend: "fake" } },
-				backends: { fake: { command: process.execPath, args: [FAKE_AGENT, "--prompt-marker", promptMarker] } },
+				backends: {
+					fake: {
+						command: process.execPath,
+						args: [
+							FAKE_AGENT,
+							"--prompt-marker",
+							promptMarker,
+							"--barrier-file",
+							scoutBarrier,
+							"--barrier-ready-file",
+							scoutBarrierReady,
+						],
+					},
+				},
 			}),
 		);
 		// A Codex from before hook trust, which is the Codex the pinned commit knew.
@@ -239,6 +254,8 @@ describe("a session saved by an older Neta, reopened by the current build", () =
 
 		// A: the old runtime runs three real sessions and leaves three checkpoints.
 		for (const backend of backends) {
+			rmSync(scoutBarrier, { force: true });
+			rmSync(scoutBarrierReady, { force: true });
 			const repo = scratch(`neta-upgrade-${backend.id}-`);
 			const env = {
 				...baseEnv,
@@ -254,10 +271,10 @@ describe("a session saved by an older Neta, reopened by the current build", () =
 			const session = liveSession(agentDir);
 			const checkpointId = session.checkpointId as string;
 
-			// Worker state built by the old runtime's own ACP path. The scout holds its
-			// first turn until the writer's automatic notice arrives, so both belong to
-			// one batch and the notice lands on top of a substantive handoff — the
-			// thing that has to survive the restart.
+			// Worker state built by the old runtime's own ACP path. The scout blocks
+			// until this test has spawned the writer. `spawn` returns only after the
+			// old manager has queued the writer-start notice, so the scout cannot
+			// archive its substantive handoff before that automatic-notice step.
 			const oldNeta = (args: string[]) =>
 				run(nodePath, [OLD_RUNTIME, ...args, "--session", session.id], { cwd: repo, env: baseEnv });
 			await oldNeta([
@@ -270,9 +287,11 @@ describe("a session saved by an older Neta, reopened by the current build", () =
 				"auth scout",
 				"--room",
 				"review",
-				"WAIT_FOR_NOTICE SUBSTANTIVE_HANDOFF map the auth flow",
+				"WAIT_FOR_BARRIER SUBSTANTIVE_HANDOFF map the auth flow",
 			]);
+			await waitFor(() => expect(existsSync(scoutBarrierReady)).toBe(true), 30000);
 			await oldNeta(["spawn", "--role", "worker", "--tier", "expert", "--writer", "config work"]);
+			writeFileSync(scoutBarrier, "release\n", "utf-8");
 			await oldNeta(["wait", "ro1", "rw2", "--timeout", "30"]);
 
 			// The old runtime's own control plane recorded the note and the room post.

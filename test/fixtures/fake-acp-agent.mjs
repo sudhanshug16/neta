@@ -21,6 +21,7 @@
  *           "fixture-fast", the way a backend reports a mid-session change
  *   MODE_UPDATE - emits a current_mode_update switching the mode to "plan"
  *   WAIT_FOR_NOTICE - pauses the first turn so a test can queue a notice
+ *   WAIT_FOR_BARRIER - pauses until the test releases its file barrier
  * Anything else is echoed back as the assistant message.
  *
  * Flags:
@@ -36,7 +37,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 
@@ -52,6 +53,10 @@ const claudeShaped = process.argv.includes("--claude-fable-default");
 const missingSonnet = process.argv.includes("--missing-sonnet");
 const promptMarkerIndex = process.argv.indexOf("--prompt-marker");
 const promptMarker = promptMarkerIndex === -1 ? undefined : process.argv[promptMarkerIndex + 1];
+const barrierFileIndex = process.argv.indexOf("--barrier-file");
+const barrierFile = barrierFileIndex === -1 ? undefined : process.argv[barrierFileIndex + 1];
+const barrierReadyFileIndex = process.argv.indexOf("--barrier-ready-file");
+const barrierReadyFile = barrierReadyFileIndex === -1 ? undefined : process.argv[barrierReadyFileIndex + 1];
 
 const sessions = new Set();
 let counter = 0;
@@ -139,6 +144,12 @@ async function say(cx, sessionId, text) {
 	});
 }
 
+async function waitForBarrier() {
+	if (!barrierFile) throw new Error("WAIT_FOR_BARRIER requires --barrier-file");
+	if (barrierReadyFile) writeFileSync(barrierReadyFile, "ready\n", "utf-8");
+	while (!existsSync(barrierFile)) await new Promise((resolve) => setTimeout(resolve, 10));
+}
+
 async function prompt(params, cx) {
 	if (promptMarker) writeFileSync(promptMarker, "prompted\n", "utf-8");
 	const sessionId = params.sessionId;
@@ -152,6 +163,8 @@ async function prompt(params, cx) {
 	if (text.includes("WAIT_FOR_NOTICE")) {
 		await new Promise((resolve) => setTimeout(resolve, 200));
 	}
+
+	if (text.includes("WAIT_FOR_BARRIER")) await waitForBarrier();
 
 	if (text.includes("REPORT_PID")) await say(cx, sessionId, `pid:${process.pid}\n\n`);
 
