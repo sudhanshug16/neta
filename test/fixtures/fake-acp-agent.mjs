@@ -278,6 +278,12 @@ async function prompt(params, cx) {
 		return { stopReason: "end_turn" };
 	}
 
+	if (text.includes("HOLD_FOREVER")) {
+		// A worker that is still running when its manager is killed. Recovery has
+		// to prove this process group is gone before it may hydrate.
+		await new Promise(() => {});
+	}
+
 	if (text.includes("SUBSTANTIVE_HANDOFF")) {
 		await say(cx, sessionId, "Substantive report: audited the control path, found the race, and verified the fix.");
 		return { stopReason: "end_turn" };

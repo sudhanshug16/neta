@@ -21,12 +21,15 @@ import { attachWorker } from "./attach.ts";
 import { handleWorkerChannelCommand } from "./channel/client.ts";
 import { handleLeaderChannelCommand, LEADER_COMMANDS } from "./channel/leader-cli.ts";
 import { NETA_WORKER_ENV } from "./channel/protocol.ts";
-import { APP_NAME, VERSION } from "./config.ts";
+import { CheckpointError } from "./checkpoint.ts";
+import { APP_NAME, getAgentDir, VERSION } from "./config.ts";
 import { detectLeaderBackends } from "./detect.ts";
 import { runGuard } from "./guard.ts";
-import { LaunchError, launchLeader } from "./launch.ts";
+import { LaunchError, launchLeader, resumeLeader } from "./launch.ts";
+import { captureLeaderSession, readHookPayload } from "./leader-capture.ts";
 import { runControlPlane, runWorkerBridge } from "./mcp/run.ts";
 import { listBackendModels } from "./models.ts";
+import { formatDurableSession, listDurableSessions, RecoveryError } from "./recovery.ts";
 import { listSessions } from "./session.ts";
 import { isWorkerId, watchRoom, watchWorker } from "./watch.ts";
 import { watchRoomTui, watchWorkerTui } from "./watch-tui.ts";
@@ -52,7 +55,11 @@ const HELP = `${APP_NAME} ${VERSION} — a leader agent that delegates to worker
   ${APP_NAME} attach <id>               Take over this terminal with a worker's own
                                         CLI (Claude Code, Codex) to read it there.
   ${APP_NAME} kill <id>                 Stop a worker.
-  ${APP_NAME} sessions                  List running leader sessions.
+  ${APP_NAME} sessions [--all]          List running leader sessions; --all also lists
+                                        closed ones you can reopen, with their ids.
+  ${APP_NAME} resume <session-id>       Reopen a closed session by its exact id: same
+                                        leader conversation and history, current Neta,
+                                        no worker restarted.
   ${APP_NAME} models [backend]          Show the models a worker backend offers,
                                         for setting tiers in settings.json.
   ${APP_NAME} --backends                Show the agent CLIs found on PATH.
@@ -70,15 +77,28 @@ function listBackends(): void {
 	for (const backend of detected) console.log(`${backend.id}\t${backend.name}\t${backend.path}`);
 }
 
-function printSessions(): void {
-	const sessions = listSessions();
-	if (sessions.length === 0) {
-		console.log("No leader sessions are running.");
+function printSessions(all: boolean): void {
+	if (!all) {
+		const sessions = listSessions();
+		if (sessions.length === 0) {
+			console.log(`No leader sessions are running. Closed ones: \`${APP_NAME} sessions --all\`.`);
+			return;
+		}
+		for (const session of sessions) {
+			console.log(`${session.id}\t${session.leader}\tpid ${session.pid}\t${session.cwd}`);
+		}
 		return;
 	}
-	for (const session of sessions) {
-		console.log(`${session.id}\t${session.leader}\tpid ${session.pid}\t${session.cwd}`);
+
+	const rows = listDurableSessions(getAgentDir());
+	if (rows.length === 0) {
+		console.log("No Neta sessions, running or closed.");
+		return;
 	}
+	console.log("id\tstate\tleader\tupdated\texact-leader-conversation\tdirectory");
+	for (const row of rows) console.log(formatDurableSession(row));
+	const resumable = rows.filter((row) => !row.live && row.resumable);
+	if (resumable.length > 0) console.log(`\nReopen one with: ${APP_NAME} resume ${resumable[0].id}`);
 }
 
 function flagValue(args: string[], name: string): string | undefined {
@@ -152,8 +172,53 @@ async function main(argv: string[]): Promise<void> {
 			return;
 		}
 		case "sessions":
-			printSessions();
+			printSessions(args.includes("--all"));
 			return;
+		case "resume": {
+			const checkpointId = args[1];
+			if (!checkpointId || checkpointId.startsWith("-")) {
+				console.error(
+					`Usage: ${APP_NAME} resume <session-id> [--mux <zellij|tmux|none>] [-- <args>]\n` +
+						`List reopenable sessions with \`${APP_NAME} sessions --all\`.`,
+				);
+				process.exitCode = 1;
+				return;
+			}
+			try {
+				process.exitCode = await resumeLeader({
+					checkpointId,
+					cwd: process.cwd(),
+					mux: flagValue(args, "--mux"),
+					extraArgs: passthrough,
+					agentDir: flagValue(args, "--dir"),
+				});
+			} catch (error) {
+				// Every refusal here left the checkpoint untouched; say so plainly and
+				// stop, rather than falling back to a fresh session the user did not ask
+				// for.
+				if (!(error instanceof LaunchError || error instanceof RecoveryError || error instanceof CheckpointError))
+					throw error;
+				console.error(error.message);
+				process.exitCode = 1;
+			}
+			return;
+		}
+		case "capture-leader-session": {
+			// A vendor hook, not a person: it reports the conversation id the CLI just
+			// assigned and must never fail the session it is reporting about.
+			const checkpointId = flagValue(args, "--session");
+			if (!checkpointId) {
+				console.error(`Usage: ${APP_NAME} capture-leader-session --session <session-id> [--dir <neta-dir>]`);
+				process.exitCode = 1;
+				return;
+			}
+			captureLeaderSession({
+				checkpointId,
+				agentDir: flagValue(args, "--dir"),
+				payload: await readHookPayload(),
+			});
+			return;
+		}
 		case "models":
 			process.exitCode = await listBackendModels(args[1], process.cwd());
 			return;

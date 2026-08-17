@@ -22,14 +22,20 @@ import {
 	NETA_WORKER_TOKEN_ENV,
 } from "../channel/protocol.ts";
 import { ChannelServer } from "../channel/server.ts";
-import { CheckpointWriter } from "../checkpoint.ts";
+import {
+	CheckpointWriter,
+	readCheckpointForHydration,
+	readVendorSessionCapture,
+	readVendorSessionCaptureError,
+} from "../checkpoint.ts";
 import { type CliInvocation, createLeaderCliShim, prependToPath, resolveSelfInvocation } from "../cli-shim.ts";
-import { getAgentDir } from "../config.ts";
+import { APP_NAME, getAgentDir } from "../config.ts";
 import { selectMux } from "../mux/index.ts";
 import { createPaneHost } from "../mux/panes.ts";
-import { WorkerManager } from "../orchestrator/manager.ts";
+import { WorkerManager, type WorkerManagerOptions } from "../orchestrator/manager.ts";
 import {
 	canonicalizeCwd,
+	isProcessGroupGone,
 	processStartTime,
 	releaseSessionLock,
 	removeSessionRecord,
@@ -94,7 +100,19 @@ export interface ControlPlaneOptions {
 	/** Backend the leader runs in, recorded so `neta sessions` can name it. */
 	leader?: string;
 	invocation?: CliInvocation;
+	/** Reopen the durable checkpoint instead of starting an empty session. */
+	resume?: boolean;
+	/** The leader's exact vendor conversation, when the launcher assigned or reopened one. */
+	leaderConversationId?: string;
+	/** Stable per-session directory a vendor hook reports its conversation id in. */
+	leaderSessionDir?: string;
 }
+
+/** How often the control plane looks for a conversation id its vendor's hook has written. */
+const CAPTURE_POLL_MS = 250;
+
+/** A session-start hook that has not reported by now is never going to. */
+const CAPTURE_WINDOW_MS = 300_000;
 
 export async function runControlPlane(options: ControlPlaneOptions = {}): Promise<void> {
 	restoreZellijIdentity();
@@ -109,6 +127,8 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 	const token = process.env[NETA_LEADER_ENV] || randomBytes(16).toString("hex");
 	const sessionId = options.sessionId ?? process.env.NETA_SESSION_ID ?? `s${process.pid}`;
 	const checkpointId = options.checkpointId ?? process.env.NETA_CHECKPOINT_ID ?? sessionId;
+	const resuming = options.resume ?? process.env.NETA_RESUME === "1";
+	const leaderConversationId = options.leaderConversationId ?? process.env.NETA_LEADER_CONVERSATION_ID;
 	const lockPath = process.env.NETA_SESSION_LOCK_PATH;
 	const lockToken = process.env.NETA_SESSION_LOCK_TOKEN;
 	const muxName = process.env.NETA_MUX_SESSION_NAME;
@@ -139,6 +159,7 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 		token,
 		cwd,
 		leader: options.leader ?? process.env.NETA_LEADER_BACKEND ?? "unknown",
+		checkpointId,
 		pid: process.pid,
 		processStartedAt: processStartTime(process.pid),
 		startedAt: Date.now(),
@@ -147,7 +168,7 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 	const checkpointWriter = new CheckpointWriter(agentDir, note);
 	const writeRegistry = () =>
 		writeSessionRecord({ ...sessionRecord, workerGroups: [...workerGroups.values()] }, agentDir);
-	const manager: WorkerManager = new WorkerManager({
+	const managerOptions: WorkerManagerOptions = {
 		cwd,
 		agentDir,
 		config,
@@ -180,13 +201,39 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 		checkpoint: {
 			id: checkpointId,
 			leaderBackend: sessionRecord.leader,
+			leaderVendorConversationId: leaderConversationId,
 			liveLease: {
 				managerId: sessionId,
 				processStartedAt: sessionRecord.processStartedAt,
 			},
 			writer: checkpointWriter,
 		},
-	});
+	};
+
+	// Hydration happens only after the checkpoint is confirmed unowned and the
+	// previous run's processes were proven stopped by `neta resume`. Refusing here
+	// is the safe answer: starting empty over an existing checkpoint would write
+	// away a session's whole history.
+	let manager: WorkerManager;
+	if (resuming) {
+		const checkpoint = readCheckpointForHydration(checkpointId, agentDir);
+		if (!checkpoint.shutdown?.processesStopped) {
+			throw new Error(
+				`Checkpoint ${checkpointId} has no proof that the previous run's worker processes stopped. ` +
+					`Resume through \`${APP_NAME} resume ${checkpointId}\`, which establishes that proof first.`,
+			);
+		}
+		manager = WorkerManager.hydrate(managerOptions, checkpoint);
+		// The barrier ran before this process existed, and its proof is what the
+		// held writer slot was waiting for.
+		manager.releaseRecoveredWriterSlot(true);
+		note(
+			`resumed session ${checkpointId} (${checkpoint.workers.length} recorded workers, ` +
+				`leader conversation ${checkpoint.leader.vendorConversationId ?? "unknown"}); no worker was restarted`,
+		);
+	} else {
+		manager = new WorkerManager(managerOptions);
+	}
 
 	const server = new ChannelServer(address, manager);
 	await server.start();
@@ -195,11 +242,22 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 	writeRegistry();
 	if (lockPath && lockToken) releaseSessionLock({ path: lockPath, token: lockToken });
 
+	// Codex assigns its own conversation id and reports it through a SessionStart
+	// hook, which runs in its own process and may beat or trail this one. Adopting
+	// it here keeps the control plane the only writer of the checkpoint.
+	const capturePoll = leaderConversationId ? undefined : startConversationCapture(manager, checkpointId, agentDir);
+
 	let shutdownPromise: Promise<void> | undefined;
 	const shutdown = (): Promise<void> => {
 		if (shutdownPromise) return shutdownPromise;
 		shutdownPromise = (async () => {
-			await manager.dispose();
+			if (capturePoll) clearInterval(capturePoll);
+			await manager.dispose({
+				// Proof, not optimism: the durable checkpoint may only record a clean
+				// stop once every group Neta detached is confirmed gone.
+				confirmProcessesStopped: () =>
+					[...workerGroups.values()].every((group) => isProcessGroupGone(group, processStartTime)),
+			});
 			await server.stop();
 			if (shimDir) await rm(shimDir, { recursive: true, force: true }).catch(() => {});
 			removeSessionRecord(sessionId, agentDir);
@@ -228,6 +286,58 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 	mcp.onclose = exit;
 	await mcp.connect(new StdioServerTransport());
 	note(`control plane ready on ${address} (session ${sessionId}) · worker views: ${panes ? mux.id : "headless"}`);
+}
+
+/**
+ * Watch for the conversation id a vendor's session-start hook or plugin records,
+ * and say so out loud if it never arrives.
+ *
+ * Polling, rather than a watcher, because the capture may run before this
+ * process exists and because a missed inotify event would silently cost the
+ * session its resumability. A launch only reaches this point with a capture
+ * mechanism configured, so nothing arriving means the mechanism failed — which
+ * the user has to hear, not discover at their next `neta resume`.
+ */
+export function startConversationCapture(
+	manager: Pick<WorkerManager, "setLeaderVendorConversationId">,
+	checkpointId: string,
+	agentDir: string,
+	options: { pollMs?: number; windowMs?: number; report?: (message: string) => void } = {},
+): NodeJS.Timeout | undefined {
+	const say = options.report ?? note;
+	const adopt = (): boolean => {
+		const captured = readVendorSessionCapture(checkpointId, agentDir);
+		if (!captured) return false;
+		try {
+			manager.setLeaderVendorConversationId(captured);
+			say(
+				`leader conversation ${captured} recorded; this session can be reopened with \`${APP_NAME} resume ${checkpointId}\``,
+			);
+		} catch (error) {
+			say(`could not record the leader conversation id: ${error instanceof Error ? error.message : String(error)}`);
+		}
+		return true;
+	};
+	if (adopt()) return undefined;
+	// Deliberately not unref'd: an unref'd timer is not guaranteed to run under
+	// every runtime Neta ships on, and a missed capture costs the session its
+	// resumability. It stops on the first id, at the deadline, or at shutdown.
+	const deadline = Date.now() + (options.windowMs ?? CAPTURE_WINDOW_MS);
+	const timer = setInterval(() => {
+		if (adopt()) {
+			clearInterval(timer);
+			return;
+		}
+		if (Date.now() <= deadline) return;
+		clearInterval(timer);
+		const failure = readVendorSessionCaptureError(checkpointId, agentDir);
+		say(
+			`this leader never reported its conversation id${failure ? `: ${failure}` : ""}. ` +
+				`Worker history is still being saved, but \`${APP_NAME} resume ${checkpointId}\` will refuse this ` +
+				`session rather than guess which conversation it was.`,
+		);
+	}, options.pollMs ?? CAPTURE_POLL_MS);
+	return timer;
 }
 
 export async function runWorkerBridge(): Promise<void> {

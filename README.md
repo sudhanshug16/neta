@@ -176,6 +176,8 @@ more than one directory has a live session.
 
 ```
 neta sessions              leader sessions running on this machine
+neta sessions --all        live and closed sessions, with the ids resume takes
+neta resume <session-id>   reopen a closed session by its exact id
 neta status                writer slot, worker states, queue and open notes
 neta workers               what is running, and what it has cost
 neta spawn ...             start a worker from your terminal
@@ -189,6 +191,40 @@ neta answer ro1 <text>     unblock a worker that asked something
 neta kill rw2              stop it
 neta --backends            which agent CLIs are installed
 ```
+
+### Reopening a session after quitting or upgrading
+
+A closed session is not lost. Neta keeps a durable checkpoint per session —
+worker outcomes, logs, notes, rooms, the writer queue, and the leader's exact
+vendor conversation id — so you can pick it up later, including after installing
+a newer Neta:
+
+```
+# quit the leader, then:
+npm install -g @intervene/neta      # or however you installed it
+neta sessions --all                 # copy the id of the session you want
+neta resume 4f1c8a...               # reopens that exact conversation
+```
+
+All three leader backends resume the same way. Neta reopens the same leader
+conversation — `claude --resume <uuid>`, `codex resume <uuid>`,
+`opencode --session <ses_…>` — with fresh Neta instructions, MCP registration
+and restrictions from the version you just installed. It never uses a vendor
+"latest", "continue" or "fork" selector: Claude Code is told which conversation
+id to use before it starts, while Codex and OpenCode report the id they assigned
+through their own hook and plugin mechanisms. A launch that could not arrange that capture at
+all — an older CLI without hooks or plugins, or OpenCode's `--pure` — is refused
+outright rather than started as a session you could never reopen. If capture was
+arranged and still never arrived, the session says so while it runs, lists as
+`conversation-id:no`, and is refused by `neta resume` rather than guessed at.
+
+**No worker is ever restarted.** Workers that were running when the session
+stopped come back as `interrupted` — their history, results and vendor session
+ids are intact, and `neta attach <id>` still opens one in its own CLI — but
+nothing re-runs, and queued writers stay queued until you say otherwise. Resume
+refuses outright if the old session is still live (reattach instead), if its
+directory is gone, or if it cannot prove the previous run's worker processes
+are dead.
 
 `neta attach` works because a worker is an ordinary session of the CLI that
 ran it: Neta hands the session id the worker's ACP handshake returned to that

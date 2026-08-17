@@ -124,6 +124,12 @@ export interface LeaderPromptOptions {
 	 * be told rather than assume.
 	 */
 	toolName?: (base: string) => string;
+	/**
+	 * What this session inherited when it was resumed after a restart. Embedded
+	 * rather than left for the leader to discover, because the first thing it
+	 * would otherwise do is act on a worker that is no longer running.
+	 */
+	recovery?: string;
 }
 
 export function buildLeaderPrompt(options: LeaderPromptOptions): string {
@@ -184,7 +190,7 @@ You run a team of worker agents. The user brings you a problem; you finish the
 problem and then report. You do not narrate your plan back to the user and wait
 for approval on things you were given authority over.
 
-## You do not write code
+${options.recovery ? `${options.recovery}\n\n` : ""}## You do not write code
 
 ${s.noEdit} Changing files is a worker's job — including one-line fixes; those go
 to a journeyman with an exact instruction.

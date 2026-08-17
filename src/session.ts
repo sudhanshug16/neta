@@ -34,6 +34,8 @@ export interface SessionRecord {
 	cwd: string;
 	/** Backend the leader runs in, e.g. "claude". */
 	leader: string;
+	/** Durable checkpoint this manager owns, so recovery can find one from the other. */
+	checkpointId?: string;
 	pid: number;
 	/** Process identity used to reject PID reuse when matching a durable checkpoint lease. */
 	processStartedAt?: string;
@@ -59,6 +61,24 @@ export interface SessionWorkerGroup {
 	pgid: number;
 	/** `ps lstart` for the group leader; prevents a recycled numeric PGID from being killed. */
 	leaderStartedAt: string;
+}
+
+/**
+ * What the sweep leaves behind after it reaps a crashed manager.
+ *
+ * Recovery has to prove the old run's processes are gone before it may hydrate,
+ * and the evidence for that lives in the session record — which the sweep
+ * deletes. Any `neta` command can trigger a sweep, so without this marker a
+ * routine `neta workers` between the crash and the resume would quietly destroy
+ * the proof and make the session unrecoverable.
+ */
+export interface SessionStoppedMarker {
+	id: string;
+	checkpointId?: string;
+	at: number;
+	/** Every recorded worker group was reaped, or was already gone. */
+	processesStopped: boolean;
+	processStartedAt?: string;
 }
 
 export interface SessionSweepOptions {
@@ -93,7 +113,22 @@ function lockOwnerPath(lock: SessionLock): string {
  * token stops the launcher's later cleanup from releasing a successor's lock.
  */
 export function tryAcquireSessionLock(cwd: string, agentDir: string = getAgentDir()): SessionLock | undefined {
-	const path = lockPath(cwd, agentDir);
+	return tryAcquireLockDirectory(lockPath(cwd, agentDir));
+}
+
+/**
+ * Claim one durable checkpoint for the duration of a resume.
+ *
+ * The directory lock already serializes launches per working directory. This
+ * second claim is what stops two `neta resume <id>` commands from building two
+ * managers over one checkpoint — including the case where the checkpoint's
+ * recorded directory is not the directory either command was typed in.
+ */
+export function tryAcquireCheckpointClaim(id: string, agentDir: string = getAgentDir()): SessionLock | undefined {
+	return tryAcquireLockDirectory(join(sessionsDir(agentDir), "claims", basename(id)));
+}
+
+function tryAcquireLockDirectory(path: string): SessionLock | undefined {
 	mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
 	try {
 		mkdirSync(path, { recursive: false, mode: 0o700 });
@@ -111,7 +146,7 @@ export function tryAcquireSessionLock(cwd: string, agentDir: string = getAgentDi
 					(!isAlive(pid) || (typeof startedAt === "string" && processStartTime(pid) !== startedAt));
 				if (stale) {
 					rmSync(path, { recursive: true, force: true });
-					return tryAcquireSessionLock(cwd, agentDir);
+					return tryAcquireLockDirectory(path);
 				}
 			} catch {
 				// A process can die after mkdir but before it writes owner.json. Only
@@ -119,7 +154,7 @@ export function tryAcquireSessionLock(cwd: string, agentDir: string = getAgentDi
 				try {
 					if (Date.now() - statSync(path).mtimeMs > 5000) {
 						rmSync(path, { recursive: true, force: true });
-						return tryAcquireSessionLock(cwd, agentDir);
+						return tryAcquireLockDirectory(path);
 					}
 				} catch {
 					// Another launcher released it; the next retry will acquire it.
@@ -170,20 +205,25 @@ export function isSessionAlive(record: Pick<SessionRecord, "pid">): boolean {
 	return isAlive(record.pid);
 }
 
+/** One session record by manager id, whether or not its process is still alive. */
+export function readSessionRecord(id: string, agentDir: string = getAgentDir()): SessionRecord | undefined {
+	try {
+		const record = JSON.parse(readFileSync(join(sessionsDir(agentDir), `${basename(id)}.json`), "utf8")) as
+			| SessionRecord
+			| undefined;
+		return record && record.id === id ? record : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 /** True only when the durable lease still names this exact live manager process. */
 export function isSessionLeaseAlive(
 	lease: { managerId: string; processStartedAt?: string },
 	agentDir: string = getAgentDir(),
 ): boolean {
-	let record: SessionRecord;
-	try {
-		record = JSON.parse(
-			readFileSync(join(sessionsDir(agentDir), `${lease.managerId}.json`), "utf8"),
-		) as SessionRecord;
-	} catch {
-		return false;
-	}
-	if (record.id !== lease.managerId || !isSessionAlive(record)) return false;
+	const record = readSessionRecord(lease.managerId, agentDir);
+	if (!record || !isSessionAlive(record)) return false;
 	const expected = lease.processStartedAt ?? record.processStartedAt;
 	return expected === undefined || processStartTime(record.pid) === expected;
 }
@@ -205,16 +245,41 @@ function isNetaSocket(address: string): boolean {
 		: dirname(address) === tmpdir() && /^neta-.+\.sock$/.test(basename(address));
 }
 
-function reapProcessGroup(
+/** Wait without yielding: the sweep runs inside synchronous startup paths. */
+function sleepSync(milliseconds: number): void {
+	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+/** True once this exact recorded group is gone — never merely "the pid is free". */
+export function isProcessGroupGone(group: SessionWorkerGroup, identify: (pid: number) => string | undefined): boolean {
+	const { pgid, leaderStartedAt } = group;
+	if (!Number.isInteger(pgid) || pgid <= 1) return true;
+	if (!isAlive(pgid)) return true;
+	// A live pid carrying a different start time is a different process that
+	// inherited the number. The recorded one is gone, and killing this one would
+	// be killing a stranger.
+	return identify(pgid) !== leaderStartedAt;
+}
+
+/**
+ * Stop one recorded worker group and report whether its death is proven.
+ *
+ * The identity check is the whole safety property: a numeric pgid is reused, so
+ * a recorded group is only ever signalled while its group leader still has the
+ * start time captured when Neta created it.
+ */
+export function reapProcessGroup(
 	group: SessionWorkerGroup,
 	identify: (pid: number) => string | undefined,
 	warn: (message: string) => void,
-): void {
+	waitMs = 2000,
+): boolean {
 	const { pgid, leaderStartedAt } = group;
-	if (!Number.isInteger(pgid) || pgid <= 1 || pgid === process.pid) return;
+	if (!Number.isInteger(pgid) || pgid <= 1 || pgid === process.pid) return true;
 	if (identify(pgid) !== leaderStartedAt) {
-		warn(`[neta] stale session skipped process group ${pgid}: group leader identity no longer matches`);
-		return;
+		if (isAlive(pgid))
+			warn(`[neta] stale session skipped process group ${pgid}: group leader identity no longer matches`);
+		return true;
 	}
 	for (const signal of ["SIGTERM", "SIGKILL"] as const) {
 		try {
@@ -226,7 +291,13 @@ function reapProcessGroup(
 				// The group already exited, or this platform cannot signal groups.
 			}
 		}
+		const deadline = Date.now() + waitMs / 2;
+		while (Date.now() < deadline) {
+			if (isProcessGroupGone(group, identify)) return true;
+			sleepSync(25);
+		}
 	}
+	return isProcessGroupGone(group, identify);
 }
 
 function killMuxSession(mux: SessionMux): void {
@@ -248,18 +319,74 @@ function hasDeletedCwd(record: SessionRecord): boolean {
 	}
 }
 
+function stoppedMarkerPath(id: string, agentDir: string): string {
+	return join(sessionsDir(agentDir), "stopped", `${basename(id)}.json`);
+}
+
+export function writeStoppedMarker(marker: SessionStoppedMarker, agentDir: string = getAgentDir()): void {
+	const path = stoppedMarkerPath(marker.id, agentDir);
+	mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+	writeFileSync(path, JSON.stringify(marker, null, 2), { encoding: "utf-8", mode: 0o600 });
+}
+
+export function readStoppedMarker(id: string, agentDir: string = getAgentDir()): SessionStoppedMarker | undefined {
+	try {
+		const marker = JSON.parse(readFileSync(stoppedMarkerPath(id, agentDir), "utf-8")) as SessionStoppedMarker;
+		return marker.id === id && typeof marker.processesStopped === "boolean" ? marker : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+export function removeStoppedMarker(id: string, agentDir: string = getAgentDir()): void {
+	rmSync(stoppedMarkerPath(id, agentDir), { force: true });
+}
+
+/**
+ * Reap one manager's residue and report whether every recorded process is
+ * provably gone. Used by the stale-session sweep and by `neta resume`, which
+ * refuses to hydrate on anything short of proof.
+ */
+export function reapSessionRecord(
+	record: SessionRecord,
+	agentDir: string = getAgentDir(),
+	options: SessionSweepOptions = {},
+): boolean {
+	return tearDownSession(
+		record,
+		agentDir,
+		options.processStartTime ?? processStartTime,
+		options.warn ?? console.warn,
+		options.killMuxSession ?? killMuxSession,
+	);
+}
+
 function tearDownSession(
 	record: SessionRecord,
 	agentDir: string,
 	identify: (pid: number) => string | undefined,
 	warn: (message: string) => void,
 	stopMux: (mux: SessionMux) => void,
-): void {
+): boolean {
 	if (record.mux) stopMux(record.mux);
+	let processesStopped = !isSessionAlive(record);
 	for (const group of Array.isArray(record.workerGroups) ? record.workerGroups : [])
-		reapProcessGroup(group, identify, warn);
+		if (!reapProcessGroup(group, identify, warn)) processesStopped = false;
 	if (typeof record.socket === "string" && isNetaSocket(record.socket)) rmSync(record.socket, { force: true });
+	// Written before the record is deleted: this marker is the only remaining
+	// evidence a later `neta resume` has that these processes were reaped.
+	writeStoppedMarker(
+		{
+			id: record.id,
+			checkpointId: record.checkpointId,
+			at: Date.now(),
+			processesStopped,
+			processStartedAt: record.processStartedAt,
+		},
+		agentDir,
+	);
 	removeSessionRecord(record.id, agentDir);
+	return processesStopped;
 }
 
 export function writeSessionRecord(record: SessionRecord, agentDir: string = getAgentDir()): string {

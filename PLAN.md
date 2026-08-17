@@ -93,6 +93,8 @@ each **vendor's own mechanisms**, kernel sandbox where available.
 | Multiplexer adapters and panes | `src/mux/` |
 | Bash guard (Claude hook, OpenCode patterns) | `src/guard.ts` |
 | Session registry (`~/.neta/sessions`) | `src/session.ts` |
+| Durable checkpoints (`~/.neta/checkpoints`) | `src/checkpoint.ts` |
+| Restart-safe resume: exact vendor conversation, process-death barrier, hydration | `src/recovery.ts`, `src/launch.ts`, `src/leader-capture.ts` |
 | Prompts: leader, roles, flavors, charter | `src/prompts/` |
 | Settings: tier overrides, backend configs, persistTierOverride | `src/settings.ts` |
 
@@ -102,13 +104,36 @@ Vendor mechanisms were checked against the installed CLIs before being coded,
 not assumed:
 
 - `claude --help`: `--append-system-prompt`, `--mcp-config`,
-  `--strict-mcp-config`, `--settings` all exist.
+  `--strict-mcp-config`, `--settings`, `--session-id <uuid>` and
+  `-r/--resume [value]` all exist; `--session-id` names a fresh conversation and
+  `--resume` reopens exactly that one (without `--fork-session` the id is kept).
+- Codex 0.147 `--help` and its own config: `codex resume <SESSION_ID>` takes a
+  UUID, and hooks are a stable, default-enabled feature (`--dangerously-bypass-hook-trust`,
+  `$CODEX_HOME/hooks.json`) whose `SessionStart` payload carries `session_id`
+  and `hook_event_name` on stdin. Neta gates its capture hook on the installed
+  binary advertising hooks at all.
 - `codex debug prompt-input`: proved `$CODEX_HOME/AGENTS.md` reaches the model,
   that `project_doc_fallback_filenames` is ignored when a project `AGENTS.md`
   exists, and that `model_instructions_file` replaces base instructions (so it
   is not used). `-s read-only`, `-a never`, `-c` overrides come from `--help`.
 - OpenCode binary: `OPENCODE_CONFIG_CONTENT`, and the `{type, command,
-  environment}` shape of its MCP entries.
+  environment}` shape of its MCP entries. For resume, `opencode --help` 1.18.3
+  gives `-s, --session <id>` (exact), `-c, --continue` and `--fork` (inexact,
+  never used); `opencode session list --format json` gives the `ses_…` id shape
+  and confirms OpenCode assigns ids rather than accepting them; its embedded
+  plugin documentation gives the `plugin: ["file://…"]` config form and the
+  `event(input)` hook; and the installed `@opencode-ai/sdk` types give
+  `session.created` with a full `Session` (`id`, `parentID`, `directory`,
+  `time.created`) — which is what makes capturing the leader's own root session
+  an exact observation rather than a "most recent" lookup.
+- OpenCode capture, live and offline: `opencode serve` with a throwaway
+  `XDG_DATA_HOME` and the generated plugin, driven only by local session
+  creation over its HTTP API — no prompt, no provider. The plugin loaded, the
+  `event` hook fired, the exact id was reported, a `parentID` child session was
+  ignored, and `opencode session list --format json` showed the same id Neta
+  recorded. That probe also caught a bug before release: OpenCode reports the
+  resolved worktree root, so an exact string compare against the launch
+  directory captured nothing.
 - ACP SDK types: `usage_update` and `PromptResponse.usage` for cost;
   `McpServerStdio` for worker MCP registration.
 - tmux 3.4 and Zellij 0.44.3, live: worker views open without stealing final
@@ -134,10 +159,19 @@ addition to the live adapter probe.
 | Workers visible in panes; headless fallback | tmux verified live; zellij unit-tested |
 | Delegation failure reported honestly rather than faked | prompt rule in place; no scripted model test (needs a paid run) |
 | `neta workers` shows per-worker token usage | verified |
+| A closed session reopens with `neta resume <id>`: same logical and vendor conversation ids, fresh runtime, no worker restarted | verified end to end with fixture Claude, Codex and OpenCode CLIs, including a killed manager on two of them |
+| Resume behaves identically across all three leader backends | verified: exact-id capture and reopen, sessions listing, death barrier, hydration, recovery briefing, preserved results |
+| Resume fails closed on a live manager, identity mismatch, unprovable process death, missing vendor id, corrupt or future schema, deleted directory, duplicate resume | verified |
 | Type-check and tests green, no real provider APIs in tests | yes |
 
 ## Deliberately not built
 
+- Automatic resume. Reopening a session is always an explicit
+  `neta resume <id>`; bare `neta` still starts or reattaches, never recovers.
+- Restarting a recovered worker, dequeuing its queued work, or expiring
+  checkpoints. There is no TTL and no delete command yet.
+- Any vendor "latest"/"continue" selector as a fallback for a conversation id
+  Neta failed to capture.
 - A unified transcript view, a re-skinned vendor transcript, or a forked
   multiplexer. Neta owns no session UI beyond the per-worker watch pane.
 - Keystroke injection into panes.

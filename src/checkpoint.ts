@@ -27,12 +27,33 @@ import {
 	type WorkerUsage,
 } from "./types.ts";
 
-export const CHECKPOINT_SCHEMA_VERSION = 1;
+export const CHECKPOINT_SCHEMA_VERSION = 2;
+
+/** Schemas this build understands. Anything else is a future file and is never rewritten. */
+const READABLE_SCHEMA_VERSIONS = [1, CHECKPOINT_SCHEMA_VERSION];
 
 export interface CheckpointLiveLease {
 	managerId: string;
 	processStartedAt?: string;
 }
+
+/**
+ * Proof that the processes of the previous run are gone.
+ *
+ * Resume is only safe once nothing from the old run can still write to the
+ * repository. A graceful shutdown proves it by killing every worker and waiting
+ * for the exits; a crash is proven afterwards by the recovery barrier, which
+ * reaps the recorded process groups and verifies their death. Without one of
+ * those two, `processesStopped` stays false and `neta resume` refuses.
+ */
+export interface CheckpointShutdown {
+	at: number;
+	processesStopped: boolean;
+	/** Who established the proof: the manager itself, the stale-session sweep, or `neta resume`. */
+	by: "graceful" | "sweep" | "recovery";
+}
+
+const SHUTDOWN_SOURCES = ["graceful", "sweep", "recovery"] as const;
 
 export interface CheckpointWriterQueueEvent {
 	workerId: string;
@@ -77,7 +98,7 @@ export interface CheckpointWorker {
 }
 
 export interface SessionCheckpoint {
-	schemaVersion: 1;
+	schemaVersion: 2;
 	appVersion: string;
 	id: string;
 	canonicalCwd: string;
@@ -85,6 +106,7 @@ export interface SessionCheckpoint {
 	createdAt: number;
 	updatedAt: number;
 	liveLease?: CheckpointLiveLease;
+	shutdown?: CheckpointShutdown;
 	counter: number;
 	noteCounter: number;
 	workers: CheckpointWorker[];
@@ -323,6 +345,7 @@ export function validateCheckpoint(value: unknown): SessionCheckpoint {
 			"createdAt",
 			"updatedAt",
 			"liveLease",
+			"shutdown",
 			"counter",
 			"noteCounter",
 			"workers",
@@ -337,9 +360,9 @@ export function validateCheckpoint(value: unknown): SessionCheckpoint {
 		],
 		"checkpoint",
 	);
-	if (root.schemaVersion !== CHECKPOINT_SCHEMA_VERSION) {
+	if (typeof root.schemaVersion !== "number" || !READABLE_SCHEMA_VERSIONS.includes(root.schemaVersion)) {
 		throw new CheckpointError(
-			`Checkpoint schema version ${String(root.schemaVersion)} is not supported by this Neta version (expected ${CHECKPOINT_SCHEMA_VERSION}). The original file was preserved.`,
+			`Checkpoint schema version ${String(root.schemaVersion)} is not supported by this Neta version (expected ${READABLE_SCHEMA_VERSIONS.join(" or ")}). The original file was preserved.`,
 		);
 	}
 	for (const key of ["appVersion", "id", "canonicalCwd"]) string(root[key], `checkpoint.${key}`);
@@ -353,6 +376,15 @@ export function validateCheckpoint(value: unknown): SessionCheckpoint {
 		exact(lease, ["managerId", "processStartedAt"], "checkpoint.liveLease");
 		string(lease.managerId, "checkpoint.liveLease.managerId");
 		optional(lease.processStartedAt, (entry) => string(entry, "checkpoint.liveLease.processStartedAt"));
+	});
+	optional(root.shutdown, (item) => {
+		const shutdown = object(item, "checkpoint.shutdown");
+		exact(shutdown, ["at", "processesStopped", "by"], "checkpoint.shutdown");
+		number(shutdown.at, "checkpoint.shutdown.at");
+		boolean(shutdown.processesStopped, "checkpoint.shutdown.processesStopped");
+		string(shutdown.by, "checkpoint.shutdown.by");
+		if (!(SHUTDOWN_SOURCES as readonly string[]).includes(shutdown.by))
+			throw new CheckpointError("Corrupt checkpoint: checkpoint.shutdown.by is unknown.");
 	});
 	if (!Array.isArray(root.workers))
 		throw new CheckpointError("Corrupt checkpoint: checkpoint.workers must be an array.");
@@ -406,7 +438,9 @@ export function validateCheckpoint(value: unknown): SessionCheckpoint {
 		string(room.room, `checkpoint.roomDebaterBackends[${index}].room`);
 		strings(room.backends, `checkpoint.roomDebaterBackends[${index}].backends`);
 	}
-	return root as unknown as SessionCheckpoint;
+	// A schema-1 file has every field this build reads; the only difference is
+	// that it predates the shutdown proof, so it reads as "not proven stopped".
+	return { ...root, schemaVersion: CHECKPOINT_SCHEMA_VERSION } as unknown as SessionCheckpoint;
 }
 
 export function readCheckpoint(id: string, agentDir: string): SessionCheckpoint {
@@ -462,8 +496,8 @@ export function readCheckpointForHydration(id: string, agentDir: string): Hydrat
 	return checkpoint as HydratableCheckpoint;
 }
 
-export function writeCheckpointAtomic(checkpoint: SessionCheckpoint, agentDir: string): string {
-	validateCheckpoint(checkpoint);
+export function writeCheckpointAtomic(input: SessionCheckpoint, agentDir: string): string {
+	const checkpoint = validateCheckpoint(input);
 	const dir = checkpointDir(agentDir);
 	mkdirSync(dir, { recursive: true, mode: 0o700 });
 	chmodSync(dir, 0o700);
@@ -546,10 +580,19 @@ export function newCheckpointBase(options: {
 	leaderBackend: string;
 	leaderVendorConversationId?: string;
 	liveLease?: CheckpointLiveLease;
+	shutdown?: CheckpointShutdown;
 	createdAt?: number;
 }): Pick<
 	SessionCheckpoint,
-	"schemaVersion" | "appVersion" | "id" | "canonicalCwd" | "leader" | "createdAt" | "updatedAt" | "liveLease"
+	| "schemaVersion"
+	| "appVersion"
+	| "id"
+	| "canonicalCwd"
+	| "leader"
+	| "createdAt"
+	| "updatedAt"
+	| "liveLease"
+	| "shutdown"
 > {
 	const now = options.createdAt ?? Date.now();
 	return {
@@ -561,5 +604,167 @@ export function newCheckpointBase(options: {
 		createdAt: now,
 		updatedAt: now,
 		liveLease: options.liveLease,
+		shutdown: options.shutdown,
 	};
+}
+
+/** An empty checkpoint, so a session's identity is durable before its vendor CLI starts. */
+export function emptySessionCheckpoint(options: {
+	id: string;
+	canonicalCwd: string;
+	leaderBackend: string;
+	leaderVendorConversationId?: string;
+	createdAt?: number;
+}): SessionCheckpoint {
+	return {
+		...newCheckpointBase(options),
+		counter: 0,
+		noteCounter: 0,
+		workers: [],
+		writerQueue: [],
+		writerQueueHistory: [],
+		notes: [],
+		rooms: [],
+		spreadCursors: [],
+		roomDebaterBackends: [],
+	};
+}
+
+/**
+ * Read, change, and rewrite one checkpoint atomically.
+ *
+ * Every mutation outside the owning manager goes through here, so a corrupt or
+ * future-schema file is read, rejected, and left exactly as it was. A mutator
+ * that returns undefined declines the write.
+ */
+export function updateCheckpoint(
+	id: string,
+	agentDir: string,
+	mutate: (checkpoint: SessionCheckpoint) => SessionCheckpoint | undefined,
+): SessionCheckpoint | undefined {
+	const next = mutate(readCheckpoint(id, agentDir));
+	if (!next) return undefined;
+	writeCheckpointAtomic({ ...next, updatedAt: Date.now() }, agentDir);
+	return next;
+}
+
+/**
+ * Record that the run owning this checkpoint is over and its processes are gone.
+ * Only the manager named by the live lease may be proven stopped, so a sweep can
+ * never retire a successor's lease.
+ */
+export function recordCheckpointStopped(
+	id: string,
+	agentDir: string,
+	by: CheckpointShutdown["by"],
+	managerId?: string,
+): SessionCheckpoint | undefined {
+	return updateCheckpoint(id, agentDir, (checkpoint) => {
+		if (managerId && checkpoint.liveLease && checkpoint.liveLease.managerId !== managerId) return undefined;
+		return { ...checkpoint, liveLease: undefined, shutdown: { at: Date.now(), processesStopped: true, by } };
+	});
+}
+
+/**
+ * Persist the leader's exact vendor conversation id.
+ *
+ * Codex reports its id through a SessionStart hook, which runs in its own short
+ * process, so this write happens outside the control plane. It is refused when
+ * the checkpoint already carries a different id: a captured conversation id is
+ * the one thing resume cannot guess, and silently replacing it would point a
+ * later resume at the wrong conversation.
+ */
+export function recordLeaderVendorConversationId(
+	id: string,
+	agentDir: string,
+	vendorConversationId: string,
+): SessionCheckpoint | undefined {
+	return updateCheckpoint(id, agentDir, (checkpoint) => {
+		const existing = checkpoint.leader.vendorConversationId;
+		if (existing === vendorConversationId) return undefined;
+		if (existing) {
+			throw new CheckpointError(
+				`Checkpoint "${id}" already records leader conversation ${existing}; refusing to replace it with ${vendorConversationId}.`,
+			);
+		}
+		return { ...checkpoint, leader: { ...checkpoint.leader, vendorConversationId } };
+	});
+}
+
+/**
+ * The stable per-session directory a leader's generated vendor state lives in.
+ *
+ * Codex records the absolute path of a session's rollout file in its own thread
+ * index. When Neta built the Codex home under the per-run temporary directory,
+ * that recorded path stopped existing the moment the session ended, and
+ * `codex resume <id>` failed even though the transcript itself was safe in the
+ * real Codex home. This path is owned by Neta, keyed by the logical session, and
+ * outlives every run of it.
+ */
+export function leaderSessionDir(id: string, agentDir: string): string {
+	safeId(id);
+	return join(agentDir, "leader-sessions", id);
+}
+
+export function ensureLeaderSessionDir(id: string, agentDir: string): string {
+	const dir = leaderSessionDir(id, agentDir);
+	mkdirSync(dir, { recursive: true, mode: 0o700 });
+	chmodSync(dir, 0o700);
+	return dir;
+}
+
+/**
+ * Where a vendor's session-start hook or plugin records the id it assigned.
+ * Shared with the adapters, because some vendors write it themselves.
+ */
+export function vendorSessionCapturePath(sessionDir: string): string {
+	return join(sessionDir, "vendor-session.json");
+}
+
+/** A capture that could not be written; surfaced by the control plane, never swallowed. */
+export function vendorSessionCaptureErrorPath(sessionDir: string): string {
+	return join(sessionDir, "vendor-session.error");
+}
+
+function vendorCapturePath(id: string, agentDir: string): string {
+	return vendorSessionCapturePath(leaderSessionDir(id, agentDir));
+}
+
+/** Written by the vendor's own session-start hook, read by the control plane. */
+export function writeVendorSessionCapture(id: string, agentDir: string, vendorConversationId: string): string {
+	ensureLeaderSessionDir(id, agentDir);
+	const path = vendorCapturePath(id, agentDir);
+	const temp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+	const handle = openSync(temp, "wx", 0o600);
+	try {
+		writeSync(handle, `${JSON.stringify({ vendorConversationId, at: Date.now() })}\n`, undefined, "utf8");
+		fsyncSync(handle);
+	} finally {
+		closeSync(handle);
+	}
+	renameSync(temp, path);
+	return path;
+}
+
+export function readVendorSessionCapture(id: string, agentDir: string): string | undefined {
+	try {
+		const parsed = JSON.parse(readFileSync(vendorCapturePath(id, agentDir), "utf8")) as {
+			vendorConversationId?: unknown;
+		};
+		return typeof parsed.vendorConversationId === "string" && parsed.vendorConversationId
+			? parsed.vendorConversationId
+			: undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** What a vendor's capture reported going wrong, if anything did. */
+export function readVendorSessionCaptureError(id: string, agentDir: string): string | undefined {
+	try {
+		const text = readFileSync(vendorSessionCaptureErrorPath(leaderSessionDir(id, agentDir)), "utf8").trim();
+		return text || undefined;
+	} catch {
+		return undefined;
+	}
 }

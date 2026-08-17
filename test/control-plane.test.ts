@@ -147,10 +147,12 @@ describe("neta mcp", () => {
 		const session = listSessions(agentDir)[0];
 
 		await client.close();
-		// The control plane exits with its transport; give it a moment to unwind.
-		await new Promise((resolve) => setTimeout(resolve, 500));
-
-		expect(listSessions(agentDir)).toEqual([]);
-		expect(existsSync(session.socket)).toBe(false);
+		// The control plane exits with its transport. Poll for the result rather
+		// than assuming an unwind window: on a loaded machine a fixed sleep only
+		// tests how busy the machine was.
+		await waitFor(() => {
+			expect(listSessions(agentDir)).toEqual([]);
+			expect(existsSync(session.socket)).toBe(false);
+		}, 15000);
 	});
 });

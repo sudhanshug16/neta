@@ -22,6 +22,7 @@ import { NETA_SCRATCH_ENV, NETA_SOCKET_ENV, NETA_WORKER_ENV, NETA_WORKER_TOKEN_E
 import type { ChannelHandler } from "../channel/server.ts";
 import {
 	type CheckpointLiveLease,
+	type CheckpointShutdown,
 	type CheckpointWriter,
 	type CheckpointWriterQueueEvent,
 	type HydratableCheckpoint,
@@ -240,8 +241,10 @@ export class WorkerManager implements ChannelHandler {
 	private readonly writerQueueHistory: CheckpointWriterQueueEvent[] = [];
 	/** Shutdown has begun; no queued writer may acquire the slot. */
 	private disposed = false;
-	/** Hydrated writers remain held until phase 2 proves their old processes are dead. */
+	/** Hydrated writers remain held until recovery proves their old processes are dead. */
 	private recoveryWriterSlotHeld = false;
+	/** Set only when this run ended with every worker process confirmed gone. */
+	private shutdownProof: CheckpointShutdown | undefined;
 	private readonly checkpointCreatedAt: number;
 	private checkpointCwd: string;
 
@@ -262,7 +265,16 @@ export class WorkerManager implements ChannelHandler {
 		const manager = new WorkerManager({
 			...options,
 			cwd: checkpoint.canonicalCwd,
-			checkpoint: options.checkpoint ? { ...options.checkpoint, createdAt: checkpoint.createdAt } : undefined,
+			checkpoint: options.checkpoint
+				? {
+						...options.checkpoint,
+						createdAt: checkpoint.createdAt,
+						// The recorded conversation id is the one thing a resumed session
+						// cannot re-derive; carry it even when the caller did not pass it.
+						leaderVendorConversationId:
+							options.checkpoint.leaderVendorConversationId ?? checkpoint.leader.vendorConversationId,
+					}
+				: undefined,
 		});
 		manager.counter = checkpoint.counter;
 		manager.noteCounter = checkpoint.noteCounter;
@@ -373,7 +385,8 @@ export class WorkerManager implements ChannelHandler {
 				canonicalCwd: this.checkpointCwd,
 				leaderBackend: checkpoint.leaderBackend,
 				leaderVendorConversationId: checkpoint.leaderVendorConversationId,
-				liveLease: checkpoint.liveLease,
+				liveLease: this.shutdownProof ? undefined : checkpoint.liveLease,
+				shutdown: this.shutdownProof,
 				createdAt: this.checkpointCreatedAt,
 			}),
 			updatedAt: Date.now(),
@@ -865,7 +878,16 @@ export class WorkerManager implements ChannelHandler {
 		return (await this.wait(workerIds, timeoutMs)).workers;
 	}
 
-	async dispose(): Promise<void> {
+	/**
+	 * Stop everything this manager owns.
+	 *
+	 * `confirmProcessesStopped` is what turns an ordinary shutdown into a
+	 * resumable one: it runs after every worker has been killed and returns true
+	 * only when each recorded process group is confirmed gone. Recording that
+	 * proof here, before the worker records are dropped, is what lets a later
+	 * `neta resume` skip the recovery barrier instead of refusing.
+	 */
+	async dispose(options: { confirmProcessesStopped?: () => boolean } = {}): Promise<void> {
 		this.disposed = true;
 		const records = [...this.workers.values()];
 		await Promise.all(
@@ -895,6 +917,9 @@ export class WorkerManager implements ChannelHandler {
 				if (record.scratchDir) await rm(record.scratchDir, { recursive: true, force: true }).catch(() => {});
 			}),
 		);
+		if (options.confirmProcessesStopped?.() === true) {
+			this.shutdownProof = { at: Date.now(), processesStopped: true, by: "graceful" };
+		}
 		this.checkpointChanged();
 		await this.flushCheckpoint();
 		this.workers.clear();

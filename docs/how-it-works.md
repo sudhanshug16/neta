@@ -56,12 +56,136 @@ after syncing the file; the directory is synced after rename. The directory is
 mode `0700` and files are `0600`. Corrupt files and unknown schema versions fail
 closed and are never overwritten.
 
+A session's checkpoint is created *before* its vendor CLI starts, and a launch
+that cannot create it stops there with an error rather than starting a leader.
+Nothing would retry that write in time — the control plane that owns later
+writes is started by the vendor — so continuing would produce a session that
+looks normal and can never be reopened. A session is either durably resumable or
+not launched. (Once a session is running, a failed checkpoint write is reported
+and never interrupts live orchestration; that trade only applies after the
+session exists.)
+
 Hydration is inert: it creates no worker process, prompt, pane, callback, or
 scratch directory. `starting`, `running`, `waiting`, and `queued` workers become
 terminal `interrupted` records carrying their previous state. Queued writer
 order and history remain visible, but nothing starts automatically. The writer
-slot stays held until a later recovery boundary proves the old processes dead.
+slot stays held until the recovery boundary proves the old processes dead.
 Completed, failed, and killed outcomes remain unchanged.
+
+## Reopening a closed session
+
+`neta resume <id>` reopens one closed session by its exact durable id. The id is
+authoritative: it decides the directory, the leader backend and the vendor
+conversation, and each is verified rather than inferred. The upgrade flow this
+exists for is: quit the leader, install the new Neta, `neta sessions --all`,
+`neta resume <id>`.
+
+All three leader backends have the same resume behaviour. What differs is only
+how each vendor names a conversation, and each mechanism below was read off the
+installed CLI — its help, its embedded documentation, its own SDK types — not
+assumed.
+
+Resume reopens the *same vendor conversation*, never a guessed one. Neta uses no
+`--continue`, `--last`, `--fork`, or picker selector, and refuses pass-through
+arguments that would move the conversation:
+
+| Backend | Fresh session | Resume | Capture mechanism |
+| --- | --- | --- | --- |
+| Claude Code | `--session-id <uuid>` (Neta assigns and records it before launch) | `--resume <uuid>` | none needed |
+| Codex | id assigned by Codex | `codex resume <uuid>` | `SessionStart` hook in `$CODEX_HOME/hooks.json` |
+| OpenCode | id assigned by OpenCode (`ses_…`) | `opencode --session <ses_…>` | plugin `event` hook on `session.created` |
+
+- **Claude Code** is the one vendor that lets the caller name a conversation, so
+  there is nothing to capture: the id exists before the CLI starts. Rejected
+  pass-through: `--continue`, `-c`, `--resume`, `-r`, `--session-id`,
+  `--fork-session`.
+- **Codex** assigns its own id and reports it to a `SessionStart` hook, whose
+  JSON payload carries `session_id`. Neta writes that hook into its overlay
+  home, gated on the installed Codex advertising hooks at all. Rejected
+  pass-through: `resume`, `fork`, `--last`, `--session`, `--session-id`,
+  `--continue`.
+- **OpenCode** also assigns its own id (`ses_…`) and offers no way to name one.
+  The leader runs in OpenCode's own TUI rather than over ACP, so there is no
+  `session/new` response to read the id from; what there is, is the plugin
+  `event` hook, which receives every bus event with the whole `Session` object
+  attached. Neta registers one generated plugin — `plugin: ["file://…"]` in the
+  inline config — that reports the id once, from the session's own creation
+  event.
+
+  The point of that design is that it is an exact observation, not a lookup.
+  Neta never runs `opencode session list` and takes the newest row: that would
+  race every other OpenCode window the user has open. Four rules keep it exact:
+  the plugin instance belongs to this leader's own process; the event is the
+  creation itself; a session carrying a `parentID` is a subagent's; a session
+  whose project directory is unrelated to this launch is not ours; and a
+  `session.updated` is accepted only when the session's own recorded creation
+  time falls inside this launch, so an older session being touched can never be
+  mistaken for the new one.
+
+  Gated on the installed OpenCode advertising plugins; `--pure` disables plugins
+  and is reported as such. OpenCode's own global storage is untouched: Neta adds
+  inline config plus that one plugin file at its own stable path, and never
+  relocates the OpenCode data directory — `opencode session list --format json`
+  and `opencode export <id>` keep working against exactly the id Neta recorded.
+  Rejected pass-through: `-c`, `--continue`, `-s`, `--session`, `--fork`.
+
+Where capture cannot be arranged — an older build without hooks or plugins,
+or `--pure` — the **launch is refused**, in the same way a conflicting
+pass-through selector is. A session that starts is a session the user will
+expect to reopen, so Neta does not start one it already knows it could not.
+
+Where capture is arranged but never arrives — a hook that silently does not
+fire — the control plane says so on the session's own error stream ("this
+leader never reported its conversation id … `neta resume` will refuse this
+session"), including whatever the capture recorded about why it failed. Worker
+history is still saved; only the leader conversation is lost, and
+`neta sessions --all` shows that as `conversation-id:no`.
+Everything else is identical across the three: `neta sessions --all`, the live
+conflict check, the process-death barrier, inert hydration with no rerun, the
+recovery briefing, preserved notes and results, and `neta_attach` on a recovered
+interrupted worker.
+
+A resumed leader keeps its logical session id and its vendor conversation id,
+and gets everything else fresh: a new manager id, socket, authorization token,
+temporary bundle and MCP config, CLI shim, and the currently installed Neta's
+instructions and restrictions. Its instructions carry a short recovered-state
+briefing — prior version, worker outcomes, open notes, and the fact that no
+worker was restarted — and point at `neta_status` for the rest.
+
+### Generated vendor state lives at a stable path
+
+Codex records the absolute path of a session's rollout file in its own thread
+index. Neta's Codex overlay home therefore lives at
+`~/.neta/leader-sessions/<logical-id>/codex-home` (mode `0700`), not under the
+per-run temporary directory: an overlay that is deleted at exit leaves Codex
+pointing at a path that no longer exists, and `codex resume <id>` then fails
+even though the transcript is safe in the real Codex home. Only `AGENTS.md` and
+`hooks.json` are generated there; every other entry stays a symlink into the
+real home, so credentials, history and sessions are never copied.
+
+OpenCode's capture plugin lives in the same per-session directory
+(`opencode-session-capture.mjs`) and is regenerated on every run, for the same
+reason: config that points at a per-run temporary path is config that stops
+resolving the moment the run ends. Claude Code needs no such file.
+
+### The process-death barrier
+
+Recovery hydrates only after it can prove that nothing from the previous run is
+still running:
+
+- A graceful shutdown records `shutdown.processesStopped` in the checkpoint
+  after every worker process group is confirmed gone.
+- A crash leaves the lease. Resume then matches the recorded manager identity,
+  reaps each recorded worker process group by pgid *and* recorded start time,
+  waits for death, kills the recorded multiplexer session, and records the proof.
+- The stale-session sweep, which any `neta` command can trigger, leaves a
+  stopped marker in `~/.neta/sessions/stopped/` when it reaps a manager, so its
+  cleanup is not lost evidence.
+
+Identity mismatch, a still-live manager, a kill that cannot be verified, or
+missing evidence after an unclean stop all abort recovery with the writer slot
+still held and the checkpoint unchanged. A directory launch lock plus a
+checkpoint claim stop two resumes from building two managers over one session.
 
 ## The two doors
 

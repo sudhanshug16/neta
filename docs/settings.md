@@ -179,6 +179,37 @@ work, put writers on Codex, or add backend flags of your own:
 
 | Variable | Meaning |
 | --- | --- |
-| `NETA_DIR` | Overrides `~/.neta` (settings, roles, skills, session registry). |
+| `NETA_DIR` | Overrides `~/.neta` (settings, roles, skills, session registry, checkpoints). |
 | `NETA_SOCKET`, `NETA_WORKER_ID`, `NETA_WORKER_TOKEN`, `NETA_SCRATCH` | Set on every worker process. |
 | `NETA_LEADER_TOKEN` | Authorizes worker management; set on the leader's process only. |
+| `NETA_CHECKPOINT_ID`, `NETA_LEADER_CONVERSATION_ID`, `NETA_LEADER_SESSION_DIR`, `NETA_RESUME` | Set by the launcher so the control plane knows which durable session it owns, which vendor conversation it is in, and whether this run is a resume. |
+
+## Reopening a closed session
+
+Neta keeps a durable checkpoint per session in `~/.neta/checkpoints/`, and the
+generated vendor state for that session in `~/.neta/leader-sessions/<id>/`
+(mode `0700`). Neither is deleted when a session ends, so a session survives
+quitting the leader, a crash, and a Neta upgrade:
+
+```
+neta sessions --all       # id, live/closed, leader, updated, exact-id, directory
+neta resume <session-id>  # reopen exactly that conversation
+```
+
+`neta resume` reopens the recorded vendor conversation and rebuilds everything
+else from the installed version. It refuses — leaving the checkpoint untouched —
+when the session is still live, its directory is gone, its checkpoint is corrupt
+or from a newer schema, its exact vendor conversation id was never captured, or
+the previous run's worker processes cannot be proven dead. No worker is ever
+restarted, and queued work stays queued.
+
+Claude Code, Codex and OpenCode all resume this way. Claude Code is given its
+conversation id before it starts; Codex reports the id it assigned through a
+`SessionStart` hook, and OpenCode through a generated plugin's `event` hook. The
+two capture mechanisms are gated on the installed CLI supporting them, and a
+launch that cannot arrange capture — an older Codex without hooks, an OpenCode
+without plugins, or `--pure` — is refused rather than started, because a session
+that starts is one you will expect to reopen. Worker resume commands
+stay configurable per backend through `backends.<name>.resume` — the defaults
+(`claude --resume`, `codex resume`, `opencode --session`) match the installed
+CLIs. See [how it works](how-it-works.md) for the mechanics.

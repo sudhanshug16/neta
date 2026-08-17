@@ -15,6 +15,7 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { shellQuote } from "../cli-shim.ts";
 import {
+	assertNoConversationSelectors,
 	controlPlaneCommand,
 	controlPlaneEnv,
 	type LeaderAdapter,
@@ -67,6 +68,9 @@ export function settingsConfig(context: LeaderLaunchContext): string {
 	);
 }
 
+/** Pass-through arguments that would move the leader to another conversation. */
+export const CLAUDE_CONVERSATION_SELECTORS = ["--continue", "-c", "--resume", "-r", "--session-id", "--fork-session"];
+
 export class ClaudeAdapter implements LeaderAdapter {
 	readonly id = "claude" as const;
 
@@ -76,12 +80,24 @@ export class ClaudeAdapter implements LeaderAdapter {
 	}
 
 	async prepare(context: LeaderLaunchContext): Promise<LeaderLaunch> {
+		assertNoConversationSelectors(context.extraArgs, CLAUDE_CONVERSATION_SELECTORS, "Claude Code");
 		const mcpPath = join(context.sessionDir, "mcp.json");
 		const settingsPath = join(context.sessionDir, "settings.json");
 		await writeFile(mcpPath, mcpConfig(context), "utf-8");
 		await writeFile(settingsPath, settingsConfig(context), "utf-8");
 
+		// Claude Code takes the conversation id both ways: `--session-id` names a
+		// fresh session, `--resume` reopens exactly that one. Everything else about
+		// the launch — prompt, MCP registration, settings — is rebuilt from the
+		// currently installed Neta, so a resumed session runs today's code.
+		const conversation = context.resumeConversationId
+			? ["--resume", context.resumeConversationId]
+			: context.leaderConversationId
+				? ["--session-id", context.leaderConversationId]
+				: [];
+
 		const args = [
+			...conversation,
 			"--append-system-prompt",
 			context.leaderPrompt,
 			"--mcp-config",

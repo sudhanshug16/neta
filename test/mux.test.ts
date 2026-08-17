@@ -705,6 +705,12 @@ describe("worker views", () => {
 		expect(tabTitle("rw12", "the entire websocket reconnect subsystem", "killed")).toBe("rw12 the entire web… ⊘");
 	});
 
+	it("shows only the three outcome icons; a recovered worker adds none", () => {
+		for (const state of ["starting", "running", "waiting", "queued", "interrupted"] as const) {
+			expect(tabTitle("ro1", "auth flow", state)).toBe("ro1 auth flow");
+		}
+	});
+
 	it("never guesses a mux or renames an unmarked user-owned resource", () => {
 		expect(markWorkerPaneTerminal({ ...worker, state: "done" }, { TMUX: "/tmp/tmux", TMUX_PANE: "%1" })).toBe(false);
 		expect(markWorkerPaneTerminal({ ...worker, state: "failed" }, { ZELLIJ: "0", ZELLIJ_PANE_ID: "1" })).toBe(false);

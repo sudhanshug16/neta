@@ -33,12 +33,15 @@ function clampTitle(label: string, suffix: string, limit: number): string {
  * What the tab is called. A tab bar has a few characters per tab before it
  * starts eliding, so the id comes first — it is what every command takes — and
  * the name gets whatever room is left.
+ *
+ * Three icons and no more: done, failed, killed. A recovered worker's
+ * "interrupted" state belongs in textual status and history, not in a tab bar
+ * the user reads at a glance — and no tab is ever created just to say it.
  */
 export function tabTitle(id: string, name: string, stateOrLimit?: WorkerState | number, limit = TITLE_LIMIT): string {
 	const state = typeof stateOrLimit === "number" ? undefined : stateOrLimit;
 	if (typeof stateOrLimit === "number") limit = stateOrLimit;
-	const marker =
-		state === "done" ? "✓" : state === "failed" ? "✗" : state === "killed" ? "⊘" : state === "interrupted" ? "!" : "";
+	const marker = state === "done" ? "✓" : state === "failed" ? "✗" : state === "killed" ? "⊘" : "";
 	const suffix = marker ? ` ${marker}` : "";
 	const label = `${id} ${name}`.replace(/\s+/g, " ").trim();
 	return clampTitle(label, suffix, limit);
