@@ -5,17 +5,16 @@
  * the same stream as a conversation — the worker's prose as markdown, tool
  * calls as quiet one-liners, diffs colored, room posts as an attribution line
  * over a markdown body — and adds an input line. What you type becomes the
- * worker's next turn (the same path as the leader's neta_send), and when the
- * worker is blocked on a question, the same input answers it. The stream still
- * comes from the control plane's non-consuming `tail`, so watching and typing
- * never disturb what the leader sees.
+ * worker's next turn (the same path as the leader's neta_send). A blocked ask
+ * is answered with `neta answer` from another terminal; watch input remains a
+ * queued steering message. The stream still comes from the control plane's
+ * non-consuming `tail`, so watching and typing never disturb what the leader sees.
  *
  * The conversation has two sides. Everything sent TO the worker — the opening
  * task brief, the leader's messages, what you type here — is the operator's
- * voice, and reads chat-style from the other edge: a block flush against the
- * RIGHT of the pane, attribution in brass, body in plain paper, wrapped
- * narrower than the pane so the alignment is visible, and never clamped or
- * markdown-rendered — what was sent is shown whole, as sent.
+ * voice. Operator and worker messages are both left-aligned; high-contrast role
+ * chips distinguish them without wasting narrow-terminal width. Sent text is
+ * never clamped or markdown-rendered — what was sent is shown whole, as sent.
  *
  * `neta watch <room>` gets the same treatment minus the input line: one merged
  * transcript of the room's posts, fed by the non-consuming `room-tail`.
@@ -39,6 +38,7 @@ import {
 import { sendChannelRequest } from "./channel/client.ts";
 import { APP_NAME } from "./config.ts";
 import { markWorkerPaneTerminal } from "./mux/panes.ts";
+import { formatLastProgress } from "./orchestrator/status.ts";
 import {
 	displayModel,
 	isTerminalState,
@@ -67,6 +67,9 @@ export const style = {
 	cyan: ansi(36, 39),
 	/** Brass #d9a441 — the caret you type at, the operator's voice: everything sent to the worker. */
 	brass: (text: string) => `\x1b[38;2;217;164;65m${text}\x1b[39m`,
+	userChip: (text: string) => `\x1b[38;2;28;20;4m\x1b[48;2;232;190;95m${text}\x1b[49m\x1b[39m`,
+	leaderChip: (text: string) => `\x1b[38;2;250;242;255m\x1b[48;2;104;68;132m${text}\x1b[49m\x1b[39m`,
+	workerChip: (text: string) => `\x1b[38;2;235;246;255m\x1b[48;2;40;91;132m${text}\x1b[49m\x1b[39m`,
 };
 
 /** Style applied line by line, so wrapping never carries a color past its text. */
@@ -134,13 +137,9 @@ function clamp(text: string): string {
 }
 
 /**
- * A message sent TO the worker, rendered chat-style: the block hugs the RIGHT
- * edge of the pane, the attribution line is brass, the body plain paper. Long
- * lines wrap at ~2/3 of the pane so the alignment stays visible, but nothing
- * is ever clamped, and the body stays plain text rather than markdown — a
- * markdown renderer fights the alignment, and full visibility beats
- * formatting. Rendering is a pure function of the width the TUI passes in, so
- * a terminal resize re-wraps and re-aligns the block on the next render.
+ * A message sent TO the worker. The role chip and body start at the left edge;
+ * long lines use the full available width so narrow panes remain readable.
+ * Nothing is clamped, and the body stays plain text rather than markdown.
  */
 export class SentBlock implements Component {
 	private readonly label: string;
@@ -160,12 +159,36 @@ export class SentBlock implements Component {
 
 	render(width: number): string[] {
 		if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
-		const measure = Math.max(1, Math.min(width, Math.max(20, Math.floor((width * 2) / 3))));
-		const flush = (line: string) => `${" ".repeat(Math.max(0, width - visibleWidth(line)))}${line}`;
+		const measure = Math.max(1, width);
 		const body = wrapTextWithAnsi(this.body.replace(/\t/g, "   "), measure);
+		const task = this.label === "task";
+		const chipText = truncateToWidth(task ? " user · task " : ` ${this.label} `, measure, "…");
+		const chip = task ? style.userChip(chipText) : style.leaderChip(chipText);
 		this.cachedWidth = width;
-		this.cachedLines = ["", flush(style.brass(`« ${this.label}`)), ...body.map(flush), ""];
+		this.cachedLines = ["", chip, ...body, ""];
 		return this.cachedLines;
+	}
+}
+
+/** Worker prose with a left-aligned, high-contrast role chip above markdown. */
+class WorkerBlock implements Component {
+	private readonly label: string;
+	private readonly markdown: Markdown;
+	constructor(label: string, text: string) {
+		this.label = label;
+		this.markdown = new Markdown(text, 0, 1, markdownTheme);
+	}
+	setText(text: string): void {
+		this.markdown.setText(text);
+	}
+	invalidate(): void {
+		this.markdown.invalidate();
+	}
+	render(width: number): string[] {
+		return [
+			style.workerChip(truncateToWidth(` ${this.label} `, Math.max(1, width), "…")),
+			...this.markdown.render(width),
+		];
 	}
 }
 
@@ -177,11 +200,11 @@ export class SentBlock implements Component {
  * disconnected fragments; anything else ends the run.
  */
 export class TranscriptView extends Container {
-	private tail: { component: Markdown; text: string } | undefined;
+	private tail: { component: WorkerBlock; text: string } | undefined;
 
 	append(raw: WorkerLogEntry): void {
 		// The operator's voice: what was sent to the worker arrives in the log as
-		// a prefixed status entry, and renders as a right-aligned block — checked
+		// a prefixed status entry, and renders as a left-aligned role block — checked
 		// before the clamp, because a sent message is content, never a dump.
 		const sent = sentMessage(raw);
 		if (sent) {
@@ -198,7 +221,7 @@ export class TranscriptView extends Container {
 					this.tail.text = `${this.tail.text}\n\n${entry.text}`;
 					this.tail.component.setText(this.tail.text);
 				} else {
-					const component = new Markdown(entry.text, 0, 1, markdownTheme);
+					const component = new WorkerBlock("worker", entry.text);
 					this.tail = { component, text: entry.text };
 					this.addChild(component);
 				}
@@ -219,14 +242,12 @@ export class TranscriptView extends Container {
 				this.addChild(new Text(colorDiff(entry.text), 0, 1));
 				return;
 			case "progress":
-				this.addChild(new Text(`${style.cyan("»")} ${entry.text}`, 0, 0));
+				// The latest milestone is pinned in the Neta-owned header. Keeping every
+				// historical progress entry here would duplicate it into a wall of text.
 				return;
 			case "say": {
-				// A room post reads like the worker's own prose: the violet arrow
-				// attributes it, and the body renders as a full markdown block.
 				const author = sayAuthor(entry);
-				this.addChild(new Text(style.magenta(author ? `→ ${author}` : "→"), 0, 0));
-				this.addChild(new Markdown(entry.text, 0, 1, markdownTheme));
+				this.addChild(new WorkerBlock(author ?? "worker", entry.text));
 				return;
 			}
 			case "error":
@@ -245,23 +266,28 @@ export class TranscriptView extends Container {
 	}
 }
 
-function headerText(worker: WorkerSummary): string {
+export function workerHeaderText(worker: WorkerSummary): string {
 	const access = worker.writer ? "writer" : "read-only";
 	const room = worker.room ? ` · room ${worker.room}` : "";
 	const model = displayModel(worker);
 	const session = model || worker.mode ? ` · ${[model, worker.mode].filter(Boolean).join("/")}` : "";
 	const bridge = worker.agentInfo ? ` · via ${worker.agentInfo}` : "";
 	const named = worker.name === worker.role ? worker.id : `${worker.id} ${worker.name}`;
+	const progress = formatLastProgress(worker);
 	return [
 		`${style.bold(named)} ${style.dim(`· ${worker.role}/${worker.tier} · ${worker.backend}${bridge} · ${access}${room}${session}`)}`,
 		style.dim(`task: ${worker.task.replace(/\s+/g, " ").trim().slice(0, 300)}`),
+		...(progress ? [style.cyan(progress)] : []),
+		...(worker.promptBlockedReason ? [style.red(`steering blocked: ${worker.promptBlockedReason}`)] : []),
 	].join("\n");
 }
 
 /** The loader's message: state, or the question the worker is blocked on. Metadata lives on the status line. */
-function footerMessage(page: WorkerLogPage): string {
+export function footerMessage(page: WorkerLogPage): string {
 	const question = page.worker?.pendingQuestion;
-	return question ? `waiting — asks: ${question}` : page.state;
+	return question
+		? `waiting — asks: ${question} · answer elsewhere: ${APP_NAME} answer ${page.worker?.id ?? "<id>"} <answer>`
+		: page.state;
 }
 
 /**
@@ -427,7 +453,7 @@ export async function watchWorkerTui(options: WatchTuiOptions): Promise<number> 
 				return;
 			}
 			if (next.worker) {
-				header.setText(headerText(next.worker));
+				header.setText(workerHeaderText(next.worker));
 				statusLine.update(next.worker, next.state);
 				// The header's one-line "task:" summary truncates; the full brief —
 				// the first thing ever sent to the worker — opens the transcript,

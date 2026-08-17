@@ -120,6 +120,8 @@ interface WorkerRecord {
 	interruptedTurns: Set<number>;
 	/** One cancel dispatch per turn; concurrent steering shares it. */
 	cancelDispatches: Map<number, Promise<boolean>>;
+	/** A cancel write became indeterminate; no later prompt may use this session. */
+	unsafeToPrompt?: string;
 	/** Terminal result is captured and its ACP process is being stopped. */
 	finishing?: Promise<void>;
 	/** A leader-initiated stop must beat a rejected in-flight prompt. */
@@ -200,6 +202,8 @@ export interface WorkerManagerOptions {
 	headlessReason?: string;
 	/** Persists a detached worker group while it can outlive the manager. */
 	onWorkerProcessGroup?: (workerId: string, pgid: number | undefined) => void;
+	/** Test seam for the public steering deadline. */
+	steerTimeoutMs?: number;
 	/** Test seam: swap in a fake transport without touching real CLIs. */
 	createTransport?: TransportFactory;
 	/** Durable semantic checkpoint. Live channel and process data never enters it. */
@@ -788,7 +792,7 @@ export class WorkerManager implements ChannelHandler {
 			return {
 				worker: this.summarize(record),
 				delivery: "next-turn",
-				note: `${workerId} is blocked on a question; it will not read this until you answer with neta_answer.`,
+				note: `${workerId} is blocked on a question; it will not read this until you run \`${APP_NAME} answer ${workerId} <answer>\` in another terminal.`,
 			};
 		}
 
@@ -802,7 +806,10 @@ export class WorkerManager implements ChannelHandler {
 		const delivered = new Promise<void>((resolve) => {
 			resolveDelivered = resolve;
 		});
-		let cancelDispatch: Promise<boolean> | undefined;
+		let releaseBoundary: (safe: boolean) => void = () => {};
+		const cancelBoundary = new Promise<boolean>((resolve) => {
+			releaseBoundary = resolve;
+		});
 		// Queued before the cancel, deliberately. The in-flight turn checks the
 		// queue depth when it ends, and finding this message there is what stops it
 		// from finishing the worker — so if the cancel and a natural end race, the
@@ -813,7 +820,7 @@ export class WorkerManager implements ChannelHandler {
 				// written, hold this prompt at the boundary. A session-wide cancel must
 				// never be able to overtake and hit the instruction it was meant to
 				// deliver.
-				await cancelDispatch?.catch(() => false);
+				return cancelBoundary;
 			})
 		) {
 			throw new Error(`Worker ${workerId} is finishing. Spawn a new worker instead.`);
@@ -821,7 +828,8 @@ export class WorkerManager implements ChannelHandler {
 		this.appendLog(record, "status", `Leader queued for next turn: ${message}`);
 		this.checkpointChanged(record);
 
-		const timeoutMs = options.timeoutMs ?? STEER_TIMEOUT_MS;
+		const timeoutMs = options.timeoutMs ?? this.options.steerTimeoutMs ?? STEER_TIMEOUT_MS;
+		const deadline = Date.now() + timeoutMs;
 
 		const queued = (note?: string): SteerResult => ({
 			worker: this.summarize(record),
@@ -830,9 +838,10 @@ export class WorkerManager implements ChannelHandler {
 		});
 
 		if (targetTurn === undefined) {
+			releaseBoundary(true);
 			// No turn to interrupt, so this is an ordinary next-turn delivery. It is
 			// still only reported as delivered once the backend has taken it.
-			return (await this.settle(delivered, timeoutMs))
+			return (await this.settle(delivered, Math.max(0, deadline - Date.now())))
 				? queued()
 				: {
 						worker: this.summarize(record),
@@ -842,24 +851,37 @@ export class WorkerManager implements ChannelHandler {
 		}
 
 		record.steeredTurns.add(targetTurn);
-		let asked: boolean;
-		try {
-			cancelDispatch = this.cancelTurn(record, targetTurn);
-			asked = await cancelDispatch;
-		} catch (error) {
+		const cancelDispatch = this.cancelTurn(record, targetTurn);
+		const dispatch = await this.settleResult(cancelDispatch, Math.max(0, deadline - Date.now()));
+		if (dispatch.status === "timeout" || dispatch.status === "rejected") {
 			record.steeredTurns.delete(targetTurn);
-			return queued(
-				`Could not interrupt ${workerId}'s current turn (${error instanceof Error ? error.message : String(error)}); ` +
-					"the message is queued and will be delivered when that turn ends.",
+			releaseBoundary(false);
+			const reason =
+				dispatch.status === "timeout"
+					? `cancel dispatch did not finish within ${timeoutMs}ms`
+					: `cancel dispatch failed (${dispatch.error instanceof Error ? dispatch.error.message : String(dispatch.error)})`;
+			record.unsafeToPrompt = reason;
+			this.appendLog(
+				record,
+				"error",
+				`Steering failed: ${reason}. The message was not delivered; kill and respawn this worker before sending more.`,
 			);
+			this.checkpointChanged(record);
+			return {
+				worker: this.summarize(record),
+				delivery: "cancel-failed",
+				note: `${workerId}'s session is unsafe for later prompts because a late session-wide cancel could hit them. Kill and respawn it.`,
+			};
 		}
+		const asked = dispatch.value;
 		if (!asked) {
 			record.steeredTurns.delete(targetTurn);
+			releaseBoundary(true);
 			return queued(`${workerId} had no live session to interrupt; the message is queued for its next turn.`);
 		}
-		this.appendLog(record, "status", "Leader interrupted the current turn to deliver a message.");
+		releaseBoundary(true);
 
-		const arrived = await this.settle(delivered, timeoutMs);
+		const arrived = await this.settle(delivered, Math.max(0, deadline - Date.now()));
 		if (!arrived) {
 			// Nothing is lost: the message is still first in the queue. But the
 			// worker has not seen it, and saying otherwise would be a lie the leader
@@ -873,6 +895,7 @@ export class WorkerManager implements ChannelHandler {
 		// True only if the turn this steer aimed at is the one that came back
 		// cancelled — not merely that some turn did.
 		const interrupted = record.interruptedTurns.has(targetTurn);
+		if (!interrupted) this.appendLog(record, "status", "The prior turn ended before the interrupt landed.");
 		return {
 			worker: this.summarize(record),
 			delivery: interrupted ? "interrupted" : "turn-ended",
@@ -902,12 +925,37 @@ export class WorkerManager implements ChannelHandler {
 		});
 	}
 
+	/** Settle one value within a deadline while consuming late resolve/reject paths. */
+	private settleResult<T>(
+		promise: Promise<T>,
+		timeoutMs: number,
+	): Promise<{ status: "resolved"; value: T } | { status: "rejected"; error: unknown } | { status: "timeout" }> {
+		return new Promise((resolve) => {
+			const timer = setTimeout(() => resolve({ status: "timeout" }), timeoutMs);
+			void promise.then(
+				(value) => {
+					clearTimeout(timer);
+					resolve({ status: "resolved", value });
+				},
+				(error: unknown) => {
+					clearTimeout(timer);
+					resolve({ status: "rejected", error });
+				},
+			);
+		});
+	}
+
 	private assertSendable(record: WorkerRecord, workerId: string): void {
 		if (isTerminalState(record.state)) {
 			throw new Error(`Worker ${workerId} already finished (${record.state}). Spawn a new worker instead.`);
 		}
 		if (record.finishing) {
 			throw new Error(`Worker ${workerId} is finishing. Spawn a new worker instead.`);
+		}
+		if (record.unsafeToPrompt) {
+			throw new Error(
+				`Worker ${workerId} cannot accept another prompt: ${record.unsafeToPrompt}. Kill and respawn it.`,
+			);
 		}
 	}
 
@@ -1778,7 +1826,7 @@ export class WorkerManager implements ChannelHandler {
 		/** Called at the moment this prompt is handed to the backend, not before. */
 		onDelivered?: () => void,
 		/** A turn-boundary barrier, used to keep a cancel ahead of its replacement prompt. */
-		beforePrompt?: () => Promise<void>,
+		beforePrompt?: () => Promise<boolean>,
 	): boolean {
 		if (isTerminalState(record.state) || record.finishing || record.killReason) return false;
 		record.queuedPrompts += 1;
@@ -1788,10 +1836,10 @@ export class WorkerManager implements ChannelHandler {
 				if (isTerminalState(record.state) || record.finishing || record.killReason) return;
 				const driver = record.driver;
 				if (!driver) throw new Error(`Worker ${record.id} has no live transport.`);
+				if (beforePrompt && !(await beforePrompt())) return;
 				for (const leaderMessage of leaderMessages) {
 					this.appendLog(record, "status", `Leader delivering now as next turn: ${leaderMessage}`);
 				}
-				if (beforePrompt) await beforePrompt();
 				const turn = ++record.turnCounter;
 				record.currentTurn = turn;
 				record.promptInFlight = true;
@@ -2145,6 +2193,7 @@ export class WorkerManager implements ChannelHandler {
 			laterFailure: record.laterFailure,
 			queuedBehind: record.state === "queued" ? record.queuedBehind : undefined,
 			pendingQuestion: record.pendingAsk?.question ?? record.pendingQuestion,
+			promptBlockedReason: record.unsafeToPrompt,
 			lastProgress: record.lastProgress,
 			scratchDir: record.scratchDir,
 			usage: record.usage,

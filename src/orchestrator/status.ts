@@ -17,6 +17,8 @@ import {
 
 const OBJECTIVE_LIMIT = 100;
 const LAST_PROGRESS_LIMIT = 80;
+/** Total rendered size of `neta inspect`, including metadata and footer. */
+export const INSPECT_RENDER_MAX_CHARS = 6000;
 
 /** The most recent `neta progress` as a "last:" line, or undefined before any progress. */
 export function formatLastProgress(summary: WorkerSummary): string | undefined {
@@ -68,7 +70,19 @@ export function formatInspection(inspection: WorkerInspection): string[] {
 		`Full stream: \`${APP_NAME} watch ${worker.id}\`` +
 			`${worker.vendorSessionId ? ` · in its own CLI: \`${APP_NAME} attach ${worker.id}\`` : ""}`,
 	);
-	return lines;
+	const rendered = lines.join("\n");
+	if (rendered.length <= INSPECT_RENDER_MAX_CHARS) return lines;
+	const details = [
+		inspection.droppedEntries > 0
+			? `${inspection.droppedEntries} earlier entries not shown (inspection cap)`
+			: undefined,
+		inspection.droppedChars > 0
+			? `${inspection.droppedChars} earlier characters truncated (inspection cap)`
+			: undefined,
+	].filter((detail) => detail !== undefined);
+	const marker = `… earlier inspection content truncated (${INSPECT_RENDER_MAX_CHARS} character hard cap)${details.length > 0 ? `; ${details.join("; ")}` : ""}`;
+	const newest = rendered.slice(-(INSPECT_RENDER_MAX_CHARS - marker.length - 1));
+	return [marker, newest];
 }
 
 export function formatWorkerSummary(summary: WorkerSummary): string {
@@ -82,6 +96,7 @@ export function formatWorkerSummary(summary: WorkerSummary): string {
 	const usage = formatUsage(summary.usage, summary.modelId ?? summary.model);
 	if (usage) parts.push(usage);
 	if (summary.pendingQuestion) parts.push(`asking: ${summary.pendingQuestion}`);
+	if (summary.promptBlockedReason) parts.push(`steering blocked: ${summary.promptBlockedReason}`);
 	return [
 		parts.join(" | "),
 		...(summary.laterFailure ? [`After its report: ${summary.laterFailure}`] : []),
@@ -101,10 +116,11 @@ export function formatSteerResult(result: SteerResult): string {
 	const id = result.worker.id;
 	const headline: Record<SteerResult["delivery"], string> = {
 		"pending-brief": `${id} has not started yet; your message was added to its opening brief and arrives with its task.`,
-		"next-turn": `${id} had no turn running; your message is its next prompt.`,
+		"next-turn": `Your message is queued as ${id}'s next prompt.`,
 		interrupted: `Interrupted ${id}'s running turn; it is now working on your message.`,
 		"turn-ended": `${id}'s turn ended before the interrupt landed; it is now working on your message.`,
 		"cancel-pending": `Asked ${id} to stop its turn; it has NOT read your message yet.`,
+		"cancel-failed": `Could not safely stop ${id}'s turn; your message was NOT delivered.`,
 	};
 	return result.note ? `${headline[result.delivery]} ${result.note}` : headline[result.delivery];
 }

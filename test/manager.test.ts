@@ -1514,7 +1514,7 @@ describe("WorkerManager", () => {
 		);
 
 		expect(response.ok).toBe(true);
-		expect(response.ok && response.text).toContain("will not read this until you answer with neta_answer");
+		expect(response.ok && response.text).toContain("neta answer ro1 <answer>");
 		expect(manager.get(summary.id).state).toBe("waiting");
 		expect(transports[0].cancels).toBe(0);
 		expect(transports[0].prompts).toEqual(["do it"]);

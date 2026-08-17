@@ -483,8 +483,10 @@ export class AcpConnection {
 
 	async kill(): Promise<void> {
 		this.killed = true;
-		// Best-effort ACP cancel before killing the process.
-		await this.cancel().catch(() => false);
+		// Start a best-effort cancel, but never put process shutdown behind its
+		// stdio write. A bridge that stopped draining stdin can leave notify()
+		// unresolved forever; close and SIGTERM/SIGKILL must still be reachable.
+		void this.cancel().catch(() => false);
 		this.connection?.close();
 		this.connection = undefined;
 		if (this.killPromise) return this.killPromise;

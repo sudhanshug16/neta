@@ -15,7 +15,12 @@ import {
 	WorkerManager,
 	type WorkerPaneHost,
 } from "../src/orchestrator/manager.ts";
-import { formatInspection, formatStatusSnapshot, inspectHint } from "../src/orchestrator/status.ts";
+import {
+	formatInspection,
+	formatStatusSnapshot,
+	INSPECT_RENDER_MAX_CHARS,
+	inspectHint,
+} from "../src/orchestrator/status.ts";
 import type { PromptOutcome, TransportOptions, WorkerTransportDriver } from "../src/orchestrator/transport.ts";
 import { fixtureBackendConfig, waitFor } from "./helpers.ts";
 
@@ -182,6 +187,18 @@ describe("the inspection cap", () => {
 	it("can be asked for less", async () => {
 		await chatty(10);
 		expect(manager.inspect("ro1", { maxEntries: 3 }).entries.length).toBeLessThanOrEqual(3);
+	});
+
+	it("caps the entire rendering when task and header metadata are oversized", async () => {
+		await manager.spawn({ role: "scout", tier: "expert", name: "n".repeat(10_000), task: "t".repeat(20_000) });
+		const transport = transports[0];
+		await waitFor(() => expect(transport.prompts.length).toBe(1));
+		transport.say("text", `older output ${"x".repeat(500)} newest finding`);
+
+		const rendered = formatInspection(manager.inspect("ro1")).join("\n");
+		expect(rendered.length).toBeLessThanOrEqual(INSPECT_RENDER_MAX_CHARS);
+		expect(rendered).toStartWith("… earlier inspection content truncated (6000 character hard cap)");
+		expect(rendered).toContain("newest finding");
 	});
 });
 

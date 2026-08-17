@@ -373,8 +373,9 @@ without consuming it, so nothing a pane shows is stolen from the leader, and
 `neta watch <id> --plain` prints the same stream as bare lines for piping.
 
 `neta inspect <id>` and `neta_inspect` provide the repo-owned expansion for a
-worker row. They show a hard-capped recent window of input and output without
-moving the leader's log cursor, and print an explicit truncation marker when
+worker row. They show a 6,000-character hard-capped recent window, including
+worker metadata, task, input and output, without moving the leader's log cursor,
+and print an explicit truncation marker when
 older entries or characters were omitted. This remains available for headless
 workers. Any clickable Terminal row in a vendor transcript or terminal host is
 host-owned; Neta does not install or modify that external click handler.

@@ -32,6 +32,10 @@ class FakeTransport implements WorkerTransportDriver {
 	liveSession = true;
 	/** Set to throw from cancel(), the way a broken transport would. */
 	cancelError: Error | undefined;
+	/** Model a bridge that accepted no more stdin and never settles its write. */
+	cancelNeverResolves = false;
+	killed = false;
+	terminal = false;
 	private cancelGate: Promise<void> | undefined;
 	private releaseCancelGate: (() => void) | undefined;
 	private pending: Array<(outcome: PromptOutcome) => void> = [];
@@ -48,6 +52,7 @@ class FakeTransport implements WorkerTransportDriver {
 	}
 	async cancel(): Promise<boolean> {
 		this.cancels += 1;
+		if (this.cancelNeverResolves) return new Promise<boolean>(() => {});
 		await this.cancelGate;
 		if (this.cancelError) throw this.cancelError;
 		if (!this.liveSession) return false;
@@ -63,8 +68,12 @@ class FakeTransport implements WorkerTransportDriver {
 		});
 		return () => this.releaseCancelGate?.();
 	}
-	async kill(): Promise<void> {}
-	markTerminal(): void {}
+	async kill(): Promise<void> {
+		this.killed = true;
+	}
+	markTerminal(): void {
+		this.terminal = true;
+	}
 
 	/** End the current turn the way a backend that finished normally would. */
 	finish(outcome: PromptOutcome): void {
@@ -91,6 +100,7 @@ describe("steering a worker", () => {
 			config: fixtureBackendConfig(),
 			channelAddress: "/tmp/neta-steer-test.sock",
 			leaderToken: "leader-token",
+			steerTimeoutMs: 20,
 			onEvent: (event) => events.push(event),
 			createTransport: (options) => {
 				const transport = new FakeTransport(options);
@@ -158,6 +168,9 @@ describe("steering a worker", () => {
 		expect(result.delivery).toBe("cancel-pending");
 		expect(formatSteerResult(result)).toContain("has NOT read your message yet");
 		expect(transport.prompts).toHaveLength(1);
+		expect(manager.tailLog("ro1").entries.map((entry) => entry.text)).not.toContain(
+			"Leader interrupted the current turn to deliver a message.",
+		);
 	});
 
 	it("keeps whatever the worker managed to say before it stopped", async () => {
@@ -194,7 +207,7 @@ describe("steering a worker", () => {
 
 		const result = await manager.steer("ro1", "the session store");
 		expect(result.delivery).toBe("next-turn");
-		expect(result.note).toContain("neta_answer");
+		expect(result.note).toContain("neta answer ro1 <answer>");
 		expect(transport.cancels).toBe(0);
 
 		manager.answer("ro1", "the session store");
@@ -209,12 +222,41 @@ describe("steering a worker", () => {
 		expect(result.note).toContain("no live session to interrupt");
 	});
 
-	it("reports honestly when cancelling throws", async () => {
+	it("fails closed when cancelling throws", async () => {
 		const { transport } = await runningWorker();
 		transport.cancelError = new Error("transport is closed");
 		const result = await manager.steer("ro1", "change course", { timeoutMs: 20 });
-		expect(result.delivery).toBe("next-turn");
-		expect(result.note).toContain("transport is closed");
+		expect(result.delivery).toBe("cancel-failed");
+		expect(result.note).toContain("unsafe for later prompts");
+		expect(result.worker.promptBlockedReason).toContain("transport is closed");
+		expect(transport.prompts).toEqual(["read the auth flow"]);
+		await expect(manager.steer("ro1", "try again")).rejects.toThrow(/cannot accept another prompt/);
+	});
+
+	it("bounds send and watch input when cancel dispatch never resolves, then remains killable", async () => {
+		const first = await manager.spawn({ role: "scout", tier: "expert", task: "first" });
+		const second = await manager.spawn({ role: "scout", tier: "expert", task: "second" });
+		await waitFor(() => expect(transports.every((transport) => transport.prompts.length === 1)).toBe(true));
+		for (const transport of transports) transport.cancelNeverResolves = true;
+
+		for (const [type, worker] of [
+			["send", first],
+			["pane-input", second],
+		] as const) {
+			const started = Date.now();
+			const response = await manager.leader(
+				{ type, token: "leader-token", workerId: worker.id, text: `${type} correction` },
+				new AbortController().signal,
+			);
+			expect(Date.now() - started).toBeLessThan(250);
+			expect(response.ok).toBe(true);
+			expect(response.ok && response.text).toContain("NOT delivered");
+		}
+
+		expect(transports.map((transport) => transport.prompts)).toEqual([["first"], ["second"]]);
+		for (const worker of [first, second]) await manager.kill(worker.id);
+		expect([first.id, second.id].map((id) => manager.get(id).state)).toEqual(["killed", "killed"]);
+		expect(transports.every((transport) => transport.killed && transport.terminal)).toBe(true);
 	});
 
 	// Two steers in quick succession: both messages arrive, in order, and the
@@ -346,5 +388,16 @@ describe("what a steer reports", () => {
 		expect(formatSteerResult({ worker, delivery: "turn-ended" })).toContain("now working on your message");
 		expect(formatSteerResult({ worker, delivery: "pending-brief" })).toContain("has not started yet");
 		expect(formatSteerResult({ worker, delivery: "next-turn" })).toContain("next prompt");
+		expect(formatSteerResult({ worker, delivery: "cancel-failed" })).toContain("NOT delivered");
+	});
+
+	it("does not claim no turn was running for blocked or failed cancellation paths", () => {
+		const waiting = { ...worker, state: "waiting" as const };
+		expect(
+			formatSteerResult({ worker: waiting, delivery: "next-turn", note: "blocked on a question" }),
+		).not.toContain("no turn running");
+		expect(formatSteerResult({ worker, delivery: "cancel-failed", note: "cancel dispatch failed" })).not.toContain(
+			"no turn running",
+		);
 	});
 });

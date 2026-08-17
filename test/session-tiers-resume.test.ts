@@ -101,10 +101,19 @@ describe("the checkpoint schema", () => {
 	// The whole installed base predates this field. Reading those files as "no
 	// tiers" would make every older session unresumable; absent means the full
 	// ladder, which is what they actually ran with.
-	it("reads a checkpoint written before session tiers existed", () => {
+	it("reads v1 and v2 checkpoints with the full tier ladder", () => {
 		const older = emptySessionCheckpoint({ id: "sess", canonicalCwd: "/repo", leaderBackend: "claude" });
-		const onDisk = { ...older, schemaVersion: 1 } as unknown;
-		expect(validateCheckpoint(onDisk).sessionTiers).toBeUndefined();
+		expect(validateCheckpoint({ ...older, schemaVersion: 1 } as unknown).sessionTiers).toBeUndefined();
+		// One prerelease wrote this v3 field under schema 2. It cannot narrow an
+		// older-schema session: rollback readers correctly knew v2 as all tiers.
+		expect(
+			validateCheckpoint({ ...older, schemaVersion: 2, sessionTiers: ["expert"] } as unknown).sessionTiers,
+		).toBeUndefined();
+	});
+
+	it("rejects future schemas with every supported version named", () => {
+		const checkpoint = emptySessionCheckpoint({ id: "sess", canonicalCwd: "/repo", leaderBackend: "claude" });
+		expect(() => validateCheckpoint({ ...checkpoint, schemaVersion: 4 })).toThrow("supported versions: 1, 2, or 3");
 	});
 
 	it("round-trips through disk", () => {

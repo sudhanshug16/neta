@@ -119,7 +119,7 @@ describe("durable session checkpoints", () => {
 	 * schema, with no proof of a clean shutdown, which is the truth about them.
 	 *
 	 * The upgrade suite resumes a real older Neta, and that runtime writes schema
-	 * 2; nothing else would notice if schema 1 stopped being readable.
+	 * 2; nothing else would notice if schemas 1 and 2 stopped being readable.
 	 */
 	it("reads a schema-1 checkpoint and carries it to the current schema", () => {
 		const agentDir = tempDir("neta-checkpoint-");

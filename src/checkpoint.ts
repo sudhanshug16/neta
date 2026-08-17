@@ -27,10 +27,10 @@ import {
 	type WorkerUsage,
 } from "./types.ts";
 
-export const CHECKPOINT_SCHEMA_VERSION = 2;
+export const CHECKPOINT_SCHEMA_VERSION = 3;
 
 /** Schemas this build understands. Anything else is a future file and is never rewritten. */
-const READABLE_SCHEMA_VERSIONS = [1, CHECKPOINT_SCHEMA_VERSION];
+const READABLE_SCHEMA_VERSIONS = [1, 2, CHECKPOINT_SCHEMA_VERSION];
 
 export interface CheckpointLiveLease {
 	managerId: string;
@@ -100,7 +100,7 @@ export interface CheckpointWorker {
 }
 
 export interface SessionCheckpoint {
-	schemaVersion: 2;
+	schemaVersion: 3;
 	appVersion: string;
 	id: string;
 	canonicalCwd: string;
@@ -374,7 +374,7 @@ export function validateCheckpoint(value: unknown): SessionCheckpoint {
 	);
 	if (typeof root.schemaVersion !== "number" || !READABLE_SCHEMA_VERSIONS.includes(root.schemaVersion)) {
 		throw new CheckpointError(
-			`Checkpoint schema version ${String(root.schemaVersion)} is not supported by this Neta version (expected ${READABLE_SCHEMA_VERSIONS.join(" or ")}). The original file was preserved.`,
+			`Checkpoint schema version ${String(root.schemaVersion)} is not supported by this Neta version (supported versions: 1, 2, or 3). The original file was preserved.`,
 		);
 	}
 	for (const key of ["appVersion", "id", "canonicalCwd"]) string(root[key], `checkpoint.${key}`);
@@ -460,17 +460,16 @@ export function validateCheckpoint(value: unknown): SessionCheckpoint {
 		string(room.room, `checkpoint.roomDebaterBackends[${index}].room`);
 		strings(room.backends, `checkpoint.roomDebaterBackends[${index}].backends`);
 	}
-	// A schema-1 file has every field this build reads; the only difference is
-	// that it predates the shutdown proof, so it reads as "not proven stopped".
-	// A file from before startup tier selection has no sessionTiers at all, and
-	// stays that way: absent is the honest record of "this session had the full
-	// ladder", and every reader spells that out itself.
-	const sessionTiers = root.sessionTiers as string[] | undefined;
+	// Schema 1 predates shutdown proof, and schemas 1 and 2 both predate startup
+	// tier selection. A short-lived build accidentally wrote sessionTiers while
+	// still claiming schema 2; accepting but ignoring that field keeps every v1/v2
+	// checkpoint compatible with the full ladder and makes the v3 boundary honest.
+	const sessionTiers = root.schemaVersion >= 3 ? (root.sessionTiers as string[] | undefined) : undefined;
 	return {
 		...root,
 		schemaVersion: CHECKPOINT_SCHEMA_VERSION,
 		// Stored order is not trusted; readers get the canonical ladder order.
-		...(sessionTiers ? { sessionTiers: TIERS.filter((tier) => sessionTiers.includes(tier)) } : {}),
+		sessionTiers: sessionTiers ? TIERS.filter((tier) => sessionTiers.includes(tier)) : undefined,
 	} as unknown as SessionCheckpoint;
 }
 

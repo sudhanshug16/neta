@@ -102,6 +102,7 @@ describe("watch", () => {
 		expect(code).toBe(0);
 		expect(lines[0]).toBe(`${worker.id} · scout/expert · claude · read-only · model unknown — backend default`);
 		expect(lines[1]).toBe("task: map the auth flow");
+		expect(lines[2]).toBe("last: reading auth.ts");
 		expect(lines).toContain("» reading auth.ts");
 		// The metadata line every state change reprints, here for the first state seen.
 		expect(lines).toContain(`· ${worker.id} · model unknown — backend default · running`);

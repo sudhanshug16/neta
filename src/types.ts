@@ -177,6 +177,8 @@ export interface WorkerSummary {
 	queuedBehind?: string;
 	/** Question the worker is blocked on, when state is "waiting". */
 	pendingQuestion?: string;
+	/** Why this live session cannot safely accept another prompt. */
+	promptBlockedReason?: string;
 	/** The worker's most recent `neta progress`, for a "last:" line in listings. */
 	lastProgress?: { text: string; at: number };
 	/** Live scratch path. Absent after checkpoint hydration because scratch state is never persisted. */
@@ -249,7 +251,9 @@ export type SteerDelivery =
 	/** A turn was in flight but ended on its own first; the worker took the message. */
 	| "turn-ended"
 	/** The cancel was sent and the worker has not taken the message yet. */
-	| "cancel-pending";
+	| "cancel-pending"
+	/** The cancel dispatch failed or timed out, so no later prompt is safe on this session. */
+	| "cancel-failed";
 
 export interface SteerResult {
 	worker: WorkerSummary;

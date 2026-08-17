@@ -30,6 +30,17 @@ describe("leader prompt", () => {
 		expect(buildLeaderPrompt({ tiers: DEFAULT_TIERS, control: "cli" })).toContain("You do not write code");
 	});
 
+	it("makes the leader conversational and proactive about real owner decisions", () => {
+		const prompt = buildLeaderPrompt({ tiers: DEFAULT_TIERS });
+
+		expect(prompt).toContain("Talk with the user like a technical lead, not a job runner");
+		expect(prompt).toContain('do not wait for the user to ask "Any questions?"');
+		expect(prompt).toContain("two to four concrete options and a\nmarked default");
+		expect(prompt).toContain("Keep doing reversible work that does not depend on the answer");
+		expect(prompt).toContain("do not turn routine technical choices into approval-seeking chatter");
+		expect(prompt).toContain("Lead with the\nverdict and keep the rest scannable");
+	});
+
 	it("names the MCP tools when the leader manages workers with tools", () => {
 		const prompt = buildLeaderPrompt({ tiers: DEFAULT_TIERS, control: "mcp" });
 

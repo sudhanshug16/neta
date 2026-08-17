@@ -123,7 +123,7 @@ keystrokes typed into someone else's terminal:
 
 - `neta progress <msg>` — records a progress milestone in the worker's log.
   The leader pulls this on demand; it does not push. The latest progress also
-  shows as a `last:` line in worker listings.
+  shows as a `last:` line in worker listings and the live worker watch header.
 - `neta ask <question>` — blocks the worker until the leader answers.
   Tier-gated: apprentices and journeymen do not get `ask` — a blocked worker
   fails fast with a report and the leader respawns it with a better spec.

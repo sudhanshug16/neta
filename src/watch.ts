@@ -15,6 +15,7 @@ import { sendChannelRequest } from "./channel/client.ts";
 import { NETA_LEADER_ENV, NETA_SOCKET_ENV } from "./channel/protocol.ts";
 import { getAgentDir } from "./config.ts";
 import { markWorkerPaneTerminal } from "./mux/panes.ts";
+import { formatLastProgress } from "./orchestrator/status.ts";
 import { estimateCost } from "./pricing.ts";
 import { findSession, listSessions } from "./session.ts";
 import {
@@ -137,9 +138,12 @@ function header(worker: WorkerSummary): string[] {
 	const session = model || worker.mode ? ` · ${[model, worker.mode].filter(Boolean).join("/")}` : "";
 	const bridge = worker.agentInfo ? ` · via ${worker.agentInfo}` : "";
 	const named = worker.name === worker.role ? worker.id : `${worker.id} ${worker.name}`;
+	const progress = formatLastProgress(worker);
 	return [
 		`${named} · ${worker.role}/${worker.tier} · ${worker.backend}${bridge} · ${access}${room}${session}`,
 		`task: ${worker.task.replace(/\s+/g, " ").trim().slice(0, 300)}`,
+		...(progress ? [progress] : []),
+		...(worker.promptBlockedReason ? [`! steering blocked: ${worker.promptBlockedReason}`] : []),
 		"─".repeat(60),
 	];
 }

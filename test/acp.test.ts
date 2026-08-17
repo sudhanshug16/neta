@@ -497,6 +497,42 @@ describe("AcpWorkerTransport", () => {
 
 		await killPromise;
 	});
+
+	it("closes and kills even when the cancel notification never resolves", async () => {
+		let pgid: number | undefined;
+		let closed = false;
+		const connection = new AcpConnection({
+			command: process.execPath,
+			args: [fakeAgent],
+			cwd: process.cwd(),
+			env: {},
+			allowMutations: false,
+			onUpdate: () => {},
+			onStderr: () => {},
+			onDenied: () => {},
+			onProcessGroup: (pid) => {
+				pgid = pid;
+			},
+		});
+		await connection.start();
+		Object.defineProperty(connection, "connection", {
+			configurable: true,
+			value: {
+				agent: { notify: () => new Promise<void>(() => {}) },
+				close: () => {
+					closed = true;
+				},
+			},
+			writable: true,
+		});
+
+		const startedAt = Date.now();
+		await connection.kill();
+		expect(Date.now() - startedAt).toBeLessThan(1000);
+		expect(closed).toBe(true);
+		if (pgid === undefined) throw new Error("ACP fixture did not report its process group");
+		expect(() => process.kill(pgid as number, 0)).toThrow();
+	});
 });
 
 // Codex folds the reasoning level into the model id, so "gpt-5.6-sol" alone
