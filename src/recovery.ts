@@ -303,7 +303,9 @@ export function buildRecoverySummary(checkpoint: SessionCheckpoint, currentVersi
 					: worker.state;
 			const outcome = worker.substantiveResponse ?? worker.finalResult;
 			lines.push(
-				`- \`${worker.id}\` ${worker.name} [${worker.role}/${worker.tier}] — ${state}${outcome ? `: ${clamp(outcome)}` : ""}`,
+				`- \`${worker.id}\` ${worker.name} [${worker.role}/${worker.tier}] — ${state}${outcome ? `: ${clamp(outcome)}` : ""}` +
+					// The report survives the restart; so must the caveat on it.
+					`${worker.laterFailure ? ` (after its report: ${clamp(worker.laterFailure, 120)})` : ""}`,
 			);
 		}
 	}

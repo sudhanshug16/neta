@@ -79,6 +79,9 @@ function statusReport(summaries: WorkerSummary[], maxResultChars = MAX_RESULT_CH
 			const lastProgress = formatLastProgress(summary);
 			if (lastProgress) lines.push(`  ${lastProgress}`);
 			if (summary.result) lines.push(`  result: ${clip(summary.result, maxResultChars)}`);
+			// Kept out of `result` on purpose: the report is what the leader acts on,
+			// and this is the caveat attached to it.
+			if (summary.laterFailure) lines.push(`  after its report: ${clip(summary.laterFailure, maxResultChars)}`);
 			return lines.join("\n");
 		})
 		.join("\n\n");

@@ -100,9 +100,9 @@ export interface AcpConnectionOptions {
 	/** What the session ended up running as, once negotiated. */
 	onSession?: (description: string) => void;
 	/**
-	 * The backend's own session id. Claude Code and Codex both hand back the id
-	 * they file the conversation under, so this is what a person needs to open
-	 * the worker in that CLI's own interface.
+	 * The backend's own session id. Claude Code, Codex and OpenCode all hand back
+	 * the id they file the conversation under, so this is what a person needs to
+	 * open the worker in that CLI's own interface.
 	 */
 	onVendorSession?: (sessionId: string) => void;
 	/** The detached ACP process group, so a crashed manager can clean it up later. */
@@ -154,8 +154,14 @@ function readSelect(option: acp.SessionConfigOption | undefined): ConfigSelectio
 	};
 }
 
-/** Neta appends thought level to a model id, while ACP exposes it separately. */
-function splitModelAndThoughtLevel(model: string): { model: string; thoughtLevel?: string } {
+/**
+ * Neta appends thought level to a model id, while ACP exposes it separately —
+ * but a backend may also advertise a model whose own id ends in brackets
+ * (Claude Code's `opus[1m]` is one model, not `opus` at thought level `1m`).
+ * The backend's own list decides which reading is right.
+ */
+function splitModelAndThoughtLevel(model: string, available: string[] = []): { model: string; thoughtLevel?: string } {
+	if (available.includes(model)) return { model };
 	const match = /^(.*)\[([^\]]+)]$/.exec(model);
 	return match ? { model: match[1], thoughtLevel: match[2] } : { model };
 }
@@ -296,12 +302,15 @@ export class AcpConnection {
 		const wanted = this.options.model;
 		const requireExact = this.options.requireExactModel === true;
 		const selectionError = (reason: string): Error =>
-			new Error(`Required model selection "${wanted}" failed: ${reason}. No task prompt was sent.`);
-		if (requireExact && (!wanted || !config.model)) {
-			throw selectionError("the backend did not advertise configurable models and thought levels");
+			new Error(`Required model selection "${wanted ?? "(none)"}" failed: ${reason}. No task prompt was sent.`);
+		if (requireExact && !wanted) {
+			throw selectionError("no model was resolved for this tier, so the backend default would decide");
+		}
+		if (requireExact && !config.model) {
+			throw selectionError("the backend did not advertise a selectable model");
 		}
 		if (wanted && config.model) {
-			const desired = splitModelAndThoughtLevel(wanted);
+			const desired = splitModelAndThoughtLevel(wanted, config.model.values);
 			const modelId = requireExact
 				? config.model.values.includes(desired.model)
 					? desired.model
@@ -483,7 +492,10 @@ export class AcpConnection {
 				process.kill(-pgid, 0);
 				return true;
 			} catch (error) {
-				if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+				const code = (error as NodeJS.ErrnoException).code;
+				if (code === "ESRCH") return false;
+				// The group exists and is not ours to signal.
+				if (code === "EPERM") return true;
 				// Negative process-group ids are not supported everywhere. The direct
 				// child is the best liveness signal on those platforms.
 				return child.exitCode === null;

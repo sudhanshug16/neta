@@ -3,5 +3,5 @@ process.on("SIGTERM", () => {
 	// group remains alive until Neta escalates to SIGKILL.
 });
 
-process.stdout.write("ready\n");
+process.stdout.write(`ready:${process.pid}\n`);
 setInterval(() => {}, 1000);

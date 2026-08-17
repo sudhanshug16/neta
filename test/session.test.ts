@@ -7,7 +7,12 @@ import { fileURLToPath } from "node:url";
 import {
 	findLiveSessionInDirectory,
 	findSession,
+	isProcessGroupGone,
 	listSessions,
+	processStartTime,
+	readSessionRecord,
+	reapProcessGroup,
+	reapSessionRecord,
 	releaseSessionLock,
 	removeSessionRecord,
 	type SessionRecord,
@@ -124,6 +129,59 @@ describe("session registry", () => {
 				process.kill(-pgid, "SIGKILL");
 			} catch {
 				// The sweep already killed the detached group.
+			}
+		}
+	});
+
+	// The real shape of an ACP worker: `npx` exits the moment it has started the
+	// bridge, so the group leader is gone while the process doing the work — and
+	// holding write access to the repository — is still running.
+	it("does not call a group gone when its leader exited and a child is still running", async () => {
+		const dir = agentDir();
+		const marker = join(agentDir(), "child.pid");
+		// A group leader that starts a child and exits, exactly like a launcher.
+		const leader = spawn("/bin/sh", ["-c", `${process.execPath} ${SIGTERM_IGNORING_CHILD} > ${marker} & sleep 0.4`], {
+			detached: true,
+			stdio: "ignore",
+		});
+		const pgid = leader.pid;
+		if (pgid === undefined) throw new Error("Could not start the group leader fixture.");
+		const leaderStartedAt = processStartTime(pgid);
+		if (!leaderStartedAt) throw new Error("Could not identify the group leader fixture.");
+		const group = { pgid, leaderStartedAt };
+		await waitFor(() => expect(readFileSync(marker, "utf-8")).toContain("ready"), 5000);
+		const childPid = Number.parseInt(readFileSync(marker, "utf-8").split(":")[1] ?? "", 10);
+		// Wait for the leader itself to be gone, not merely finished.
+		await new Promise<void>((resolve) => leader.on("exit", () => resolve()));
+		await waitFor(() => expect(() => process.kill(pgid, 0)).toThrow(), 5000);
+
+		try {
+			expect(isProcessGroupGone(group, processStartTime)).toBe(false);
+			expect(() => process.kill(childPid, 0)).not.toThrow();
+
+			// Reaping it must both kill the child and prove it.
+			expect(reapProcessGroup(group, processStartTime, () => {})).toBe(true);
+			expect(isProcessGroupGone(group, processStartTime)).toBe(true);
+			await waitFor(() => expect(() => process.kill(childPid, 0)).toThrow(), 5000);
+
+			// And the sweep must refuse to call the session stopped until then.
+			writeSessionRecord(record({ id: "orphaned", pid: 2147483646, workerGroups: [group] }), dir);
+			const stopped: boolean[] = [];
+			stopped.push(
+				reapSessionRecord(readSessionRecord("orphaned", dir) as SessionRecord, dir, {
+					groupPopulated: () => true,
+					processStartTime: () => undefined,
+					warn: () => {},
+				}),
+			);
+			expect(stopped).toEqual([false]);
+		} finally {
+			for (const pid of [childPid, pgid]) {
+				try {
+					if (Number.isInteger(pid)) process.kill(-pid, "SIGKILL");
+				} catch {
+					// Already gone, which is the point of the test.
+				}
 			}
 		}
 	});

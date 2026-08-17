@@ -27,10 +27,27 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, lstatSync, readdirSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import {
+	chmodSync,
+	closeSync,
+	existsSync,
+	fsyncSync,
+	lstatSync,
+	openSync,
+	readdirSync,
+	readFileSync,
+	realpathSync,
+	renameSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { APP_NAME } from "../config.ts";
+import { codexEnforcesHookTrust, ensureCaptureHookTrusted } from "./codex-hooks.ts";
 import {
 	assertNoConversationSelectors,
 	controlPlaneCommand,
@@ -157,21 +174,81 @@ export async function createHomeOverlay(
 
 /**
  * Codex refreshes credentials by replacing auth.json, which turns our symlink
- * into a real file inside the overlay. Copy it back so the refresh is not lost
- * when the session ends.
+ * into a real file inside the overlay.
+ *
+ * Copy the refreshed credentials back to the real home, then put the symlink
+ * back — so the one copy of the user's Codex credentials stays in the user's
+ * own Codex home and Neta's session directory retains none. The order matters:
+ * the overlay copy is only removed after the real home is confirmed to hold the
+ * same bytes, so a failure anywhere leaves the credentials where they are and
+ * says so out loud rather than deleting the only good copy.
  */
-export function preserveRefreshedAuth(overlay: string, realHome: string): void {
+export function preserveRefreshedAuth(
+	overlay: string,
+	realHome: string,
+	report: (message: string) => void = (message) => process.stderr.write(`${APP_NAME}: ${message}\n`),
+): void {
 	const overlayAuth = join(overlay, "auth.json");
+	const realAuth = join(realHome, "auth.json");
 	if (!existsSync(overlayAuth)) return;
 	try {
 		if (lstatSync(overlayAuth).isSymbolicLink()) return;
-		copyFileSync(overlayAuth, join(realHome, "auth.json"));
 	} catch {
-		// Nothing to do: the user logs in again if it mattered.
+		return;
+	}
+	const refreshed = readFileSync(overlayAuth);
+	try {
+		// Same directory as the destination, so the rename is atomic and a torn
+		// write can never be what the user's next Codex login reads.
+		const temp = `${realAuth}.neta-${process.pid}-${randomBytes(6).toString("hex")}.tmp`;
+		const handle = openSync(temp, "wx", 0o600);
+		try {
+			writeFileSync(handle, refreshed);
+			fsyncSync(handle);
+		} finally {
+			closeSync(handle);
+		}
+		renameSync(temp, realAuth);
+		chmodSync(realAuth, 0o600);
+	} catch (error) {
+		report(
+			`could not copy Codex's refreshed credentials back to ${realAuth}: ${describeError(error)}. ` +
+				`They are still in ${overlayAuth}; move that file yourself, or log in to Codex again.`,
+		);
+		return;
+	}
+	// Only now is deleting safe: the real home holds these exact bytes.
+	try {
+		if (!readFileSync(realAuth).equals(refreshed)) {
+			report(
+				`Codex's credentials in ${realAuth} are not the ones this session refreshed; ` +
+					`leaving Neta's copy at ${overlayAuth} rather than deleting it.`,
+			);
+			return;
+		}
+		rmSync(overlayAuth, { force: true });
+		symlinkSync(realAuth, overlayAuth);
+	} catch (error) {
+		report(
+			`could not restore the credentials symlink in ${overlay}: ${describeError(error)}. ` +
+				`Remove ${overlayAuth} yourself: it is a copy of your Codex credentials.`,
+		);
 	}
 }
 
-const hookSupport = new Map<string, boolean>();
+function describeError(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+const helpText = new Map<string, string>();
+
+function cachedHelp(binary: string, run: (path: string) => string): string {
+	const cached = helpText.get(binary);
+	if (cached !== undefined) return cached;
+	const help = run(binary);
+	helpText.set(binary, help);
+	return help;
+}
 
 /**
  * Whether the installed Codex has the hook mechanism at all.
@@ -182,11 +259,12 @@ const hookSupport = new Map<string, boolean>();
  * cheap and is the only honest gate.
  */
 export function codexSupportsHooks(binary: string, run: (path: string) => string = codexHelp): boolean {
-	const cached = hookSupport.get(binary);
-	if (cached !== undefined) return cached;
-	const supported = /hook/i.test(run(binary));
-	hookSupport.set(binary, supported);
-	return supported;
+	return /hook/i.test(cachedHelp(binary, run));
+}
+
+/** Whether this build withholds hooks it has not been told to trust. */
+export function codexRequiresHookTrust(binary: string, run: (path: string) => string = codexHelp): boolean {
+	return codexEnforcesHookTrust(cachedHelp(binary, run));
 }
 
 function codexHelp(binary: string): string {
@@ -231,6 +309,31 @@ export class CodexAdapter implements LeaderAdapter {
 			context.leaderPrompt,
 			capture ? hooksConfig(realHome, capture) : undefined,
 		);
+
+		// The hook file exists now, so Codex can be asked about it by name. A build
+		// that enforces hook trust runs nothing it has not been told to trust, and
+		// an unrunnable capture hook means an unreopenable session — so this either
+		// arranges trust for Neta's own hook or refuses the launch.
+		if (capture && codexRequiresHookTrust(context.backend.path)) {
+			const trusted = await ensureCaptureHookTrusted({
+				binary: context.backend.path,
+				codexHome: overlay,
+				realHome,
+				cwd: context.cwd,
+				hooksPath: realpathSync(join(overlay, "hooks.json")),
+				captureCommand: [capture.command, ...capture.args].join(" "),
+				// Every generated Codex home lives under this one directory, which is
+				// what makes pruning dead trust entries a Neta-only operation.
+				ownedPrefix: context.leaderSessionDir ? dirname(context.leaderSessionDir) : overlay,
+				resolvePath: realpathSync,
+			});
+			if (trusted.wrote.length > 0) {
+				warnings.push(
+					`recorded Codex hook trust for ${trusted.wrote.length} hook${trusted.wrote.length === 1 ? "" : "s"} ` +
+						`in ${trusted.configPath}, so this session's id can be captured`,
+				);
+			}
+		}
 
 		// `codex resume <uuid>` is exact; `--last` and the picker are not, and Neta
 		// never uses them. Config, MCP registration and instructions are rebuilt

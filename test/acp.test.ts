@@ -298,6 +298,73 @@ describe("AcpWorkerTransport", () => {
 		});
 	});
 
+	// Every Claude tier, not only the architect's. A user-global Fable default is
+	// what a lower tier would silently run on if selection were best-effort.
+	for (const [model, display] of [
+		["haiku", "Claude Haiku"],
+		["sonnet", "Claude Sonnet"],
+		["opus[1m]", "Claude Opus 1M"],
+	] as const) {
+		it(`selects the exact "${model}" tier model over a Claude backend's Fable default`, async () => {
+			const transport = createTransport(false, [], [], ["--claude-fable-default"], {}, model, true);
+			await transport.start();
+
+			expect(sessionReports.at(-1)).toMatchObject({ model: display, modelId: model });
+			expect(sessionReports.at(-1)?.modelId).not.toContain("fable");
+		});
+	}
+
+	for (const [name, fixtureFlag, error] of [
+		["the requested lower-tier model is absent", "--missing-sonnet", /exact model "sonnet" is unavailable/, "sonnet"],
+		["setConfig fails for a lower tier", "--fail-set-config", /configuration request failed/, "haiku"],
+	] as const) {
+		it(`fails closed before the task prompt when ${name}`, async () => {
+			const markerDir = mkdtempSync(join(tmpdir(), "neta-prompt-marker-"));
+			tempDirs.push(markerDir);
+			const marker = join(markerDir, "prompted");
+			const transport = createTransport(
+				false,
+				[],
+				[],
+				["--claude-fable-default", fixtureFlag, "--prompt-marker", marker],
+				{},
+				name.includes("absent") ? "sonnet" : "haiku",
+				true,
+			);
+
+			await expect(transport.start()).rejects.toThrow(error);
+			expect(existsSync(marker)).toBe(false);
+		});
+	}
+
+	it("fails closed when a Claude tier resolved no model at all", async () => {
+		const markerDir = mkdtempSync(join(tmpdir(), "neta-prompt-marker-"));
+		tempDirs.push(markerDir);
+		const marker = join(markerDir, "prompted");
+		const transport = createTransport(
+			false,
+			[],
+			[],
+			["--claude-fable-default", "--prompt-marker", marker],
+			{},
+			undefined,
+			true,
+		);
+
+		await expect(transport.start()).rejects.toThrow(/no model was resolved for this tier/);
+		expect(existsSync(marker)).toBe(false);
+	});
+
+	it("fails closed when a Claude backend advertises no selectable model", async () => {
+		const markerDir = mkdtempSync(join(tmpdir(), "neta-prompt-marker-"));
+		tempDirs.push(markerDir);
+		const marker = join(markerDir, "prompted");
+		const transport = createTransport(false, [], [], ["--bare", "--prompt-marker", marker], {}, "haiku", true);
+
+		await expect(transport.start()).rejects.toThrow(/did not advertise a selectable model/);
+		expect(existsSync(marker)).toBe(false);
+	});
+
 	for (const [name, fixtureFlag, error] of [
 		["exact Opus 1M is absent", "--missing-exact-opus", /exact model "opus\[1m\]" is unavailable/],
 		["Max effort is absent", "--missing-max", /exact thought level "max" is unavailable/],

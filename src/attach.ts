@@ -2,11 +2,12 @@
  * `neta attach <worker>` — open a worker in its own CLI.
  *
  * A worker driven over ACP is not a special kind of session. Claude Code files
- * it in `~/.claude/projects` and Codex in `~/.codex/sessions`, under the very id
- * the ACP handshake hands back. So the whole conversation a worker had is
- * sitting in that CLI's own history, and `claude --resume <id>` opens it in the
- * interface you already know — where you can read it properly and keep talking
- * to it yourself.
+ * it in `~/.claude/projects`, Codex in `~/.codex/sessions` and OpenCode in its
+ * own session store, under the very id the ACP handshake hands back. So the
+ * whole conversation a worker had is sitting in that CLI's own history, and the
+ * backend's own resume command — `claude --resume <id>`, `codex resume <id>`,
+ * `opencode --session <id>` — opens it in the interface you already know, where
+ * you can read it properly and keep talking to it yourself.
  *
  * Neta keeps driving the worker while it runs, so attaching to one that is
  * still working means two clients on one conversation. That is the user's call

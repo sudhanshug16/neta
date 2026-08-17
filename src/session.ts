@@ -84,6 +84,8 @@ export interface SessionStoppedMarker {
 export interface SessionSweepOptions {
 	/** Test seam for platforms where the process table is unavailable to the test sandbox. */
 	processStartTime?: (pid: number) => string | undefined;
+	/** Test seam for process-group membership; normal runs signal the real group. */
+	groupPopulated?: (pgid: number) => boolean | undefined;
 	/** Emits identity-mismatch warnings without making cleanup fail. */
 	warn?: (message: string) => void;
 	/** Test seam for multiplexer cleanup; normal runs ignore muxes already gone. */
@@ -250,37 +252,80 @@ function sleepSync(milliseconds: number): void {
 	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
 }
 
-/** True once this exact recorded group is gone — never merely "the pid is free". */
-export function isProcessGroupGone(group: SessionWorkerGroup, identify: (pid: number) => string | undefined): boolean {
+/**
+ * Whether any process still belongs to this group.
+ *
+ * `kill(-pgid, 0)` asks the kernel about the whole group, which is the only
+ * question worth asking: an ACP bridge routinely outlives the launcher that
+ * created the group (`npx` exits, the bridge keeps working), so the group
+ * leader's own liveness says nothing about whether work is still running.
+ * `undefined` means this platform cannot answer — Windows has no process
+ * groups to signal — and callers fall back to the group leader there.
+ */
+export function isGroupPopulated(pgid: number): boolean | undefined {
+	if (!Number.isInteger(pgid) || pgid <= 1) return false;
+	try {
+		process.kill(-pgid, 0);
+		return true;
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		if (code === "ESRCH") return false;
+		// The group exists and belongs to another user.
+		if (code === "EPERM") return true;
+		return undefined;
+	}
+}
+
+/**
+ * True once this exact recorded group is gone — never merely "the leader pid is
+ * free".
+ *
+ * Two facts make this decidable. A pgid number cannot be handed to a new
+ * process while the group it names still has members (Linux holds the `struct
+ * pid`; the BSDs check `pgfind` before reusing a pid), so a live group under a
+ * dead leader is still ours. And a live *process* at that number proves the
+ * opposite: the number was reissued, which the kernel only allows once our
+ * group emptied, so a mismatched leader identity means our group is gone and
+ * whatever holds the number now is a stranger.
+ */
+export function isProcessGroupGone(
+	group: SessionWorkerGroup,
+	identify: (pid: number) => string | undefined,
+	groupPopulated: (pgid: number) => boolean | undefined = isGroupPopulated,
+): boolean {
 	const { pgid, leaderStartedAt } = group;
 	if (!Number.isInteger(pgid) || pgid <= 1) return true;
-	if (!isAlive(pgid)) return true;
-	// A live pid carrying a different start time is a different process that
-	// inherited the number. The recorded one is gone, and killing this one would
-	// be killing a stranger.
-	return identify(pgid) !== leaderStartedAt;
+	const leaderMatches = isAlive(pgid) && identify(pgid) === leaderStartedAt;
+	const populated = groupPopulated(pgid);
+	// No group signalling here: the recorded leader is the only evidence.
+	if (populated === undefined) return !leaderMatches;
+	if (!populated) return true;
+	// A live group whose number was reissued to an unrelated process is not ours.
+	return isAlive(pgid) && !leaderMatches;
 }
 
 /**
  * Stop one recorded worker group and report whether its death is proven.
  *
  * The identity check is the whole safety property: a numeric pgid is reused, so
- * a recorded group is only ever signalled while its group leader still has the
- * start time captured when Neta created it.
+ * a recorded group is only ever signalled while it is still provably the one
+ * Neta created — its leader alive under the recorded start time, or the leader
+ * gone and the number still held by the group it led.
  */
 export function reapProcessGroup(
 	group: SessionWorkerGroup,
 	identify: (pid: number) => string | undefined,
 	warn: (message: string) => void,
 	waitMs = 2000,
+	groupPopulated: (pgid: number) => boolean | undefined = isGroupPopulated,
 ): boolean {
 	const { pgid, leaderStartedAt } = group;
 	if (!Number.isInteger(pgid) || pgid <= 1 || pgid === process.pid) return true;
-	if (identify(pgid) !== leaderStartedAt) {
-		if (isAlive(pgid))
-			warn(`[neta] stale session skipped process group ${pgid}: group leader identity no longer matches`);
+	if (isAlive(pgid) && identify(pgid) !== leaderStartedAt) {
+		warn(`[neta] stale session skipped process group ${pgid}: group leader identity no longer matches`);
 		return true;
 	}
+	if (isProcessGroupGone(group, identify, groupPopulated)) return true;
 	for (const signal of ["SIGTERM", "SIGKILL"] as const) {
 		try {
 			process.kill(-pgid, signal);
@@ -293,11 +338,11 @@ export function reapProcessGroup(
 		}
 		const deadline = Date.now() + waitMs / 2;
 		while (Date.now() < deadline) {
-			if (isProcessGroupGone(group, identify)) return true;
+			if (isProcessGroupGone(group, identify, groupPopulated)) return true;
 			sleepSync(25);
 		}
 	}
-	return isProcessGroupGone(group, identify);
+	return isProcessGroupGone(group, identify, groupPopulated);
 }
 
 function killMuxSession(mux: SessionMux): void {
@@ -358,6 +403,7 @@ export function reapSessionRecord(
 		options.processStartTime ?? processStartTime,
 		options.warn ?? console.warn,
 		options.killMuxSession ?? killMuxSession,
+		options.groupPopulated ?? isGroupPopulated,
 	);
 }
 
@@ -367,11 +413,12 @@ function tearDownSession(
 	identify: (pid: number) => string | undefined,
 	warn: (message: string) => void,
 	stopMux: (mux: SessionMux) => void,
+	groupPopulated: (pgid: number) => boolean | undefined,
 ): boolean {
 	if (record.mux) stopMux(record.mux);
 	let processesStopped = !isSessionAlive(record);
 	for (const group of Array.isArray(record.workerGroups) ? record.workerGroups : [])
-		if (!reapProcessGroup(group, identify, warn)) processesStopped = false;
+		if (!reapProcessGroup(group, identify, warn, 2000, groupPopulated)) processesStopped = false;
 	if (typeof record.socket === "string" && isNetaSocket(record.socket)) rmSync(record.socket, { force: true });
 	// Written before the record is deleted: this marker is the only remaining
 	// evidence a later `neta resume` has that these processes were reaped.
@@ -406,6 +453,7 @@ export function sweepStaleSessions(agentDir: string = getAgentDir(), options: Se
 	const identify = options.processStartTime ?? processStartTime;
 	const warn = options.warn ?? console.warn;
 	const stopMux = options.killMuxSession ?? killMuxSession;
+	const groupPopulated = options.groupPopulated ?? isGroupPopulated;
 	const dir = sessionsDir(agentDir);
 	if (!existsSync(dir)) return;
 	for (const name of readdirSync(dir)) {
@@ -431,7 +479,7 @@ export function sweepStaleSessions(agentDir: string = getAgentDir(), options: Se
 				// It exited between the liveness check and the signal.
 			}
 		}
-		tearDownSession(record, agentDir, identify, warn, stopMux);
+		tearDownSession(record, agentDir, identify, warn, stopMux, groupPopulated);
 	}
 }
 

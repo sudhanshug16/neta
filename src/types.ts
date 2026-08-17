@@ -166,6 +166,13 @@ export interface WorkerSummary {
 	stateBeforeStop?: Exclude<WorkerState, "done" | "failed" | "killed" | "interrupted">;
 	/** Set once the worker reaches a terminal state. */
 	result?: string;
+	/**
+	 * Something that failed after this worker had already reported — an automatic
+	 * writer notice, or a follow-up. Reported next to `result`, never instead of
+	 * it: the report is what the leader needs, and the failure is what it needs to
+	 * know about the report.
+	 */
+	laterFailure?: string;
 	/** Writer holding the slot, while this worker's state is "queued". */
 	queuedBehind?: string;
 	/** Question the worker is blocked on, when state is "waiting". */
@@ -179,9 +186,9 @@ export interface WorkerSummary {
 	 * The backend's own session id for this worker.
 	 *
 	 * A worker driven over ACP is not a special kind of session — it is an
-	 * ordinary Claude Code or Codex session, stored where that CLI stores its
-	 * own. Knowing the id is what lets a person open the worker in the vendor's
-	 * real UI and carry on the conversation by hand.
+	 * ordinary Claude Code, Codex or OpenCode session, stored where that CLI
+	 * stores its own. Knowing the id is what lets a person open the worker in the
+	 * vendor's real UI and carry on the conversation by hand.
 	 */
 	vendorSessionId?: string;
 	/** The model this worker negotiated and is running on, if reported by the backend. */

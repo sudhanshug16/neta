@@ -104,6 +104,22 @@ arguments that would move the conversation:
   home, gated on the installed Codex advertising hooks at all. Rejected
   pass-through: `resume`, `fork`, `--last`, `--session`, `--session-id`,
   `--continue`.
+
+  Codex 0.147 and later will not *run* a hook they have not been told to trust:
+  a new one waits for review in the TUI, and `--dangerously-bypass-hook-trust`
+  un-reviews every enabled hook for that invocation, project-local ones
+  included. Neta uses neither. Before the leader starts it asks the installed
+  binary — `codex app-server`, `hooks/list`, offline, no session and no model —
+  for the key and hash Codex files this hook under, records
+  `[hooks.state."<key>"] trusted_hash = "<hash>"` in the Codex config that
+  session will read, and asks again to confirm Codex now trusts it. If it does
+  not, the launch is refused rather than started unresumable. Neta vouches for
+  exactly two things: its own generated capture hook, and a hook of yours whose
+  identical definition your Codex config already trusts (the overlay gives your
+  hooks a new path, which Codex reads as new). Anything else — an unreviewed
+  hook of yours, anything a repository ships — stays untrusted and Codex asks
+  you, as it would without Neta. Trust entries Neta wrote for overlay homes that
+  no longer exist are pruned when it writes the next one.
 - **OpenCode** also assigns its own id (`ses_…`) and offers no way to name one.
   The leader runs in OpenCode's own TUI rather than over ACP, so there is no
   `session/new` response to read the id from; what there is, is the plugin
@@ -273,8 +289,12 @@ CLI differently, because the CLIs differ:
   replaced by your own text plus Neta's. The copy is best-effort: an entry
   that cannot be linked is silently skipped, and Codex simply does not see
   it. Sessions, history and credentials live in your real home through the
-  links that succeed, and a refreshed `auth.json` is copied back when the
-  session ends — also best-effort.
+  links that succeed. When Codex refreshes credentials it replaces the
+  `auth.json` link with a real file; at the end of the session Neta copies
+  those bytes back to your real home, verifies them there, and restores the
+  link — so Neta's own directory retains no copy of your credentials. If any
+  step fails it says so and leaves the file alone, because the alternative is
+  deleting the only good copy.
 
 ## Taking a worker over
 

@@ -7,7 +7,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { execFile, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -87,6 +87,48 @@ describe("neta mcp", () => {
 			expect(existsSync(lock.path)).toBe(false);
 		} finally {
 			await muxClient.close();
+			rmSync(home, { recursive: true, force: true });
+		}
+	});
+
+	// The live lease is what records which manager owns this session's worker
+	// processes. Without it on disk, a later `neta resume` would believe the
+	// checkpoint is free while those processes may still be running.
+	it("refuses to register when the first durable checkpoint write fails", async () => {
+		const home = mkdtempSync(join(tmpdir(), "neta-unwritable-"));
+		// A file where the checkpoint directory has to be: every write fails, and
+		// nothing about the failure is Neta's to repair.
+		writeFileSync(join(home, "checkpoints"), "not a directory");
+		const lock = tryAcquireSessionLock(process.cwd(), home);
+		if (!lock) throw new Error("Could not acquire test launch lock.");
+		const child = spawn(process.execPath, [CLI, "mcp"], {
+			env: {
+				...process.env,
+				NETA_DIR: home,
+				NETA_SESSION_ID: "unsafe",
+				NETA_LEADER_BACKEND: "claude",
+				NETA_SESSION_LOCK_PATH: lock.path,
+				NETA_SESSION_LOCK_TOKEN: lock.token,
+			} as Record<string, string>,
+			stdio: ["pipe", "pipe", "pipe"],
+		});
+		let stderr = "";
+		child.stderr?.on("data", (chunk: Buffer) => {
+			stderr += chunk.toString();
+		});
+		try {
+			const code = await new Promise<number | null>((resolve) => child.on("close", resolve));
+
+			expect(code).not.toBe(0);
+			expect(stderr).toContain("could not record session unsafe");
+			expect(stderr).toContain("No control plane was registered");
+			// Nothing a person or a resume could find: no manager, no socket, and the
+			// launch lock still held by its owner.
+			expect(listSessions(home)).toEqual([]);
+			expect(existsSync(join(home, "sessions", "unsafe.json"))).toBe(false);
+			expect(existsSync(lock.path)).toBe(true);
+		} finally {
+			child.kill("SIGKILL");
 			rmSync(home, { recursive: true, force: true });
 		}
 	});

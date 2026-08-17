@@ -267,6 +267,24 @@ describe("leader MCP tools", () => {
 		expect(bodyOf(await waiting)).toContain("auth lives in src/auth.ts");
 	});
 
+	// The report is what the leader acts on; a later failure is a caveat on it,
+	// and both have to arrive without a trip through neta_log.
+	it("returns a preserved report and the later failure beside it", async () => {
+		await call("neta_spawn", { role: "scout", tier: "expert", task: "look" });
+		await call("neta_spawn", { role: "worker", tier: "expert", task: "write", writer: true });
+		const waiting = call("neta_wait", { workerIds: ["ro1"], timeoutSeconds: 10 });
+		transports[0].finish({ ok: true, summary: "auth lives in src/auth.ts" });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		transports[0].finish({ ok: false, summary: "backend closed the session" });
+
+		const waited = bodyOf(await waiting);
+		expect(waited).toContain("result: auth lives in src/auth.ts");
+		expect(waited).toContain("after its report: automatic notice failed");
+		const listed = bodyOf(await call("neta_workers", { workerId: "ro1" }));
+		expect(listed).toContain("result: auth lives in src/auth.ts");
+		expect(listed).toContain("backend closed the session");
+	});
+
 	it("returns the first finished worker with first=true, listing the rest as still running", async () => {
 		await call("neta_spawn", { role: "scout", tier: "expert", task: "a" });
 		await call("neta_spawn", { role: "scout", tier: "expert", task: "b" });

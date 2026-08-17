@@ -235,10 +235,22 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 		manager = new WorkerManager(managerOptions);
 	}
 
+	// The live lease goes to disk before anything can reach this manager. It is
+	// the record of who owns this session's processes, so until it is durable
+	// there must be no socket to talk to, no registry entry to find, and no
+	// released launch lock for a second launcher to take.
+	try {
+		await checkpointWriter.writeDurable(manager.checkpointSnapshot());
+	} catch (error) {
+		throw new Error(
+			`Neta could not record session ${checkpointId} in ${agentDir}, so nothing would know this manager owns ` +
+				`its workers: ${error instanceof Error ? error.message : String(error)}\n` +
+				`No control plane was registered. Fix that directory (or point NETA_DIR elsewhere) and start again.`,
+		);
+	}
+
 	const server = new ChannelServer(address, manager);
 	await server.start();
-	checkpointWriter.schedule(manager.checkpointSnapshot());
-	await checkpointWriter.flush();
 	writeRegistry();
 	if (lockPath && lockToken) releaseSessionLock({ path: lockPath, token: lockToken });
 

@@ -336,6 +336,58 @@ describe("WorkerManager", () => {
 		await manager.spawn({ role: "scout", tier: "architect", task: "design it" });
 
 		expect(transports[0].options.model).toBe("opus[1m][max]");
+		expect(transports[0].options.requireExactModel).toBe(true);
+	});
+
+	// Every tier, because a Claude backend's own default can be a model Neta's
+	// policy forbids: a best-effort selection would run the turn on it.
+	it("requires exact model confirmation for every Claude tier, at every alias of the lineage", async () => {
+		const lineages = {
+			claude: {},
+			"by-detect": { detect: "claude" },
+			"by-package": {
+				command: "npx",
+				args: ["-y", "@agentclientprotocol/claude-agent-acp@0.68.0"],
+			},
+			"by-resume": { resume: { command: "claude", args: ["--resume", "{session}"] } },
+		};
+		const config = fixtureBackendConfig({ backends: lineages });
+		const seen: Array<{ backend: string; tier: string; model: string | undefined; exact: boolean | undefined }> = [];
+		const lineageManager = new WorkerManager({
+			cwd: process.cwd(),
+			agentDir: "/nonexistent-agent-dir",
+			config,
+			channelAddress: "/tmp/neta-lineage-test.sock",
+			onEvent: () => {},
+			createTransport: (options) => {
+				seen.push({
+					backend: options.workerId,
+					tier: "",
+					model: options.model,
+					exact: options.requireExactModel,
+				});
+				return new FakeTransport(options);
+			},
+		});
+
+		try {
+			for (const backend of Object.keys(lineages)) {
+				for (const tier of ["apprentice", "journeyman", "expert", "architect"] as const) {
+					await lineageManager.spawn({ role: "scout", tier, task: "look", backend });
+				}
+			}
+			expect(seen).toHaveLength(16);
+			expect(seen.every((entry) => entry.exact === true)).toBe(true);
+			expect(seen.map((entry) => entry.model).slice(0, 4)).toEqual(["haiku", "sonnet", "opus[1m]", "opus[1m][max]"]);
+
+			// OpenCode fronts whichever provider the user logged into, so Neta has no
+			// exact model to demand there.
+			await lineageManager.spawn({ role: "scout", tier: "expert", task: "look", backend: "opencode" });
+			expect(seen.at(-1)?.exact).toBe(false);
+		} finally {
+			await lineageManager.dispose();
+			rmSync("/tmp/neta-lineage-test.sock", { force: true });
+		}
 	});
 
 	it("fails closed before transport creation if a forbidden Claude model escapes settings validation", async () => {
@@ -521,6 +573,77 @@ describe("WorkerManager", () => {
 			await queueManager.dispose();
 			rmSync("/tmp/neta-queued-process-group.sock", { force: true });
 		}
+	});
+
+	// Neta's own writer notices are appended as prompts, so a backend error on one
+	// used to overwrite the handoff the worker had already delivered.
+	it("keeps a worker's report when the automatic writer notice that follows it fails", async () => {
+		const reader = await manager.spawn({ role: "scout", tier: "expert", task: "inspect" });
+		// Spawning a writer queues a heads-up behind the reader's running turn.
+		await manager.spawn({ role: "worker", tier: "expert", task: "first", writer: true });
+		await flush();
+
+		transports[0].finish({ ok: true, summary: "Substantive report: mapped the auth flow." });
+		await flush();
+		expect(manager.get(reader.id).state).toBe("running");
+		// The queued notice is the reader's next prompt, and it is the one that fails.
+		transports[0].finish({ ok: false, summary: "backend closed the session" });
+		await manager.waitFor([reader.id], 5000);
+		await flush();
+
+		const summary = manager.get(reader.id);
+		expect(summary.state).toBe("done");
+		expect(summary.result).toBe("Substantive report: mapped the auth flow.");
+		expect(summary.laterFailure).toContain("automatic notice failed");
+		expect(summary.laterFailure).toContain("backend closed the session");
+		// Visible without draining the log, in both live doors.
+		expect(manager.list().find((worker) => worker.id === reader.id)?.laterFailure).toContain("automatic notice");
+		const waited = await manager.wait([reader.id], 1000);
+		expect(waited.workers[0].result).toContain("Substantive report");
+		expect(waited.workers[0].laterFailure).toContain("automatic notice");
+		expect(
+			manager
+				.tailLog(reader.id)
+				.entries.filter((entry) => entry.kind === "error")
+				.map((entry) => entry.text)
+				.join("\n"),
+		).toContain("automatic notice failed");
+	});
+
+	it("keeps a worker's report when a leader follow-up fails, and still calls the turn failed", async () => {
+		const second = await manager.spawn({ role: "scout", tier: "expert", task: "map it" });
+		manager.send(second.id, "one more thing");
+		await flush();
+
+		transports[0].finish({ ok: true, summary: "Substantive report: found the second race." });
+		await flush();
+		transports[0].finish({ ok: false, summary: "backend refused the follow-up" });
+		await manager.waitFor([second.id], 5000);
+		await flush();
+
+		const failed = manager.get(second.id);
+		expect(failed.state).toBe("failed");
+		expect(failed.result).toBe("Substantive report: found the second race.");
+		expect(failed.laterFailure).toContain("follow-up failed");
+		// The failure event carries the failure, not the preserved report.
+		expect(events.filter((event) => event.type === "failed").at(-1)).toMatchObject({
+			workerId: second.id,
+			error: expect.stringContaining("backend refused the follow-up"),
+		});
+	});
+
+	it("returns the failure normally when nothing substantive was ever reported", async () => {
+		const summary = await manager.spawn({ role: "scout", tier: "expert", task: "map it" });
+
+		transports[0].finish({ ok: false, summary: "backend not installed" });
+		await manager.waitFor([summary.id], 5000);
+		await flush();
+
+		expect(manager.get(summary.id)).toMatchObject({
+			state: "failed",
+			result: "backend not installed",
+			laterFailure: undefined,
+		});
 	});
 
 	it("does not send writer notices to queued writers", async () => {

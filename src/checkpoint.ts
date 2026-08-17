@@ -78,6 +78,8 @@ export interface CheckpointWorker {
 	finalResult?: string;
 	substantiveResponse?: string;
 	lastResponse?: string;
+	/** A turn that failed after the report in `finalResult`; kept beside it, never over it. */
+	laterFailure?: string;
 	log: WorkerLogEntry[];
 	logFirstIndex: number;
 	logCursor: number;
@@ -244,6 +246,7 @@ function validateWorker(value: unknown, path: string): void {
 			"finalResult",
 			"substantiveResponse",
 			"lastResponse",
+			"laterFailure",
 			"log",
 			"logFirstIndex",
 			"logCursor",
@@ -284,6 +287,7 @@ function validateWorker(value: unknown, path: string): void {
 		"finalResult",
 		"substantiveResponse",
 		"lastResponse",
+		"laterFailure",
 		"pendingQuestion",
 		"vendorSessionId",
 		"model",
@@ -571,6 +575,28 @@ export class CheckpointWriter {
 			this.start();
 			await this.writing;
 		}
+	}
+
+	/**
+	 * Write the first checkpoint of a run durably, and let failure escape.
+	 *
+	 * Every later write is best-effort on purpose: a full disk must not take down
+	 * a session that is already orchestrating work. The first one is different.
+	 * It is what records the live lease — which manager owns this session, and
+	 * which worker groups belong to it — and the control plane registers itself
+	 * and releases the launch lock on the strength of it. Reporting a failure and
+	 * carrying on there would publish a manager whose ownership nothing durable
+	 * records, and hand the next `neta resume` a checkpoint it believes is free
+	 * while the old processes may still be running.
+	 */
+	async writeDurable(checkpoint: SessionCheckpoint): Promise<void> {
+		// This snapshot supersedes anything queued behind it; a queued write that
+		// is already in flight still finishes first, so the file is never written
+		// out of order.
+		this.pending = undefined;
+		await this.writing;
+		writeCheckpointAtomic(checkpoint, this.agentDir);
+		this.lastError = undefined;
 	}
 }
 

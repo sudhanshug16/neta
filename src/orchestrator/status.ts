@@ -31,6 +31,7 @@ export function formatWorkerSummary(summary: WorkerSummary): string {
 	if (summary.pendingQuestion) parts.push(`asking: ${summary.pendingQuestion}`);
 	return [
 		parts.join(" | "),
+		...(summary.laterFailure ? [`After its report: ${summary.laterFailure}`] : []),
 		...(summary.headlessReason ? [`Worker view: headless — ${summary.headlessReason}`] : []),
 	].join("\n");
 }

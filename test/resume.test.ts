@@ -15,6 +15,7 @@ import {
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
+	realpathSync,
 	rmSync,
 	statSync,
 	symlinkSync,
@@ -40,6 +41,7 @@ import {
 	writeVendorSessionCapture,
 } from "../src/checkpoint.ts";
 import { VERSION } from "../src/config.ts";
+import type { DetectedLeaderBackend } from "../src/detect.ts";
 import { resumeLeader } from "../src/launch.ts";
 import { captureLeaderSession } from "../src/leader-capture.ts";
 import { startConversationCapture } from "../src/mcp/run.ts";
@@ -72,6 +74,24 @@ function scratch(prefix: string): string {
 	const dir = mkdtempSync(join(tmpdir(), prefix));
 	dirs.push(dir);
 	return dir;
+}
+
+const FAKE_LEADER = fileURLToPath(new URL("./fixtures/fake-leader.mjs", import.meta.url));
+
+/**
+ * A "codex" whose `--help` and `app-server` behave like the installed one: the
+ * adapter's hook-trust path talks to a real process over real stdio, so what is
+ * tested is the arrangement Neta makes, not a description of it.
+ */
+function fakeCodex(name: string, help?: string): DetectedLeaderBackend {
+	const path = join(scratch(`neta-codex-shim-${name}-`), "codex");
+	writeFileSync(
+		path,
+		`#!/bin/sh\n${help === undefined ? "" : `FAKE_LEADER_HELP=${JSON.stringify(help)}\nexport FAKE_LEADER_HELP\n`}` +
+			`exec ${process.execPath} ${FAKE_LEADER} "$@"\n`,
+		{ mode: 0o755 },
+	);
+	return { id: "codex", name: "Codex", binary: "codex", install: "", path };
 }
 
 function checkpointWith(
@@ -658,11 +678,6 @@ describe("the exact leader conversation", () => {
 		const leaderDir = scratch("neta-codex-leader-");
 		const realHome = scratch("neta-codex-real-");
 		const capture = { command: "/usr/bin/neta", args: ["capture-leader-session", "--session", "logical-1"] };
-		const shim = (name: string, help: string): string => {
-			const path = join(scratch(`neta-codex-shim-${name}-`), "codex");
-			writeFileSync(path, `#!/bin/sh\necho ${JSON.stringify(help)}\n`, { mode: 0o755 });
-			return path;
-		};
 
 		expect(codexSupportsHooks("/fake/codex-hooks", () => "--dangerously-bypass-hook-trust")).toBe(true);
 		expect(codexSupportsHooks("/fake/codex-plain", () => "Usage: codex [OPTIONS]")).toBe(false);
@@ -672,19 +687,19 @@ describe("the exact leader conversation", () => {
 		try {
 			const supported = await new CodexAdapter().prepare(
 				context({
-					backend: {
-						id: "codex",
-						name: "Codex",
-						binary: "codex",
-						install: "",
-						path: shim("hooks", "--dangerously-bypass-hook-trust"),
-					},
+					backend: fakeCodex("hooks"),
+					cwd: scratch("neta-codex-cwd-"),
 					leaderSessionDir: leaderDir,
 					captureCommand: capture,
 				}),
 			);
-			expect(supported.warnings).toEqual([]);
+			// The hook is written and, on a build that enforces hook trust, vouched
+			// for — otherwise Codex would hold it back and never report its id.
 			expect(readFileSync(join(leaderDir, "codex-home", "hooks.json"), "utf8")).toContain("SessionStart");
+			expect(supported.warnings.join(" ")).toContain("recorded Codex hook trust");
+			expect(readFileSync(join(realHome, "config.toml"), "utf8")).toContain(
+				`[hooks.state."${realpathSync(join(leaderDir, "codex-home", "hooks.json"))}:session_start:0:0"]`,
+			);
 
 			// The refusal itself is covered by its own test; here it is enough that
 			// the hook file is only written where the mechanism exists.
@@ -692,13 +707,8 @@ describe("the exact leader conversation", () => {
 			await expect(
 				new CodexAdapter().prepare(
 					context({
-						backend: {
-							id: "codex",
-							name: "Codex",
-							binary: "codex",
-							install: "",
-							path: shim("plain", "Usage: codex [OPTIONS]"),
-						},
+						backend: fakeCodex("plain", "Usage: codex [OPTIONS]"),
+						cwd: scratch("neta-codex-cwd-"),
 						leaderSessionDir: leaderDir,
 						captureCommand: capture,
 					}),
@@ -856,6 +866,61 @@ describe("what a resumed leader is told", () => {
 		expect(prompt).toContain("## Recovered session");
 		expect(prompt.indexOf("## Recovered session")).toBeLessThan(prompt.indexOf("## You do not write code"));
 		expect(buildLeaderPrompt({ tiers: {} })).not.toContain("## Recovered session");
+	});
+
+	// A report that survived a failed automatic notice has to survive the restart
+	// too, and so does the caveat attached to it.
+	it("carries a preserved report and its later failure through hydration", async () => {
+		const agentDir = scratch("neta-later-failure-home-");
+		const cwd = scratch("neta-later-failure-repo-");
+		const checkpoint = checkpointWith({
+			id: "later-failure",
+			canonicalCwd: cwd,
+			shutdown: { at: Date.now(), processesStopped: true, by: "graceful" },
+			counter: 1,
+			workers: [
+				{
+					...runningWorker("ro1"),
+					role: "scout",
+					writer: false,
+					state: "done",
+					finalResult: "Substantive report: mapped the auth flow.",
+					substantiveResponse: "Substantive report: mapped the auth flow.",
+					lastResponse: "backend closed the session",
+					laterFailure: "automatic notice failed after the report above: backend closed the session",
+				},
+			],
+		});
+		writeCheckpointAtomic(checkpoint, agentDir);
+
+		const manager = WorkerManager.hydrate(
+			{
+				cwd,
+				agentDir,
+				config: fixtureBackendConfig(),
+				channelAddress: "/tmp/neta-later-failure.sock",
+				onEvent: () => {},
+				createTransport: () => {
+					throw new Error("a recovered worker must never be started again");
+				},
+			},
+			readCheckpointForHydration("later-failure", agentDir),
+		);
+
+		try {
+			expect(manager.get("ro1")).toMatchObject({
+				state: "done",
+				result: "Substantive report: mapped the auth flow.",
+				laterFailure: expect.stringContaining("automatic notice failed"),
+			});
+			const waited = await manager.wait(["ro1"], 1000);
+			expect(waited.workers[0].result).toContain("Substantive report");
+			expect(waited.workers[0].laterFailure).toContain("backend closed the session");
+			expect(buildRecoverySummary(checkpoint, VERSION)).toContain("after its report");
+		} finally {
+			await manager.dispose();
+			rmSync("/tmp/neta-later-failure.sock", { force: true });
+		}
 	});
 });
 

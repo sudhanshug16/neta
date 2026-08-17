@@ -32,7 +32,7 @@ import {
 import { APP_NAME } from "../config.ts";
 import { loadRoleText, roleNames, workingAgreement } from "../prompts/roles.ts";
 import { canonicalizeCwd } from "../session.ts";
-import { assertClaudeModelAllowed, CLAUDE_OPUS_MAX, type NetaConfig, type ResolvedBackend } from "../settings.ts";
+import { assertClaudeModelAllowed, type NetaConfig, type ResolvedBackend } from "../settings.ts";
 import {
 	displayModel,
 	formatUsage,
@@ -84,6 +84,8 @@ interface WorkerRecord {
 	substantiveResponse?: string;
 	/** Most recent prompt response, including automatic system notices. */
 	lastResponse?: string;
+	/** A turn that failed after this worker had already reported; never replaces the report. */
+	laterFailure?: string;
 	scratchDir?: string;
 	/** Capability token for this worker's channel requests. */
 	channelToken?: string;
@@ -316,6 +318,7 @@ export class WorkerManager implements ChannelHandler {
 					(wasActive ? `Interrupted during recovery (was ${worker.state}); review before continuing.` : undefined),
 				substantiveResponse: worker.substantiveResponse,
 				lastResponse: worker.lastResponse,
+				laterFailure: worker.laterFailure,
 				log: worker.log.map((entry) => ({ ...entry })),
 				logFirstIndex: worker.logFirstIndex,
 				logCursor: worker.logCursor,
@@ -414,6 +417,7 @@ export class WorkerManager implements ChannelHandler {
 				finalResult: record.result,
 				substantiveResponse: record.substantiveResponse,
 				lastResponse: record.lastResponse,
+				laterFailure: record.laterFailure,
 				log: record.log.map((entry) => ({ ...entry })),
 				logFirstIndex: record.logFirstIndex,
 				logCursor: record.logCursor,
@@ -1257,6 +1261,9 @@ export class WorkerManager implements ChannelHandler {
 					: summary.result;
 			line += `\n  ${result}`;
 		}
+		// After the result, because the result is the worker's answer and this is a
+		// caveat on it: reading them the other way round buries the handoff.
+		if (summary.laterFailure) line += `\n  after its report: ${summary.laterFailure}`;
 		return line;
 	}
 
@@ -1328,7 +1335,11 @@ export class WorkerManager implements ChannelHandler {
 			command: backend.command,
 			args: backend.args,
 			model: backend.model,
-			requireExactModel: backend.claudeLineage && backend.model === CLAUDE_OPUS_MAX,
+			// Every Claude tier, not just the architect's Opus 1M Max. Anthropic's
+			// own default can be a model Neta's policy forbids, and a warn-and-carry-on
+			// selection would spend the turn on it. Confirm the tier's exact model
+			// with the backend or send no task prompt at all.
+			requireExactModel: backend.claudeLineage,
 			writer: record.writer,
 			systemPrompt,
 			scratchDir: record.scratchDir,
@@ -1385,7 +1396,20 @@ export class WorkerManager implements ChannelHandler {
 				const outcome = await driver.prompt(message);
 				if (isTerminalState(record.state) || record.finishing || record.killReason) return;
 				if (!outcome.ok) {
-					await this.finish(record, "failed", outcome.summary);
+					// A later turn failing must not delete the handoff this worker
+					// already produced. Neta's own writer notices are appended as
+					// prompts, so a worker that did its job and then hit a backend
+					// error on an automatic notice used to come back as a bare error
+					// message, with the real report reachable only by draining the log.
+					const preserved = record.substantiveResponse;
+					const failure = `${automatic ? "automatic notice" : "follow-up"} failed after the report above: ${outcome.summary}`;
+					if (!preserved) {
+						await this.finish(record, "failed", outcome.summary);
+						return;
+					}
+					// The task itself finished; only Neta's own notice failed. A failed
+					// follow-up the leader sent is a failed turn, and stays one.
+					await this.finish(record, automatic ? "done" : "failed", preserved, { failure });
 					return;
 				}
 				record.lastResponse = outcome.summary;
@@ -1460,7 +1484,19 @@ export class WorkerManager implements ChannelHandler {
 		return "no repository changes were committed";
 	}
 
-	private finish(record: WorkerRecord, state: WorkerState, result: string): Promise<void> {
+	/**
+	 * Make a worker terminal with the result the leader should read.
+	 *
+	 * `failure` is for the case where the result and the reason to worry are two
+	 * different things: the worker's report stands, and something after it went
+	 * wrong. It is reported alongside the result rather than replacing it.
+	 */
+	private finish(
+		record: WorkerRecord,
+		state: WorkerState,
+		result: string,
+		options: { failure?: string } = {},
+	): Promise<void> {
 		if (record.killReason && state !== "killed") {
 			state = "killed";
 			result = record.killReason;
@@ -1490,6 +1526,7 @@ export class WorkerManager implements ChannelHandler {
 			record.endedAt = Date.now();
 			record.result = result;
 			record.lastResponse ??= result;
+			if (options.failure) record.laterFailure = options.failure;
 			this.checkpointChanged(record);
 			// A finished worker's prose already streamed into the log, so logging the
 			// full result here printed the whole final message a second time, raw, in
@@ -1498,8 +1535,11 @@ export class WorkerManager implements ChannelHandler {
 			this.appendLog(
 				record,
 				state === "done" ? "status" : "error",
-				state === "done" ? "done" : `${state}: ${result}`,
+				state === "done" ? "done" : `${state}: ${options.failure ?? result}`,
 			);
+			// A preserved report ends "done"; the thing that went wrong after it
+			// still has to be visible in the log, not only on the summary.
+			if (options.failure && state === "done") this.appendLog(record, "error", options.failure);
 
 			if (state === "done") {
 				this.options.onEvent({
@@ -1509,7 +1549,7 @@ export class WorkerManager implements ChannelHandler {
 					dirtyFiles: dirtyFiles.length > 0 ? dirtyFiles : undefined,
 				});
 			} else if (state === "failed") {
-				this.options.onEvent({ type: "failed", workerId: record.id, error: result });
+				this.options.onEvent({ type: "failed", workerId: record.id, error: options.failure ?? result });
 			}
 
 			const wasActiveWriter = this.activeWriter === record.id;
@@ -1659,6 +1699,7 @@ export class WorkerManager implements ChannelHandler {
 			endedAt: record.endedAt,
 			stateBeforeStop: record.stateBeforeStop,
 			result: record.result,
+			laterFailure: record.laterFailure,
 			queuedBehind: record.state === "queued" ? record.queuedBehind : undefined,
 			pendingQuestion: record.pendingAsk?.question ?? record.pendingQuestion,
 			lastProgress: record.lastProgress,

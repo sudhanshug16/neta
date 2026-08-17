@@ -53,7 +53,7 @@ const HELP = `${APP_NAME} ${VERSION} — a leader agent that delegates to worker
                                         leader's read cursor; to look in on a worker
                                         without stealing lines, use watch.
   ${APP_NAME} attach <id>               Take over this terminal with a worker's own
-                                        CLI (Claude Code, Codex) to read it there.
+                                        CLI (Claude Code, Codex, OpenCode) to read it there.
   ${APP_NAME} kill <id>                 Stop a worker.
   ${APP_NAME} sessions [--all]          List running leader sessions; --all also lists
                                         closed ones you can reopen, with their ids.

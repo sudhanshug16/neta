@@ -12,8 +12,8 @@
  */
 
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -79,22 +79,102 @@ async function runOpenCodeCapturePlugin(sessionId) {
 	return true;
 }
 
-/** Codex reports the id it assigned by running its SessionStart hooks. */
-function runSessionStartHooks(codexHome, sessionId) {
-	let hooks;
+/**
+ * Codex's hook trust, as Codex 0.147 implements it.
+ *
+ * A hook is filed under `<hooks file>:<event>:<group>:<hook>` and only runs when
+ * the effective config records a `trusted_hash` matching what Codex computes for
+ * the hook itself. The real hash function is Codex's; this fixture uses its own,
+ * because what a test can check is that Neta arranged trust for the exact key
+ * Codex reported, not that it guessed a hash it was told.
+ */
+function hookInventory(codexHome) {
+	let hooksPath;
+	let config;
 	try {
-		hooks = JSON.parse(readFileSync(join(codexHome, "hooks.json"), "utf-8")).hooks?.SessionStart ?? [];
+		hooksPath = join(realpathSync(codexHome), "hooks.json");
+		config = JSON.parse(readFileSync(hooksPath, "utf-8")).hooks ?? {};
 	} catch {
-		return false;
+		return [];
 	}
-	let ran = false;
-	for (const matcher of hooks) {
-		for (const hook of matcher.hooks ?? []) {
-			if (hook.type !== "command") continue;
-			const child = spawn("/bin/sh", ["-c", hook.command], { stdio: ["pipe", "inherit", "inherit"] });
-			child.stdin.end(JSON.stringify({ hook_event_name: "SessionStart", session_id: sessionId, source: "startup" }));
-			ran = true;
+	let trust = "";
+	try {
+		trust = readFileSync(join(codexHome, "config.toml"), "utf-8");
+	} catch {
+		// No config means nothing is trusted yet.
+	}
+	const entries = [];
+	for (const [event, groups] of Object.entries(config)) {
+		const eventName = event.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
+		for (const [groupIndex, group] of (groups ?? []).entries()) {
+			for (const [hookIndex, hook] of (group.hooks ?? []).entries()) {
+				if (hook.type !== "command") continue;
+				const key = `${hooksPath}:${eventName}:${groupIndex}:${hookIndex}`;
+				const currentHash = `sha256:${createHash("sha256").update(`${eventName}:${hook.command}`).digest("hex")}`;
+				const recorded = new RegExp(
+					`\\[hooks\\.state\\."${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"]\\s*\\n\\s*trusted_hash\\s*=\\s*"([^"]+)"`,
+				).exec(trust)?.[1];
+				entries.push({
+					key,
+					eventName: event.charAt(0).toLowerCase() + event.slice(1),
+					handlerType: "command",
+					command: hook.command,
+					sourcePath: hooksPath,
+					enabled: true,
+					isManaged: false,
+					currentHash,
+					trustStatus: recorded === undefined ? "untrusted" : recorded === currentHash ? "trusted" : "modified",
+				});
+			}
 		}
+	}
+	return entries;
+}
+
+/** `codex app-server`, enough of it for `hooks/list`. */
+async function runAppServer() {
+	const entries = hookInventory(process.env.CODEX_HOME ?? ".");
+	const reply = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
+	let buffered = "";
+	process.stdin.on("data", (chunk) => {
+		buffered += chunk.toString();
+		let index = buffered.indexOf("\n");
+		while (index >= 0) {
+			const line = buffered.slice(0, index);
+			buffered = buffered.slice(index + 1);
+			index = buffered.indexOf("\n");
+			let request;
+			try {
+				request = JSON.parse(line);
+			} catch {
+				continue;
+			}
+			if (request.method === "initialize") {
+				reply({ id: request.id, result: { userAgent: "fake/0.0.0", codexHome: process.env.CODEX_HOME ?? "" } });
+			} else if (request.method === "hooks/list") {
+				reply({
+					id: request.id,
+					result: { data: [{ cwd: process.cwd(), hooks: entries, warnings: [], errors: [] }] },
+				});
+			}
+		}
+	});
+	await new Promise(() => {});
+}
+
+/**
+ * Codex reports the id it assigned by running its SessionStart hooks — but only
+ * the ones it has been told to trust, exactly like the installed build.
+ */
+function runSessionStartHooks(codexHome, sessionId, argv) {
+	const bypass = argv.includes("--dangerously-bypass-hook-trust");
+	let ran = false;
+	for (const entry of hookInventory(codexHome)) {
+		if (entry.eventName !== "sessionStart") continue;
+		if (!bypass && entry.trustStatus !== "trusted" && entry.trustStatus !== "managed") continue;
+		const child = spawn("/bin/sh", ["-c", entry.command], { stdio: ["pipe", "inherit", "inherit"] });
+		child.stdin.end(JSON.stringify({ hook_event_name: "SessionStart", session_id: sessionId, source: "startup" }));
+		ran = true;
 	}
 	return ran;
 }
@@ -123,6 +203,12 @@ if (process.argv.includes("--help") && process.env.FAKE_LEADER_HELP !== "") {
 			"Fake CLI\n  --dangerously-bypass-hook-trust  Run enabled hooks\n  opencode plugin <module>  install plugin\n",
 	);
 	process.exit(0);
+}
+
+// Answering `hooks/list` is a capability probe, not a session: it must never
+// record a launch or start a control plane.
+if (process.argv[2] === "app-server") {
+	await runAppServer();
 }
 
 const target = process.env.FAKE_LEADER_RECORD;
@@ -186,7 +272,7 @@ if (process.env.FAKE_LEADER_HOST_MCP === "1") {
 	} else if (process.env.CODEX_HOME) {
 		const resumed = process.argv.indexOf("resume");
 		const sessionId = resumed === -1 ? randomUUID() : process.argv[resumed + 1];
-		runSessionStartHooks(process.env.CODEX_HOME, sessionId);
+		runSessionStartHooks(process.env.CODEX_HOME, sessionId, process.argv.slice(2));
 	}
 	const quitFile = process.env.FAKE_LEADER_QUIT_FILE;
 	const deadline = Date.now() + Number.parseInt(process.env.FAKE_LEADER_MAX_MS ?? "60000", 10);

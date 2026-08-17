@@ -29,6 +29,10 @@
  *           test can tell which one the client preferred
  *   --bare - session/new returns only the sessionId: no models, no modes,
  *           no configOptions, like a backend that reports nothing
+ *   --claude-fable-default - a Claude-shaped model list whose current value is
+ *           the Fable model Neta's policy forbids, so a test can prove which
+ *           model a Claude tier actually ran on
+ *   --missing-sonnet - drops "sonnet" from that list
  */
 
 import { spawn } from "node:child_process";
@@ -43,6 +47,9 @@ const bare = process.argv.includes("--bare");
 const missingExactOpus = process.argv.includes("--missing-exact-opus");
 const missingMax = process.argv.includes("--missing-max");
 const failSetConfig = process.argv.includes("--fail-set-config");
+// A Claude-shaped backend whose own default is the model Neta must never run.
+const claudeShaped = process.argv.includes("--claude-fable-default");
+const missingSonnet = process.argv.includes("--missing-sonnet");
 const promptMarkerIndex = process.argv.indexOf("--prompt-marker");
 const promptMarker = promptMarkerIndex === -1 ? undefined : process.argv[promptMarkerIndex + 1];
 
@@ -58,6 +65,33 @@ function configOptions(current, thoughtLevel = "medium") {
 	const opusOption = missingExactOpus
 		? { value: "opus[1m][high]", name: "Claude Opus 1M High" }
 		: { value: "opus[1m]", name: "Claude Opus 1M" };
+	if (claudeShaped) {
+		return [
+			{
+				id: "model",
+				name: "Model",
+				category: "model",
+				type: "select",
+				currentValue: current,
+				options: [
+					// The user-global default a Claude worker inherits when nothing is
+					// selected exactly. Neta's policy forbids running on it.
+					{ value: "claude-fable-5", name: "Claude Fable 5" },
+					{ value: "haiku", name: "Claude Haiku" },
+					...(missingSonnet ? [] : [{ value: "sonnet", name: "Claude Sonnet" }]),
+					opusOption,
+				],
+			},
+			{
+				id: "mode",
+				name: "Mode",
+				category: "mode",
+				type: "select",
+				currentValue: "ask",
+				options: [{ value: "ask", name: "Always Ask" }],
+			},
+		];
+	}
 	return [
 		{
 			id: "model",
@@ -317,9 +351,10 @@ acp.agent({ name: "fake-acp-agent" })
 				currentModeId: "test-mode",
 			},
 		};
-		if (useConfigOptions) {
-			selectedConfig.set(sessionId, { model: "fixture-default", thoughtLevel: "medium" });
-			response.configOptions = configOptions("fixture-default");
+		if (useConfigOptions || claudeShaped) {
+			const current = claudeShaped ? "claude-fable-5" : "fixture-default";
+			selectedConfig.set(sessionId, { model: current, thoughtLevel: "medium" });
+			response.configOptions = configOptions(current);
 		}
 		return response;
 	})
@@ -332,7 +367,7 @@ acp.agent({ name: "fake-acp-agent" })
 		return { configOptions: configOptions(selected.model, selected.thoughtLevel) };
 	})
 	.onRequest("session/set_model", { parse: (params) => params }, (ctx) => {
-		if (useConfigOptions) throw new Error("legacy set_model is not supported");
+		if (useConfigOptions || claudeShaped) throw new Error("legacy set_model is not supported");
 		selectedLegacyModel = ctx.params.modelId;
 		return {};
 	})
