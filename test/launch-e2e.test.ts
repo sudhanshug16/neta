@@ -294,6 +294,92 @@ describe("neta (launching a leader)", () => {
 		]);
 	});
 
+	it("prefers an attachable same-directory session regardless of registry file order", async () => {
+		const binDir = fakeBackend("claude");
+		const agentDir = scratch("neta-home-");
+		const cwd = scratch("neta-repo-");
+		const attachRecord = join(scratch("neta-attach-"), "tmux.txt");
+		const tmux = join(binDir, "tmux");
+		writeFileSync(tmux, '#!/bin/sh\nprintf "%s\\n" "$@" > "$TMUX_ATTACH_RECORD"\n', "utf-8");
+		chmodSync(tmux, 0o755);
+		writeSessionRecord(
+			{
+				id: "a-headless-newer",
+				socket: "/tmp/neta-headless-newer.sock",
+				token: "token",
+				cwd,
+				leader: "claude",
+				pid: process.pid,
+				startedAt: 1_700_000_000_001,
+			},
+			agentDir,
+		);
+		writeSessionRecord(
+			{
+				id: "z-tmux-older",
+				socket: "/tmp/neta-tmux-older.sock",
+				token: "token",
+				cwd,
+				leader: "claude",
+				pid: process.pid,
+				startedAt: 1_700_000_000_000,
+				mux: { id: "tmux", name: "neta-tmux-older" },
+			},
+			agentDir,
+		);
+
+		await run(process.execPath, [CLI, "--leader", "claude", "--mux", "none"], {
+			cwd,
+			env: {
+				...process.env,
+				PATH: `${binDir}${delimiter}${process.env.PATH}`,
+				NETA_DIR: agentDir,
+				TMUX_ATTACH_RECORD: attachRecord,
+			},
+		});
+
+		expect(readFileSync(attachRecord, "utf-8").trim().split("\n")).toEqual(["attach", "-t", "neta-tmux-older"]);
+	});
+
+	it("lists every same-directory headless session when none can be reattached", async () => {
+		const binDir = fakeBackend("claude");
+		const agentDir = scratch("neta-home-");
+		const cwd = scratch("neta-repo-");
+		writeSessionRecord(
+			{
+				id: "first-headless",
+				socket: "/tmp/neta-first-headless.sock",
+				token: "token",
+				cwd,
+				leader: "claude",
+				pid: process.pid,
+				startedAt: 1_700_000_000_000,
+			},
+			agentDir,
+		);
+		writeSessionRecord(
+			{
+				id: "second-headless",
+				socket: "/tmp/neta-second-headless.sock",
+				token: "token",
+				cwd,
+				leader: "claude",
+				pid: process.pid,
+				startedAt: 1_700_000_000_001,
+			},
+			agentDir,
+		);
+
+		await expect(
+			run(process.execPath, [CLI, "--leader", "claude", "--mux", "none"], {
+				cwd,
+				env: { ...process.env, PATH: `${binDir}${delimiter}${process.env.PATH}`, NETA_DIR: agentDir },
+			}),
+		).rejects.toThrow(
+			/second-headless.*pid .*started .*headless.*neta workers --session second-headless.*neta watch <worker>.*neta kill <worker>.*kill .*first-headless.*pid .*started .*headless.*neta workers --session first-headless.*neta watch <worker>.*neta kill <worker>.*kill /s,
+		);
+	});
+
 	it("allows another directory to launch its own session", async () => {
 		const otherDir = scratch("neta-other-repo-");
 		const binDir = fakeBackend("claude");

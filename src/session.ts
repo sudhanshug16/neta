@@ -315,16 +315,21 @@ function readLiveSessions(dir: string): SessionRecord[] {
 	return records.sort((a, b) => b.startedAt - a.startedAt);
 }
 
-/** A live session in this exact real directory, with symlinks resolved on both sides. */
-export function findLiveSessionInDirectory(cwd: string, agentDir: string = getAgentDir()): SessionRecord | undefined {
+/** Live sessions in this exact real directory, newest first, with symlinks resolved on both sides. */
+export function findLiveSessionsInDirectory(cwd: string, agentDir: string = getAgentDir()): SessionRecord[] {
 	const canonicalCwd = canonicalizeCwd(cwd);
-	return readLiveSessions(sessionsDir(agentDir)).find((record) => {
+	return readLiveSessions(sessionsDir(agentDir)).filter((record) => {
 		try {
 			return canonicalizeCwd(record.cwd) === canonicalCwd;
 		} catch {
 			return false;
 		}
 	});
+}
+
+/** The newest live session in this exact real directory. */
+export function findLiveSessionInDirectory(cwd: string, agentDir: string = getAgentDir()): SessionRecord | undefined {
+	return findLiveSessionsInDirectory(cwd, agentDir)[0];
 }
 
 /**

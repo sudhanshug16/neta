@@ -29,7 +29,7 @@ import { materializeFlavors } from "./prompts/flavors.ts";
 import { buildLeaderPrompt } from "./prompts/leader.ts";
 import {
 	canonicalizeCwd,
-	findLiveSessionInDirectory,
+	findLiveSessionsInDirectory,
 	isSessionAlive,
 	releaseSessionLock,
 	type SessionLock,
@@ -61,7 +61,7 @@ function delay(milliseconds: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-type DirectorySession = { lock: SessionLock } | { existing: SessionRecord };
+type DirectorySession = { lock: SessionLock } | { existing: SessionRecord[] };
 
 /**
  * The control plane writes the registry record, not the launcher. Keep this
@@ -73,8 +73,8 @@ async function claimDirectorySession(cwd: string, agentDir: string): Promise<Dir
 		const lock = tryAcquireSessionLock(cwd, agentDir);
 		if (lock) {
 			sweepStaleSessions(agentDir);
-			const existing = findLiveSessionInDirectory(cwd, agentDir);
-			if (existing) {
+			const existing = findLiveSessionsInDirectory(cwd, agentDir);
+			if (existing.length > 0) {
 				releaseSessionLock(lock);
 				return { existing };
 			}
@@ -83,23 +83,28 @@ async function claimDirectorySession(cwd: string, agentDir: string): Promise<Dir
 
 		// A competing launcher owns the gap before its control plane records the
 		// session. Re-check its result instead of starting another leader.
-		const existing = findLiveSessionInDirectory(cwd, agentDir);
-		if (existing) return { existing };
+		const existing = findLiveSessionsInDirectory(cwd, agentDir);
+		if (existing.length > 0) return { existing };
 		await delay(LOCK_RETRY_MS);
 	}
 }
 
-function headlessSessionMessage(session: SessionRecord): string {
+function headlessSessionsMessage(sessions: SessionRecord[]): string {
 	return (
-		`Neta session ${session.id} (pid ${session.pid}, started ${new Date(session.startedAt).toISOString()}) ` +
-		"is already live in this directory and runs headless. " +
-		`Reach it with \`neta workers --session ${session.id}\` or \`neta watch <worker>\`; ` +
-		`stop work with \`neta kill <worker> --session ${session.id}\` or stop the leader with \`kill ${session.pid}\`.`
+		"Neta found live sessions in this directory, but none has a recorded multiplexer session; each one runs headless:\n" +
+		sessions
+			.map(
+				(session) =>
+					`- ${session.id} (pid ${session.pid}, started ${new Date(session.startedAt).toISOString()}, headless): ` +
+					`reach it with \`neta workers --session ${session.id}\` or \`neta watch <worker>\`; ` +
+					`stop work with \`neta kill <worker> --session ${session.id}\` or stop the leader with \`kill ${session.pid}\`.`,
+			)
+			.join("\n")
 	);
 }
 
 async function reconnectToSession(session: SessionRecord): Promise<number> {
-	if (!session.mux) throw new LaunchError(headlessSessionMessage(session));
+	if (!session.mux) throw new LaunchError(headlessSessionsMessage([session]));
 	const spec = attachSessionSpec(session.mux.id, session.mux.name);
 	return new Promise<number>((resolve) => {
 		const child = spawn(spec.command, spec.args, { stdio: "inherit" });
@@ -165,8 +170,13 @@ export async function launchLeader(options: LaunchOptions): Promise<number> {
 	// Keep the liveness decision at the reattach point, even though the sweep
 	// and registry lookup already reject dead managers. A stale record must
 	// never turn into a terminal attached to an orphaned mux session.
-	if ("existing" in claimed && isSessionAlive(claimed.existing)) return reconnectToSession(claimed.existing);
-	if ("existing" in claimed) return launchLeader(options);
+	if ("existing" in claimed) {
+		const liveSessions = claimed.existing.filter(isSessionAlive);
+		if (liveSessions.length === 0) return launchLeader(options);
+		const attachable = liveSessions.find((session) => session.mux);
+		if (attachable) return reconnectToSession(attachable);
+		throw new LaunchError(headlessSessionsMessage(liveSessions));
+	}
 	const lock = claimed.lock;
 	try {
 		const config = loadConfig(cwd, agentDir);
