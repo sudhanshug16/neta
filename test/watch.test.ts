@@ -204,6 +204,31 @@ describe("watch", () => {
 		);
 	});
 
+	// Alignment does not exist in the plain view, so the "«" marker carries the
+	// direction instead: everything sent TO the worker — the opening brief, the
+	// leader's messages, answers — is prefixed and printed whole.
+	it("marks everything sent to the worker and opens with the full brief", async () => {
+		const worker = await manager.spawn({
+			role: "worker",
+			tier: "expert",
+			task: "Fix the auth flow.\n\nStart from login.ts, keep the tests green.",
+		});
+		manager.send(worker.id, "keep going");
+		manager.send(worker.id, "Two more things:\n\nstop short of the tests.");
+
+		const code = await watchWorker({ workerId: worker.id, once: true, hold: false, write });
+
+		expect(code).toBe(0);
+		const text = lines.join("\n");
+		// The header's truncated "task:" line stays; the whole brief follows it.
+		expect(lines[1]).toBe("task: Fix the auth flow. Start from login.ts, keep the tests green.");
+		expect(text).toContain("« task:\nFix the auth flow.\n\nStart from login.ts, keep the tests green.");
+		expect(text).toContain("« leader: keep going");
+		// A multi-line message reads like a "say": attribution, then the whole body.
+		expect(text).toContain("« leader:\nTwo more things:\n\nstop short of the tests.");
+		expect(text).not.toContain("· Leader:");
+	});
+
 	describe("room view", () => {
 		it("merges two posters into one transcript, in posting order, with authors", async () => {
 			const pro = await manager.spawn({

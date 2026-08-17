@@ -8,7 +8,7 @@
 import { describe, expect, it } from "bun:test";
 import { stripTerminalSequences } from "@earendil-works/pi-tui";
 import type { WorkerLogEntry, WorkerSummary } from "../src/types.ts";
-import { colorDiff, StatusLine, TranscriptView } from "../src/watch-tui.ts";
+import { colorDiff, SentBlock, StatusLine, TranscriptView } from "../src/watch-tui.ts";
 
 const WIDTH = 80;
 
@@ -75,7 +75,7 @@ describe("TranscriptView", () => {
 		const view = new TranscriptView();
 		view.append(entry("progress", "halfway"));
 		view.append(entry("say", "posting to the room"));
-		view.append(entry("status", "Leader: keep going"));
+		view.append(entry("status", "writer slot freed"));
 		view.append(entry("thought", "weighing options"));
 		view.append(entry("error", "backend hiccup"));
 
@@ -83,7 +83,7 @@ describe("TranscriptView", () => {
 		expect(text).toContain("» halfway");
 		expect(text).toContain("→");
 		expect(text).toContain("posting to the room");
-		expect(text).toContain("· Leader: keep going");
+		expect(text).toContain("· writer slot freed");
 		expect(text).toContain("weighing options");
 		expect(text).toContain("! backend hiccup");
 	});
@@ -120,6 +120,88 @@ describe("TranscriptView", () => {
 		const text = rendered(view);
 		expect(text).not.toContain("more lines");
 		expect(text).toContain("point 199");
+	});
+});
+
+// Everything sent TO the worker is the operator's voice: it reads from the
+// RIGHT edge of the pane, attribution in brass, body in plain paper —
+// unmistakably not the worker's own prose, and never cut. Typed pane input
+// and the leader's neta_send ride the same path into the log, so one entry
+// shape covers both.
+describe("sent messages", () => {
+	const BRASS = "\x1b[38;2;217;164;65m";
+	const content = (view: TranscriptView, width = WIDTH) =>
+		view
+			.render(width)
+			.map((line) => stripTerminalSequences(line))
+			.filter((line) => line.trim() !== "");
+
+	it("echoes a message typed at the pane right-aligned, attributed in brass", () => {
+		const view = new TranscriptView();
+		view.append(entry("status", "Leader: keep going"));
+
+		expect(view.render(WIDTH).join("\n")).toContain(BRASS);
+		const [attribution, body] = content(view);
+		expect(attribution.endsWith("« leader")).toBe(true);
+		expect(attribution).toHaveLength(WIDTH);
+		expect(body.endsWith("keep going")).toBe(true);
+		expect(body).toHaveLength(WIDTH);
+	});
+
+	it("renders the leader's answer in the same sent style", () => {
+		const view = new TranscriptView();
+		view.append(entry("status", "Leader answered: use Postgres"));
+
+		const [attribution, body] = content(view);
+		expect(attribution.endsWith("« leader answered")).toBe(true);
+		expect(body.endsWith("use Postgres")).toBe(true);
+		expect(body).toHaveLength(WIDTH);
+	});
+
+	// A wall of status text collapses; a message the operator sent never does.
+	it("wraps a long sent message narrower than the pane but keeps it whole", () => {
+		const words = Array.from({ length: 40 }, (_, i) => `word${i}`);
+		const view = new TranscriptView();
+		view.append(entry("status", `Leader: ${words.join(" ")}`));
+
+		const lines = content(view);
+		expect(lines.length).toBeGreaterThan(2);
+		const measure = Math.floor((WIDTH * 2) / 3);
+		for (const line of lines.slice(1)) {
+			expect(line).toHaveLength(WIDTH); // flush against the right edge
+			expect(line.trim().length).toBeLessThanOrEqual(measure);
+		}
+		const text = rendered(view);
+		expect(text).not.toContain("more lines");
+		for (const word of words) expect(text).toContain(word);
+	});
+
+	// What the runner does on the first page: the full brief opens the
+	// transcript as a sent block, ahead of everything the worker says.
+	it("opens the transcript with the whole task brief", () => {
+		const brief = "Fix the auth flow.\n\nStart from login.ts, keep the tests green.";
+		const view = new TranscriptView();
+		view.addChild(new SentBlock("task", brief));
+		view.append(entry("text", "Reading login.ts now."));
+
+		const text = rendered(view);
+		expect(text).toContain("« task");
+		expect(text).toContain("Fix the auth flow.");
+		expect(text).toContain("Start from login.ts, keep the tests green.");
+		expect(text.indexOf("Fix the auth flow.")).toBeLessThan(text.indexOf("Reading login.ts now."));
+	});
+
+	// The TUI re-renders every component with the terminal's current width; a
+	// sent block must re-wrap and stay flush at whatever width arrives.
+	it("re-aligns to the width of each render", () => {
+		const block = new SentBlock("leader", "a message that should hug the right edge at any width");
+		for (const width of [100, 46]) {
+			const lines = block
+				.render(width)
+				.map((line) => stripTerminalSequences(line))
+				.filter((line) => line.trim() !== "");
+			for (const line of lines) expect(line).toHaveLength(width);
+		}
 	});
 });
 

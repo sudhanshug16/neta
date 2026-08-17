@@ -10,6 +10,13 @@
  * comes from the control plane's non-consuming `tail`, so watching and typing
  * never disturb what the leader sees.
  *
+ * The conversation has two sides. Everything sent TO the worker — the opening
+ * task brief, the leader's messages, what you type here — is the operator's
+ * voice, and reads chat-style from the other edge: a block flush against the
+ * RIGHT of the pane, attribution in brass, body in plain paper, wrapped
+ * narrower than the pane so the alignment is visible, and never clamped or
+ * markdown-rendered — what was sent is shown whole, as sent.
+ *
  * `neta watch <room>` gets the same treatment minus the input line: one merged
  * transcript of the room's posts, fed by the non-consuming `room-tail`.
  */
@@ -27,6 +34,7 @@ import {
 	TuiMainScreen,
 	truncateToWidth,
 	visibleWidth,
+	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { sendChannelRequest } from "./channel/client.ts";
 import { APP_NAME } from "./config.ts";
@@ -39,7 +47,7 @@ import {
 	type WorkerState,
 	type WorkerSummary,
 } from "./types.ts";
-import { metadataCandidates, resolveTarget, sayAuthor, sayEntry } from "./watch.ts";
+import { metadataCandidates, resolveTarget, sayAuthor, sayEntry, sentMessage } from "./watch.ts";
 
 const POLL_MS = 400;
 
@@ -56,6 +64,8 @@ export const style = {
 	yellow: ansi(33, 39),
 	magenta: ansi(35, 39),
 	cyan: ansi(36, 39),
+	/** Brass #d9a441 — the caret you type at, the operator's voice: everything sent to the worker. */
+	brass: (text: string) => `\x1b[38;2;217;164;65m${text}\x1b[39m`,
 };
 
 /** Style applied line by line, so wrapping never carries a color past its text. */
@@ -123,6 +133,42 @@ function clamp(text: string): string {
 }
 
 /**
+ * A message sent TO the worker, rendered chat-style: the block hugs the RIGHT
+ * edge of the pane, the attribution line is brass, the body plain paper. Long
+ * lines wrap at ~2/3 of the pane so the alignment stays visible, but nothing
+ * is ever clamped, and the body stays plain text rather than markdown — a
+ * markdown renderer fights the alignment, and full visibility beats
+ * formatting. Rendering is a pure function of the width the TUI passes in, so
+ * a terminal resize re-wraps and re-aligns the block on the next render.
+ */
+export class SentBlock implements Component {
+	private readonly label: string;
+	private readonly body: string;
+	private cachedWidth: number | undefined;
+	private cachedLines: string[] | undefined;
+
+	constructor(label: string, body: string) {
+		this.label = label;
+		this.body = body;
+	}
+
+	invalidate(): void {
+		this.cachedWidth = undefined;
+		this.cachedLines = undefined;
+	}
+
+	render(width: number): string[] {
+		if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
+		const measure = Math.max(1, Math.min(width, Math.max(20, Math.floor((width * 2) / 3))));
+		const flush = (line: string) => `${" ".repeat(Math.max(0, width - visibleWidth(line)))}${line}`;
+		const body = wrapTextWithAnsi(this.body.replace(/\t/g, "   "), measure);
+		this.cachedWidth = width;
+		this.cachedLines = ["", flush(style.brass(`« ${this.label}`)), ...body.map(flush), ""];
+		return this.cachedLines;
+	}
+}
+
+/**
  * The transcript: log entries mapped onto renderable blocks.
  *
  * Consecutive "text" entries are one assistant message arriving a paragraph at
@@ -133,6 +179,15 @@ export class TranscriptView extends Container {
 	private tail: { component: Markdown; text: string } | undefined;
 
 	append(raw: WorkerLogEntry): void {
+		// The operator's voice: what was sent to the worker arrives in the log as
+		// a prefixed status entry, and renders as a right-aligned block — checked
+		// before the clamp, because a sent message is content, never a dump.
+		const sent = sentMessage(raw);
+		if (sent) {
+			this.tail = undefined;
+			this.addChild(new SentBlock(sent.label, sent.text));
+			return;
+		}
 		const entry =
 			raw.kind === "text" || raw.kind === "diff" || raw.kind === "say" ? raw : { ...raw, text: clamp(raw.text) };
 		if (entry.kind !== "text") this.tail = undefined;
@@ -258,6 +313,7 @@ export async function watchWorkerTui(options: WatchTuiOptions): Promise<number> 
 	for (const child of [header, transcript, footerSlot, inputSlot, statusLine]) tui.addChild(child);
 
 	let page: WorkerLogPage | undefined;
+	let briefed = false;
 	let finished = false;
 	let closed = false;
 	let exitCode = 0;
@@ -309,7 +365,8 @@ export async function watchWorkerTui(options: WatchTuiOptions): Promise<number> 
 
 	const deliver = async (text: string) => {
 		// An answer unblocks a waiting worker; anything else queues as its next
-		// turn. Both land in the log, so the transcript needs no local echo.
+		// turn. Both land in the log as prefixed status entries, so the transcript
+		// needs no local echo: the tail brings them back as sent blocks.
 		const type = page?.worker?.pendingQuestion ? ("answer" as const) : ("send" as const);
 		try {
 			const response = await sendChannelRequest(target.address, {
@@ -372,6 +429,13 @@ export async function watchWorkerTui(options: WatchTuiOptions): Promise<number> 
 			if (next.worker) {
 				header.setText(headerText(next.worker));
 				statusLine.update(next.worker, next.state);
+				// The header's one-line "task:" summary truncates; the full brief —
+				// the first thing ever sent to the worker — opens the transcript,
+				// ahead of the entries this same page carries.
+				if (!briefed) {
+					briefed = true;
+					transcript.addChild(new SentBlock("task", next.worker.task));
+				}
 			}
 			for (const entry of next.entries) transcript.append(entry);
 			since = next.cursor;

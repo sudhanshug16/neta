@@ -48,12 +48,51 @@ export function sayEntry(post: RoomPost): WorkerLogEntry {
 }
 
 /**
+ * Everything sent TO the worker lands in its log as a status entry with one of
+ * these fixed prefixes (manager send/answer — the pane's input line rides the
+ * same path). These are the operator's voice, not one more status line, so the
+ * views pick them out and render them in their own style, never cut.
+ */
+const SENT_PREFIXES: ReadonlyArray<readonly [prefix: string, label: string]> = [
+	["Leader: ", "leader"],
+	["Leader answered: ", "leader answered"],
+	["Leader queued message (will be delivered at start): ", "leader queued"],
+];
+
+export interface SentMessage {
+	label: string;
+	text: string;
+}
+
+/** The message behind a sent-to-worker status entry, or undefined on any other entry. */
+export function sentMessage(entry: WorkerLogEntry): SentMessage | undefined {
+	if (entry.kind !== "status") return undefined;
+	for (const [prefix, label] of SENT_PREFIXES) {
+		if (entry.text.startsWith(prefix)) return { label, text: entry.text.slice(prefix.length) };
+	}
+	return undefined;
+}
+
+/**
+ * A sent message in the plain view: alignment does not exist here, so the "«"
+ * marker carries the direction — into the worker, mirroring the "»" its own
+ * progress lines point out with. One line stays a line; a longer message reads
+ * like a "say": attribution, then the whole body.
+ */
+function formatSent(label: string, text: string): string {
+	return text.includes("\n") ? `\n« ${label}:\n${text}\n` : `« ${label}: ${text}`;
+}
+
+/**
  * A pane is read at a glance, so the shape of a line carries the meaning: what
  * the worker did is indented and quiet, what it said to the leader stands out,
- * and trouble is impossible to miss. Tags like "[output]" on every line are
- * noise that makes a busy worker unreadable.
+ * what was sent to it carries the "«" marker, and trouble is impossible to
+ * miss. Tags like "[output]" on every line are noise that makes a busy worker
+ * unreadable.
  */
 function formatLine(entry: WorkerLogEntry): string {
+	const sent = sentMessage(entry);
+	if (sent) return formatSent(sent.label, sent.text);
 	switch (entry.kind) {
 		case "progress":
 			return `» ${entry.text}`;
@@ -233,6 +272,9 @@ export async function watchWorker(options: WatchOptions): Promise<number> {
 		}
 		if (!introduced && page.worker) {
 			for (const line of header(page.worker)) write(line);
+			// The header's "task:" line truncates; the brief was the first thing
+			// sent to the worker and opens the transcript whole.
+			write(formatSent("task", page.worker.task));
 			introduced = true;
 		}
 		for (const entry of page.entries) write(formatLine(entry));
