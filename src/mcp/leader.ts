@@ -606,7 +606,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 				const modelValue = optionalString(args, "model");
 
 				const override = modelValue ? { backend: backendValue, model: modelValue } : { backend: backendValue };
-				await persistTierOverride(manager.cwd, tierValue, override);
+				await persistTierOverride(manager.cwd, tierValue, override, manager.agentDir);
 
 				const modelText = modelValue ? ` (model: ${modelValue})` : "";
 				return text(`Persisted: ${tierValue} -> ${backendValue}${modelText}\nWritten to .neta/settings.json`);

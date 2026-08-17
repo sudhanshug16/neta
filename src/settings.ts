@@ -581,7 +581,12 @@ export function loadConfig(cwd: string, agentDir: string = getAgentDir()): NetaC
  * Note: This writes JSON with pretty-printing (2-space indent). JSON comments
  * are not preserved, as the settings files are JSON, not JSONC.
  */
-export async function persistTierOverride(cwd: string, tier: Tier, override: NetaTierSettings): Promise<void> {
+export async function persistTierOverride(
+	cwd: string,
+	tier: Tier,
+	override: NetaTierSettings,
+	agentDir: string = getAgentDir(),
+): Promise<void> {
 	const settingsDir = join(cwd, CONFIG_DIR_NAME);
 	const settingsPath = join(settingsDir, "settings.json");
 
@@ -596,9 +601,17 @@ export async function persistTierOverride(cwd: string, tier: Tier, override: Net
 			[tier]: override,
 		},
 	};
-	// Validate the prospective effective backend before touching disk. This is
-	// what makes custom Claude aliases obey the same persistence boundary.
-	new NetaConfig(updated);
+	// Runtime resolution merges user settings with this project file. Validate
+	// that same prospective result before touching disk, so a user-only Claude
+	// alias cannot make neta_remember report success for a model startup rejects.
+	const effective = loadNetaSettings(cwd, agentDir);
+	new NetaConfig({
+		...effective,
+		tiers: {
+			...effective.tiers,
+			[tier]: { ...effective.tiers?.[tier], ...override },
+		},
+	});
 
 	if (!existsSync(settingsDir)) mkdirSync(settingsDir, { recursive: true });
 

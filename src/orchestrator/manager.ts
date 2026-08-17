@@ -363,6 +363,11 @@ export class WorkerManager implements ChannelHandler {
 		return this.options.cwd;
 	}
 
+	/** Current user-level Neta settings directory. */
+	get agentDir(): string {
+		return this.options.agentDir;
+	}
+
 	get logicalSessionId(): string | undefined {
 		return this.options.checkpoint?.id;
 	}

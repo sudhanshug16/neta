@@ -489,6 +489,35 @@ describe("loadNetaSettings", () => {
 		expect(readFileSync(settingsPath, "utf-8")).toBe(before);
 	});
 
+	it("rejects Fable through a user-only custom Claude alias before creating project settings", async () => {
+		const agentDir = scratch();
+		const cwd = scratch();
+		writeFileSync(
+			join(agentDir, "settings.json"),
+			JSON.stringify({
+				backends: {
+					"review-primary": {
+						command: "npx",
+						args: ["-y", "@agentclientprotocol/claude-agent-acp@0.68.0"],
+					},
+				},
+			}),
+		);
+
+		for (const model of ["fable", "claude-fable-5-latest", "anthropic/claude-fable-5-20260817-v1"]) {
+			await expect(
+				persistTierOverride(cwd, "architect", { backend: "review-primary", model }, agentDir),
+			).rejects.toThrow(/Claude Fable model.*tiers\.architect\.model/);
+			expect(existsSync(join(cwd, CONFIG_DIR_NAME, "settings.json"))).toBe(false);
+		}
+
+		await persistTierOverride(cwd, "architect", { backend: "review-primary", model: "opus[1m]" }, agentDir);
+		await persistTierOverride(cwd, "architect", { backend: "review-primary", model: "sonnet" }, agentDir);
+		expect(JSON.parse(readFileSync(join(cwd, CONFIG_DIR_NAME, "settings.json"), "utf-8"))).toMatchObject({
+			tiers: { architect: { backend: "review-primary", model: "sonnet" } },
+		});
+	});
+
 	it("drops a quarantined Fable value when persisting another setting and preserves unrelated keys", async () => {
 		const cwd = scratch();
 		const settingsDir = join(cwd, CONFIG_DIR_NAME);

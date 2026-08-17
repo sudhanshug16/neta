@@ -4,7 +4,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -56,13 +56,17 @@ describe("leader MCP tools", () => {
 	let transports: FakeTransport[];
 	let client: Client;
 	let attached: Array<{ workerId: string; command: string; args: string[] }>;
+	let cwd: string;
+	let agentDir: string;
 
 	beforeEach(async () => {
 		transports = [];
 		attached = [];
+		cwd = mkdtempSync(join(tmpdir(), "neta-mcp-cwd-"));
+		agentDir = mkdtempSync(join(tmpdir(), "neta-mcp-home-"));
 		manager = new WorkerManager({
-			cwd: process.cwd(),
-			agentDir: "/nonexistent-agent-dir",
+			cwd,
+			agentDir,
 			config: fixtureBackendConfig(),
 			channelAddress: "/tmp/neta-mcp-test.sock",
 			onEvent: () => {},
@@ -90,6 +94,8 @@ describe("leader MCP tools", () => {
 	afterEach(async () => {
 		await client.close();
 		await manager.dispose();
+		rmSync(cwd, { recursive: true, force: true });
+		rmSync(agentDir, { recursive: true, force: true });
 	});
 
 	const call = async (name: string, args: Record<string, unknown> = {}) =>
@@ -224,6 +230,31 @@ describe("leader MCP tools", () => {
 		expect(result.isError).toBe(true);
 		expect(bodyOf(result)).toContain("Claude Fable model");
 		expect(bodyOf(result)).toContain("opus[1m][max]");
+	});
+
+	it("rejects a Fable model through a user-only Claude alias without reporting persistence", async () => {
+		writeFileSync(
+			join(agentDir, "settings.json"),
+			JSON.stringify({
+				backends: {
+					"review-primary": {
+						command: "npx",
+						args: ["-y", "@agentclientprotocol/claude-agent-acp@0.68.0"],
+					},
+				},
+			}),
+		);
+
+		const result = await call("neta_remember", {
+			tier: "architect",
+			backend: "review-primary",
+			model: "claude-fable-5[1m]",
+		});
+
+		expect(result.isError).toBe(true);
+		expect(bodyOf(result)).toContain("Claude Fable model");
+		expect(bodyOf(result)).not.toContain("Persisted:");
+		expect(existsSync(join(cwd, ".neta", "settings.json"))).toBe(false);
 	});
 
 	// This is the wake-up: an idle leader ends its turn in neta_wait and comes
