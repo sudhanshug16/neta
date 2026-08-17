@@ -52,6 +52,49 @@ describe("neta mcp", () => {
 		expect(client.getInstructions()).toContain("never do the work yourself");
 	});
 
+	// The startup checklist runs in the launcher, which is a different process
+	// from this one. This is the hop that carries its answer, and the only thing
+	// that makes the choice enforcement rather than a note in a prompt.
+	it("staffs only the tiers the launcher chose", async () => {
+		const home = mkdtempSync(join(tmpdir(), "neta-tiers-"));
+		const tierTransport = new StdioClientTransport({
+			command: process.execPath,
+			args: [CLI, "mcp"],
+			env: {
+				...process.env,
+				NETA_DIR: home,
+				NETA_SESSION_ID: "tiers",
+				NETA_TIERS: "journeyman,expert",
+			} as Record<string, string>,
+			stderr: "ignore",
+		});
+		const tierClient = new Client({ name: "vendor-cli", version: "0.0.0" });
+		await tierClient.connect(tierTransport);
+		try {
+			const spawn = (await tierClient.listTools()).tools.find((tool) => tool.name === "neta_spawn");
+			const tiers = (spawn?.inputSchema.properties as { tier: { enum: string[] } }).tier.enum;
+			expect(tiers).toEqual(["journeyman", "expert"]);
+
+			// And the refusal is real, not just a narrowed schema: this call names a
+			// tier the schema does not offer, the way a leader ignoring it would.
+			const refused = await tierClient.callTool({
+				name: "neta_spawn",
+				arguments: { role: "scout", tier: "architect", task: "think hard" },
+			});
+			expect(refused.isError).toBe(true);
+			expect(JSON.stringify(refused.content)).toContain("not available in this session");
+		} finally {
+			await tierClient.close().catch(() => {});
+			rmSync(home, { recursive: true, force: true });
+		}
+	});
+
+	it("staffs every tier when the launcher chose none", async () => {
+		const spawn = (await client.listTools()).tools.find((tool) => tool.name === "neta_spawn");
+		const tiers = (spawn?.inputSchema.properties as { tier: { enum: string[] } }).tier.enum;
+		expect(tiers).toEqual(["apprentice", "journeyman", "expert", "architect"]);
+	});
+
 	it("registers a session other terminals can find", async () => {
 		const sessions = listSessions(agentDir);
 

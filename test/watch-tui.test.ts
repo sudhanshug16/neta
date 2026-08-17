@@ -24,8 +24,8 @@ function rendered(view: TranscriptView): string {
 }
 
 describe("TranscriptView", () => {
-	it("states that Enter answers a question or queues the next turn", () => {
-		expect(WORKER_INPUT_HINT).toBe("enter answers a question or queues the next turn · ctrl+c closes this view");
+	it("states that Enter steers through the shared immediate path", () => {
+		expect(WORKER_INPUT_HINT).toBe("enter steers this worker now · ctrl+c closes this view");
 	});
 	// Paragraphs of one assistant message arrive as separate log entries; the
 	// pane has to read as one message, not as scattered fragments.

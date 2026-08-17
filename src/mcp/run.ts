@@ -44,7 +44,8 @@ import {
 	writeSessionRecord,
 } from "../session.ts";
 import { loadConfig, type MuxMode } from "../settings.ts";
-import type { WorkerEvent } from "../types.ts";
+import { parseSessionTiers } from "../startup/preflight.ts";
+import { TIERS, type Tier, type WorkerEvent } from "../types.ts";
 import { leaderTools } from "./leader.ts";
 import { createMcpServer } from "./serve.ts";
 import { workerTools } from "./worker.ts";
@@ -106,6 +107,8 @@ export interface ControlPlaneOptions {
 	leaderConversationId?: string;
 	/** Stable per-session directory a vendor hook reports its conversation id in. */
 	leaderSessionDir?: string;
+	/** Worker tiers this session may staff. Omitted means every tier. */
+	sessionTiers?: Tier[];
 }
 
 /** How often the control plane looks for a conversation id its vendor's hook has written. */
@@ -129,6 +132,19 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 	const checkpointId = options.checkpointId ?? process.env.NETA_CHECKPOINT_ID ?? sessionId;
 	const resuming = options.resume ?? process.env.NETA_RESUME === "1";
 	const leaderConversationId = options.leaderConversationId ?? process.env.NETA_LEADER_CONVERSATION_ID;
+	// Hydration happens only after the checkpoint is confirmed unowned and the
+	// previous run's processes were proven stopped by `neta resume`. Refusing here
+	// is the safe answer: starting empty over an existing checkpoint would write
+	// away a session's whole history.
+	const hydrating = resuming ? readCheckpointForHydration(checkpointId, agentDir) : undefined;
+	// A resumed session runs on the tiers it was launched with. The checkpoint is
+	// the authority, not this process's environment and never today's startup
+	// preferences: the session's recorded workers were staffed under that answer.
+	// A checkpoint predating session tiers reads as every tier, which is what
+	// those sessions really ran with.
+	const sessionTiers: Tier[] = hydrating
+		? (hydrating.sessionTiers ?? [...TIERS])
+		: (options.sessionTiers ?? parseSessionTiers(process.env.NETA_TIERS));
 	const lockPath = process.env.NETA_SESSION_LOCK_PATH;
 	const lockToken = process.env.NETA_SESSION_LOCK_TOKEN;
 	const muxName = process.env.NETA_MUX_SESSION_NAME;
@@ -172,6 +188,7 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 		cwd,
 		agentDir,
 		config,
+		sessionTiers,
 		channelAddress: address,
 		leaderToken: token,
 		onEvent: (event) => note(describeEvent(event)),
@@ -210,13 +227,9 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 		},
 	};
 
-	// Hydration happens only after the checkpoint is confirmed unowned and the
-	// previous run's processes were proven stopped by `neta resume`. Refusing here
-	// is the safe answer: starting empty over an existing checkpoint would write
-	// away a session's whole history.
 	let manager: WorkerManager;
-	if (resuming) {
-		const checkpoint = readCheckpointForHydration(checkpointId, agentDir);
+	if (hydrating) {
+		const checkpoint = hydrating;
 		if (!checkpoint.shutdown?.processesStopped) {
 			throw new Error(
 				`Checkpoint ${checkpointId} has no proof that the previous run's worker processes stopped. ` +
@@ -229,7 +242,8 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 		manager.releaseRecoveredWriterSlot(true);
 		note(
 			`resumed session ${checkpointId} (${checkpoint.workers.length} recorded workers, ` +
-				`leader conversation ${checkpoint.leader.vendorConversationId ?? "unknown"}); no worker was restarted`,
+				`leader conversation ${checkpoint.leader.vendorConversationId ?? "unknown"}, ` +
+				`tiers ${sessionTiers.join(", ")}); no worker was restarted`,
 		);
 	} else {
 		manager = new WorkerManager(managerOptions);
@@ -297,7 +311,10 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 	);
 	mcp.onclose = exit;
 	await mcp.connect(new StdioServerTransport());
-	note(`control plane ready on ${address} (session ${sessionId}) · worker views: ${panes ? mux.id : "headless"}`);
+	note(
+		`control plane ready on ${address} (session ${sessionId}) · worker views: ${panes ? mux.id : "headless"}` +
+			`${sessionTiers.length === TIERS.length ? "" : ` · tiers ${sessionTiers.join(", ")}`}`,
+	);
 }
 
 /**

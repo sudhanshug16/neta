@@ -167,12 +167,23 @@ export class AcpWorkerTransport implements WorkerTransportDriver {
 			if (response.stopReason === "end_turn" || response.stopReason === "max_tokens") {
 				return { ok: true, summary };
 			}
+			// A cancelled turn is reported as its own thing rather than as a failure.
+			// The orchestrator cancels deliberately, to steer a worker onto a new
+			// instruction, and treating that as a crash would fail a healthy worker
+			// and release its writer slot.
+			if (response.stopReason === "cancelled") {
+				return { ok: false, cancelled: true, summary: `Turn cancelled. ${summary}` };
+			}
 			return { ok: false, summary: `Stopped early (${response.stopReason}). ${summary}` };
 		} catch (error) {
 			this.flushStreaming();
 			if (connection.killed) return { ok: false, summary: "Worker was killed." };
 			return { ok: false, summary: error instanceof Error ? error.message : String(error) };
 		}
+	}
+
+	cancel(): boolean | Promise<boolean> {
+		return this.connection?.cancel() ?? false;
 	}
 
 	async kill(): Promise<void> {

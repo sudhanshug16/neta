@@ -236,9 +236,9 @@ checkpoint claim stop two resumes from building two managers over one session.
 ## The two doors
 
 Two doors reach one manager, but they do not carry the same operations. The
-MCP door has all thirteen leader tools. The socket door carries the eight
+MCP door has all fifteen leader tools. The socket door carries the nine
 leader commands a person or token-holding process needs from a terminal —
-`spawn`, `workers`, `status`, `log`, `wait`, `send`, `answer`, `kill` — plus
+`spawn`, `workers`, `status`, `log`, `inspect`, `wait`, `send`, `answer`, `kill` — plus
 the worker commands and the view commands (`watch`, `attach`, `sessions`).
 The five tools without socket twins (`neta_plan`, `neta_spawn_group`,
 `neta_room`, `neta_note`, `neta_remember`) are staffing and bookkeeping
@@ -246,8 +246,8 @@ surfaces of the leader's own judgment loop, which lives in the MCP door.
 
 | Door | Who uses it | How |
 | --- | --- | --- |
-| MCP tools | the leader | all 13 `neta_*` tools in the vendor's tool loop |
-| Unix socket | workers, and you | 8 leader commands, 5 worker commands, the view commands |
+| MCP tools | the leader | all 15 `neta_*` tools in the vendor's tool loop |
+| Unix socket | workers, and you | 9 leader commands, 5 worker commands, the view commands |
 
 The socket door is authorized per role, by token. Each worker's requests carry
 its own per-worker token, and a worker can only report progress, ask, post to
@@ -361,12 +361,23 @@ again opens another tab.
 With Zellij or tmux available, each worker gets a pane running `neta watch
 <id>`: the worker's prose rendered as markdown, tool calls as one-liners,
 file changes as colored diffs, and an input line at the bottom. Typing there
-talks to the worker — a message queues as its next turn, and when the worker
-is blocked on a question, the same input answers it. The pane is a window onto
-the worker, not the worker itself — the agent process stays under Neta's
-control. Panes read the log without consuming it, so nothing a pane shows is
-stolen from the leader, and `neta watch <id> --plain` prints the same stream
-as bare lines for piping.
+uses the same manager path as `neta send` and `neta_send`: Neta cancels the
+exact active ACP turn, waits until that session-wide cancel is dispatched,
+then sends the text as the immediate next prompt in the same worker session.
+A delayed cancel is held ahead of its replacement prompt, so it cannot stop
+the later turn. Text entered while no turn is active becomes the next turn;
+text entered while the worker is blocked on `neta ask` stays queued until
+`neta answer` unblocks it. The pane is a window onto the worker, not the worker
+itself — the agent process stays under Neta's control. Panes read the log
+without consuming it, so nothing a pane shows is stolen from the leader, and
+`neta watch <id> --plain` prints the same stream as bare lines for piping.
+
+`neta inspect <id>` and `neta_inspect` provide the repo-owned expansion for a
+worker row. They show a hard-capped recent window of input and output without
+moving the leader's log cursor, and print an explicit truncation marker when
+older entries or characters were omitted. This remains available for headless
+workers. Any clickable Terminal row in a vendor transcript or terminal host is
+host-owned; Neta does not install or modify that external click handler.
 
 An existing worker watch tab advertises its result in the tab bar: `✓` is done,
 `✗` is failed, and `⊘` is killed. Status marking only renames the exact watch

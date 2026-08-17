@@ -12,7 +12,12 @@
  */
 
 import type { WorkerManager } from "../orchestrator/manager.ts";
-import { formatLastProgress, formatWorkerSummary } from "../orchestrator/status.ts";
+import {
+	formatInspection,
+	formatLastProgress,
+	formatSteerResult,
+	formatWorkerSummary,
+} from "../orchestrator/status.ts";
 import { roleNames } from "../prompts/roles.ts";
 import { persistTierOverride } from "../settings.ts";
 import {
@@ -20,6 +25,7 @@ import {
 	isTier,
 	type Note,
 	TIERS,
+	type Tier,
 	type WaitResult,
 	type WorkerLogEntry,
 	type WorkerSummary,
@@ -155,9 +161,23 @@ function formatOpenNotes(manager: WorkerManager): string {
 	return `\n\nOpen notes: ${lines.join(" | ")}`;
 }
 
-function tier(args: Record<string, unknown>, name = "tier") {
+/**
+ * Read a tier argument.
+ *
+ * `available` is what this session may staff, so an unavailable tier is named
+ * for what it is rather than reported as unknown. The refusal itself belongs to
+ * the WorkerManager, which every door goes through; this only makes the message
+ * useful at the door the leader actually used.
+ */
+function tier(args: Record<string, unknown>, available: readonly Tier[], name = "tier"): Tier {
 	const value = requireString(args, name);
 	if (!isTier(value)) throw new Error(`Unknown tier "${value}". Tiers: ${TIERS.join(", ")}.`);
+	if (!available.includes(value)) {
+		throw new Error(
+			`Tier "${value}" is not available in this session. Available: ${available.join(", ")}. ` +
+				`Restaff this work on an available tier, or ask the user to start a session with it.`,
+		);
+	}
 	return value;
 }
 
@@ -172,12 +192,21 @@ function spawnWaitReminder(summaries: WorkerSummary[]): string {
 
 export function leaderTools(manager: WorkerManager): McpTool[] {
 	const roles = roleNames().join(", ");
+	// The session's ladder, fixed at startup. It narrows the tool schemas so the
+	// leader is never offered a tier the control plane will refuse — the refusal
+	// still lives in the manager, because a schema is advice and the socket door
+	// never sees one.
+	const available = manager.sessionTiers;
+	const tierEnum = [...available];
+	const tierNote = manager.allTiersAvailable
+		? ""
+		: ` Only ${available.join(", ")} were selected for this session; the others are refused.`;
 
 	const memberSchema = {
 		type: "object",
 		properties: {
 			role: { type: "string", description: `Role prompt to run. Built-in: ${roles}.` },
-			tier: { type: "string", enum: [...TIERS], description: "apprentice, journeyman, expert or architect." },
+			tier: { type: "string", enum: tierEnum, description: `One of: ${available.join(", ")}.` },
 			task: { type: "string", description: "Self-contained instructions for this member." },
 			name: { type: "string", description: "Two or three words naming this member's job, for its tab." },
 			writer: { type: "boolean", description: "Grant this member the writer slot." },
@@ -197,14 +226,14 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 			name: "neta_spawn",
 			description:
 				"Spawn a worker agent to do a piece of work. Give it everything it needs in the task: it cannot see this " +
-				`conversation. Roles: ${roles}. Tiers: apprentice (mechanical), journeyman (exact spec), expert (scoped work), architect (ambiguity). ` +
+				`conversation. Roles: ${roles}. Tiers: apprentice (mechanical), journeyman (exact spec), expert (scoped work), architect (ambiguity).${tierNote} ` +
 				"Returns immediately; use neta_wait to collect the result. If a writer is already active, the new writer " +
 				"is queued and starts automatically when the slot frees.",
 			inputSchema: {
 				type: "object",
 				properties: {
 					role: { type: "string", description: `Role prompt to run. Built-in: ${roles}.` },
-					tier: { type: "string", enum: [...TIERS], description: "How much judgement the task needs." },
+					tier: { type: "string", enum: tierEnum, description: "How much judgement the task needs." },
 					task: {
 						type: "string",
 						description: "Self-contained instructions: files, acceptance criteria, what done means.",
@@ -233,7 +262,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 			async run(args) {
 				const summary = await manager.spawn({
 					role: requireString(args, "role"),
-					tier: tier(args),
+					tier: tier(args, available),
 					task: requireString(args, "task"),
 					name: optionalString(args, "name"),
 					writer: optionalBoolean(args, "writer"),
@@ -266,7 +295,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 							type: "object",
 							properties: {
 								role: { type: "string", description: `Role prompt to run. Built-in: ${roles}.` },
-								tier: { type: "string", enum: [...TIERS], description: "How much judgement the task needs." },
+								tier: { type: "string", enum: tierEnum, description: "How much judgement the task needs." },
 								writer: { type: "boolean", description: "Whether this worker needs the writer slot." },
 								backend: { type: "string", description: "Override the backend for this worker." },
 								room: { type: "string", description: "Room name for workers that will share a room." },
@@ -286,7 +315,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 
 				const requests = workers.map((w: Record<string, unknown>) => ({
 					role: requireString(w, "role"),
-					tier: tier(w),
+					tier: tier(w, available),
 					writer: optionalBoolean(w, "writer"),
 					backend: optionalString(w, "backend"),
 					room: optionalString(w, "room"),
@@ -320,17 +349,23 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 				const room = requireString(args, "room");
 				const members = args.members;
 				if (!Array.isArray(members) || members.length === 0) throw new Error('"members" must be a non-empty list.');
+				// Every member's tier is checked before the room is seeded and before
+				// the first member starts. Validating inside the loop would leave a
+				// half-built room and a posted seed behind when member three names an
+				// unavailable tier — a side effect of a call that failed.
+				const tiers = (members as Record<string, unknown>[]).map((raw) => tier(raw, available));
+				manager.assertTiersAvailable(tiers);
 				const seed = optionalString(args, "seed");
 				if (seed) manager.postToRoom(room, "leader", "leader", seed);
 
 				const spawned: WorkerSummary[] = [];
 				const failures: string[] = [];
-				for (const raw of members as Record<string, unknown>[]) {
+				for (const [index, raw] of (members as Record<string, unknown>[]).entries()) {
 					try {
 						spawned.push(
 							await manager.spawn({
 								role: requireString(raw, "role"),
-								tier: tier(raw),
+								tier: tiers[index],
 								task: requireString(raw, "task"),
 								name: optionalString(raw, "name"),
 								writer: optionalBoolean(raw, "writer"),
@@ -420,6 +455,22 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 			},
 		},
 		{
+			name: "neta_inspect",
+			description:
+				"Expand one worker in place: what was sent to it and what it has said back, most recent last. Bounded " +
+				"hard and marked where it was cut, so it is safe to call on a chatty worker. Unlike neta_log it does not " +
+				"move your read cursor, so you can look without consuming lines. This is also the way to see a worker " +
+				"that has no multiplexer tab — a headless session, or one whose tab could not be created.",
+			inputSchema: {
+				type: "object",
+				properties: { workerId: { type: "string", description: "Worker id, such as rw1 or ro2." } },
+				required: ["workerId"],
+			},
+			async run(args) {
+				return text(formatInspection(manager.inspect(requireString(args, "workerId"))).join("\n"));
+			},
+		},
+		{
 			name: "neta_wait",
 			description:
 				"Block until the named workers need you, then return what woke you. This is how you collect work: end " +
@@ -484,9 +535,13 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 		{
 			name: "neta_send",
 			description:
-				"Send a follow-up instruction to a worker: a running worker receives it as its next prompt turn when " +
-				"the current turn ends; a queued worker gets it appended to its pending brief, delivered when it " +
-				"starts. A finished worker errors; spawn a new worker instead.",
+				"Steer a worker: interrupt the turn it is running and make your message its next prompt, in the same " +
+				"session. Use it to redirect work that is going the wrong way, rather than waiting for the turn to end " +
+				"or killing the worker. A worker that has not started yet gets the message appended to its brief; a " +
+				"worker blocked on a question keeps waiting until you answer it with neta_answer. A finished worker " +
+				"errors; spawn a new worker instead. The result says exactly what happened — interrupted, delivered " +
+				"after the turn ended on its own, or queued and not yet read — and work the worker had already " +
+				"completed is never undone.",
 			inputSchema: {
 				type: "object",
 				properties: {
@@ -496,8 +551,8 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 				required: ["workerId", "message"],
 			},
 			async run(args) {
-				const summary = manager.send(requireString(args, "workerId"), requireString(args, "message"));
-				return text(`Sent to ${describe(summary)}`);
+				const result = await manager.steer(requireString(args, "workerId"), requireString(args, "message"));
+				return text(`${formatSteerResult(result)}\n${describe(result.worker)}`);
 			},
 		},
 		{
@@ -597,14 +652,20 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 			inputSchema: {
 				type: "object",
 				properties: {
-					tier: { type: "string", enum: [...TIERS], description: "The tier to configure." },
+					tier: {
+						type: "string",
+						enum: [...TIERS],
+						// Settings outlive this session, so any tier may be configured —
+						// including one this session was not started with.
+						description: "The tier to configure, for this and future sessions.",
+					},
 					backend: { type: "string", description: "The backend name to assign to this tier." },
 					model: { type: "string", description: "Optional model override for this tier and backend." },
 				},
 				required: ["tier", "backend"],
 			},
 			async run(args) {
-				const tierValue = tier(args);
+				const tierValue = tier(args, TIERS);
 				const backendValue = requireString(args, "backend");
 				const modelValue = optionalString(args, "model");
 

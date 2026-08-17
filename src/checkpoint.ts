@@ -109,6 +109,13 @@ export interface SessionCheckpoint {
 	updatedAt: number;
 	liveLease?: CheckpointLiveLease;
 	shutdown?: CheckpointShutdown;
+	/**
+	 * Worker tiers this session was launched with. Absent in every checkpoint
+	 * written before startup tier selection existed, and read as the full ladder —
+	 * which is what those sessions ran with. It is recorded rather than re-asked
+	 * so a resume restores the session it saved instead of today's preference.
+	 */
+	sessionTiers?: Tier[];
 	counter: number;
 	noteCounter: number;
 	workers: CheckpointWorker[];
@@ -350,6 +357,7 @@ export function validateCheckpoint(value: unknown): SessionCheckpoint {
 			"updatedAt",
 			"liveLease",
 			"shutdown",
+			"sessionTiers",
 			"counter",
 			"noteCounter",
 			"workers",
@@ -389,6 +397,16 @@ export function validateCheckpoint(value: unknown): SessionCheckpoint {
 		string(shutdown.by, "checkpoint.shutdown.by");
 		if (!(SHUTDOWN_SOURCES as readonly string[]).includes(shutdown.by))
 			throw new CheckpointError("Corrupt checkpoint: checkpoint.shutdown.by is unknown.");
+	});
+	optional(root.sessionTiers, (item) => {
+		strings(item, "checkpoint.sessionTiers");
+		for (const [index, tier] of item.entries()) {
+			if (!(TIERS as readonly string[]).includes(tier))
+				throw new CheckpointError(`Corrupt checkpoint: checkpoint.sessionTiers[${index}] is not a known tier.`);
+		}
+		// A session that may staff nothing cannot exist; a file claiming one is
+		// corrupt, not a session with an unusual setting.
+		if (item.length === 0) throw new CheckpointError("Corrupt checkpoint: checkpoint.sessionTiers is empty.");
 	});
 	if (!Array.isArray(root.workers))
 		throw new CheckpointError("Corrupt checkpoint: checkpoint.workers must be an array.");
@@ -444,7 +462,16 @@ export function validateCheckpoint(value: unknown): SessionCheckpoint {
 	}
 	// A schema-1 file has every field this build reads; the only difference is
 	// that it predates the shutdown proof, so it reads as "not proven stopped".
-	return { ...root, schemaVersion: CHECKPOINT_SCHEMA_VERSION } as unknown as SessionCheckpoint;
+	// A file from before startup tier selection has no sessionTiers at all, and
+	// stays that way: absent is the honest record of "this session had the full
+	// ladder", and every reader spells that out itself.
+	const sessionTiers = root.sessionTiers as string[] | undefined;
+	return {
+		...root,
+		schemaVersion: CHECKPOINT_SCHEMA_VERSION,
+		// Stored order is not trusted; readers get the canonical ladder order.
+		...(sessionTiers ? { sessionTiers: TIERS.filter((tier) => sessionTiers.includes(tier)) } : {}),
+	} as unknown as SessionCheckpoint;
 }
 
 export function readCheckpoint(id: string, agentDir: string): SessionCheckpoint {
@@ -641,9 +668,12 @@ export function emptySessionCheckpoint(options: {
 	leaderBackend: string;
 	leaderVendorConversationId?: string;
 	createdAt?: number;
+	/** Tiers the startup preflight settled on. Omitted means the full ladder. */
+	sessionTiers?: readonly Tier[];
 }): SessionCheckpoint {
 	return {
 		...newCheckpointBase(options),
+		...(options.sessionTiers ? { sessionTiers: TIERS.filter((tier) => options.sessionTiers?.includes(tier)) } : {}),
 		counter: 0,
 		noteCounter: 0,
 		workers: [],

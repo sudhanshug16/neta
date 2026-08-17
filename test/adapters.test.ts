@@ -252,6 +252,25 @@ describe("Codex adapter", () => {
 		expect(target).toBe("neta-s1");
 	});
 
+	// Session tiers are enforcement, not presentation, so they have to survive the
+	// one hop where a vendor clears the environment: the control plane is a child
+	// of the vendor CLI, not of the launcher.
+	it("carries the session's worker tiers to the control plane", () => {
+		const declared = controlPlaneEnv(context({ sessionTiers: ["journeyman", "architect"] }));
+		expect(declared.NETA_TIERS).toBe("journeyman,architect");
+	});
+
+	it("declares the tiers in canonical order whatever order they arrive in", () => {
+		const declared = controlPlaneEnv(context({ sessionTiers: ["architect", "apprentice"] }));
+		expect(declared.NETA_TIERS).toBe("apprentice,architect");
+	});
+
+	// An older launcher declares nothing here. Absent must mean "every tier", or
+	// upgrading Neta mid-session would take away the ability to delegate.
+	it("declares nothing when the launcher chose no tiers", () => {
+		expect(controlPlaneEnv(context({})).NETA_TIERS).toBeUndefined();
+	});
+
 	it("allowlists the complete Zellij caller identity and nothing ambient", () => {
 		const declared = controlPlaneEnv(
 			context({

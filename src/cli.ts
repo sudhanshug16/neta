@@ -45,13 +45,17 @@ const HELP = `${APP_NAME} ${VERSION} — a leader agent that delegates to worker
   ${APP_NAME} workers                   List this session's workers and what they cost.
   ${APP_NAME} status                    Show the writer slot, worker states and open notes.
   ${APP_NAME} wait <id> [<id>...]       Block until the listed workers finish.
-  ${APP_NAME} send <id> <message>       Send a follow-up instruction to a running worker.
+  ${APP_NAME} send <id> <message>       Interrupt a running worker's turn and make this
+                                        message its next prompt, in the same session.
   ${APP_NAME} answer <id> <text>        Answer a worker's pending question.
   ${APP_NAME} watch <id|room>           Watch a worker and type to it, or follow a
                                         room's merged transcript (--plain for bare log lines).
   ${APP_NAME} log <id>                  Drain a worker's new log lines. This moves the
                                         leader's read cursor; to look in on a worker
                                         without stealing lines, use watch.
+  ${APP_NAME} inspect <id>              Print a worker's recent input and output, bounded
+                                        and marked where it was cut. Reads without
+                                        consuming, and works for a worker with no tab.
   ${APP_NAME} attach <id>               Take over this terminal with a worker's own
                                         CLI (Claude Code, Codex, OpenCode) to read it there.
   ${APP_NAME} kill <id>                 Stop a worker.

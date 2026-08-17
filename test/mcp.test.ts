@@ -37,6 +37,13 @@ class FakeTransport implements WorkerTransportDriver {
 
 	async kill(): Promise<void> {}
 
+	cancels = 0;
+
+	cancel(): boolean {
+		this.cancels += 1;
+		return true;
+	}
+
 	markTerminal(): void {}
 
 	finish(outcome: PromptOutcome): void {
@@ -108,6 +115,7 @@ describe("leader MCP tools", () => {
 		expect(names).toEqual([
 			"neta_answer",
 			"neta_attach",
+			"neta_inspect",
 			"neta_kill",
 			"neta_log",
 			"neta_note",

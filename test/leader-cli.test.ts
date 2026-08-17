@@ -24,10 +24,11 @@ import { createLeaderCliShim, prependToPath } from "../src/cli-shim.ts";
 import { WorkerManager } from "../src/orchestrator/manager.ts";
 import type { PromptOutcome, TransportOptions, WorkerTransportDriver } from "../src/orchestrator/transport.ts";
 import { writeSessionRecord } from "../src/session.ts";
-import { fixtureBackendConfig } from "./helpers.ts";
+import { fixtureBackendConfig, waitFor } from "./helpers.ts";
 
 class FakeTransport implements WorkerTransportDriver {
 	readonly options: TransportOptions;
+	readonly prompts: string[] = [];
 	private pending: Array<(outcome: PromptOutcome) => void> = [];
 
 	constructor(options: TransportOptions) {
@@ -38,11 +39,22 @@ class FakeTransport implements WorkerTransportDriver {
 		return Promise.resolve();
 	}
 
-	prompt(): Promise<PromptOutcome> {
+	prompt(text: string): Promise<PromptOutcome> {
+		this.prompts.push(text);
 		return new Promise((resolve) => this.pending.push(resolve));
 	}
 
 	async kill(): Promise<void> {}
+
+	cancels = 0;
+
+	/** A real ACP agent answers a cancel by resolving the in-flight prompt. */
+	cancel(): boolean {
+		this.cancels += 1;
+		const resolve = this.pending.shift();
+		if (resolve) queueMicrotask(() => resolve({ ok: false, cancelled: true, summary: "Turn cancelled." }));
+		return true;
+	}
 
 	markTerminal(): void {}
 
@@ -139,6 +151,41 @@ describe("leader CLI over the real shim", () => {
 		expect(listed.stdout).toContain(
 			"ro1 [scout/expert, read-only, model unknown — backend default] running — map the auth flow",
 		);
+	});
+
+	// The socket is the second door onto the same operations. `send` steers here
+	// exactly as the leader's tool does, and says which of the two things it did.
+	it("steers a running worker from the shell", async () => {
+		await neta(["spawn", "--role", "scout", "--tier", "expert", "map the auth flow"], asLeader());
+		await waitFor(() => expect(transports[0].prompts.length).toBe(1));
+
+		const sent = await neta(["send", "ro1", "look at the session store instead"], asLeader());
+		expect(sent.code).toBe(0);
+		expect(sent.stdout).toContain("Interrupted ro1's running turn");
+		expect(transports[0].cancels).toBe(1);
+		expect(transports[0].prompts[1]).toBe("look at the session store instead");
+	});
+
+	// Bounded, non-consuming, and available for a worker with no pane — this is
+	// the expand path a status row points at.
+	it("expands a worker's recent input and output from the shell", async () => {
+		await neta(["spawn", "--role", "scout", "--tier", "expert", "map the auth flow"], asLeader());
+		await waitFor(() => expect(transports[0].prompts.length).toBe(1));
+
+		manager.progress("ro1", "reading session.ts");
+
+		const inspected = await neta(["inspect", "ro1"], asLeader());
+		expect(inspected.code).toBe(0);
+		expect(inspected.stdout).toContain("task: map the auth flow");
+		expect(inspected.stdout).toContain("reading session.ts");
+
+		// Looking did not steal the leader's unread lines.
+		expect(manager.drainLog("ro1").map((entry) => entry.text)).toContain("reading session.ts");
+	});
+
+	it("says how to call inspect when the worker id is missing", async () => {
+		const result = await neta(["inspect"], asLeader());
+		expect(result.stderr).toContain("Usage: neta inspect <worker-id>");
 	});
 
 	it("carries --name and --note through the socket spawn", async () => {

@@ -66,6 +66,12 @@ export type LeaderChannelRequest =
 	| { type: "tail"; token: string; workerId: string; since?: number }
 	/** Read a room's merged transcript without consuming it; `tail` for a room. */
 	| { type: "room-tail"; token: string; room: string; since?: number }
+	/**
+	 * A bounded window onto one worker's recent input and output, capped by the
+	 * manager rather than by the caller. This is how a worker row expands in
+	 * place, including for a worker with no multiplexer tab.
+	 */
+	| { type: "inspect"; token: string; workerId: string }
 	/** Block until the listed workers are terminal or the timeout fires. */
 	| { type: "wait"; token: string; workerIds: string[]; timeoutMs?: number }
 	| { type: "send"; token: string; workerId: string; text: string }
@@ -83,6 +89,7 @@ export const LEADER_REQUEST_TYPES = new Set([
 	"log",
 	"tail",
 	"room-tail",
+	"inspect",
 	"wait",
 	"send",
 	"answer",

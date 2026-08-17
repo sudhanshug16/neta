@@ -45,6 +45,13 @@ class FakeTransport implements WorkerTransportDriver {
 	kill(): Promise<void> {
 		return Promise.resolve();
 	}
+	cancels = 0;
+
+	cancel(): boolean {
+		this.cancels += 1;
+		return true;
+	}
+
 	markTerminal(): void {}
 	finish(outcome: PromptOutcome): void {
 		const resolve = this.outcomes.shift();

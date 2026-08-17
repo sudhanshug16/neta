@@ -70,11 +70,28 @@ export interface PromptOutcome {
 	ok: boolean;
 	/** What the worker said, or why it failed. */
 	summary: string;
+	/**
+	 * The turn ended because it was cancelled, not because the worker failed.
+	 *
+	 * ACP has no way to inject a message into a running prompt turn: `session/prompt`
+	 * owns the turn until it resolves. Cancelling and re-prompting the same session
+	 * is the protocol's supported equivalent, and this flag is what tells the
+	 * orchestrator that an early stop was Neta's own doing.
+	 */
+	cancelled?: boolean;
 }
 
 export interface WorkerTransportDriver {
 	start(): Promise<void>;
 	prompt(text: string): Promise<PromptOutcome>;
+	/**
+	 * Ask the backend to end the current prompt turn now, keeping the session.
+	 *
+	 * Returns false when there is nothing to cancel. Best-effort by nature: the
+	 * turn may already be resolving, and tool calls the worker has already run are
+	 * not undone by it.
+	 */
+	cancel(): boolean | Promise<boolean>;
 	kill(): Promise<void>;
 	/** The worker reached a terminal state; its session must stop being honored. */
 	markTerminal(): void;

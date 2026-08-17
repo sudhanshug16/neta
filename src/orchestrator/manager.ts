@@ -41,11 +41,13 @@ import {
 	type RoomLogPage,
 	type RoomPost,
 	type SpawnRequest,
+	type SteerResult,
 	TIERS,
 	type Tier,
 	type WaitOptions,
 	type WaitResult,
 	type WorkerEvent,
+	type WorkerInspection,
 	type WorkerLogEntry,
 	type WorkerLogPage,
 	type WorkerState,
@@ -54,13 +56,15 @@ import {
 	type WorkerUsage,
 } from "../types.ts";
 import {
+	formatInspection,
 	formatLastProgress,
 	formatStatusSnapshot,
+	formatSteerResult,
 	formatWriterActivityNotice,
 	formatWriterContext,
 	formatWriterStatus,
 } from "./status.ts";
-import type { TransportOptions, WorkerMcpServer, WorkerTransportDriver } from "./transport.ts";
+import type { PromptOutcome, TransportOptions, WorkerMcpServer, WorkerTransportDriver } from "./transport.ts";
 
 const MAX_LOG_ENTRIES = 500;
 type ActiveWorkerState = "starting" | "running" | "waiting" | "queued";
@@ -104,6 +108,18 @@ interface WorkerRecord {
 	queue: Promise<void>;
 	/** Prompts queued or running. The worker is only done when the last one ends. */
 	queuedPrompts: number;
+	/** A `session/prompt` is in flight right now, so there is a turn to cancel. */
+	promptInFlight?: boolean;
+	/** Turns started so far, so a steer can name the one it aimed at. */
+	turnCounter: number;
+	/** The turn currently in flight, while `promptInFlight`. */
+	currentTurn?: number;
+	/** Turns a steer asked the backend to cancel, by turn number. */
+	steeredTurns: Set<number>;
+	/** Steered turns that did come back cancelled. Retained for concurrent senders. */
+	interruptedTurns: Set<number>;
+	/** One cancel dispatch per turn; concurrent steering shares it. */
+	cancelDispatches: Map<number, Promise<boolean>>;
 	/** Terminal result is captured and its ACP process is being stopped. */
 	finishing?: Promise<void>;
 	/** A leader-initiated stop must beat a rejected in-flight prompt. */
@@ -156,6 +172,12 @@ export interface WorkerManagerOptions {
 	cwd: string;
 	agentDir: string;
 	config: NetaConfig;
+	/**
+	 * Worker tiers this session may staff, chosen once at startup. Omitted means
+	 * every tier — an older launcher, a hand-registered `neta mcp`, or a test that
+	 * does not care must never silently lose the ability to delegate.
+	 */
+	sessionTiers?: Tier[];
 	channelAddress: string;
 	/** Authorizes socket-side worker management. Generated when the caller has no token to share. */
 	leaderToken?: string;
@@ -208,6 +230,23 @@ async function gitDirtyFiles(cwd: string): Promise<string[]> {
 	});
 }
 
+/**
+ * How long a steer waits for the backend to take the new prompt.
+ *
+ * An agent honors `session/cancel` by finishing whatever update it is mid-way
+ * through and then resolving the prompt, which is fast but not instant. Past
+ * this the call reports the truth — queued, not yet seen — rather than blocking
+ * the leader's tool call any longer.
+ */
+const STEER_TIMEOUT_MS = 15_000;
+
+/**
+ * The hard cap on an inspection. Not a default a caller can raise: the point of
+ * a bounded window is that its size is knowable before it is asked for.
+ */
+export const INSPECT_MAX_ENTRIES = 40;
+export const INSPECT_MAX_CHARS = 6000;
+
 function gitHead(cwd: string): string | undefined {
 	try {
 		return execFileSync("git", ["rev-parse", "HEAD"], {
@@ -251,9 +290,15 @@ export class WorkerManager implements ChannelHandler {
 	private shutdownProof: CheckpointShutdown | undefined;
 	private readonly checkpointCreatedAt: number;
 	private checkpointCwd: string;
+	/** Tiers this session may staff, in canonical order. Fixed for the session's life. */
+	private readonly tiers: Tier[];
 
 	constructor(options: WorkerManagerOptions) {
 		this.options = options;
+		this.tiers = options.sessionTiers ? TIERS.filter((tier) => options.sessionTiers?.includes(tier)) : [...TIERS];
+		if (this.tiers.length === 0) {
+			throw new Error("A Neta session must be able to staff at least one worker tier.");
+		}
 		this.leaderToken = options.leaderToken ?? randomBytes(16).toString("hex");
 		this.createTransport =
 			options.createTransport ?? ((transportOptions) => new AcpWorkerTransport(transportOptions));
@@ -269,6 +314,10 @@ export class WorkerManager implements ChannelHandler {
 		const manager = new WorkerManager({
 			...options,
 			cwd: checkpoint.canonicalCwd,
+			// The session's own answer wins over whatever this process was told.
+			// A checkpoint from before session tiers existed records none, which
+			// means the session ran on the full ladder.
+			sessionTiers: checkpoint.sessionTiers ?? [...TIERS],
 			checkpoint: options.checkpoint
 				? {
 						...options.checkpoint,
@@ -328,6 +377,10 @@ export class WorkerManager implements ChannelHandler {
 				lastProgress: worker.lastProgress ? { ...worker.lastProgress } : undefined,
 				queue: Promise.resolve(),
 				queuedPrompts: 0,
+				turnCounter: 0,
+				steeredTurns: new Set<number>(),
+				interruptedTurns: new Set<number>(),
+				cancelDispatches: new Map<number, Promise<boolean>>(),
 				waiters: [],
 				usage: worker.usage ? { ...worker.usage } : undefined,
 				vendorSessionId: worker.vendorSessionId,
@@ -401,6 +454,7 @@ export class WorkerManager implements ChannelHandler {
 				createdAt: this.checkpointCreatedAt,
 			}),
 			updatedAt: Date.now(),
+			sessionTiers: [...this.tiers],
 			counter: this.counter,
 			noteCounter: this.noteCounter,
 			workers: [...this.workers.values()].map((record) => ({
@@ -478,7 +532,54 @@ export class WorkerManager implements ChannelHandler {
 	// Leader-facing API
 	// =========================================================================
 
+	/** Worker tiers this session may staff, in canonical order. */
+	get sessionTiers(): Tier[] {
+		return [...this.tiers];
+	}
+
+	/** True when this session was started with the full ladder. */
+	get allTiersAvailable(): boolean {
+		return this.tiers.length === TIERS.length;
+	}
+
+	/**
+	 * The one gate on tier availability.
+	 *
+	 * Every door into spawning — the leader's MCP tool, the group tool, the Unix
+	 * socket, the `neta` CLI — ends up in `spawn`, and `spawn` calls this before
+	 * it touches anything. Restricting the tool schema and the prompt is how the
+	 * leader learns which tiers exist; this is what makes it true. A schema is a
+	 * hint a caller can ignore, and the socket door never sees the schema at all.
+	 */
+	assertTierAvailable(tier: Tier): void {
+		if (this.tiers.includes(tier)) return;
+		const missing = TIERS.filter((candidate) => !this.tiers.includes(candidate));
+		throw new Error(
+			`Tier "${tier}" is not available in this session. Available: ${this.tiers.join(", ")}` +
+				`${missing.length > 0 ? ` (not selected at startup: ${missing.join(", ")})` : ""}. ` +
+				`Restaff this work on an available tier, or start a new session and select it.`,
+		);
+	}
+
+	/**
+	 * Check a whole batch before any of it happens.
+	 *
+	 * A group spawn that validated per member would seed the room and start the
+	 * first two workers before refusing the third, leaving the leader to clean up
+	 * a half-built room. Reporting every unavailable tier at once also beats
+	 * making the leader discover them one spawn at a time.
+	 */
+	assertTiersAvailable(tiers: readonly Tier[]): void {
+		const unavailable = [...new Set(tiers)].filter((tier) => !this.tiers.includes(tier));
+		if (unavailable.length === 0) return;
+		this.assertTierAvailable(unavailable[0]);
+	}
+
 	async spawn(request: SpawnRequest): Promise<WorkerSummary> {
+		// First, before the writer-slot reservation, the batch archive sweep, the
+		// worker counter, or the scratch directory: a refused spawn must leave the
+		// session exactly as it found it.
+		this.assertTierAvailable(request.tier);
 		const writer = request.writer ?? false;
 		if (writer && this.recoveryWriterSlotHeld) {
 			throw new Error("Recovered writer slot is held until prior worker process death is proven.");
@@ -562,6 +663,10 @@ export class WorkerManager implements ChannelHandler {
 			logCursor: 0,
 			queue: Promise.resolve(),
 			queuedPrompts: 0,
+			turnCounter: 0,
+			steeredTurns: new Set<number>(),
+			interruptedTurns: new Set<number>(),
+			cancelDispatches: new Map<number, Promise<boolean>>(),
 			waiters: [],
 			driver: undefined as unknown as WorkerTransportDriver,
 			noteId: request.note,
@@ -644,14 +749,177 @@ export class WorkerManager implements ChannelHandler {
 		return this.summarize(record);
 	}
 
-	send(workerId: string, message: string): WorkerSummary {
+	/**
+	 * Steer a running worker: end its current turn now and make this message its
+	 * next prompt, in the same session.
+	 *
+	 * ACP gives no way to inject text into a running prompt turn — `session/prompt`
+	 * owns the turn until it resolves, and there is no "append to the turn"
+	 * request in 1.3.0. Cancel-then-prompt is the protocol's supported equivalent
+	 * and the strongest steering primitive available: the session, its history,
+	 * its model selection and its writer slot all survive, and only the turn ends.
+	 *
+	 * What it cannot do is undo work. Tool calls the worker already completed —
+	 * files written, commands run — stay done, which is why the result says the
+	 * turn was interrupted rather than that nothing happened.
+	 *
+	 * The returned delivery is what actually happened, established by watching the
+	 * queue rather than assumed: the message is only reported as delivered once it
+	 * has been handed to the backend.
+	 */
+	async steer(workerId: string, message: string, options: { timeoutMs?: number } = {}): Promise<SteerResult> {
 		const record = this.require(workerId);
+		this.assertSendable(record, workerId);
+
+		// Not started yet: a follow-up must not become prompt one and displace the
+		// task to prompt two. It rides with the brief instead, and no turn exists
+		// to interrupt.
+		if (record.state === "queued" || record.state === "starting") {
+			this.send(workerId, message);
+			return { worker: this.summarize(record), delivery: "pending-brief" };
+		}
+
+		// Blocked on `neta ask`: the turn is technically in flight, but the worker
+		// is waiting on Neta, not thinking. Cancelling would throw away the turn
+		// that asked the question and leave the asker's own call dangling, so this
+		// queues instead and says which tool actually unblocks it.
+		if (record.pendingAsk) {
+			this.send(workerId, message);
+			return {
+				worker: this.summarize(record),
+				delivery: "next-turn",
+				note: `${workerId} is blocked on a question; it will not read this until you answer with neta_answer.`,
+			};
+		}
+
+		// The exact turn this steer is aimed at, captured before anything is
+		// queued. `session/cancel` names a session, not a turn, so the accounting
+		// has to: if the turn we meant to stop ends on its own and the next one
+		// begins before our notification reaches the agent, the cancel lands on a
+		// turn nobody aimed at, and must not be booked as this steer's success.
+		const targetTurn = record.promptInFlight === true ? record.currentTurn : undefined;
+		let resolveDelivered: () => void = () => {};
+		const delivered = new Promise<void>((resolve) => {
+			resolveDelivered = resolve;
+		});
+		let cancelDispatch: Promise<boolean> | undefined;
+		// Queued before the cancel, deliberately. The in-flight turn checks the
+		// queue depth when it ends, and finding this message there is what stops it
+		// from finishing the worker — so if the cancel and a natural end race, the
+		// worker survives either way.
+		if (
+			!this.enqueue(record, message, false, [message], resolveDelivered, async () => {
+				// If the old turn ends while its cancel notification is still being
+				// written, hold this prompt at the boundary. A session-wide cancel must
+				// never be able to overtake and hit the instruction it was meant to
+				// deliver.
+				await cancelDispatch?.catch(() => false);
+			})
+		) {
+			throw new Error(`Worker ${workerId} is finishing. Spawn a new worker instead.`);
+		}
+		this.appendLog(record, "status", `Leader queued for next turn: ${message}`);
+		this.checkpointChanged(record);
+
+		const timeoutMs = options.timeoutMs ?? STEER_TIMEOUT_MS;
+
+		const queued = (note?: string): SteerResult => ({
+			worker: this.summarize(record),
+			delivery: "next-turn",
+			note,
+		});
+
+		if (targetTurn === undefined) {
+			// No turn to interrupt, so this is an ordinary next-turn delivery. It is
+			// still only reported as delivered once the backend has taken it.
+			return (await this.settle(delivered, timeoutMs))
+				? queued()
+				: {
+						worker: this.summarize(record),
+						delivery: "cancel-pending",
+						note: `${workerId} has not taken the message yet; it is first in that worker's queue.`,
+					};
+		}
+
+		record.steeredTurns.add(targetTurn);
+		let asked: boolean;
+		try {
+			cancelDispatch = this.cancelTurn(record, targetTurn);
+			asked = await cancelDispatch;
+		} catch (error) {
+			record.steeredTurns.delete(targetTurn);
+			return queued(
+				`Could not interrupt ${workerId}'s current turn (${error instanceof Error ? error.message : String(error)}); ` +
+					"the message is queued and will be delivered when that turn ends.",
+			);
+		}
+		if (!asked) {
+			record.steeredTurns.delete(targetTurn);
+			return queued(`${workerId} had no live session to interrupt; the message is queued for its next turn.`);
+		}
+		this.appendLog(record, "status", "Leader interrupted the current turn to deliver a message.");
+
+		const arrived = await this.settle(delivered, timeoutMs);
+		if (!arrived) {
+			// Nothing is lost: the message is still first in the queue. But the
+			// worker has not seen it, and saying otherwise would be a lie the leader
+			// would act on.
+			return {
+				worker: this.summarize(record),
+				delivery: "cancel-pending",
+				note: `${workerId} has not taken the message yet; it is first in that worker's queue.`,
+			};
+		}
+		// True only if the turn this steer aimed at is the one that came back
+		// cancelled — not merely that some turn did.
+		const interrupted = record.interruptedTurns.has(targetTurn);
+		return {
+			worker: this.summarize(record),
+			delivery: interrupted ? "interrupted" : "turn-ended",
+			note: interrupted
+				? "Tool calls that worker had already completed were not undone."
+				: "That turn had already ended before the interrupt landed, so nothing was cut short.",
+		};
+	}
+
+	/** Dispatch at most one session-wide cancel for a particular prompt turn. */
+	private cancelTurn(record: WorkerRecord, turn: number): Promise<boolean> {
+		const existing = record.cancelDispatches.get(turn);
+		if (existing) return existing;
+		const dispatch = Promise.resolve().then(() => record.driver?.cancel() ?? false);
+		record.cancelDispatches.set(turn, dispatch);
+		return dispatch;
+	}
+
+	/** Resolve true if the promise settles first, false if the deadline wins. */
+	private settle(promise: Promise<void>, timeoutMs: number): Promise<boolean> {
+		return new Promise<boolean>((resolve) => {
+			const timer = setTimeout(() => resolve(false), timeoutMs);
+			void promise.then(() => {
+				clearTimeout(timer);
+				resolve(true);
+			});
+		});
+	}
+
+	private assertSendable(record: WorkerRecord, workerId: string): void {
 		if (isTerminalState(record.state)) {
 			throw new Error(`Worker ${workerId} already finished (${record.state}). Spawn a new worker instead.`);
 		}
 		if (record.finishing) {
 			throw new Error(`Worker ${workerId} is finishing. Spawn a new worker instead.`);
 		}
+	}
+
+	/**
+	 * Queue a message as the worker's next turn, without interrupting anything.
+	 *
+	 * This is the pane's path and the path for Neta's own automatic notices. The
+	 * leader steers instead; see `steer`.
+	 */
+	send(workerId: string, message: string): WorkerSummary {
+		const record = this.require(workerId);
+		this.assertSendable(record, workerId);
 		if (record.state === "queued" || record.state === "starting") {
 			// A transport in "starting" has not received its real brief yet. Hold
 			// pane/leader input behind that brief just like a queued writer, or the
@@ -680,12 +948,6 @@ export class WorkerManager implements ChannelHandler {
 		pending.resolve({ ok: true, text: answer });
 		this.checkpointChanged(record);
 		return this.summarize(record);
-	}
-
-	/** The pane's single atomic operation: current question wins over follow-up. */
-	paneInput(workerId: string, text: string): WorkerSummary {
-		const record = this.require(workerId);
-		return record.pendingAsk ? this.answer(workerId, text) : this.send(workerId, text);
 	}
 
 	async kill(workerId: string): Promise<WorkerSummary> {
@@ -729,15 +991,40 @@ export class WorkerManager implements ChannelHandler {
 			);
 		}
 		const summary = this.summarize(record);
-		const resume = workerResumeCommand(this.options.config, summary);
+		// A worker with no tab is exactly the case a reader most needs a way into,
+		// so none of these refusals is a dead end: each one names what still works
+		// without a multiplexer.
+		let resume: { command: string; args: string[] };
+		try {
+			resume = workerResumeCommand(this.options.config, summary);
+		} catch (error) {
+			throw new Error(
+				`${error instanceof Error ? error.message : String(error)} ` +
+					`Read it in place with \`${APP_NAME} inspect ${workerId}\` instead.`,
+			);
+		}
 		if (!this.options.panes?.attach) {
 			throw new Error(
-				`Cannot open ${workerId}: this Neta session has no live pane host (${this.options.headlessReason ?? "headless mode"}).`,
+				`Cannot open ${workerId}: this Neta session has no live pane host ` +
+					`(${record.headlessReason ?? this.options.headlessReason ?? "headless mode"}). ` +
+					`${this.headlessAlternatives(workerId)}`,
 			);
 		}
 		const outcome = this.options.panes.attach(summary, resume);
-		if (!outcome.opened) throw new Error(`Could not open ${workerId}'s native TUI: ${outcome.reason}.`);
+		if (!outcome.opened) {
+			throw new Error(
+				`Could not open ${workerId}'s native TUI: ${outcome.reason}. ${this.headlessAlternatives(workerId)}`,
+			);
+		}
 		return summary;
+	}
+
+	/** What still works when there is no multiplexer tab to open. */
+	private headlessAlternatives(workerId: string): string {
+		return (
+			`Read it in place with \`${APP_NAME} inspect ${workerId}\` (bounded recent input and output), ` +
+			`or take over a terminal with \`${APP_NAME} attach ${workerId}\`.`
+		);
 	}
 
 	/** One complete, point-in-time view for the MCP and socket status commands. */
@@ -800,6 +1087,64 @@ export class WorkerManager implements ChannelHandler {
 			state: record.state,
 			worker: this.summarize(record),
 			archived: record.archived ?? false,
+		};
+	}
+
+	/**
+	 * A bounded window onto one worker's recent input and output.
+	 *
+	 * The expand-in-place path for a worker row, and the only one that works when
+	 * a worker has no pane — a multiplexer that refused to open a tab, or a
+	 * session running headless on purpose. It reads through the same
+	 * non-consuming view the pane watcher uses, so looking never steals lines the
+	 * leader has not seen, and it is capped hard rather than by the caller's
+	 * discretion: an uncapped dump of a chatty worker is what buries a leader's
+	 * context, and a terminal row that expands to ten thousand lines is not an
+	 * expansion, it is a different problem.
+	 */
+	inspect(workerId: string, options: { maxEntries?: number; maxChars?: number } = {}): WorkerInspection {
+		const record = this.require(workerId);
+		const maxEntries = Math.max(1, Math.min(options.maxEntries ?? INSPECT_MAX_ENTRIES, INSPECT_MAX_ENTRIES));
+		const maxChars = Math.max(80, Math.min(options.maxChars ?? INSPECT_MAX_CHARS, INSPECT_MAX_CHARS));
+
+		const all = record.log;
+		const shown = all.slice(Math.max(0, all.length - maxEntries));
+		// Trimmed history counts too: a worker whose oldest lines have already
+		// aged out of the retained log has more missing than this slice dropped.
+		const droppedEntries = all.length - shown.length + record.logFirstIndex;
+
+		// The character budget is spent newest-first, so the tail of the
+		// conversation — the part a reader opened this for — survives intact.
+		let remaining = maxChars;
+		let droppedChars = 0;
+		const kept: WorkerLogEntry[] = [];
+		for (let index = shown.length - 1; index >= 0; index--) {
+			const entry = shown[index];
+			if (remaining <= 0) {
+				droppedChars += entry.text.length;
+				continue;
+			}
+			if (entry.text.length <= remaining) {
+				remaining -= entry.text.length;
+				kept.push(entry);
+				continue;
+			}
+			// This is a recent window, including within one large entry. Keep its
+			// tail rather than showing the beginning and silently dropping the newest
+			// text the worker produced.
+			const clipped = entry.text.slice(-remaining);
+			droppedChars += entry.text.length - remaining;
+			remaining = 0;
+			kept.push({ ...entry, text: clipped });
+		}
+		kept.reverse();
+
+		return {
+			worker: this.summarize(record),
+			entries: kept,
+			droppedEntries: droppedEntries + (kept.length < shown.length ? shown.length - kept.length : 0),
+			droppedChars,
+			headlessReason: record.headlessReason ?? this.options.headlessReason,
 		};
 	}
 
@@ -970,6 +1315,9 @@ export class WorkerManager implements ChannelHandler {
 	planAssignments(
 		requests: Array<{ role: string; tier: Tier; writer?: boolean; backend?: string; room?: string }>,
 	): Array<{ role: string; tier: Tier; backend: string; writer: boolean }> {
+		// A staffing plan the user approves and the session then refuses is worse
+		// than no plan; the whole batch is checked before any of it is computed.
+		this.assertTiersAvailable(requests.map((request) => request.tier));
 		// Deep copy state so planning never mutates live cursors or room assignments
 		const simulatedState = {
 			cursors: new Map(this.spreadCursors),
@@ -1159,16 +1507,28 @@ export class WorkerManager implements ChannelHandler {
 						data: page,
 					};
 				}
+				case "inspect": {
+					const inspection = this.inspect(request.workerId);
+					return { ok: true, text: formatInspection(inspection).join("\n"), data: inspection };
+				}
 				case "wait": {
 					const summaries = await this.waitFor(request.workerIds, request.timeoutMs ?? 600_000);
 					return { ok: true, text: summaries.map((summary) => this.statusLine(summary)).join("\n\n") };
 				}
 				case "send":
-					return { ok: true, text: this.statusLine(this.send(request.workerId, request.text), 200) };
+				case "pane-input": {
+					// CLI send and typed watch-pane input are exactly the same central
+					// operation as the MCP tool. Keeping one primitive prevents the pane
+					// from silently falling back to old queue-only behavior.
+					const steered = await this.steer(request.workerId, request.text);
+					return {
+						ok: true,
+						text: `${formatSteerResult(steered)}\n${this.statusLine(steered.worker, 200)}`,
+						data: { delivery: steered.delivery, note: steered.note },
+					};
+				}
 				case "answer":
 					return { ok: true, text: this.statusLine(this.answer(request.workerId, request.text), 200) };
-				case "pane-input":
-					return { ok: true, text: this.statusLine(this.paneInput(request.workerId, request.text), 200) };
 				case "kill":
 					return { ok: true, text: this.statusLine(await this.kill(request.workerId), 200) };
 			}
@@ -1410,7 +1770,16 @@ export class WorkerManager implements ChannelHandler {
 		this.checkpointChanged(record);
 	}
 
-	private enqueue(record: WorkerRecord, message: string, automatic = false, leaderMessages: string[] = []): boolean {
+	private enqueue(
+		record: WorkerRecord,
+		message: string,
+		automatic = false,
+		leaderMessages: string[] = [],
+		/** Called at the moment this prompt is handed to the backend, not before. */
+		onDelivered?: () => void,
+		/** A turn-boundary barrier, used to keep a cancel ahead of its replacement prompt. */
+		beforePrompt?: () => Promise<void>,
+	): boolean {
 		if (isTerminalState(record.state) || record.finishing || record.killReason) return false;
 		record.queuedPrompts += 1;
 		this.checkpointChanged(record);
@@ -1422,8 +1791,45 @@ export class WorkerManager implements ChannelHandler {
 				for (const leaderMessage of leaderMessages) {
 					this.appendLog(record, "status", `Leader delivering now as next turn: ${leaderMessage}`);
 				}
-				const outcome = await driver.prompt(message);
+				if (beforePrompt) await beforePrompt();
+				const turn = ++record.turnCounter;
+				record.currentTurn = turn;
+				record.promptInFlight = true;
+				let outcome: PromptOutcome;
+				try {
+					const prompting = driver.prompt(message);
+					onDelivered?.();
+					outcome = await prompting;
+				} finally {
+					record.promptInFlight = false;
+					record.currentTurn = undefined;
+				}
+				const steered = record.steeredTurns.delete(turn);
+				record.cancelDispatches.delete(turn);
 				if (isTerminalState(record.state) || record.finishing || record.killReason) return;
+				// A turn Neta cancelled on purpose, to put a new instruction in front
+				// of this worker. It is not a failure: the worker is healthy, its
+				// session is intact, its writer slot is unchanged, and the message that
+				// caused the cancel is the next thing in this same queue. Whatever the
+				// worker managed to say before stopping is kept as its last response,
+				// but never promoted to its report.
+				//
+				// Only the turn a steer actually aimed at qualifies. A cancel that
+				// arrived late and stopped some later turn falls through to the
+				// ordinary early-stop handling below, which is visible to the leader —
+				// far better than silently leaving a worker running with nothing queued.
+				if (outcome.cancelled && steered) {
+					record.interruptedTurns.add(turn);
+					// Bound retained accounting while leaving enough history for every
+					// concurrent caller waiting on this turn's replacement prompt.
+					for (const old of record.interruptedTurns) {
+						if (old < turn - 100) record.interruptedTurns.delete(old);
+					}
+					record.lastResponse = outcome.summary;
+					this.appendLog(record, "status", "Turn interrupted to deliver the leader's message.");
+					this.checkpointChanged(record);
+					return;
+				}
 				if (!outcome.ok) {
 					// A later turn failing must not delete the handoff this worker
 					// already produced. Neta's own writer notices are appended as

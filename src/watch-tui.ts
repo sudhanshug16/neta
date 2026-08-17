@@ -293,7 +293,7 @@ export interface WatchTuiOptions {
 	agentDir?: string;
 }
 
-export const WORKER_INPUT_HINT = "enter answers a question or queues the next turn · ctrl+c closes this view";
+export const WORKER_INPUT_HINT = "enter steers this worker now · ctrl+c closes this view";
 
 export async function watchWorkerTui(options: WatchTuiOptions): Promise<number> {
 	const target = resolveTarget(options.sessionId, process.cwd(), options.agentDir);
@@ -367,8 +367,8 @@ export async function watchWorkerTui(options: WatchTuiOptions): Promise<number> 
 	});
 
 	const deliver = async (text: string) => {
-		// The manager decides atomically whether this answers a question or queues
-		// the next turn. The pane's polled snapshot may be up to 400 ms stale.
+		// This request reaches the exact same cancel-and-reprompt primitive as
+		// `neta_send`. The pane is a second surface, not a weaker queue-only path.
 		try {
 			const response = await sendChannelRequest(target.address, {
 				type: "pane-input",

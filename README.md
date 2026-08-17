@@ -10,8 +10,9 @@ an MCP server, write access removed with that vendor's own permission
 machinery — and gives it a team of worker agents, each a real agent CLI driven
 over ACP on the login you already use. The leader reads, decides, delegates
 and verifies; workers do the work; one writer at a time per session. Neta owns
-no session UI — it stays behind the CLI and gets out of the way; the one
-surface it draws is the per-worker `neta watch` pane.
+no session UI — it stays behind the CLI and gets out of the way. Its launcher
+draws the two startup selectors, and its one worker surface is the per-worker
+`neta watch` pane.
 
 ## Install
 
@@ -35,12 +36,25 @@ cd your-repo
 neta
 ```
 
-That detects the agent CLIs you have, launches one as the leader (it asks
-which when several are installed; `--leader codex` picks), and stays behind
-it. You are in that CLI's ordinary interface. With Zellij or tmux, each worker
+On a terminal, that asks two questions with an arrow-key selector: which of
+your installed agent CLIs leads (skipped when only one is installed, or when
+`--leader codex` picks), and which worker tiers this session may staff — a
+checkbox list where space toggles, enter confirms and esc cancels. The first
+run offers every tier; later runs start on whatever you confirmed last time,
+remembered in `~/.neta/startup.json` and nowhere else. A session cannot spawn
+a tier it was not started with: the control plane refuses it, not the prompt.
+Piped or non-interactive launches never prompt and get every tier.
+
+Then Neta launches that CLI as the leader and stays behind it. You are in that CLI's ordinary interface. With Zellij or tmux, each worker
 gets a tab streaming its log; without one, workers run headless (`--mux none`
 forces that). Arguments after `--` pass through to the vendor CLI:
 `neta -- --model opus`.
+
+Worker rows are text. If a vendor transcript or terminal host makes a
+Terminal row clickable, that click handler belongs to the host; this repository
+does not install or change it. Neta's own expansion is `neta inspect <id>` (or
+`neta_inspect`): a bounded recent input/output window with an explicit marker
+when content was truncated, including for headless workers.
 
 Then delegate:
 
@@ -121,7 +135,8 @@ host process, outside any sandbox:
 | `neta_attach` | Reopen a terminal worker's exact native backend session in a new tab. |
 | `neta_log` | A worker's new log lines since the leader last looked. |
 | `neta_wait` | Block until watched workers finish, ask a question, or a room posts. |
-| `neta_send` | Follow-up instruction, delivered as the worker's next turn. |
+| `neta_send` | Steer a worker: interrupt its current turn and make this its next prompt, same session. |
+| `neta_inspect` | Expand one worker's recent input and output, bounded, without consuming lines. |
 | `neta_answer` | Answer a worker blocked on a question. |
 | `neta_kill` | Terminate a worker, releasing the writer slot. |
 | `neta_room` | Read a room's transcript, optionally post to it. |
@@ -182,10 +197,13 @@ neta status                writer slot, worker states, queue and open notes
 neta workers               what is running, and what it has cost
 neta spawn ...             start a worker from your terminal
 neta wait ro1 ro2          block until those workers finish
-neta watch ro1             watch one worker live, and type to talk to it
+neta watch ro1             watch one worker live; typed text uses the same
+                           cancel-and-reprompt steering as neta send
 neta watch auth-debate     follow a room's merged transcript live
 neta attach ro1            take over this terminal with that worker's own CLI
 neta log ro1               its new lines since you last looked
+neta inspect ro1           its recent input and output, bounded, without
+                           consuming lines — works with no tab at all
 neta send rw2 <message>    give a worker more instructions
 neta answer ro1 <text>     unblock a worker that asked something
 neta kill rw2              stop it
@@ -260,8 +278,6 @@ active workers so two clients cannot drive one conversation.
 - [Settings](docs/settings.md) — tiers, backends, multiplexer, leader options.
 - [MANIFESTO.md](MANIFESTO.md) — the design: tiers, roles, single writer, the
   charter.
-- [PLAN.md](PLAN.md) — what is built, what was verified how, and what is
-  deliberately missing.
 
 ## Development
 

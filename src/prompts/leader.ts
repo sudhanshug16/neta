@@ -14,7 +14,7 @@
 
 import { APP_NAME } from "../config.ts";
 import type { NetaTierSettings } from "../settings.ts";
-import type { Tier } from "../types.ts";
+import { TIERS, type Tier } from "../types.ts";
 import type { Charter } from "./charter.ts";
 import { roleNames } from "./roles.ts";
 
@@ -26,21 +26,49 @@ export type LeaderControl = "mcp" | "cli";
  * would trust a worker with and how it fails, because "how smart is it" is not
  * a single number and pretending otherwise produces bad delegation.
  */
-const TIER_LADDER = `- **apprentice** — the mechanical floor: run a named command and report its output, apply an
+const TIER_RUNGS: Record<Tier, string> = {
+	apprentice: `- **apprentice** — the mechanical floor: run a named command and report its output, apply an
   exactly specified small change, or read a named file and answer one bounded question. Fails on
-  any ambiguity. Apprentices cannot ask you questions; a blocked apprentice stops and reports.
-- **journeyman** — mechanical work with a precise spec: renames, applying a reviewed
+  any ambiguity. Apprentices cannot ask you questions; a blocked apprentice stops and reports.`,
+	journeyman: `- **journeyman** — mechanical work with a precise spec: renames, applying a reviewed
   diff, running a command and reporting output. Fails on ambiguity. Journeymen cannot ask you
-  questions; a blocked journeyman stops and reports.
-- **expert** — well-scoped features, bug fixes with tests, code review. Handles
-  normal ambiguity, tells you when something is wrong with the task.
-- **architect** — real ambiguity: debugging with an unknown cause, design work,
-  arguing a tradeoff. Use it when the shape of the answer is not known yet.`;
+  questions; a blocked journeyman stops and reports.`,
+	expert: `- **expert** — well-scoped features, bug fixes with tests, code review. Handles
+  normal ambiguity, tells you when something is wrong with the task.`,
+	architect: `- **architect** — real ambiguity: debugging with an unknown cause, design work,
+  arguing a tradeoff. Use it when the shape of the answer is not known yet.`,
+};
+
+/**
+ * Only the rungs this session can actually staff.
+ *
+ * Describing a tier the control plane will refuse costs a wasted turn and a
+ * confusing error; the enforcement lives in the WorkerManager either way, and
+ * this is how the leader learns the shape of the ladder it has.
+ */
+function tierLadder(available: readonly Tier[]): string {
+	return TIERS.filter((tier) => available.includes(tier))
+		.map((tier) => TIER_RUNGS[tier])
+		.join("\n");
+}
 
 const TIER_CHOICE = `Pick the lowest tier that can do the job: mechanical, inventory, and reading tasks go to
 apprentice or journeyman scouts (for example, list every machine and report its OS); use an expert
 for a scoped feature or review (for example, add one validated API field); use an architect only
 when the shape of the answer is unknown (for example, find why an intermittent deploy fails).`;
+
+/** Said out loud only when the session is narrower than the full ladder. */
+function tierRestriction(available: readonly Tier[]): string {
+	if (available.length === TIERS.length) return "";
+	const missing = TIERS.filter((tier) => !available.includes(tier));
+	return `
+
+This session was started with only these tiers: ${available.join(", ")}. ${missing.join(", ")} ${
+		missing.length === 1 ? "is" : "are"
+	} not available and spawning ${missing.length === 1 ? "it" : "them"} is refused by the
+control plane, not merely discouraged. Staff the work on an available tier, or tell the user
+which tier this needs and why, and let them start a session with it.`;
+}
 
 /**
  * The rule that survives a broken control plane. A leader that cannot delegate
@@ -71,6 +99,8 @@ interface Surface {
 	status: string;
 	wait: string;
 	answer: string;
+	/** How the leader steers a worker that is going the wrong way. */
+	send: string;
 	closing: string;
 }
 
@@ -83,9 +113,10 @@ edit files through your shell either (no \`>\`, \`sed -i\`, \`tee\`, \`patch\`,
 inspecting git is your job.`,
 			spawn: `\`${APP_NAME} spawn --role <role> --tier <tier> [--writer] [--room <name>] <task>\``,
 			spawnFails: `additional writers queue automatically; the spawn result says queued vs running`,
-			status: `\`${APP_NAME} status\` shows the writer slot, queue, grouped worker states and open notes; \`${APP_NAME} workers\` lists workers; \`${APP_NAME} log <id>\` pulls a worker's new log lines; \`${APP_NAME} attach <id>\` takes over the caller's terminal with that worker's native backend TUI`,
+			status: `\`${APP_NAME} status\` shows the writer slot, queue, grouped worker states and open notes; \`${APP_NAME} workers\` lists workers; \`${APP_NAME} log <id>\` pulls a worker's new log lines; \`${APP_NAME} inspect <id>\` prints one worker's recent input and output, bounded, without consuming lines, and works for a worker with no tab; \`${APP_NAME} attach <id>\` takes over the caller's terminal with that worker's native backend TUI`,
 			wait: `\`${APP_NAME} wait <id> [<id>...]\``,
 			answer: `\`${APP_NAME} answer <id> <text>\``,
+			send: `\`${APP_NAME} send <id> <message>\``,
 			closing: `You manage workers by running the \`${APP_NAME}\` CLI with your shell tool. Run
 \`${APP_NAME} spawn --help\` if you need the exact flags. Workers report back
 through the same CLI and already know how to use it.`,
@@ -98,9 +129,10 @@ attempting one wastes a turn. You must not edit files through bash either (no
 searching, running tests, and inspecting git is your job.`,
 		spawn: `\`${tool("neta_spawn")}\``,
 		spawnFails: `additional writers queue automatically; the spawn result says queued vs running`,
-		status: `\`${tool("neta_status")}\` shows the writer slot, queue, grouped worker states and open notes; \`${tool("neta_workers")}\` lists workers; \`${tool("neta_log")}\` pulls a worker's new log lines; \`${tool("neta_attach")}\` reopens a terminal worker's native backend TUI in a new tab`,
+		status: `\`${tool("neta_status")}\` shows the writer slot, queue, grouped worker states and open notes; \`${tool("neta_workers")}\` lists workers; \`${tool("neta_log")}\` pulls a worker's new log lines; \`${tool("neta_inspect")}\` expands one worker's recent input and output, bounded, without consuming lines, and works for a worker with no tab; \`${tool("neta_attach")}\` reopens a terminal worker's native backend TUI in a new tab`,
 		wait: `\`${tool("neta_wait")}\``,
 		answer: `\`${tool("neta_answer")}\``,
+		send: `\`${tool("neta_send")}\``,
 		closing: `The worker CLI is \`${APP_NAME}\`; workers already know how to use it.`,
 	};
 }
@@ -114,6 +146,11 @@ export interface FlavorRef {
 
 export interface LeaderPromptOptions {
 	tiers: Partial<Record<Tier, NetaTierSettings>>;
+	/**
+	 * Tiers this session may staff. Defaults to all of them, so a caller that
+	 * predates startup tier selection describes the whole ladder as before.
+	 */
+	availableTiers?: readonly Tier[];
 	/** The user's charter, embedded verbatim when present. */
 	charter?: Charter;
 	flavors?: FlavorRef[];
@@ -134,6 +171,7 @@ export interface LeaderPromptOptions {
 
 export function buildLeaderPrompt(options: LeaderPromptOptions): string {
 	const { tiers, control = "mcp", toolName = (base) => base } = options;
+	const available = TIERS.filter((tier) => (options.availableTiers ?? TIERS).includes(tier));
 	const mapping = (Object.keys(tiers) as Tier[])
 		.filter((tier) => tiers[tier]?.backend)
 		.map((tier) => `${tier} -> ${tiers[tier]?.backend}`)
@@ -199,9 +237,9 @@ to a journeyman with an exact instruction.
 
 Spawn a worker with a role, a tier and a task: ${s.spawn}. Roles available: ${roleNames().join(", ")}.
 
-${TIER_LADDER}
+${tierLadder(available)}
 
-${TIER_CHOICE}
+${TIER_CHOICE}${tierRestriction(available)}
 
 Backend assignments are computed deterministically from tier mappings and the
 spread/diversity policy. Configured mappings: ${mapping || "(none — all tiers use spread policy)"}. Unconfigured tiers
@@ -268,6 +306,11 @@ Rules that matter in practice:
   delivered results or a blocking question, never with "workers are running".
 - A worker blocked on a question shows up as state "waiting"; answer it with
   ${s.answer}.
+- A worker going the wrong way does not have to be killed and respawned. ${s.send}
+  interrupts its current turn and makes your message its next prompt, in the same
+  session, so it keeps everything it has learned. The result tells you whether the
+  turn was interrupted, had already ended, or is only queued — act on what it says,
+  not on having sent it. Work the worker already finished is not undone.
 
 ${HONESTY}
 

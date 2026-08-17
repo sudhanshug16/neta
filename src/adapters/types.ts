@@ -13,6 +13,8 @@
 import type { CliInvocation } from "../cli-shim.ts";
 import type { DetectedLeaderBackend } from "../detect.ts";
 import type { MuxId } from "../mux/types.ts";
+import { formatSessionTiers } from "../startup/preflight.ts";
+import type { Tier } from "../types.ts";
 
 export interface LeaderLaunchContext {
 	backend: DetectedLeaderBackend;
@@ -44,6 +46,13 @@ export interface LeaderLaunchContext {
 	token: string;
 	/** The leader's operating instructions, already built. */
 	leaderPrompt: string;
+	/**
+	 * Worker tiers this session may staff, chosen at startup. Carried to the
+	 * control plane so the enforcement lives with the WorkerManager rather than in
+	 * the prompt: a leader that asks for an unavailable tier is refused, not
+	 * merely discouraged.
+	 */
+	sessionTiers?: Tier[];
 	/** How to re-invoke the `neta` binary, for the MCP server command line. */
 	invocation: CliInvocation;
 	/** Hide the user's own MCP servers, leaving only Neta's. */
@@ -125,6 +134,10 @@ export function controlPlaneEnv(context: LeaderLaunchContext): Record<string, st
 			? { NETA_LEADER_CONVERSATION_ID: (context.resumeConversationId ?? context.leaderConversationId) as string }
 			: {}),
 		...(context.resumeConversationId ? { NETA_RESUME: "1" } : {}),
+		// Absent means every tier: a control plane started without this — an older
+		// launcher, a hand-registered `neta mcp` — must not silently lose the
+		// ability to staff work.
+		...(context.sessionTiers ? { NETA_TIERS: formatSessionTiers(context.sessionTiers) } : {}),
 		NETA_MUX: context.mux,
 		NETA_PANES: context.panes ? "1" : "0",
 		...(context.muxSessionName ? { NETA_MUX_SESSION_NAME: context.muxSessionName } : {}),

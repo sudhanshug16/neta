@@ -186,7 +186,7 @@ describe("a leader session, end to end", () => {
 		);
 	});
 
-	it("accepts pane input through the real channel and applies it only after the active turn", async () => {
+	it("cancels an active turn and delivers typed pane input immediately through the real channel", async () => {
 		await call("neta_spawn", { role: "scout", tier: "expert", task: "WAIT_FOR_BARRIER" });
 		while (!existsSync(barrierReadyFile)) await new Promise((resolve) => setTimeout(resolve, 10));
 		const session = JSON.parse(readFileSync(join(agentDir, "sessions", "e2e.json"), "utf8")) as SessionRecord;
@@ -198,14 +198,11 @@ describe("a leader session, end to end", () => {
 			text: "pane follow-up",
 		});
 		expect(accepted.ok).toBe(true);
-		const queuedLog = bodyOf(await call("neta_log", { workerId: "ro1" }));
-		expect(queuedLog).toContain("Leader queued for next turn: pane follow-up");
-		expect(queuedLog).not.toContain("Leader delivering now as next turn: pane follow-up");
-
-		writeFileSync(barrierFile, "release\n");
+		expect(accepted.ok && accepted.text).toContain("Interrupted ro1's running turn");
+		const steeredLog = bodyOf(await call("neta_log", { workerId: "ro1" }));
+		expect(steeredLog).toContain("Turn interrupted to deliver the leader's message");
+		expect(steeredLog).toContain("Leader delivering now as next turn: pane follow-up");
 		const waited = bodyOf(await call("neta_wait", { workerIds: ["ro1"], timeoutSeconds: 30 }));
-		const appliedLog = bodyOf(await call("neta_log", { workerId: "ro1" }));
-		expect(appliedLog).toContain("Leader delivering now as next turn: pane follow-up");
 		expect(waited).toContain("echo:pane follow-up");
 	});
 

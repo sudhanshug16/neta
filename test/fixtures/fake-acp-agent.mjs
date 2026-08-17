@@ -59,6 +59,7 @@ const barrierReadyFileIndex = process.argv.indexOf("--barrier-ready-file");
 const barrierReadyFile = barrierReadyFileIndex === -1 ? undefined : process.argv[barrierReadyFileIndex + 1];
 
 const sessions = new Set();
+const activePrompts = new Map();
 let counter = 0;
 /** Whatever the client asked us to launch at session/new, echoed back on request. */
 let mcpServers = [];
@@ -144,13 +145,14 @@ async function say(cx, sessionId, text) {
 	});
 }
 
-async function waitForBarrier() {
+async function waitForBarrier(signal) {
 	if (!barrierFile) throw new Error("WAIT_FOR_BARRIER requires --barrier-file");
 	if (barrierReadyFile) writeFileSync(barrierReadyFile, "ready\n", "utf-8");
-	while (!existsSync(barrierFile)) await new Promise((resolve) => setTimeout(resolve, 10));
+	while (!existsSync(barrierFile) && !signal.aborted) await new Promise((resolve) => setTimeout(resolve, 10));
+	return !signal.aborted;
 }
 
-async function prompt(params, cx) {
+async function runPrompt(params, cx, signal) {
 	if (promptMarker) writeFileSync(promptMarker, "prompted\n", "utf-8");
 	const sessionId = params.sessionId;
 	const text = params.prompt.map((block) => (block.type === "text" ? block.text : "")).join("");
@@ -164,7 +166,9 @@ async function prompt(params, cx) {
 		await new Promise((resolve) => setTimeout(resolve, 200));
 	}
 
-	if (text.includes("WAIT_FOR_BARRIER")) await waitForBarrier();
+	if (text.includes("WAIT_FOR_BARRIER") && !(await waitForBarrier(signal))) {
+		return { stopReason: "cancelled" };
+	}
 
 	if (text.includes("REPORT_PID")) await say(cx, sessionId, `pid:${process.pid}\n\n`);
 
@@ -192,7 +196,13 @@ async function prompt(params, cx) {
 		const toolCallId = `call_${++counter}`;
 		await cx.notify(acp.methods.client.session.update, {
 			sessionId,
-			update: { sessionUpdate: "tool_call", toolCallId, title: "Edit config.json", kind: "edit", status: "pending" },
+			update: {
+				sessionUpdate: "tool_call",
+				toolCallId,
+				title: "Edit config.json",
+				kind: "edit",
+				status: "pending",
+			},
 		});
 		const response = await cx.request(acp.methods.client.session.requestPermission, {
 			sessionId,
@@ -271,7 +281,12 @@ async function prompt(params, cx) {
 	if (text.includes("USAGE")) {
 		await cx.notify(acp.methods.client.session.update, {
 			sessionId,
-			update: { sessionUpdate: "usage_update", used: 1200, size: 200000, cost: { amount: 0.42, currency: "USD" } },
+			update: {
+				sessionUpdate: "usage_update",
+				used: 1200,
+				size: 200000,
+				cost: { amount: 0.42, currency: "USD" },
+			},
 		});
 		await say(cx, sessionId, "counted");
 		return {
@@ -340,6 +355,16 @@ async function prompt(params, cx) {
 	return { stopReason: "end_turn" };
 }
 
+async function prompt(params, cx) {
+	const controller = new AbortController();
+	activePrompts.set(params.sessionId, controller);
+	try {
+		return await runPrompt(params, cx, controller.signal);
+	} finally {
+		if (activePrompts.get(params.sessionId) === controller) activePrompts.delete(params.sessionId);
+	}
+}
+
 const stream = acp.ndJsonStream(Writable.toWeb(process.stdout), Readable.toWeb(process.stdin));
 
 acp.agent({ name: "fake-acp-agent" })
@@ -385,5 +410,8 @@ acp.agent({ name: "fake-acp-agent" })
 		return {};
 	})
 	.onRequest("authenticate", () => ({}))
+	.onNotification(acp.methods.agent.session.cancel, (ctx) => {
+		activePrompts.get(ctx.params.sessionId)?.abort();
+	})
 	.onRequest("session/prompt", (ctx) => prompt(ctx.params, ctx.client))
 	.connect(stream);

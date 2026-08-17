@@ -46,7 +46,7 @@ const AUTH_REQUIRED_CODE = -32000;
 const INHERITED_SESSION_PREFIXES = ["CLAUDE_CODE_"];
 const INHERITED_SESSION_VARS = new Set(["CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT"]);
 const LEADER_ENV_PREFIX = "NETA_LEADER_";
-const LEADER_ENV_VARS = new Set(["NETA_SESSION_ID", "NETA_MUX", "NETA_PANES"]);
+const LEADER_ENV_VARS = new Set(["NETA_SESSION_ID", "NETA_MUX", "NETA_PANES", "NETA_TIERS"]);
 
 export function sanitizeInheritedEnv(env: NodeJS.ProcessEnv): Record<string, string> {
 	const clean: Record<string, string> = {};
@@ -457,18 +457,34 @@ export class AcpConnection {
 		});
 	}
 
-	/** Ask the agent to stop the current prompt turn. The prompt call then resolves with stopReason "cancelled". */
-	cancel(): void {
+	/**
+	 * Ask the agent to stop the current prompt turn, keeping the session.
+	 *
+	 * ACP 1.3.0: `session/cancel` is a notification, so there is nothing to await
+	 * and no acknowledgement. The agent may send final updates first and then
+	 * responds to the in-flight `session/prompt` with stopReason "cancelled" — the
+	 * SDK's own documentation says so, and that response is the only confirmation
+	 * a cancel ever gets. Tool calls the agent already completed stay completed.
+	 *
+	 * Returns false when there is no live session to cancel, so a caller can tell
+	 * "asked" from "nothing to ask".
+	 */
+	async cancel(): Promise<boolean> {
 		const connection = this.connection;
 		const sessionId = this.sessionId;
-		if (!connection || !sessionId) return;
-		void connection.agent.notify(acp.methods.agent.session.cancel, { sessionId }).catch(() => {});
+		if (!connection || !sessionId) return false;
+		// Wait until the notification has been written before the orchestrator may
+		// start the next prompt. ACP cancel names only a session, not a turn; letting
+		// the next prompt overtake this write could make a late cancel stop the turn
+		// that steering was meant to deliver.
+		await connection.agent.notify(acp.methods.agent.session.cancel, { sessionId });
+		return true;
 	}
 
 	async kill(): Promise<void> {
 		this.killed = true;
 		// Best-effort ACP cancel before killing the process.
-		this.cancel();
+		await this.cancel().catch(() => false);
 		this.connection?.close();
 		this.connection = undefined;
 		if (this.killPromise) return this.killPromise;

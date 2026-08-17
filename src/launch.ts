@@ -16,7 +16,6 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createInterface } from "node:readline/promises";
 import { sanitizeInheritedEnv } from "./acp/connection.ts";
 import { adapterFor } from "./adapters/index.ts";
 import type { LeaderLaunch } from "./adapters/types.ts";
@@ -48,6 +47,15 @@ import {
 	tryAcquireSessionLock,
 } from "./session.ts";
 import { loadConfig } from "./settings.ts";
+import {
+	chooseSessionTiers,
+	EmptyTierSelection,
+	type PreflightTerminal,
+	processPreflightTerminal,
+	promptForLeaderBackend,
+	StartupCancelled,
+} from "./startup/preflight.ts";
+import { TIERS, type Tier } from "./types.ts";
 
 export interface LaunchOptions {
 	cwd: string;
@@ -58,6 +66,8 @@ export interface LaunchOptions {
 	/** Arguments passed through to the vendor CLI after `--`. */
 	extraArgs: string[];
 	agentDir?: string;
+	/** Test seam for the startup selectors; defaults to this process's terminal. */
+	terminal?: PreflightTerminal;
 }
 
 export interface ResumeOptions extends Omit<LaunchOptions, "cwd" | "leader"> {
@@ -136,12 +146,18 @@ async function reconnectToSession(session: SessionRecord): Promise<number> {
 
 /**
  * Which CLI leads. An explicit choice wins, then settings, then the only one
- * installed; with several installed and no preference, ask.
+ * installed; with several installed and no preference, ask with a real selector.
+ *
+ * The detected list is already filtered to backends that are installed and not
+ * disabled, so a disabled leader is simply not offered — while an explicit
+ * `--leader` naming one still gets a hard error from the caller rather than a
+ * quiet substitution.
  */
 export async function chooseBackend(
 	detected: DetectedLeaderBackend[],
 	requested: string | undefined,
 	configured: string | undefined,
+	terminal: PreflightTerminal = processPreflightTerminal(),
 ): Promise<DetectedLeaderBackend> {
 	if (detected.length === 0) {
 		const installs = LEADER_BACKENDS.map((spec) => `  ${spec.name}: ${spec.install}`).join("\n");
@@ -160,24 +176,14 @@ export async function chooseBackend(
 	}
 
 	if (detected.length === 1) return detected[0];
-	if (!process.stdin.isTTY) {
+	if (!terminal.interactive) {
 		throw new LaunchError(
 			`Several agent CLIs are installed (${detected.map((b) => b.id).join(", ")}). ` +
 				`Pick one with --leader <id>, or set leader.backend in settings.`,
 		);
 	}
 
-	const rl = createInterface({ input: process.stdin, output: process.stdout });
-	try {
-		const menu = detected.map((backend, index) => `  ${index + 1}. ${backend.name} (${backend.path})`).join("\n");
-		const answer = await rl.question(`Which agent leads?\n${menu}\nChoice [1]: `);
-		const index = answer.trim() === "" ? 0 : Number.parseInt(answer.trim(), 10) - 1;
-		const chosen = detected[index];
-		if (!chosen) throw new LaunchError(`"${answer.trim()}" is not one of the choices.`);
-		return chosen;
-	} finally {
-		rl.close();
-	}
+	return promptForLeaderBackend(terminal, detected);
 }
 
 /** Runs a leader session to completion and resolves with its exit code. */
@@ -203,7 +209,25 @@ export async function launchLeader(options: LaunchOptions): Promise<number> {
 			throw new LaunchError(`Backend "${preferredLeader}" is disabled in settings.`);
 		}
 		const detected = detectLeaderBackends().filter(({ id }) => config.backendNames().includes(id));
-		const backend = await chooseBackend(detected, options.leader, config.leader.backend);
+		const terminal = options.terminal ?? processPreflightTerminal();
+		let backend: DetectedLeaderBackend;
+		let sessionTiers: Tier[];
+		try {
+			backend = await chooseBackend(detected, options.leader, config.leader.backend, terminal);
+			// Asked even when `--leader` decided the backend: the two questions are
+			// independent, and skipping the checklist because one of them was answered
+			// on the command line would silently staff every tier.
+			sessionTiers = await chooseSessionTiers({ terminal, agentDir });
+		} catch (error) {
+			// Esc is an ordinary answer, not a failure. Say one line and stop with the
+			// conventional interrupted-by-user code; nothing has been started yet.
+			if (error instanceof StartupCancelled) {
+				process.stderr.write(`${APP_NAME}: cancelled; no leader was started.\n`);
+				return 130;
+			}
+			if (error instanceof EmptyTierSelection) throw new LaunchError(error.message);
+			throw error;
+		}
 		const logicalSessionId = randomBytes(12).toString("hex");
 		// Claude Code lets the caller name the conversation, so Neta assigns one
 		// and records it before the CLI starts. That is what makes an exact
@@ -220,6 +244,7 @@ export async function launchLeader(options: LaunchOptions): Promise<number> {
 					canonicalCwd: cwd,
 					leaderBackend: backend.id,
 					leaderVendorConversationId: leaderConversationId,
+					sessionTiers,
 				}),
 				agentDir,
 			);
@@ -237,6 +262,7 @@ export async function launchLeader(options: LaunchOptions): Promise<number> {
 			backend,
 			logicalSessionId,
 			leaderConversationId,
+			sessionTiers,
 			lock,
 			options,
 		});
@@ -299,9 +325,15 @@ export async function resumeLeader(options: ResumeOptions): Promise<number> {
 						`Install it to resume; the checkpoint was left unchanged.`,
 				);
 			}
+			// The session's own tiers, never today's startup preferences. Its
+			// recorded workers were staffed under this answer, and a resume that
+			// silently widened or narrowed it would contradict its own history. A
+			// checkpoint written before session tiers existed reads as every tier,
+			// which is what those sessions actually ran with.
+			const sessionTiers = checkpoint.sessionTiers ?? [...TIERS];
 			write(
 				`${APP_NAME}: resuming ${checkpoint.id} in ${cwd} · ${backend.name} conversation ${conversationId} · ` +
-					`saved by Neta ${checkpoint.appVersion}, now ${VERSION}`,
+					`tiers ${sessionTiers.join(", ")} · saved by Neta ${checkpoint.appVersion}, now ${VERSION}`,
 			);
 			return await runLeaderSession({
 				cwd,
@@ -309,6 +341,7 @@ export async function resumeLeader(options: ResumeOptions): Promise<number> {
 				config,
 				backend,
 				logicalSessionId: checkpoint.id,
+				sessionTiers,
 				resumeConversationId: conversationId,
 				recovery: buildRecoverySummary(checkpoint, VERSION),
 				lock,
@@ -330,6 +363,8 @@ interface LeaderSessionParams {
 	logicalSessionId: string;
 	leaderConversationId?: string;
 	resumeConversationId?: string;
+	/** Worker tiers this session may staff, for the whole life of the session. */
+	sessionTiers: Tier[];
 	/** Recovered-state briefing, appended to the leader instructions on resume. */
 	recovery?: string;
 	lock: SessionLock;
@@ -380,6 +415,9 @@ async function runLeaderSession(params: LeaderSessionParams): Promise<number> {
 	// today's MCP registration and today's restrictions.
 	const leaderPrompt = buildLeaderPrompt({
 		tiers: config.tierMapping(),
+		// A leader told about a tier it cannot staff will try to use it and get an
+		// error; the prompt describes only the ladder this session actually has.
+		availableTiers: params.sessionTiers,
 		charter: loadCharter(cwd, agentDir),
 		flavors,
 		control: "mcp",
@@ -406,6 +444,7 @@ async function runLeaderSession(params: LeaderSessionParams): Promise<number> {
 		socket: createChannelAddress(),
 		token: randomBytes(16).toString("hex"),
 		leaderPrompt,
+		sessionTiers: params.sessionTiers,
 		invocation,
 		strictMcp: config.leader.strictMcp,
 		extraArgs: options.extraArgs,

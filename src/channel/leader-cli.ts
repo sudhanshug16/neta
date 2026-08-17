@@ -13,7 +13,17 @@ import { findSession, listSessions } from "../session.ts";
 import { sendChannelRequest } from "./client.ts";
 import { type LeaderChannelRequest, NETA_LEADER_ENV, NETA_SOCKET_ENV, NETA_WORKER_ENV } from "./protocol.ts";
 
-export const LEADER_COMMANDS = new Set(["spawn", "workers", "status", "log", "wait", "send", "answer", "kill"]);
+export const LEADER_COMMANDS = new Set([
+	"spawn",
+	"workers",
+	"status",
+	"log",
+	"inspect",
+	"wait",
+	"send",
+	"answer",
+	"kill",
+]);
 
 const LEADER_HELP = `Leader channel commands (available where the leader token is set):
 
@@ -22,9 +32,11 @@ const LEADER_HELP = `Leader channel commands (available where the leader token i
   ${APP_NAME} workers               List every worker and its state.
   ${APP_NAME} status                Show the writer slot, worker states and open notes.
   ${APP_NAME} log <id>              Read a worker's new log lines since you last looked.
+  ${APP_NAME} inspect <id>          Expand a worker's recent input and output, bounded and
+                                    non-consuming. Works for headless workers with no tab.
   ${APP_NAME} wait <id> [<id>...] [--timeout <seconds>]
       Block until the listed workers finish (default timeout 600s).
-  ${APP_NAME} send <id> <message>   Send a follow-up instruction to a running worker.
+  ${APP_NAME} send <id> <message>   Interrupt a running worker's turn and make this its next prompt.
   ${APP_NAME} answer <id> <text>    Answer a worker's pending question.
   ${APP_NAME} kill <id>             Stop a worker.
 `;
@@ -89,6 +101,11 @@ function buildRequest(command: string, token: string, rest: string[]): LeaderCha
 			const workerId = rest[0];
 			if (!workerId) return `Usage: ${APP_NAME} log <worker-id>`;
 			return { type: "log", token, workerId };
+		}
+		case "inspect": {
+			const workerId = rest[0];
+			if (!workerId) return `Usage: ${APP_NAME} inspect <worker-id>`;
+			return { type: "inspect", token, workerId };
 		}
 		case "wait": {
 			const { flags, positional } = parseFlags(rest, new Set());

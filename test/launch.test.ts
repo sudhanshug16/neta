@@ -1,6 +1,28 @@
 import { describe, expect, it } from "bun:test";
 import type { DetectedLeaderBackend } from "../src/detect.ts";
 import { chooseBackend, LaunchError } from "../src/launch.ts";
+import { type PreflightTerminal, StartupCancelled } from "../src/startup/preflight.ts";
+import type { KeyInput } from "../src/startup/select.ts";
+
+/** A terminal that replays scripted keys and records what was drawn on it. */
+function terminal(script: string[], interactive = true): PreflightTerminal & { written: string[] } {
+	const written: string[] = [];
+	let listener: ((chunk: string) => void) | undefined;
+	const input: KeyInput = {
+		setRawMode: () => {},
+		setEncoding: () => {},
+		resume: () => {},
+		pause: () => {},
+		on: (_event, handler) => {
+			listener = handler as (chunk: string) => void;
+			for (const [index, chunk] of script.entries()) setTimeout(() => listener?.(chunk), index + 1);
+		},
+		off: () => {
+			listener = undefined;
+		},
+	};
+	return { interactive, input, output: { write: (text: string) => written.push(text) }, written };
+}
 
 const claude: DetectedLeaderBackend = {
 	id: "claude",
@@ -44,14 +66,35 @@ describe("choosing the leader", () => {
 	});
 
 	it("asks for a choice instead of guessing when several are installed and nothing can prompt", async () => {
-		const tty = process.stdin.isTTY;
-		Object.defineProperty(process.stdin, "isTTY", { value: false, configurable: true });
-		try {
-			await expect(chooseBackend([claude, codex], undefined, undefined)).rejects.toThrow(
-				/Several agent CLIs are installed \(claude, codex\)/,
-			);
-		} finally {
-			Object.defineProperty(process.stdin, "isTTY", { value: tty, configurable: true });
+		await expect(chooseBackend([claude, codex], undefined, undefined, terminal([], false))).rejects.toThrow(
+			/Several agent CLIs are installed \(claude, codex\)/,
+		);
+	});
+
+	it("draws a real selector when several are installed and a terminal can answer", async () => {
+		const picker = terminal(["\x1b[B", "\r"]);
+		expect((await chooseBackend([claude, codex], undefined, undefined, picker)).id).toBe("codex");
+		// The selector was drawn, not a numeric readline menu.
+		expect(picker.written.join("")).toContain("Which agent leads?");
+	});
+
+	it("cancels cleanly rather than guessing when the user presses esc", async () => {
+		await expect(chooseBackend([claude, codex], undefined, undefined, terminal(["\x1b"]))).rejects.toBeInstanceOf(
+			StartupCancelled,
+		);
+	});
+
+	// Every non-interactive answer is exhausted first, so a session that can be
+	// decided without asking is never interrupted by a selector.
+	it("never draws a selector when the answer is already known", async () => {
+		for (const [detected, requested, configured] of [
+			[[claude], undefined, undefined],
+			[[claude, codex], "codex", undefined],
+			[[claude, codex], undefined, "claude"],
+		] as const) {
+			const picker = terminal(["\r"]);
+			await chooseBackend([...detected], requested, configured, picker);
+			expect(picker.written).toEqual([]);
 		}
 	});
 });

@@ -307,6 +307,7 @@ if (target) {
 				NETA_RESUME: process.env.NETA_RESUME ?? null,
 				CODEX_HOME: process.env.CODEX_HOME ?? null,
 				OPENCODE_CONFIG_CONTENT: process.env.OPENCODE_CONFIG_CONTENT ?? null,
+				NETA_TIERS: process.env.NETA_TIERS ?? null,
 				NETA_MUX: process.env.NETA_MUX ?? null,
 				NETA_PANES: process.env.NETA_PANES ?? null,
 			},

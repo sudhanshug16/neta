@@ -167,6 +167,14 @@ describe("neta (launching a leader)", () => {
 		expect(launched.env.NETA_PANES).toBe("0");
 	});
 
+	// A launch with no terminal cannot ask which tiers to staff, and must not
+	// guess a narrower answer: a piped or CI launch keeps the whole ladder.
+	it("enables every worker tier when nothing could be asked", async () => {
+		const launched = await launch("claude");
+
+		expect(launched.env.NETA_TIERS).toBe("apprentice,journeyman,expert,architect");
+	});
+
 	it("passes the real Zellij caller identity to Codex's manager without ambient secrets", async () => {
 		const binDir = fakeBackend("codex");
 		const zellij = join(binDir, "zellij");

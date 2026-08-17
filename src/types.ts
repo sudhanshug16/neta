@@ -231,6 +231,33 @@ export interface Note {
 	workers: NoteWorkerLink[];
 }
 
+/**
+ * What steering a worker actually did.
+ *
+ * ACP cannot inject text into a running prompt turn, so Neta steers by
+ * cancelling the turn and prompting the same session again. That has more than
+ * one outcome, and the difference between them is whether the worker has the
+ * message — which the leader acts on, so it is never blurred.
+ */
+export type SteerDelivery =
+	/** The worker had not started its first turn; the message rides with its brief. */
+	| "pending-brief"
+	/** No turn was in flight, so the message simply became the next prompt. */
+	| "next-turn"
+	/** A turn was in flight, Neta cancelled it, and the worker took the message. */
+	| "interrupted"
+	/** A turn was in flight but ended on its own first; the worker took the message. */
+	| "turn-ended"
+	/** The cancel was sent and the worker has not taken the message yet. */
+	| "cancel-pending";
+
+export interface SteerResult {
+	worker: WorkerSummary;
+	delivery: SteerDelivery;
+	/** The caveat that belongs with this delivery, when there is one. */
+	note?: string;
+}
+
 /** What can end a leader's wait. */
 export type WaitWakeReason = "completed" | "first" | "ask" | "room" | "timeout";
 
@@ -251,6 +278,26 @@ export interface WaitResult {
 	wokeBy?: WorkerSummary;
 	/** The new posts that woke the wait ("room"), and the room they landed in. */
 	roomActivity?: { room: string; posts: RoomPost[] };
+}
+
+/**
+ * A bounded window onto one worker's recent input and output.
+ *
+ * This is the expand-in-place answer for a worker row: what was sent to it and
+ * what it has said back, capped hard so it can be printed anywhere — a terminal,
+ * a tool result, a leader's context — without the caller having to guess how big
+ * it will be. Reading it never moves the leader's log cursor.
+ */
+export interface WorkerInspection {
+	worker: WorkerSummary;
+	/** Recent entries, oldest first, already capped. */
+	entries: WorkerLogEntry[];
+	/** Entries the cap dropped from the top. Rendered as an explicit marker. */
+	droppedEntries: number;
+	/** Characters the cap dropped from individual entries. */
+	droppedChars: number;
+	/** Why this worker has no multiplexer view, when it has none. */
+	headlessReason?: string;
 }
 
 /** A point-in-time view of the writer slot, workers and open-notes ledger. */

@@ -56,6 +56,28 @@ class FakeTransport implements WorkerTransportDriver {
 		if (killGate) await killGate;
 	}
 
+	/** How many times Neta asked this session to stop its turn. */
+	cancels = 0;
+	/** Set false to model a backend that never answers the cancel notification. */
+	honorCancel = true;
+	/** Set false to model a transport with no live session left to cancel. */
+	liveSession = true;
+
+	/**
+	 * A real ACP agent answers `session/cancel` by resolving the in-flight prompt
+	 * with stopReason "cancelled", after whatever it was mid-way through. This
+	 * models that: the turn ends on a later tick, not synchronously.
+	 */
+	cancel(): boolean {
+		this.cancels += 1;
+		if (!this.liveSession) return false;
+		if (!this.honorCancel) return true;
+		const resolve = this.pending.shift();
+		if (resolve)
+			queueMicrotask(() => resolve({ ok: false, cancelled: true, summary: "Turn cancelled. partial work" }));
+		return true;
+	}
+
 	markTerminal(): void {
 		this.markedTerminal = true;
 	}
@@ -1481,7 +1503,7 @@ describe("WorkerManager", () => {
 		expect(manager.get(reader.id).state).toBe("killed");
 	});
 
-	it("atomically treats stale pane input as the pending answer", async () => {
+	it("routes pane input through steering even while a worker has a pending question", async () => {
 		const summary = await manager.spawn({ role: "worker", tier: "expert", task: "do it" });
 		const pending = manager.ask(summary.id, "which database?", new AbortController().signal);
 		await flush();
@@ -1492,9 +1514,12 @@ describe("WorkerManager", () => {
 		);
 
 		expect(response.ok).toBe(true);
-		expect(await pending).toEqual({ ok: true, text: "postgres" });
-		expect(manager.get(summary.id).state).toBe("running");
+		expect(response.ok && response.text).toContain("will not read this until you answer with neta_answer");
+		expect(manager.get(summary.id).state).toBe("waiting");
+		expect(transports[0].cancels).toBe(0);
 		expect(transports[0].prompts).toEqual(["do it"]);
+		manager.answer(summary.id, "postgres");
+		expect(await pending).toEqual({ ok: true, text: "postgres" });
 	});
 
 	// The channel is opened on demand rather than at startup, so a leader session

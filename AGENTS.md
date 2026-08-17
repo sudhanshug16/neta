@@ -1,8 +1,9 @@
 # Development Rules
 
-Read PLAN.md (current plan and phase) before non-trivial work. The repo is in
-the phase PLAN.md says it is in — do not start a later phase without the
-operator saying so.
+Read [MANIFESTO.md](MANIFESTO.md) for scope and
+[docs/how-it-works.md](docs/how-it-works.md) for the current architecture
+before non-trivial work. Do not expand the product beyond those boundaries
+without the operator saying so.
 
 ## Neta Operating Contract
 
