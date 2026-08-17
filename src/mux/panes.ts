@@ -38,23 +38,27 @@ export function createPaneHost(
 ): WorkerPaneHost | undefined {
 	if (mux.id === "none" || (!sessionName && !mux.inSession())) return undefined;
 
+	// `neta watch` takes a worker id or a room name; the pane command is the same.
+	const openView = (title: string, target: string): PaneOpenOutcome => {
+		try {
+			const opened = mux.openPane(
+				title,
+				{
+					command: invocation.command,
+					args: [...invocation.prefixArgs, "watch", target, "--session", sessionId, "--dir", agentDir],
+				},
+				cwd,
+				sessionName,
+			);
+			if (opened) return { opened: true };
+			return { opened: false, reason: `could not open a ${mux.id} view` };
+		} catch (error) {
+			return { opened: false, reason: error instanceof Error ? error.message : String(error) };
+		}
+	};
+
 	return {
-		open(worker: WorkerSummary): PaneOpenOutcome {
-			try {
-				const opened = mux.openPane(
-					tabTitle(worker.id, worker.name),
-					{
-						command: invocation.command,
-						args: [...invocation.prefixArgs, "watch", worker.id, "--session", sessionId, "--dir", agentDir],
-					},
-					cwd,
-					sessionName,
-				);
-				if (opened) return { opened: true };
-				return { opened: false, reason: `could not open a ${mux.id} view` };
-			} catch (error) {
-				return { opened: false, reason: error instanceof Error ? error.message : String(error) };
-			}
-		},
+		open: (worker: WorkerSummary) => openView(tabTitle(worker.id, worker.name), worker.id),
+		openRoom: (room: string) => openView(tabTitle(room, ""), room),
 	};
 }

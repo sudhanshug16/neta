@@ -3,11 +3,15 @@
  *
  * The plain renderer in watch.ts prints a worker's log as lines. This renders
  * the same stream as a conversation — the worker's prose as markdown, tool
- * calls as quiet one-liners, diffs colored — and adds an input line. What you
- * type becomes the worker's next turn (the same path as the leader's
- * neta_send), and when the worker is blocked on a question, the same input
- * answers it. The stream still comes from the control plane's non-consuming
- * `tail`, so watching and typing never disturb what the leader sees.
+ * calls as quiet one-liners, diffs colored, room posts as an attribution line
+ * over a markdown body — and adds an input line. What you type becomes the
+ * worker's next turn (the same path as the leader's neta_send), and when the
+ * worker is blocked on a question, the same input answers it. The stream still
+ * comes from the control plane's non-consuming `tail`, so watching and typing
+ * never disturb what the leader sees.
+ *
+ * `neta watch <room>` gets the same treatment minus the input line: one merged
+ * transcript of the room's posts, fed by the non-consuming `room-tail`.
  */
 
 import {
@@ -29,12 +33,13 @@ import { APP_NAME } from "./config.ts";
 import {
 	displayModel,
 	isTerminalState,
+	type RoomLogPage,
 	type WorkerLogEntry,
 	type WorkerLogPage,
 	type WorkerState,
 	type WorkerSummary,
 } from "./types.ts";
-import { metadataCandidates, resolveTarget } from "./watch.ts";
+import { metadataCandidates, resolveTarget, sayAuthor, sayEntry } from "./watch.ts";
 
 const POLL_MS = 400;
 
@@ -107,8 +112,9 @@ const CLAMP_LINES = 12;
 
 /**
  * Cut a wall of text down to something a pane can carry. The worker's own
- * prose is never clamped — it is the content — but a status line or an error
- * that arrives as two hundred lines of dump collapses to its head.
+ * prose is never clamped — it is the content, and a room post is the content
+ * of a debate — but a status line or an error that arrives as two hundred
+ * lines of dump collapses to its head.
  */
 function clamp(text: string): string {
 	const lines = text.split("\n");
@@ -127,7 +133,8 @@ export class TranscriptView extends Container {
 	private tail: { component: Markdown; text: string } | undefined;
 
 	append(raw: WorkerLogEntry): void {
-		const entry = raw.kind === "text" || raw.kind === "diff" ? raw : { ...raw, text: clamp(raw.text) };
+		const entry =
+			raw.kind === "text" || raw.kind === "diff" || raw.kind === "say" ? raw : { ...raw, text: clamp(raw.text) };
 		if (entry.kind !== "text") this.tail = undefined;
 		switch (entry.kind) {
 			case "text":
@@ -158,9 +165,14 @@ export class TranscriptView extends Container {
 			case "progress":
 				this.addChild(new Text(`${style.cyan("»")} ${entry.text}`, 0, 0));
 				return;
-			case "say":
-				this.addChild(new Text(`${style.magenta("→")} ${entry.text}`, 0, 0));
+			case "say": {
+				// A room post reads like the worker's own prose: the violet arrow
+				// attributes it, and the body renders as a full markdown block.
+				const author = sayAuthor(entry);
+				this.addChild(new Text(style.magenta(author ? `→ ${author}` : "→"), 0, 0));
+				this.addChild(new Markdown(entry.text, 0, 1, markdownTheme));
 				return;
+			}
 			case "error":
 				this.addChild(
 					new Text(
@@ -367,6 +379,135 @@ export async function watchWorkerTui(options: WatchTuiOptions): Promise<number> 
 			if (!finished) loader.setMessage(footerMessage(next));
 			// The leader has moved on to a new batch; this view closes itself.
 			if (next.archived) {
+				close(0);
+				return;
+			}
+			tui.requestRender();
+			await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+		}
+	};
+
+	void poll();
+	await closedPromise;
+	if (partingWords) console.error(partingWords);
+	return exitCode;
+}
+
+/** Which room this is and who is in it, in the worker header's grammar. */
+function roomHeaderText(room: string, page: RoomLogPage): string {
+	const members = page.members.map((member) => `${member.id} ${member.name} (${member.backend})`).join(", ");
+	return `${style.bold(`room ${room}`)}${members ? ` ${style.dim(`· ${members}`)}` : ""}`;
+}
+
+/** The loader's message: who is still talking. */
+function roomFooterMessage(page: RoomLogPage): string {
+	if (page.members.length === 0) return "waiting for members";
+	const active = page.members.filter((member) => !isTerminalState(member.state)).length;
+	return `${active} of ${page.members.length} members active`;
+}
+
+export interface WatchRoomTuiOptions {
+	room: string;
+	sessionId?: string;
+	agentDir?: string;
+}
+
+/**
+ * The room's merged transcript as a pane: every member's posts in one place,
+ * each rendered as an attributed markdown block. Read-only — talking to a
+ * member goes through its own pane; posting to the room is the leader's move.
+ */
+export async function watchRoomTui(options: WatchRoomTuiOptions): Promise<number> {
+	const target = resolveTarget(options.sessionId, process.cwd(), options.agentDir);
+	if (!target) {
+		console.error(`No Neta session found. Start one with \`${APP_NAME}\`, or pass --session <id>.`);
+		return 1;
+	}
+
+	const tui = new TuiMainScreen(new ProcessTerminal());
+	const header = new Text("", 0, 0);
+	const transcript = new TranscriptView();
+	const footerSlot = new Container();
+	const loader = new Loader(tui, style.cyan, style.dim, "connecting");
+	footerSlot.addChild(loader);
+	footerSlot.addChild(new Text(style.dim("a room view only reads · ctrl+c closes this view"), 0, 0));
+	for (const child of [header, transcript, footerSlot]) tui.addChild(child);
+
+	let finished = false;
+	let closed = false;
+	let exitCode = 0;
+	/** Printed after the terminal is back to normal, where it can be read. */
+	let partingWords: string | undefined;
+	let resolveClosed = () => {};
+	const closedPromise = new Promise<void>((resolve) => {
+		resolveClosed = resolve;
+	});
+
+	const close = (code: number) => {
+		if (closed) return;
+		closed = true;
+		exitCode = code;
+		loader.stop();
+		tui.stop();
+		resolveClosed();
+	};
+
+	const finish = () => {
+		finished = true;
+		loader.stop();
+		footerSlot.clear();
+		footerSlot.addChild(new Text(style.dim(`── room ${options.room} done ── (enter to close)`), 0, 1));
+	};
+
+	tui.addInputListener((data) => {
+		if (data === "\x03") {
+			close(0);
+			return { consume: true };
+		}
+		if (finished && (data === "\r" || data === "\n")) {
+			close(0);
+			return { consume: true };
+		}
+		return undefined;
+	});
+
+	loader.start();
+	tui.start();
+
+	const poll = async () => {
+		let since = 0;
+		while (!closed) {
+			let response: Awaited<ReturnType<typeof sendChannelRequest>>;
+			try {
+				response = await sendChannelRequest(target.address, {
+					type: "room-tail",
+					token: target.token,
+					room: options.room,
+					since,
+				});
+			} catch {
+				// The leader is gone; a finished exchange was still worth reading.
+				close(finished ? 0 : 1);
+				return;
+			}
+			if (!response.ok) {
+				partingWords = response.error;
+				close(1);
+				return;
+			}
+			const page = response.data as RoomLogPage | undefined;
+			if (!page) {
+				partingWords = "The leader sent no room page; is this a current Neta session?";
+				close(1);
+				return;
+			}
+			header.setText(roomHeaderText(options.room, page));
+			for (const post of page.posts) transcript.append(sayEntry(post));
+			since = page.cursor;
+			if (page.done && !finished) finish();
+			if (!finished) loader.setMessage(roomFooterMessage(page));
+			// The leader has moved on to a new batch; this view closes itself.
+			if (page.archived) {
 				close(0);
 				return;
 			}

@@ -12,7 +12,7 @@ import { ChannelServer } from "../src/channel/server.ts";
 import { WorkerManager } from "../src/orchestrator/manager.ts";
 import type { PromptOutcome, TransportOptions, WorkerTransportDriver } from "../src/orchestrator/transport.ts";
 import { writeSessionRecord } from "../src/session.ts";
-import { watchWorker } from "../src/watch.ts";
+import { isWorkerId, watchRoom, watchWorker } from "../src/watch.ts";
 import { EnvStub, fixtureBackendConfig } from "./helpers.ts";
 
 const env = new EnvStub();
@@ -181,5 +181,99 @@ describe("watch", () => {
 
 		expect(code).toBe(1);
 		expect(lines.join(" ")).toContain("No Neta session found");
+	});
+
+	// A debate argument spans paragraphs; squeezing it onto the arrow line made
+	// real debates unreadable. The arrow attributes, the body reads as prose.
+	it("renders a room post as an attribution line over the full body", async () => {
+		const worker = await manager.spawn({
+			role: "debater",
+			tier: "architect",
+			task: "argue for",
+			room: "db",
+			name: "pro",
+		});
+		manager.say(worker.id, "First paragraph of the argument.\n\nSecond paragraph.");
+
+		const code = await watchWorker({ workerId: worker.id, once: true, hold: false, write });
+
+		expect(code).toBe(0);
+		const text = lines.join("\n");
+		expect(text).toContain(
+			`→ ${worker.id} pro · debater/architect\nFirst paragraph of the argument.\n\nSecond paragraph.`,
+		);
+	});
+
+	describe("room view", () => {
+		it("merges two posters into one transcript, in posting order, with authors", async () => {
+			const pro = await manager.spawn({
+				role: "debater",
+				tier: "architect",
+				task: "argue for",
+				room: "db",
+				name: "pro",
+			});
+			const con = await manager.spawn({
+				role: "debater",
+				tier: "architect",
+				task: "argue against",
+				room: "db",
+				name: "con",
+			});
+			manager.say(pro.id, "Postgres: we already run it.");
+			manager.say(con.id, "SQLite: one file, no ops.\n\nBackups become a copy.");
+			manager.say(pro.id, "Ops is already paid for here.");
+
+			const code = await watchRoom({ room: "db", once: true, hold: false, write });
+
+			expect(code).toBe(0);
+			const text = lines.join("\n");
+			// Debaters in one room are spread across vendors; the header says which.
+			expect(lines[0]).toBe(`room db · members: ${pro.id} pro (${pro.backend}), ${con.id} con (${con.backend})`);
+			expect(text).toContain(`→ ${pro.id} pro · debater/architect\nPostgres: we already run it.`);
+			expect(text).toContain(
+				`→ ${con.id} con · debater/architect\nSQLite: one file, no ops.\n\nBackups become a copy.`,
+			);
+			const first = text.indexOf("Postgres: we already run it.");
+			const second = text.indexOf("SQLite: one file, no ops.");
+			const third = text.indexOf("Ops is already paid for here.");
+			expect(first).toBeGreaterThan(-1);
+			expect(second).toBeGreaterThan(first);
+			expect(third).toBeGreaterThan(second);
+		});
+
+		it("follows the room until its last member finishes", async () => {
+			const solo = await manager.spawn({ role: "debater", tier: "architect", task: "argue", room: "db" });
+			const watching = watchRoom({ room: "db", hold: false, write });
+			manager.say(solo.id, "opening statement");
+			transports[0].finish({ ok: true, summary: "done arguing" });
+
+			expect(await watching).toBe(0);
+			expect(lines.join("\n")).toContain("opening statement");
+			expect(lines.at(-1)).toBe("── room db done ──");
+		});
+
+		it("reports an unknown room instead of hanging", async () => {
+			await manager.spawn({ role: "debater", tier: "architect", task: "argue", room: "db" });
+
+			const code = await watchRoom({ room: "bd", once: true, hold: false, write });
+
+			expect(code).toBe(1);
+			expect(lines.join(" ")).toContain('Unknown room "bd"');
+		});
+	});
+});
+
+// `neta watch` routes by the target's shape: minted worker ids go to the
+// worker view, everything else is a room name.
+describe("isWorkerId", () => {
+	it("tells worker ids from room names", () => {
+		expect(isWorkerId("ro1")).toBe(true);
+		expect(isWorkerId("rw12")).toBe(true);
+		expect(isWorkerId("db")).toBe(false);
+		expect(isWorkerId("auth-debate")).toBe(false);
+		expect(isWorkerId("ro")).toBe(false);
+		expect(isWorkerId("ro1x")).toBe(false);
+		expect(isWorkerId("rooms")).toBe(false);
 	});
 });

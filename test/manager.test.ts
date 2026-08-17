@@ -481,6 +481,42 @@ describe("WorkerManager", () => {
 		expect(manager.say(summary.id, "hello")).toEqual({ ok: false, error: "You are not in a room." });
 	});
 
+	// One merged view per room: the pane opens beside the first member's pane,
+	// and joining more members does not open it again.
+	it("opens one room pane when the room's first member joins", async () => {
+		const opened: string[] = [];
+		const roomsOpened: string[] = [];
+		const paneManager = new WorkerManager({
+			cwd: process.cwd(),
+			agentDir: "/nonexistent-agent-dir",
+			config,
+			channelAddress: "/tmp/neta-test-room-pane.sock",
+			onEvent: () => {},
+			createTransport: (options) => new FakeTransport(options),
+			panes: {
+				open: (worker) => {
+					opened.push(worker.id);
+					return { opened: true };
+				},
+				openRoom: (room) => {
+					roomsOpened.push(room);
+					return { opened: true };
+				},
+			},
+		});
+		try {
+			await paneManager.spawn({ role: "debater", tier: "architect", task: "argue for", room: "db" });
+			await paneManager.spawn({ role: "debater", tier: "architect", task: "argue against", room: "db" });
+			await paneManager.spawn({ role: "scout", tier: "expert", task: "look" });
+
+			expect(roomsOpened).toEqual(["db"]);
+			expect(opened).toHaveLength(3);
+		} finally {
+			await paneManager.dispose();
+			rmSync("/tmp/neta-test-room-pane.sock", { force: true });
+		}
+	});
+
 	describe("writer queue", () => {
 		it("reserves the writer slot before asynchronous spawn setup", async () => {
 			let releaseSetup: (() => void) | undefined;

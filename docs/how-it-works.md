@@ -158,6 +158,12 @@ control. Panes read the log without consuming it, so nothing a pane shows is
 stolen from the leader, and `neta watch <id> --plain` prints the same stream
 as bare lines for piping.
 
+A room gets one more pane of its own, opened when its first member joins:
+`neta watch <room-name>` follows the room's merged transcript, every post
+rendered as an attributed markdown block, so a debate reads in one place
+instead of across its members' panes. The room view holds after the last
+member finishes, like a worker pane, and closes with the batch.
+
 Under the default `auto` mode, a multiplexer session you are already inside
 wins; outside one, `auto` prefers Zellij, then tmux. An explicit `--mux
 zellij` or `--mux tmux` picks that multiplexer regardless. If you are not

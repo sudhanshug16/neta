@@ -81,10 +81,45 @@ describe("TranscriptView", () => {
 
 		const text = rendered(view);
 		expect(text).toContain("» halfway");
-		expect(text).toContain("→ posting to the room");
+		expect(text).toContain("→");
+		expect(text).toContain("posting to the room");
 		expect(text).toContain("· Leader: keep going");
 		expect(text).toContain("weighing options");
 		expect(text).toContain("! backend hiccup");
+	});
+
+	// A debate argument is the content of a debate, not a status line: the post
+	// renders as an attribution line over the full body as markdown — the same
+	// treatment the worker's own prose gets, never squeezed onto the arrow line.
+	it("renders a room post as attribution over a full markdown body", () => {
+		const view = new TranscriptView();
+		view.append({
+			at: 0,
+			kind: "say",
+			text: "# Opening\n\nFirst paragraph of the argument.\n\nSecond paragraph, with `code`.",
+			from: "ro2",
+			label: "pro · debater/architect",
+		});
+
+		expect(view.children).toHaveLength(2);
+		const text = rendered(view);
+		expect(text).toContain("→ ro2 pro · debater/architect");
+		expect(text).toContain("Opening");
+		expect(text).not.toContain("# Opening");
+		expect(text).toContain("First paragraph of the argument.");
+		expect(text).toContain("Second paragraph, with code.");
+	});
+
+	// The clamp exists for dumps, not for arguments: a long post is exactly the
+	// thing a room view is for.
+	it("never clamps a room post", () => {
+		const wall = Array.from({ length: 200 }, (_, i) => `point ${i}`).join("\n\n");
+		const view = new TranscriptView();
+		view.append({ at: 0, kind: "say", text: wall, from: "ro1", label: "debater/architect" });
+
+		const text = rendered(view);
+		expect(text).not.toContain("more lines");
+		expect(text).toContain("point 199");
 	});
 });
 

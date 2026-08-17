@@ -1,12 +1,14 @@
 /**
- * `neta watch <id>` — a live view of one worker.
+ * `neta watch <id>` — a live view of one worker — and `neta watch <room>`, the
+ * same view of a room's merged transcript.
  *
  * This is what runs in a worker's pane, and what a person runs in a spare
- * terminal. It reads through the non-consuming `tail` request, so watching a
- * worker never steals log lines the leader has not seen yet.
+ * terminal. It reads through the non-consuming `tail` and `room-tail`
+ * requests, so watching never steals log lines the leader has not seen yet.
  *
  * When the worker finishes, the view stays until dismissed: a pane that
- * vanishes the moment a worker fails takes the error with it.
+ * vanishes the moment a worker fails takes the error with it. A room view
+ * stays the same way once its last member finishes.
  */
 
 import { sendChannelRequest } from "./channel/client.ts";
@@ -17,6 +19,8 @@ import { findSession, listSessions } from "./session.ts";
 import {
 	displayModel,
 	isTerminalState,
+	type RoomLogPage,
+	type RoomPost,
 	type WorkerLogEntry,
 	type WorkerLogPage,
 	type WorkerState,
@@ -25,6 +29,23 @@ import {
 
 const POLL_MS = 400;
 const ARCHIVE_POLL_MS = 2000;
+
+/** Worker ids are minted as ro<N>/rw<N>; anything else `watch` takes as a room name. */
+export function isWorkerId(target: string): boolean {
+	return /^(ro|rw)\d+$/.test(target);
+}
+
+/** "ro2 pro · debater/architect", or undefined on an entry that carries no poster. */
+export function sayAuthor(entry: WorkerLogEntry): string | undefined {
+	if (!entry.from) return undefined;
+	if (!entry.label || entry.label === entry.from) return entry.from;
+	return `${entry.from} ${entry.label}`;
+}
+
+/** A room post rendered exactly like a worker's own "say" log entry. */
+export function sayEntry(post: RoomPost): WorkerLogEntry {
+	return { at: post.at, kind: "say", text: post.text, from: post.from, label: post.label };
+}
 
 /**
  * A pane is read at a glance, so the shape of a line carries the meaning: what
@@ -36,8 +57,13 @@ function formatLine(entry: WorkerLogEntry): string {
 	switch (entry.kind) {
 		case "progress":
 			return `» ${entry.text}`;
-		case "say":
-			return `→ ${entry.text}`;
+		case "say": {
+			// A room post is the content of a debate, and reads like the worker's
+			// own prose: an attribution line, then the whole body, never squeezed
+			// onto the arrow line.
+			const author = sayAuthor(entry);
+			return author ? `\n→ ${author}\n${entry.text}\n` : `→ ${entry.text}`;
+		}
 		case "status":
 			return `· ${entry.text}`;
 		case "error":
@@ -239,6 +265,107 @@ export async function watchWorker(options: WatchOptions): Promise<number> {
 				process.stdin.once("data", () => resolve());
 			}),
 			waitForArchive(target, options.workerId),
+		]);
+	}
+	return 0;
+}
+
+/** Which room this is and who is in it, mirroring the worker header. */
+function roomHeader(room: string, page: RoomLogPage): string[] {
+	const members = page.members.map((member) => `${member.id} ${member.name} (${member.backend})`).join(", ");
+	return [`room ${room}${members ? ` · members: ${members}` : ""}`, "─".repeat(60)];
+}
+
+/** Resolves when the room's batch has been archived, or the session goes away. */
+async function waitForRoomArchive(target: WatchTarget, room: string): Promise<void> {
+	for (;;) {
+		await new Promise((resolve) => setTimeout(resolve, ARCHIVE_POLL_MS));
+		let response: Awaited<ReturnType<typeof sendChannelRequest>>;
+		try {
+			response = await sendChannelRequest(target.address, {
+				type: "room-tail",
+				token: target.token,
+				room,
+				since: Number.MAX_SAFE_INTEGER,
+			});
+		} catch {
+			// The leader is gone; nothing left to watch.
+			return;
+		}
+		if (!response.ok) return;
+		if ((response.data as RoomLogPage | undefined)?.archived) return;
+	}
+}
+
+export interface WatchRoomOptions {
+	room: string;
+	sessionId?: string;
+	cwd?: string;
+	/** Where the session registry lives, for panes started without our env. */
+	agentDir?: string;
+	/** Read once and return, instead of following. */
+	once?: boolean;
+	/** Keep the view open after the room finishes. Defaults to true on a terminal. */
+	hold?: boolean;
+	write?: (line: string) => void;
+}
+
+/**
+ * One merged transcript for a whole room, so a person follows a debate in one
+ * place instead of interleaving its members' panes mentally. Every post
+ * renders the way a worker's own "say" does: attribution line, full body.
+ */
+export async function watchRoom(options: WatchRoomOptions): Promise<number> {
+	const write = options.write ?? ((line: string) => process.stdout.write(`${line}\n`));
+	const target = resolveTarget(options.sessionId, options.cwd, options.agentDir);
+	if (!target) {
+		write("No Neta session found. Start one with `neta`, or pass --session <id>.");
+		return 1;
+	}
+
+	let since = 0;
+	let introduced = false;
+	for (;;) {
+		const response = await sendChannelRequest(target.address, {
+			type: "room-tail",
+			token: target.token,
+			room: options.room,
+			since,
+		});
+		if (!response.ok) {
+			write(response.error);
+			return 1;
+		}
+		const page = response.data as RoomLogPage | undefined;
+		if (!page) {
+			write("The leader sent no room page; is this a current Neta session?");
+			return 1;
+		}
+		if (!introduced) {
+			for (const line of roomHeader(options.room, page)) write(line);
+			introduced = true;
+		}
+		for (const post of page.posts) write(formatLine(sayEntry(post)));
+		since = page.cursor;
+
+		if (page.done || options.once) {
+			if (page.done) write(`── room ${options.room} done ──`);
+			break;
+		}
+		await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+	}
+
+	// Like a finished worker's tab: the exchange stays readable until dismissed,
+	// and the view closes itself when the leader moves on to a new batch.
+	const hold = options.hold ?? (process.stdin.isTTY === true && !options.once);
+	if (hold) {
+		write("(enter to close)");
+		await Promise.race([
+			new Promise<void>((resolve) => {
+				process.stdin.resume();
+				process.stdin.once("data", () => resolve());
+			}),
+			waitForRoomArchive(target, options.room),
 		]);
 	}
 	return 0;

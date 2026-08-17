@@ -64,6 +64,8 @@ export type LeaderChannelRequest =
 	 * this is for extra readers — the pane watcher, a person in another terminal.
 	 */
 	| { type: "tail"; token: string; workerId: string; since?: number }
+	/** Read a room's merged transcript without consuming it; `tail` for a room. */
+	| { type: "room-tail"; token: string; room: string; since?: number }
 	/** Block until the listed workers are terminal or the timeout fires. */
 	| { type: "wait"; token: string; workerIds: string[]; timeoutMs?: number }
 	| { type: "send"; token: string; workerId: string; text: string }
@@ -78,6 +80,7 @@ export const LEADER_REQUEST_TYPES = new Set([
 	"status",
 	"log",
 	"tail",
+	"room-tail",
 	"wait",
 	"send",
 	"answer",

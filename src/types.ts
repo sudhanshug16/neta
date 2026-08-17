@@ -64,6 +64,10 @@ export interface WorkerLogEntry {
 	at: number;
 	kind: "progress" | "say" | "status" | "tool" | "text" | "thought" | "diff" | "error";
 	text: string;
+	/** On "say" entries: the poster's worker id, so a view can attribute the post. */
+	from?: string;
+	/** On "say" entries: the poster's display label (name and role/tier). */
+	label?: string;
 }
 
 /** A post in a room's shared transcript. */
@@ -90,6 +94,19 @@ export interface WorkerUsage {
 	contextSize?: number;
 	costAmount?: number;
 	costCurrency?: string;
+}
+
+/** A room's shared transcript, addressed by position like a worker's log page. */
+export interface RoomLogPage {
+	posts: RoomPost[];
+	/** Index to pass as `since` next time. */
+	cursor: number;
+	/** The room's members, summarized, so a watcher can say who is talking. */
+	members: WorkerSummary[];
+	/** Every member has reached a terminal state: the exchange is over. */
+	done: boolean;
+	/** The leader has moved on to a new batch; a view of this room can close. */
+	archived: boolean;
 }
 
 /** One line of a worker's log, addressed by its position so several readers can follow independently. */

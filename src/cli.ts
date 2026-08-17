@@ -28,8 +28,8 @@ import { LaunchError, launchLeader } from "./launch.ts";
 import { runControlPlane, runWorkerBridge } from "./mcp/run.ts";
 import { listBackendModels } from "./models.ts";
 import { listSessions } from "./session.ts";
-import { watchWorker } from "./watch.ts";
-import { watchWorkerTui } from "./watch-tui.ts";
+import { isWorkerId, watchRoom, watchWorker } from "./watch.ts";
+import { watchRoomTui, watchWorkerTui } from "./watch-tui.ts";
 
 const HELP = `${APP_NAME} ${VERSION} — a leader agent that delegates to worker agents.
 
@@ -44,7 +44,8 @@ const HELP = `${APP_NAME} ${VERSION} — a leader agent that delegates to worker
   ${APP_NAME} wait <id> [<id>...]       Block until the listed workers finish.
   ${APP_NAME} send <id> <message>       Send a follow-up instruction to a running worker.
   ${APP_NAME} answer <id> <text>        Answer a worker's pending question.
-  ${APP_NAME} watch <id>                Watch a worker and type to it (--plain for bare log lines).
+  ${APP_NAME} watch <id|room>           Watch a worker and type to it, or follow a
+                                        room's merged transcript (--plain for bare log lines).
   ${APP_NAME} log <id>                  Drain a worker's new log lines. This moves the
                                         leader's read cursor; to look in on a worker
                                         without stealing lines, use watch.
@@ -111,9 +112,9 @@ async function main(argv: string[]): Promise<void> {
 			await runGuard();
 			return;
 		case "watch": {
-			const workerId = args[1];
-			if (!workerId) {
-				console.error(`Usage: ${APP_NAME} watch <worker-id> [--session <id>] [--dir <neta-dir>] [--plain]`);
+			const targetId = args[1];
+			if (!targetId) {
+				console.error(`Usage: ${APP_NAME} watch <worker-id|room> [--session <id>] [--dir <neta-dir>] [--plain]`);
 				process.exitCode = 1;
 				return;
 			}
@@ -124,9 +125,15 @@ async function main(argv: string[]): Promise<void> {
 			// The interactive view needs a real terminal on both ends; piped
 			// output gets the plain line renderer, as does --plain by request.
 			const interactive = !args.includes("--plain") && process.stdin.isTTY === true && process.stdout.isTTY === true;
-			process.exitCode = interactive
-				? await watchWorkerTui({ workerId, sessionId, agentDir })
-				: await watchWorker({ workerId, sessionId, agentDir });
+			if (isWorkerId(targetId)) {
+				process.exitCode = interactive
+					? await watchWorkerTui({ workerId: targetId, sessionId, agentDir })
+					: await watchWorker({ workerId: targetId, sessionId, agentDir });
+			} else {
+				process.exitCode = interactive
+					? await watchRoomTui({ room: targetId, sessionId, agentDir })
+					: await watchRoom({ room: targetId, sessionId, agentDir });
+			}
 			return;
 		}
 		case "attach": {

@@ -27,6 +27,7 @@ import {
 	formatUsage,
 	isTerminalState,
 	type Note,
+	type RoomLogPage,
 	type RoomPost,
 	type SpawnRequest,
 	TIERS,
@@ -112,6 +113,8 @@ interface WorkerRecord {
 /** Opens a pane per worker, when a multiplexer is running. */
 export interface WorkerPaneHost {
 	open(worker: WorkerSummary): { opened: true } | { opened: false; reason: string };
+	/** Opens the room's merged view; one pane per room, beside its members'. */
+	openRoom(room: string): { opened: true } | { opened: false; reason: string };
 }
 
 export type TransportFactory = (options: TransportOptions) => WorkerTransportDriver;
@@ -188,6 +191,8 @@ export class WorkerManager implements ChannelHandler {
 	private lastWriterBackend: string | undefined;
 	/** Per-room debater backend assignments, for room-scoped vendor mixing. */
 	private readonly roomDebaterBackends = new Map<string, string[]>();
+	/** Rooms whose merged-view pane is already open, so each opens once. */
+	private readonly roomPanesOpened = new Set<string>();
 	/** Authorizes leader channel commands. Given only to the leader's own process. */
 	readonly leaderToken: string;
 	/** Open-notes ledger. */
@@ -240,6 +245,9 @@ export class WorkerManager implements ChannelHandler {
 		const existing = [...this.workers.values()];
 		if (existing.length > 0 && existing.every((record) => isTerminalState(record.state))) {
 			for (const record of existing) record.archived = true;
+			// Room views close with the batch they belonged to; a room joined again
+			// later gets a fresh pane.
+			this.roomPanesOpened.clear();
 		}
 
 		const backendName = this.computeBackendAssignment(request, {
@@ -485,6 +493,26 @@ export class WorkerManager implements ChannelHandler {
 		return tail && tail > 0 ? posts.slice(-tail) : posts;
 	}
 
+	/**
+	 * A room's posts after `since`, for the room watch view. Like tailLog,
+	 * reading never consumes: members and leader still see the whole transcript.
+	 */
+	tailRoom(room: string, since = 0): RoomLogPage {
+		const posts = this.rooms.get(room);
+		if (!posts) {
+			const known = [...this.rooms.keys()].join(", ") || "none";
+			throw new Error(`Unknown room "${room}". Rooms: ${known}.`);
+		}
+		const members = [...this.workers.values()].filter((record) => record.room === room);
+		return {
+			posts: posts.slice(Math.max(0, since)),
+			cursor: posts.length,
+			members: members.map((record) => this.summarize(record)),
+			done: members.length > 0 && members.every((record) => isTerminalState(record.state)),
+			archived: members.length > 0 && members.every((record) => record.archived === true),
+		};
+	}
+
 	postToRoom(room: string, from: string, label: string, text: string): void {
 		this.ensureRoom(room).push({ at: Date.now(), from, label, text });
 		for (const watcher of [...(this.roomWatchers.get(room) ?? [])]) watcher();
@@ -677,8 +705,14 @@ export class WorkerManager implements ChannelHandler {
 		const record = this.workers.get(workerId);
 		if (!record) return { ok: false, error: `Unknown worker ${workerId}.` };
 		if (!record.room) return { ok: false, error: "You are not in a room." };
-		this.postToRoom(record.room, workerId, `${record.role}/${record.tier}`, text);
-		this.appendLog(record, "say", text);
+		// The name is what tells two debaters of the same role and tier apart, so
+		// the label carries it — in the room transcript and in the worker's own log.
+		const label =
+			record.name === record.role
+				? `${record.role}/${record.tier}`
+				: `${record.name} · ${record.role}/${record.tier}`;
+		this.postToRoom(record.room, workerId, label, text);
+		this.appendLog(record, "say", text, { from: workerId, label });
 		return { ok: true };
 	}
 
@@ -782,6 +816,14 @@ export class WorkerManager implements ChannelHandler {
 					return {
 						ok: true,
 						text: page.entries.map((entry) => `[${entry.kind}] ${entry.text}`).join("\n"),
+						data: page,
+					};
+				}
+				case "room-tail": {
+					const page = this.tailRoom(request.room, request.since);
+					return {
+						ok: true,
+						text: page.posts.map((post) => `[${post.label}] ${post.text}`).join("\n"),
 						data: page,
 					};
 				}
@@ -930,8 +972,13 @@ export class WorkerManager implements ChannelHandler {
 		return posts;
 	}
 
-	private appendLog(record: WorkerRecord, kind: WorkerLogEntry["kind"], text: string): void {
-		record.log.push({ at: Date.now(), kind, text });
+	private appendLog(
+		record: WorkerRecord,
+		kind: WorkerLogEntry["kind"],
+		text: string,
+		attribution?: { from: string; label: string },
+	): void {
+		record.log.push({ at: Date.now(), kind, text, ...attribution });
 		if (record.log.length > MAX_LOG_ENTRIES) {
 			const dropped = record.log.length - MAX_LOG_ENTRIES;
 			record.log.splice(0, dropped);
@@ -1238,9 +1285,20 @@ export class WorkerManager implements ChannelHandler {
 	private openWorkerView(record: WorkerRecord): void {
 		const outcome = this.options.panes?.open(this.summarize(record));
 		const reason = outcome && !outcome.opened ? outcome.reason : this.options.headlessReason;
-		if (!reason) return;
-		record.headlessReason = reason;
-		this.appendLog(record, "status", `Worker view: headless — ${reason}`);
+		if (reason) {
+			record.headlessReason = reason;
+			this.appendLog(record, "status", `Worker view: headless — ${reason}`);
+		}
+		// The room's own merged view opens once, beside its first member's pane.
+		// It closes itself the way a worker pane does: the watch process holds
+		// after the last member finishes and exits when the batch is archived.
+		if (record.room && this.options.panes && !this.roomPanesOpened.has(record.room)) {
+			this.roomPanesOpened.add(record.room);
+			const roomOutcome = this.options.panes.openRoom(record.room);
+			if (!roomOutcome.opened) {
+				this.appendLog(record, "status", `Room view: headless — ${roomOutcome.reason}`);
+			}
+		}
 	}
 
 	private summarize(record: WorkerRecord): WorkerSummary {

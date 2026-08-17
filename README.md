@@ -178,6 +178,7 @@ neta workers               what is running, and what it has cost
 neta spawn ...             start a worker from your terminal
 neta wait ro1 ro2          block until those workers finish
 neta watch ro1             watch one worker live, and type to talk to it
+neta watch auth-debate     follow a room's merged transcript live
 neta attach ro1            open that worker in its own CLI and take over
 neta log ro1               its new lines since you last looked
 neta send rw2 <message>    give a worker more instructions

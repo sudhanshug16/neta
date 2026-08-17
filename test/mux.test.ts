@@ -295,6 +295,36 @@ describe("worker views", () => {
 		expect(calls[0].args).toEqual(["/opt/cli.js", "watch", "ro1", "--session", "s7", "--dir", "/home/u/.neta"]);
 	});
 
+	// The room's own view runs the same watch command; the tab is titled with
+	// the room's name, clamped like every tab title.
+	it("opens the room view with the room's name as the tab title", () => {
+		const { mux, calls } = recordingMux();
+		const host = createPaneHost(
+			mux,
+			{ command: "node", prefixArgs: ["/opt/cli.js"] },
+			"s7",
+			"/repo",
+			"/home/u/.neta",
+			"neta-s7",
+		);
+
+		host?.openRoom("auth-debate");
+		host?.openRoom("a-room-name-far-too-long-for-a-tab");
+
+		expect(calls[0].title).toBe("auth-debate");
+		expect(calls[0].args).toEqual([
+			"/opt/cli.js",
+			"watch",
+			"auth-debate",
+			"--session",
+			"s7",
+			"--dir",
+			"/home/u/.neta",
+		]);
+		expect(calls[1].title.length).toBeLessThanOrEqual(22);
+		expect(calls[1].title).toEndWith("…");
+	});
+
 	it("reports why a view could not open rather than losing it", () => {
 		const mux: MuxAdapter = {
 			id: "tmux",
