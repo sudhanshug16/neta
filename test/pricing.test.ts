@@ -61,6 +61,11 @@ describe("estimateCost", () => {
 		expect(cost).toBeCloseTo(10.5, 2);
 	});
 
+	it("retains historical Fable pricing for old runs", () => {
+		const usage: WorkerUsage = { inputTokens: 1_000_000, outputTokens: 500_000 };
+		expect(estimateCost("claude-fable-5[1m]", usage)).toBe(35);
+	});
+
 	it("fuzzy matches when model id contains table key as substring", () => {
 		const usage: WorkerUsage = { inputTokens: 1_000_000, outputTokens: 500_000 };
 		// "gpt-4o-mini-2024-07-18-custom" contains "gpt-4o-mini" which should match

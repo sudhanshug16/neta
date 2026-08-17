@@ -152,7 +152,7 @@ function readSelect(option: acp.SessionConfigOption | undefined): ConfigSelectio
 	};
 }
 
-/** Codex puts its thought level in the configured model id, while ACP exposes it separately. */
+/** Neta appends thought level to a model id, while ACP exposes it separately. */
 function splitModelAndThoughtLevel(model: string): { model: string; thoughtLevel?: string } {
 	const match = /^(.*)\[([^\]]+)]$/.exec(model);
 	return match ? { model: match[1], thoughtLevel: match[2] } : { model };

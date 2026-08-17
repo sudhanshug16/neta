@@ -45,6 +45,7 @@ export const PRICING_SNAPSHOT = {
 			input: 5,
 			output: 25,
 		},
+		// Historical cost estimation only. Neta's selection policy rejects Fable.
 		"claude-fable-5": {
 			input: 10,
 			output: 50,

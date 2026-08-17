@@ -83,6 +83,22 @@ export interface NetaSettings {
 	backends?: Record<string, NetaBackendSettings>;
 }
 
+/** Claude Fable is historical-only: costs remain known, but Neta must never select it. */
+const CLAUDE_FABLE_MODEL = /^(?:anthropic\/)?(?:claude-)?fable(?:[-.]\d+)*(?:-\d+m|\[\d+m\])?(?:\[[^\]]+\])?$/i;
+export const CLAUDE_OPUS_MAX = "opus[1m][max]";
+
+export function isForbiddenClaudeModel(model: string): boolean {
+	return CLAUDE_FABLE_MODEL.test(model.trim());
+}
+
+export function assertClaudeModelAllowed(backend: string, model: string | undefined, field: string): void {
+	if (backend === "claude" && model && isForbiddenClaudeModel(model)) {
+		throw new Error(
+			`Claude Fable model "${model}" is disabled by Neta policy at ${field}. Use ${CLAUDE_OPUS_MAX} or a lower Claude tier.`,
+		);
+	}
+}
+
 /**
  * Shipped backend launchers.
  *
@@ -106,7 +122,7 @@ export const DEFAULT_BACKENDS: Record<string, NetaBackendSettings> = {
 			apprentice: "haiku",
 			journeyman: "sonnet",
 			expert: "opus[1m]",
-			architect: "claude-fable-5[1m]",
+			architect: CLAUDE_OPUS_MAX,
 		},
 		// A worker is an ordinary Claude Code session, filed under the same id.
 		resume: { command: "claude", args: ["--resume", "{session}"] },
@@ -155,6 +171,7 @@ export class NetaConfig {
 	readonly mux: Required<NetaMuxSettings>;
 
 	constructor(settings?: NetaSettings) {
+		assertSettingsClaudePolicy(settings ?? {});
 		const normalized = normalizeSettings(settings ?? {});
 		this.leader = { backend: normalized.leader?.backend, strictMcp: normalized.leader?.strictMcp ?? false };
 		this.mux = { mode: normalized.mux?.mode ?? "auto", panes: normalized.mux?.panes ?? true };
@@ -250,6 +267,7 @@ export class NetaConfig {
 		// the backend's own idea of what this tier means still applies.
 		const tierModel = mapping?.backend && backendName !== mapping.backend ? undefined : mapping?.model;
 		const model = tierModel ?? backend.tierModels?.[tier];
+		assertClaudeModelAllowed(backendName, model, `resolved ${tier} model`);
 		const args = [...(backend.args ?? [])];
 		const env = { ...(backend.env ?? {}) };
 		if (model) {
@@ -259,6 +277,17 @@ export class NetaConfig {
 		args.push(...((writer ? backend.writerArgs : backend.readOnlyArgs) ?? []));
 
 		return { name: backendName, command: backend.command, args, model, env };
+	}
+}
+
+function assertSettingsClaudePolicy(settings: NetaSettings): void {
+	for (const [tier, setting] of Object.entries(settings.tiers ?? {})) {
+		if (setting.model && (setting.backend === undefined || setting.backend === "claude")) {
+			assertClaudeModelAllowed("claude", setting.model, `tiers.${tier}.model`);
+		}
+	}
+	for (const [tier, model] of Object.entries(settings.backends?.claude?.tierModels ?? {})) {
+		assertClaudeModelAllowed("claude", model, `backends.claude.tierModels.${tier}`);
 	}
 }
 
@@ -402,7 +431,7 @@ function readSettingsFile(path: string): NetaSettings {
 	if (!existsSync(path)) return {};
 	try {
 		const parsed: unknown = JSON.parse(readFileSync(path, "utf-8"));
-		if (validSettings(parsed)) return parsed;
+		if (validSettings(parsed)) return quarantineForbiddenClaudeModels(parsed, path);
 	} catch {
 		// The warning below names the file while keeping leader startup resilient.
 	}
@@ -410,14 +439,43 @@ function readSettingsFile(path: string): NetaSettings {
 	return {};
 }
 
+function quarantineForbiddenClaudeModels(settings: NetaSettings, path: string): NetaSettings {
+	const quarantined = structuredClone(settings);
+	for (const [tier, setting] of Object.entries(quarantined.tiers ?? {})) {
+		if (
+			setting.model &&
+			setting.backend !== "opencode" &&
+			setting.backend !== "codex" &&
+			isForbiddenClaudeModel(setting.model)
+		) {
+			console.error(
+				`Warning: blocked forbidden Claude Fable model "${setting.model}" in ${path} at tiers.${tier}.model; using the shipped safe Claude tier model.`,
+			);
+			delete setting.model;
+		}
+	}
+	const tierModels = quarantined.backends?.claude?.tierModels;
+	for (const [tier, model] of Object.entries(tierModels ?? {})) {
+		if (isForbiddenClaudeModel(model)) {
+			console.error(
+				`Warning: blocked forbidden Claude Fable model "${model}" in ${path} at backends.claude.tierModels.${tier}; using the shipped safe Claude tier model.`,
+			);
+			delete tierModels?.[tier as TierSettingsKey];
+		}
+	}
+	return quarantined;
+}
+
 /**
  * User settings, then project settings on top. Tiers and backend entries merge
  * independently, so a project can override one field without losing siblings.
  */
 export function loadNetaSettings(cwd: string, agentDir: string = getAgentDir()): NetaSettings {
-	const user = normalizeSettings(readSettingsFile(join(agentDir, "settings.json")));
-	const project = normalizeSettings(readSettingsFile(join(cwd, CONFIG_DIR_NAME, "settings.json")));
-	return {
+	const userPath = join(agentDir, "settings.json");
+	const projectPath = join(cwd, CONFIG_DIR_NAME, "settings.json");
+	const user = normalizeSettings(readSettingsFile(userPath));
+	const project = normalizeSettings(readSettingsFile(projectPath));
+	const merged: NetaSettings = {
 		leader: { ...user.leader, ...project.leader },
 		mux: { ...user.mux, ...project.mux },
 		tiers: Object.fromEntries(
@@ -432,6 +490,15 @@ export function loadNetaSettings(cwd: string, agentDir: string = getAgentDir()):
 			),
 		),
 	};
+	for (const [tier, setting] of Object.entries(merged.tiers ?? {})) {
+		if (setting.backend !== "claude" || !setting.model || !isForbiddenClaudeModel(setting.model)) continue;
+		const sourcePath = project.tiers?.[tier as Tier]?.model ? projectPath : userPath;
+		console.error(
+			`Warning: blocked forbidden Claude Fable model "${setting.model}" in ${sourcePath} at tiers.${tier}.model after settings merge; using the shipped safe Claude tier model.`,
+		);
+		delete setting.model;
+	}
+	return merged;
 }
 
 /** Everything the process needs from settings, in one call. */
@@ -448,6 +515,7 @@ export function loadConfig(cwd: string, agentDir: string = getAgentDir()): NetaC
  * are not preserved, as the settings files are JSON, not JSONC.
  */
 export async function persistTierOverride(cwd: string, tier: Tier, override: NetaTierSettings): Promise<void> {
+	if (override.model) assertClaudeModelAllowed(override.backend ?? "claude", override.model, `tiers.${tier}.model`);
 	const settingsDir = join(cwd, CONFIG_DIR_NAME);
 	const settingsPath = join(settingsDir, "settings.json");
 

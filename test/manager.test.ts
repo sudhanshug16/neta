@@ -332,6 +332,45 @@ describe("WorkerManager", () => {
 		expect(transports[0].options.model).toBe("opus[1m]");
 	});
 
+	it("automatically assigns Claude architect work to exact Opus Max", async () => {
+		await manager.spawn({ role: "scout", tier: "architect", task: "design it" });
+
+		expect(transports[0].options.model).toBe("opus[1m][max]");
+	});
+
+	it("fails closed before transport creation if a forbidden Claude model escapes settings validation", async () => {
+		const unsafeConfig = fixtureBackendConfig();
+		unsafeConfig.resolve = () => ({
+			name: "claude",
+			command: process.execPath,
+			args: [],
+			model: "claude-fable-5[1m]",
+			env: {},
+		});
+		const unsafeManager = new WorkerManager({
+			cwd: process.cwd(),
+			agentDir: "/nonexistent-agent-dir",
+			config: unsafeConfig,
+			channelAddress: "/tmp/neta-policy-test.sock",
+			onEvent: () => {},
+			createTransport: (options) => {
+				const transport = new FakeTransport(options);
+				transports.push(transport);
+				return transport;
+			},
+		});
+
+		try {
+			expect(unsafeManager.spawn({ role: "scout", tier: "architect", task: "do not run" })).rejects.toThrow(
+				/Claude Fable model.*disabled.*runtime architect assignment/,
+			);
+			expect(transports).toHaveLength(0);
+		} finally {
+			await unsafeManager.dispose();
+			rmSync("/tmp/neta-policy-test.sock", { force: true });
+		}
+	});
+
 	it("surfaces the negotiated model, mode and bridge in the worker summary", async () => {
 		const summary = await manager.spawn({ role: "scout", tier: "expert", task: "look" });
 		transports[0].options.events.session({

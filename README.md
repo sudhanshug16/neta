@@ -103,6 +103,8 @@ which one you logged into — so its ids are provider-qualified
 (`"expert": "openai/gpt-5.4"`); [docs/settings.md](docs/settings.md) has the
 full example. `"disabled": true` removes a backend from assignment and leader
 selection. `neta models [backend]` lists the ids, straight from the backend.
+Claude listings omit Fable because Neta does not allow selecting it; old Fable
+usage remains cost-estimable for historical reports.
 
 ## The leader's tools
 

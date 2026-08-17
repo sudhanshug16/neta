@@ -22,7 +22,7 @@ broken settings file should not stop you leading a session.
     "apprentice": { "backend": "claude", "model": "haiku" },
     "journeyman": { "backend": "claude", "model": "sonnet" },
     "expert": { "backend": "claude", "model": "opus[1m]" },
-    "architect":  { "backend": "claude", "model": "claude-fable-5[1m]" }
+    "architect":  { "backend": "claude", "model": "opus[1m][max]" }
   },
   "backends": {
     "claude":   { "command": "npx", "args": ["-y", "@agentclientprotocol/claude-agent-acp@0.68.0"], "modelEnv": "ANTHROPIC_MODEL" },
@@ -79,11 +79,13 @@ Shipped mappings:
 | apprentice | `haiku` | `gpt-5.6-luna[high]` |
 | journeyman | `sonnet` | `gpt-5.6-terra[medium]` |
 | expert | `opus[1m]` | `gpt-5.6-sol[medium]` |
-| architect | `claude-fable-5[1m]` | `gpt-5.6-sol[max]` |
+| architect | `opus[1m][max]` | `gpt-5.6-sol[max]` |
 
-Codex folds the reasoning level into the model id, so thinking depth is part of
-the choice: `gpt-5.6-sol[max]` is the same model thinking harder. Naming a
-family without a level (`gpt-5.6-sol`) takes that family's first level.
+Neta's composite notation names the exact model and thought level. For Claude,
+`opus[1m][max]` selects the advertised `opus[1m]` model and its separate `max`
+effort option. For Codex, `gpt-5.6-sol[max]` does the same. Claude Fable is not
+selectable: new overrides are rejected, while old settings are warned about
+and fall back in memory without being rewritten during load.
 
 Run **`neta models`** to see what a backend actually offers — the ids come from
 the backend itself, so they stay right when a vendor adds a model. OpenCode
@@ -114,9 +116,9 @@ When an old and new key both appear, the new key wins.
 
 Neta selects the model over ACP, which is why this works the same on every
 backend: `session/set_config_option` where the bridge supports it, falling
-back to the legacy `session/set_model` extension where it does not. Codex's
-composite ids are split — `gpt-5.6-sol[max]` becomes the model plus a
-thought-level option, selected separately. Selection is negotiated, not
+back to the legacy `session/set_model` extension where it does not.
+Composite ids are split from the right — `opus[1m][max]` becomes exact model
+`opus[1m]` plus thought level `max`, selected separately. Selection is negotiated, not
 assumed: a model the backend does not offer, or a selection call that fails,
 is loudly logged in the worker's log and the worker runs on the backend's
 default — and listings show what actually ran, not what was asked for. Neta

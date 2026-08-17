@@ -22,7 +22,7 @@ import { NETA_SCRATCH_ENV, NETA_SOCKET_ENV, NETA_WORKER_ENV, NETA_WORKER_TOKEN_E
 import type { ChannelHandler } from "../channel/server.ts";
 import { APP_NAME } from "../config.ts";
 import { loadRoleText, roleNames, workingAgreement } from "../prompts/roles.ts";
-import type { NetaConfig, ResolvedBackend } from "../settings.ts";
+import { assertClaudeModelAllowed, type NetaConfig, type ResolvedBackend } from "../settings.ts";
 import {
 	displayModel,
 	formatUsage,
@@ -266,6 +266,7 @@ export class WorkerManager implements ChannelHandler {
 			roomDebaterBackends: this.roomDebaterBackends,
 		});
 		const backend = this.options.config.resolve(request.tier, backendName, writer);
+		assertClaudeModelAllowed(backend.name, backend.model, `runtime ${request.tier} assignment`);
 		const id = `${writer ? "rw" : "ro"}${++this.counter}`;
 		const reservedWriterSlot = writer && !this.activeWriter;
 		if (reservedWriterSlot) this.activeWriter = id;
@@ -1027,6 +1028,9 @@ export class WorkerManager implements ChannelHandler {
 		runtimeEnv: Record<string, string>,
 		systemPrompt: string,
 	): WorkerTransportDriver {
+		// Last guard before ACP process creation. Settings validation is defense in depth;
+		// this is the boundary that guarantees a forbidden model cannot reach a provider.
+		assertClaudeModelAllowed(backend.name, backend.model, `runtime worker ${record.id}`);
 		const backendPath = backend.env.PATH;
 		const runtimePath = runtimeEnv.PATH;
 		return this.createTransport({
@@ -1279,6 +1283,7 @@ export class WorkerManager implements ChannelHandler {
 
 		// Prepare backend and transport
 		const backend = this.options.config.resolve(record.tier, record.backend, true);
+		assertClaudeModelAllowed(backend.name, backend.model, `runtime ${record.tier} assignment`);
 		const runtimeEnv = (await this.options.prepareEnv?.()) ?? {};
 		if (this.disposed || record.state !== "queued") return;
 		const roleText = loadRoleText(record.role, this.options.cwd, this.options.agentDir);

@@ -214,6 +214,18 @@ describe("leader MCP tools", () => {
 		expect(transports).toHaveLength(0);
 	});
 
+	it("rejects a Fable model through neta_remember without writing settings", async () => {
+		const result = await call("neta_remember", {
+			tier: "architect",
+			backend: "claude",
+			model: "claude-fable-5[1m]",
+		});
+
+		expect(result.isError).toBe(true);
+		expect(bodyOf(result)).toContain("Claude Fable model");
+		expect(bodyOf(result)).toContain("opus[1m][max]");
+	});
+
 	// This is the wake-up: an idle leader ends its turn in neta_wait and comes
 	// back with the worker's own words.
 	it("blocks in neta_wait until the worker finishes, then reports its summary", async () => {

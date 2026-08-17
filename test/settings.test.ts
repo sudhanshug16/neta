@@ -14,7 +14,7 @@ describe("NetaConfig", () => {
 		expect(config.resolve("apprentice", "claude")).toMatchObject({ name: "claude", model: "haiku" });
 		expect(config.resolve("journeyman", "claude")).toMatchObject({ name: "claude", model: "sonnet" });
 		expect(config.resolve("expert", "claude")).toMatchObject({ name: "claude", model: "opus[1m]" });
-		expect(config.resolve("architect", "claude")).toMatchObject({ name: "claude", model: "claude-fable-5[1m]" });
+		expect(config.resolve("architect", "claude")).toMatchObject({ name: "claude", model: "opus[1m][max]" });
 		expect(config.resolve("apprentice", "codex")).toMatchObject({ name: "codex", model: "gpt-5.6-luna[high]" });
 		expect(config.resolve("journeyman", "codex")).toMatchObject({ name: "codex", model: "gpt-5.6-terra[medium]" });
 		expect(config.resolve("expert", "codex")).toMatchObject({ name: "codex", model: "gpt-5.6-sol[medium]" });
@@ -34,6 +34,31 @@ describe("NetaConfig", () => {
 		const config = new NetaConfig({ tiers: { journeyman: { backend: "codex", model: "gpt-5.4-mini[low]" } } });
 
 		expect(config.resolve("journeyman", "codex").model).toBe("gpt-5.4-mini[low]");
+	});
+
+	it("rejects new Claude Fable tier and backend model overrides without substring false positives", () => {
+		expect(() => new NetaConfig({ tiers: { architect: { backend: "claude", model: "fable" } } })).toThrow(
+			/Claude Fable model "fable" is disabled.*tiers\.architect\.model.*opus\[1m\]\[max\]/,
+		);
+		expect(
+			() =>
+				new NetaConfig({
+					backends: { claude: { tierModels: { architect: "claude-fable-5[1m]" } } },
+				}),
+		).toThrow(/backends\.claude\.tierModels\.architect/);
+
+		expect(
+			new NetaConfig({ tiers: { architect: { backend: "claude", model: "fablefish" } } }).resolve(
+				"architect",
+				"claude",
+			).model,
+		).toBe("fablefish");
+		expect(
+			new NetaConfig({ tiers: { architect: { backend: "opencode", model: "fable" } } }).resolve(
+				"architect",
+				"opencode",
+			).model,
+		).toBe("fable");
 	});
 
 	it("substitutes the model into backend arguments for backends that take a flag", () => {
@@ -264,6 +289,72 @@ describe("loadNetaSettings", () => {
 		}
 	});
 
+	it("warns and quarantines old user and project Fable values without rewriting either file", () => {
+		const agentDir = scratch();
+		const cwd = scratch();
+		const userPath = join(agentDir, "settings.json");
+		const projectDir = join(cwd, CONFIG_DIR_NAME);
+		const projectPath = join(projectDir, "settings.json");
+		const userContents = JSON.stringify({
+			leader: { strictMcp: true },
+			tiers: { architect: { backend: "claude", model: "fable" } },
+		});
+		const projectContents = JSON.stringify({
+			mux: { panes: false },
+			backends: { claude: { env: { SAFE: "yes" }, tierModels: { expert: "claude-fable-5[1m]" } } },
+		});
+		writeFileSync(userPath, userContents);
+		mkdirSync(projectDir);
+		writeFileSync(projectPath, projectContents);
+		const error = spyOn(console, "error").mockImplementation(() => {});
+
+		try {
+			const settings = loadNetaSettings(cwd, agentDir);
+			const config = new NetaConfig(settings);
+
+			expect(error).toHaveBeenCalledWith(expect.stringContaining(`${userPath} at tiers.architect.model`));
+			expect(error).toHaveBeenCalledWith(
+				expect.stringContaining(`${projectPath} at backends.claude.tierModels.expert`),
+			);
+			expect(config.resolve("architect", "claude").model).toBe("opus[1m][max]");
+			expect(config.resolve("expert", "claude").model).toBe("opus[1m]");
+			expect(settings.leader?.strictMcp).toBe(true);
+			expect(settings.mux?.panes).toBe(false);
+			expect(settings.backends?.claude?.env).toEqual({ SAFE: "yes" });
+			expect(readFileSync(userPath, "utf-8")).toBe(userContents);
+			expect(readFileSync(projectPath, "utf-8")).toBe(projectContents);
+		} finally {
+			error.mockRestore();
+		}
+	});
+
+	it("quarantines a Fable value that becomes Claude-only after user and project settings merge", () => {
+		const agentDir = scratch();
+		const cwd = scratch();
+		const userPath = join(agentDir, "settings.json");
+		writeFileSync(
+			userPath,
+			JSON.stringify({ tiers: { architect: { backend: "opencode", model: "anthropic/claude-fable-5" } } }),
+		);
+		mkdirSync(join(cwd, CONFIG_DIR_NAME));
+		writeFileSync(
+			join(cwd, CONFIG_DIR_NAME, "settings.json"),
+			JSON.stringify({ tiers: { architect: { backend: "claude" } } }),
+		);
+		const error = spyOn(console, "error").mockImplementation(() => {});
+
+		try {
+			const settings = loadNetaSettings(cwd, agentDir);
+			expect(settings.tiers?.architect).toEqual({ backend: "claude" });
+			expect(new NetaConfig(settings).resolve("architect", "claude").model).toBe("opus[1m][max]");
+			expect(error).toHaveBeenCalledWith(
+				expect.stringContaining(`${userPath} at tiers.architect.model after settings merge`),
+			);
+		} finally {
+			error.mockRestore();
+		}
+	});
+
 	it("persists a tier override to .neta/settings.json without clobbering other tiers", async () => {
 		const cwd = scratch();
 		mkdirSync(join(cwd, CONFIG_DIR_NAME));
@@ -289,5 +380,38 @@ describe("loadNetaSettings", () => {
 		expect(existsSync(join(cwd, CONFIG_DIR_NAME))).toBe(true);
 		const settings = JSON.parse(readFileSync(join(cwd, CONFIG_DIR_NAME, "settings.json"), "utf-8"));
 		expect(settings.tiers).toEqual({ architect: { backend: "claude", model: "opus" } });
+	});
+
+	it("rejects persisting a new Claude Fable override before writing", async () => {
+		const cwd = scratch();
+
+		expect(persistTierOverride(cwd, "architect", { backend: "claude", model: "claude-fable-5[1m]" })).rejects.toThrow(
+			/Claude Fable model.*disabled.*tiers\.architect\.model/,
+		);
+		expect(existsSync(join(cwd, CONFIG_DIR_NAME, "settings.json"))).toBe(false);
+	});
+
+	it("drops a quarantined Fable value when persisting another setting and preserves unrelated keys", async () => {
+		const cwd = scratch();
+		const settingsDir = join(cwd, CONFIG_DIR_NAME);
+		const settingsPath = join(settingsDir, "settings.json");
+		mkdirSync(settingsDir);
+		writeFileSync(
+			settingsPath,
+			JSON.stringify({ mux: { panes: false }, tiers: { architect: { backend: "claude", model: "fable" } } }),
+		);
+		const error = spyOn(console, "error").mockImplementation(() => {});
+
+		try {
+			await persistTierOverride(cwd, "expert", { backend: "codex" });
+			const updated = JSON.parse(readFileSync(settingsPath, "utf-8"));
+			expect(updated).toEqual({
+				mux: { panes: false },
+				tiers: { architect: { backend: "claude" }, expert: { backend: "codex" } },
+			});
+			expect(error).toHaveBeenCalledWith(expect.stringContaining(`${settingsPath} at tiers.architect.model`));
+		} finally {
+			error.mockRestore();
+		}
 	});
 });

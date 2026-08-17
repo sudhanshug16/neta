@@ -17,8 +17,8 @@ export function estimateCost(modelId: string | undefined, usage: WorkerUsage): n
 	if (!modelId) return undefined;
 	if (usage.inputTokens === undefined || usage.outputTokens === undefined) return undefined;
 
-	// Normalize: lowercase and strip bracket suffixes like "[high]"
-	const normalized = modelId.toLowerCase().replace(/\[[^\]]+\]$/, "");
+	// Normalize: lowercase and strip one or more selection suffixes like "[1m][max]".
+	const normalized = modelId.toLowerCase().replace(/(?:\[[^\]]+\])+$/, "");
 
 	// Look up pricing across both providers
 	const allPricing: Record<string, { input: number; output: number }> = {

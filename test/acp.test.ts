@@ -286,6 +286,16 @@ describe("AcpWorkerTransport", () => {
 		}
 	});
 
+	it("selects the exact Claude Opus 1M model and separate Max effort", async () => {
+		const transport = createTransport(false, [], [], ["--config-options"], {}, "opus[1m][max]");
+		await transport.start();
+
+		expect(sessionReports.at(-1)).toMatchObject({
+			model: "Claude Opus 1M [Max]",
+			modelId: "opus[1m][max]",
+		});
+	});
+
 	it("tracks a mode the backend switches mid-session", async () => {
 		const transport = createTransport(false, [], [], ["--config-options"]);
 		await transport.start();
