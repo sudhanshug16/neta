@@ -38,6 +38,10 @@ export interface LeaderLaunchContext {
 	/** Native mux locators, needed when a vendor clears the MCP child's environment. */
 	tmux?: string;
 	zellij?: string;
+	zellijSessionName?: string;
+	zellijPaneId?: string;
+	/** Session-private handoff written after a fresh Zellij assigns the leader pane. */
+	zellijIdentityFile?: string;
 }
 
 export interface LeaderLaunch {
@@ -79,6 +83,9 @@ export function controlPlaneEnv(context: LeaderLaunchContext): Record<string, st
 		...(context.muxSessionName ? { NETA_MUX_SESSION_NAME: context.muxSessionName } : {}),
 		...(context.tmux ? { TMUX: context.tmux } : {}),
 		...(context.zellij ? { ZELLIJ: context.zellij } : {}),
+		...(context.zellijSessionName ? { ZELLIJ_SESSION_NAME: context.zellijSessionName } : {}),
+		...(context.zellijPaneId ? { ZELLIJ_PANE_ID: context.zellijPaneId } : {}),
+		...(context.zellijIdentityFile ? { NETA_ZELLIJ_IDENTITY_FILE: context.zellijIdentityFile } : {}),
 	};
 }
 

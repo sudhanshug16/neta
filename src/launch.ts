@@ -24,6 +24,7 @@ import { resolveSelfInvocation } from "./cli-shim.ts";
 import { APP_NAME, getAgentDir } from "./config.ts";
 import { type DetectedLeaderBackend, detectLeaderBackends, LEADER_BACKENDS } from "./detect.ts";
 import { attachSessionSpec, selectMux } from "./mux/index.ts";
+import { zellijIdentityPath } from "./mux/zellij.ts";
 import { loadCharter } from "./prompts/charter.ts";
 import { materializeFlavors } from "./prompts/flavors.ts";
 import { buildLeaderPrompt } from "./prompts/leader.ts";
@@ -196,8 +197,17 @@ export async function launchLeader(options: LaunchOptions): Promise<number> {
 		const mux = selectMux(options.mux ? normalizeMux(options.mux) : config.mux.mode);
 		const showing = config.mux.panes && mux.id !== "none";
 		const muxSessionName = showing ? (mux.sessionName() ?? `neta-${sessionId}`) : undefined;
-		const tmux = mux.id === "tmux" ? process.env.TMUX : undefined;
-		const zellij = mux.id === "zellij" ? (process.env.ZELLIJ ?? muxSessionName) : undefined;
+		// Only carry native identity that exists in this launch environment. These
+		// values are enough for the manager to address the caller's mux, without
+		// copying the rest of the ambient environment into an MCP child. In
+		// particular, never invent a pane id for a newly-created session: Zellij
+		// assigns it after this point, and acting on a guessed identity is worse than
+		// failing closed.
+		const tmux = mux.id === "tmux" ? process.env.TMUX || undefined : undefined;
+		const zellij = mux.id === "zellij" ? process.env.ZELLIJ || undefined : undefined;
+		const zellijSessionName = mux.id === "zellij" ? process.env.ZELLIJ_SESSION_NAME || undefined : undefined;
+		const zellijPaneId = mux.id === "zellij" ? process.env.ZELLIJ_PANE_ID || undefined : undefined;
+		const zellijIdentityFile = mux.id === "zellij" && !mux.inSession() ? zellijIdentityPath(sessionDir) : undefined;
 
 		const adapter = adapterFor(backend.id);
 		const flavors = await materializeFlavors(agentDir, cwd).catch(() => []);
@@ -227,6 +237,9 @@ export async function launchLeader(options: LaunchOptions): Promise<number> {
 			muxSessionName,
 			tmux,
 			zellij,
+			zellijSessionName,
+			zellijPaneId,
+			zellijIdentityFile,
 		};
 		const launch = await adapter.prepare(launchContext);
 
@@ -294,6 +307,9 @@ export async function launchLeader(options: LaunchOptions): Promise<number> {
 				muxSessionName: undefined,
 				tmux: undefined,
 				zellij: undefined,
+				zellijSessionName: undefined,
+				zellijPaneId: undefined,
+				zellijIdentityFile: undefined,
 			});
 			code = await run({
 				command: fallbackLaunch.command,

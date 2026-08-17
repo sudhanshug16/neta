@@ -21,6 +21,7 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { ZellijAdapter } from "../src/mux/zellij.ts";
 import { listSessions, writeSessionRecord } from "../src/session.ts";
 import { waitFor } from "./helpers.ts";
 
@@ -101,6 +102,17 @@ function launchProcess(
 	});
 }
 
+function codexMcpEnvironment(launched: LaunchRecord): Record<string, string> {
+	const override = launched.argv.find((arg) => arg.startsWith("mcp_servers.neta.env="));
+	if (!override) throw new Error("Codex launch did not declare the Neta MCP environment");
+	return Object.fromEntries(
+		[...override.matchAll(/([A-Z][A-Z0-9_]*) = ("(?:[^"\\]|\\.)*")/g)].map((match) => [
+			match[1],
+			JSON.parse(match[2]) as string,
+		]),
+	);
+}
+
 afterEach(() => {
 	for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
@@ -153,6 +165,77 @@ describe("neta (launching a leader)", () => {
 
 		expect(launched.env.NETA_MUX).toBe("none");
 		expect(launched.env.NETA_PANES).toBe("0");
+	});
+
+	it("passes the real Zellij caller identity to Codex's manager without ambient secrets", async () => {
+		const binDir = fakeBackend("codex");
+		const zellij = join(binDir, "zellij");
+		writeFileSync(zellij, "#!/bin/sh\nexit 0\n", "utf-8");
+		chmodSync(zellij, 0o755);
+		const agentDir = scratch("neta-home-");
+		const cwd = scratch("neta-repo-");
+		const record = join(scratch("neta-record-"), "launch.json");
+
+		await run(process.execPath, [CLI, "--leader", "codex", "--mux", "zellij"], {
+			cwd,
+			env: {
+				...process.env,
+				PATH: `${binDir}${delimiter}${process.env.PATH}`,
+				NETA_DIR: agentDir,
+				FAKE_LEADER_RECORD: record,
+				CODEX_HOME: join(agentDir, "codex"),
+				ZELLIJ: "0",
+				ZELLIJ_SESSION_NAME: "user-session",
+				ZELLIJ_PANE_ID: "41",
+				AWS_SECRET_ACCESS_KEY: "must-not-reach-manager",
+			},
+		});
+
+		const managerEnv = codexMcpEnvironment(JSON.parse(readFileSync(record, "utf-8")) as LaunchRecord);
+		expect(managerEnv).toMatchObject({
+			NETA_MUX: "zellij",
+			NETA_MUX_SESSION_NAME: "user-session",
+			ZELLIJ: "0",
+			ZELLIJ_SESSION_NAME: "user-session",
+			ZELLIJ_PANE_ID: "41",
+		});
+		expect(managerEnv.AWS_SECRET_ACCESS_KEY).toBeUndefined();
+	});
+
+	it("does not forge a missing Zellij pane identity and pane opening fails closed", async () => {
+		const binDir = fakeBackend("codex");
+		const zellij = join(binDir, "zellij");
+		writeFileSync(zellij, "#!/bin/sh\nexit 0\n", "utf-8");
+		chmodSync(zellij, 0o755);
+		const agentDir = scratch("neta-home-");
+		const cwd = scratch("neta-repo-");
+		const record = join(scratch("neta-record-"), "launch.json");
+
+		await run(process.execPath, [CLI, "--leader", "codex", "--mux", "zellij"], {
+			cwd,
+			env: {
+				...process.env,
+				PATH: `${binDir}${delimiter}${process.env.PATH}`,
+				NETA_DIR: agentDir,
+				FAKE_LEADER_RECORD: record,
+				CODEX_HOME: join(agentDir, "codex"),
+				ZELLIJ: "0",
+				ZELLIJ_SESSION_NAME: "user-session",
+				ZELLIJ_PANE_ID: "",
+			},
+		});
+
+		const managerEnv = codexMcpEnvironment(JSON.parse(readFileSync(record, "utf-8")) as LaunchRecord);
+		expect(managerEnv.ZELLIJ_PANE_ID).toBeUndefined();
+		let calls = 0;
+		const adapter = new ZellijAdapter(() => {
+			calls += 1;
+			return { status: 0, stdout: "[]" };
+		}, managerEnv);
+		expect(adapter.openPane("ro1 scout", { command: "neta", args: ["watch", "ro1"] }, cwd, "user-session")).toBe(
+			false,
+		);
+		expect(calls).toBe(0);
 	});
 
 	it("passes arguments after -- through to the vendor CLI", async () => {

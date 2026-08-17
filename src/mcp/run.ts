@@ -11,6 +11,7 @@
  */
 
 import { randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -50,6 +51,28 @@ function muxMode(configured: MuxMode): MuxMode {
 	return chosen === "zellij" || chosen === "tmux" || chosen === "none" || chosen === "auto" ? chosen : configured;
 }
 
+/** Restore only the identity a fresh Zellij assigns after adapter config exists. */
+export function restoreZellijIdentity(
+	env: NodeJS.ProcessEnv = process.env,
+	read: (path: string, encoding: "utf-8") => string = readFileSync,
+): boolean {
+	if (env.NETA_MUX !== "zellij") return false;
+	const present = [env.ZELLIJ, env.ZELLIJ_SESSION_NAME, env.ZELLIJ_PANE_ID];
+	if (present.every(Boolean)) return true;
+	// A partial direct identity is not combined with a file from another launch.
+	if (present.some(Boolean)) return false;
+	const path = env.NETA_ZELLIJ_IDENTITY_FILE;
+	if (!path) return false;
+	try {
+		const lines = read(path, "utf-8").split("\n");
+		if (lines.length !== 4 || lines[3] !== "" || lines.slice(0, 3).some((value) => value.length === 0)) return false;
+		[env.ZELLIJ, env.ZELLIJ_SESSION_NAME, env.ZELLIJ_PANE_ID] = lines;
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 function describeEvent(event: WorkerEvent): string {
 	switch (event.type) {
 		case "done":
@@ -71,6 +94,7 @@ export interface ControlPlaneOptions {
 }
 
 export async function runControlPlane(options: ControlPlaneOptions = {}): Promise<void> {
+	restoreZellijIdentity();
 	const cwd = options.cwd ?? process.cwd();
 	const agentDir = options.agentDir ?? getAgentDir();
 	const config = loadConfig(cwd, agentDir);

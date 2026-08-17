@@ -12,6 +12,7 @@ import { ClaudeAdapter, DENIED_TOOLS } from "../src/adapters/claude.ts";
 import { CodexAdapter, createHomeOverlay, preserveRefreshedAuth } from "../src/adapters/codex.ts";
 import { OpenCodeAdapter, READ_ONLY_BASH_PATTERNS } from "../src/adapters/opencode.ts";
 import { controlPlaneEnv, type LeaderLaunchContext, MCP_SERVER_NAME } from "../src/adapters/types.ts";
+import { restoreZellijIdentity } from "../src/mcp/run.ts";
 import { createPaneHost } from "../src/mux/panes.ts";
 import type { MuxAdapter } from "../src/mux/types.ts";
 
@@ -73,6 +74,42 @@ describe("what each host calls our tools", () => {
 
 		expect(Object.keys(mcp.mcpServers)).toEqual([MCP_SERVER_NAME]);
 		expect(new ClaudeAdapter().toolName("x")).toContain(MCP_SERVER_NAME);
+	});
+});
+
+describe("control-plane mux identity", () => {
+	it("restores a fresh Zellij leader identity from its private launch handoff", () => {
+		const env: NodeJS.ProcessEnv = {
+			NETA_MUX: "zellij",
+			NETA_ZELLIJ_IDENTITY_FILE: "/private/session/zellij-identity",
+			AWS_SECRET_ACCESS_KEY: "ambient-only",
+		};
+
+		expect(restoreZellijIdentity(env, () => "0\nneta-s1\n41\n")).toBe(true);
+		expect(env).toMatchObject({ ZELLIJ: "0", ZELLIJ_SESSION_NAME: "neta-s1", ZELLIJ_PANE_ID: "41" });
+		expect(env.PROBE_SECRET).toBeUndefined();
+	});
+
+	it("fails closed for missing, malformed, or partially forged identity", () => {
+		const missing: NodeJS.ProcessEnv = { NETA_MUX: "zellij", NETA_ZELLIJ_IDENTITY_FILE: "/missing" };
+		expect(
+			restoreZellijIdentity(missing, () => {
+				throw new Error("missing");
+			}),
+		).toBe(false);
+		expect(missing.ZELLIJ_PANE_ID).toBeUndefined();
+
+		const malformed: NodeJS.ProcessEnv = { NETA_MUX: "zellij", NETA_ZELLIJ_IDENTITY_FILE: "/bad" };
+		expect(restoreZellijIdentity(malformed, () => "0\nneta-s1\n\n")).toBe(false);
+		expect(malformed.ZELLIJ_PANE_ID).toBeUndefined();
+
+		const partial: NodeJS.ProcessEnv = {
+			NETA_MUX: "zellij",
+			NETA_ZELLIJ_IDENTITY_FILE: "/other-launch",
+			ZELLIJ: "forged",
+		};
+		expect(restoreZellijIdentity(partial, () => "0\nneta-s1\n41\n")).toBe(false);
+		expect(partial.ZELLIJ_PANE_ID).toBeUndefined();
 	});
 });
 
@@ -212,6 +249,26 @@ describe("Codex adapter", () => {
 
 		expect(outcome).toEqual({ opened: true });
 		expect(target).toBe("neta-s1");
+	});
+
+	it("allowlists the complete Zellij caller identity and nothing ambient", () => {
+		const declared = controlPlaneEnv(
+			context({
+				mux: "zellij",
+				panes: true,
+				muxSessionName: "user-session",
+				zellij: "0",
+				zellijSessionName: "user-session",
+				zellijPaneId: "41",
+			}),
+		);
+
+		expect(declared).toMatchObject({
+			ZELLIJ: "0",
+			ZELLIJ_SESSION_NAME: "user-session",
+			ZELLIJ_PANE_ID: "41",
+		});
+		expect(declared.AWS_SECRET_ACCESS_KEY).toBeUndefined();
 	});
 
 	// Codex has no flag for extra instructions, so the session runs against a

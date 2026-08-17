@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NoMux, selectMux } from "../src/mux/index.ts";
@@ -610,6 +610,9 @@ describe("zellij", () => {
 			join(dir, "layout.kdl"),
 		]);
 		expect(readFileSync(join(dir, "layout.kdl"), "utf-8")).toContain("neta leader");
+		expect(readFileSync(join(dir, "layout.kdl"), "utf-8")).toContain("zellij-leader");
+		expect(existsSync(join(dir, "zellij-leader"))).toBe(true);
+		expect(statSync(join(dir, "zellij-leader")).mode & 0o777).toBe(0o700);
 	});
 
 	// Verified against zellij 0.44.3: with --session, plain --layout means "add

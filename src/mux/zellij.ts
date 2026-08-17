@@ -7,7 +7,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { chmodSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { findOnPath } from "../detect.ts";
 import type { MuxAdapter, ProcessSpec } from "./types.ts";
@@ -27,6 +27,14 @@ export type ZellijCommandRunner = (command: string, args: string[], options?: Co
 
 const runCommand: ZellijCommandRunner = (command, args, options) =>
 	spawnSync(command, args, { encoding: "utf-8", env: options?.env });
+
+export function zellijIdentityPath(sessionDir: string): string {
+	return join(sessionDir, "zellij-identity");
+}
+
+function leaderWrapperPath(sessionDir: string): string {
+	return join(sessionDir, "zellij-leader");
+}
 
 /** KDL strings escape backslash and double quote; nothing else needs quoting here. */
 function kdlString(value: string): string {
@@ -354,7 +362,23 @@ export class ZellijAdapter implements MuxAdapter {
 	wrapLeader(leader: ProcessSpec, sessionName: string, sessionDir: string): ProcessSpec | undefined {
 		if (this.inSession()) return undefined;
 		const layoutPath = join(sessionDir, "layout.kdl");
-		writeFileSync(layoutPath, leaderLayout(leader), "utf-8");
+		const wrapperPath = leaderWrapperPath(sessionDir);
+		const dollar = "$";
+		writeFileSync(
+			wrapperPath,
+			`#!/bin/sh\nset -eu\nidentity_path="$1"\nshift\numask 077\nprintf '%s\\n%s\\n%s\\n' "${dollar}{ZELLIJ-}" "${dollar}{ZELLIJ_SESSION_NAME-}" "${dollar}{ZELLIJ_PANE_ID-}" > "$identity_path"\nexec "$@"\n`,
+			"utf-8",
+		);
+		chmodSync(wrapperPath, 0o700);
+		writeFileSync(
+			layoutPath,
+			leaderLayout({
+				...leader,
+				command: wrapperPath,
+				args: [zellijIdentityPath(sessionDir), leader.command, ...leader.args],
+			}),
+			"utf-8",
+		);
 		return { command: "zellij", args: newSessionArgs(sessionName, layoutPath), env: leader.env };
 	}
 
