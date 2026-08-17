@@ -7,7 +7,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { execFile } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,6 +15,8 @@ import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { sendChannelRequest } from "../src/channel/client.ts";
+import type { SessionRecord } from "../src/session.ts";
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const FAKE_AGENT = fileURLToPath(new URL("./fixtures/fake-acp-agent.mjs", import.meta.url));
@@ -44,10 +46,14 @@ describe("a leader session, end to end", () => {
 	let repo: string;
 	let client: Client;
 	let transport: StdioClientTransport;
+	let barrierFile: string;
+	let barrierReadyFile: string;
 
 	beforeEach(async () => {
 		agentDir = mkdtempSync(join(tmpdir(), "neta-e2e-home-"));
 		repo = mkdtempSync(join(tmpdir(), "neta-e2e-repo-"));
+		barrierFile = join(agentDir, "release-barrier");
+		barrierReadyFile = join(agentDir, "barrier-ready");
 		// Every tier runs the fixture agent, so spawning costs nothing.
 		writeFileSync(
 			join(agentDir, "settings.json"),
@@ -59,7 +65,12 @@ describe("a leader session, end to end", () => {
 					expert: { backend: "fake" },
 					architect: { backend: "fake" },
 				},
-				backends: { fake: { command: process.execPath, args: [FAKE_AGENT] } },
+				backends: {
+					fake: {
+						command: process.execPath,
+						args: [FAKE_AGENT, "--barrier-file", barrierFile, "--barrier-ready-file", barrierReadyFile],
+					},
+				},
 			}),
 		);
 
@@ -138,8 +149,8 @@ describe("a leader session, end to end", () => {
 	});
 
 	it("queues writer activity notices for a running read-only fixture worker", async () => {
-		await call("neta_spawn", { role: "scout", tier: "expert", task: "WAIT_FOR_NOTICE SUBSTANTIVE_HANDOFF" });
-		await new Promise((resolve) => setTimeout(resolve, 25));
+		await call("neta_spawn", { role: "scout", tier: "expert", task: "WAIT_FOR_BARRIER SUBSTANTIVE_HANDOFF" });
+		while (!existsSync(barrierReadyFile)) await new Promise((resolve) => setTimeout(resolve, 10));
 		await call("neta_spawn", {
 			role: "worker",
 			tier: "expert",
@@ -148,7 +159,9 @@ describe("a leader session, end to end", () => {
 			writer: true,
 		});
 
-		const waited = bodyOf(await call("neta_wait", { workerIds: ["ro1", "rw2"], timeoutSeconds: 30 }));
+		await call("neta_wait", { workerIds: ["rw2"], timeoutSeconds: 30 });
+		writeFileSync(barrierFile, "release\n");
+		const waited = bodyOf(await call("neta_wait", { workerIds: ["ro1"], timeoutSeconds: 30 }));
 		const readerLog = bodyOf(await call("neta_log", { workerId: "ro1" }));
 		const writerLog = bodyOf(await call("neta_log", { workerId: "rw2" }));
 		const listed = bodyOf(await call("neta_workers"));
@@ -171,6 +184,29 @@ describe("a leader session, end to end", () => {
 		expect(checkpoint.workers.find((worker: { id: string }) => worker.id === "ro1")?.lastResponse).not.toContain(
 			"Substantive report: audited the control path",
 		);
+	});
+
+	it("accepts pane input through the real channel and applies it only after the active turn", async () => {
+		await call("neta_spawn", { role: "scout", tier: "expert", task: "WAIT_FOR_BARRIER" });
+		while (!existsSync(barrierReadyFile)) await new Promise((resolve) => setTimeout(resolve, 10));
+		const session = JSON.parse(readFileSync(join(agentDir, "sessions", "e2e.json"), "utf8")) as SessionRecord;
+
+		const accepted = await sendChannelRequest(session.socket, {
+			type: "pane-input",
+			token: session.token,
+			workerId: "ro1",
+			text: "pane follow-up",
+		});
+		expect(accepted.ok).toBe(true);
+		const queuedLog = bodyOf(await call("neta_log", { workerId: "ro1" }));
+		expect(queuedLog).toContain("Leader queued for next turn: pane follow-up");
+		expect(queuedLog).not.toContain("Leader delivering now as next turn: pane follow-up");
+
+		writeFileSync(barrierFile, "release\n");
+		const waited = bodyOf(await call("neta_wait", { workerIds: ["ro1"], timeoutSeconds: 30 }));
+		const appliedLog = bodyOf(await call("neta_log", { workerId: "ro1" }));
+		expect(appliedLog).toContain("Leader delivering now as next turn: pane follow-up");
+		expect(waited).toContain("echo:pane follow-up");
 	});
 
 	it("does not notify a terminal read-only worker about a writer", async () => {

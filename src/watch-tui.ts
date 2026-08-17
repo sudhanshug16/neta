@@ -293,6 +293,8 @@ export interface WatchTuiOptions {
 	agentDir?: string;
 }
 
+export const WORKER_INPUT_HINT = "enter answers a question or queues the next turn · ctrl+c closes this view";
+
 export async function watchWorkerTui(options: WatchTuiOptions): Promise<number> {
 	const target = resolveTarget(options.sessionId, process.cwd(), options.agentDir);
 	if (!target) {
@@ -310,10 +312,9 @@ export async function watchWorkerTui(options: WatchTuiOptions): Promise<number> 
 	const editor = new Editor(tui, editorTheme);
 	footerSlot.addChild(loader);
 	inputSlot.addChild(editor);
-	inputSlot.addChild(new Text(style.dim("enter sends to the worker · ctrl+c closes this view"), 0, 0));
+	inputSlot.addChild(new Text(style.dim(WORKER_INPUT_HINT), 0, 0));
 	for (const child of [header, transcript, footerSlot, inputSlot, statusLine]) tui.addChild(child);
 
-	let page: WorkerLogPage | undefined;
 	let briefed = false;
 	let finished = false;
 	let closed = false;
@@ -366,13 +367,11 @@ export async function watchWorkerTui(options: WatchTuiOptions): Promise<number> 
 	});
 
 	const deliver = async (text: string) => {
-		// An answer unblocks a waiting worker; anything else queues as its next
-		// turn. Both land in the log as prefixed status entries, so the transcript
-		// needs no local echo: the tail brings them back as sent blocks.
-		const type = page?.worker?.pendingQuestion ? ("answer" as const) : ("send" as const);
+		// The manager decides atomically whether this answers a question or queues
+		// the next turn. The pane's polled snapshot may be up to 400 ms stale.
 		try {
 			const response = await sendChannelRequest(target.address, {
-				type,
+				type: "pane-input",
 				token: target.token,
 				workerId: options.workerId,
 				text,
@@ -427,7 +426,6 @@ export async function watchWorkerTui(options: WatchTuiOptions): Promise<number> 
 				close(1);
 				return;
 			}
-			page = next;
 			if (next.worker) {
 				header.setText(headerText(next.worker));
 				statusLine.update(next.worker, next.state);

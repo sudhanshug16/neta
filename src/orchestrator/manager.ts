@@ -124,6 +124,8 @@ interface WorkerRecord {
 	queuedBehind?: string;
 	/** Messages held until this worker's first prompt can accept them. */
 	pendingBrief: string[];
+	/** Human pending-brief messages that need an applied-phase log at first prompt. */
+	pendingBriefLeaderMessages: string[];
 	/** HEAD when a writer began, used to report commit state without guessing. */
 	headAtStart?: string;
 	/** Detached ACP process group, for startup cleanup after a manager crash. */
@@ -337,6 +339,7 @@ export class WorkerManager implements ChannelHandler {
 				noteId: worker.noteId,
 				queuedBehind: worker.queuedBehind,
 				pendingBrief: [...worker.pendingBrief],
+				pendingBriefLeaderMessages: [],
 				headAtStart: worker.headAtStart,
 				headlessReason: worker.headlessReason,
 			});
@@ -563,6 +566,7 @@ export class WorkerManager implements ChannelHandler {
 			driver: undefined as unknown as WorkerTransportDriver,
 			noteId: request.note,
 			pendingBrief: [],
+			pendingBriefLeaderMessages: [],
 		};
 
 		this.workers.set(id, record);
@@ -609,6 +613,13 @@ export class WorkerManager implements ChannelHandler {
 		try {
 			await record.driver.start();
 		} catch (error) {
+			for (const message of record.pendingBriefLeaderMessages) {
+				this.appendLog(
+					record,
+					"error",
+					`Leader message was not delivered because the worker failed to start: ${message}`,
+				);
+			}
 			await this.finish(record, "failed", error instanceof Error ? error.message : String(error));
 			throw error;
 		}
@@ -626,7 +637,8 @@ export class WorkerManager implements ChannelHandler {
 					}),
 				);
 		const task = writerContext ? `${writerContext}\n\n---\n\n# Task\n\n${request.task}` : request.task;
-		this.enqueue(record, this.withPendingBrief(record, task));
+		const firstPrompt = this.withPendingBrief(record, task);
+		this.enqueue(record, firstPrompt.message, false, firstPrompt.leaderMessages);
 		this.openWorkerView(record);
 		this.checkpointChanged();
 		return this.summarize(record);
@@ -640,13 +652,18 @@ export class WorkerManager implements ChannelHandler {
 		if (record.finishing) {
 			throw new Error(`Worker ${workerId} is finishing. Spawn a new worker instead.`);
 		}
-		if (record.state === "queued") {
-			// Append to pending brief for delivery when started
+		if (record.state === "queued" || record.state === "starting") {
+			// A transport in "starting" has not received its real brief yet. Hold
+			// pane/leader input behind that brief just like a queued writer, or the
+			// follow-up can become prompt one and displace the task to prompt two.
 			record.pendingBrief.push(message);
-			this.appendLog(record, "status", `Leader queued message (will be delivered at start): ${message}`);
+			record.pendingBriefLeaderMessages.push(message);
+			this.appendLog(record, "status", `Leader queued for next turn: ${message}`);
 		} else {
-			this.appendLog(record, "status", `Leader: ${message}`);
-			this.enqueue(record, message);
+			if (!this.enqueue(record, message, false, [message])) {
+				throw new Error(`Worker ${workerId} is finishing. Spawn a new worker instead.`);
+			}
+			this.appendLog(record, "status", `Leader queued for next turn: ${message}`);
 		}
 		this.checkpointChanged(record);
 		return this.summarize(record);
@@ -663,6 +680,12 @@ export class WorkerManager implements ChannelHandler {
 		pending.resolve({ ok: true, text: answer });
 		this.checkpointChanged(record);
 		return this.summarize(record);
+	}
+
+	/** The pane's single atomic operation: current question wins over follow-up. */
+	paneInput(workerId: string, text: string): WorkerSummary {
+		const record = this.require(workerId);
+		return record.pendingAsk ? this.answer(workerId, text) : this.send(workerId, text);
 	}
 
 	async kill(workerId: string): Promise<WorkerSummary> {
@@ -1144,6 +1167,8 @@ export class WorkerManager implements ChannelHandler {
 					return { ok: true, text: this.statusLine(this.send(request.workerId, request.text), 200) };
 				case "answer":
 					return { ok: true, text: this.statusLine(this.answer(request.workerId, request.text), 200) };
+				case "pane-input":
+					return { ok: true, text: this.statusLine(this.paneInput(request.workerId, request.text), 200) };
 				case "kill":
 					return { ok: true, text: this.statusLine(await this.kill(request.workerId), 200) };
 			}
@@ -1385,7 +1410,8 @@ export class WorkerManager implements ChannelHandler {
 		this.checkpointChanged(record);
 	}
 
-	private enqueue(record: WorkerRecord, message: string, automatic = false): void {
+	private enqueue(record: WorkerRecord, message: string, automatic = false, leaderMessages: string[] = []): boolean {
+		if (isTerminalState(record.state) || record.finishing || record.killReason) return false;
 		record.queuedPrompts += 1;
 		this.checkpointChanged(record);
 		record.queue = record.queue.then(async () => {
@@ -1393,6 +1419,9 @@ export class WorkerManager implements ChannelHandler {
 				if (isTerminalState(record.state) || record.finishing || record.killReason) return;
 				const driver = record.driver;
 				if (!driver) throw new Error(`Worker ${record.id} has no live transport.`);
+				for (const leaderMessage of leaderMessages) {
+					this.appendLog(record, "status", `Leader delivering now as next turn: ${leaderMessage}`);
+				}
 				const outcome = await driver.prompt(message);
 				if (isTerminalState(record.state) || record.finishing || record.killReason) return;
 				if (!outcome.ok) {
@@ -1436,31 +1465,39 @@ export class WorkerManager implements ChannelHandler {
 				this.checkpointChanged(record);
 			}
 		});
+		return true;
 	}
 
 	/**
 	 * ACP's session/prompt request owns an entire prompt turn; neither the SDK
-	 * nor any supported bridge exposes a way to inject text into a live turn.
-	 * Notices are therefore appended as the worker's next prompt and also logged.
+	 * nor installed Codex/Claude bridges' private steering features are used here.
+	 * Neta intentionally uses cross-provider FIFO next-turn prompts, never
+	 * injecting a follow-up into an active turn and cancelling one only when
+	 * killing the worker. Notices are also logged.
 	 */
 	private notifyReadOnlyWorkers(writer: WorkerRecord, activity: "started" | "finished", changes?: string): void {
 		const notice = formatWriterActivityNotice(this.summarize(writer), activity, changes);
 		for (const record of this.workers.values()) {
-			if (record.writer || record.state === "queued" || isTerminalState(record.state)) continue;
-			this.appendLog(record, "status", notice);
+			if (record.writer || record.state === "queued" || isTerminalState(record.state) || record.finishing) continue;
 			if (record.state === "starting") {
 				record.pendingBrief.push(notice);
+				this.appendLog(record, "status", notice);
 			} else {
-				this.enqueue(record, notice, true);
+				// In this non-starting enqueue path, acceptance and logging are one
+				// synchronous decision. If finish has begun, enqueue rejects and the pane
+				// never promises a discarded notice.
+				if (this.enqueue(record, notice, true)) this.appendLog(record, "status", notice);
 			}
 		}
 	}
 
-	private withPendingBrief(record: WorkerRecord, task: string): string {
-		if (record.pendingBrief.length === 0) return task;
+	private withPendingBrief(record: WorkerRecord, task: string): { message: string; leaderMessages: string[] } {
+		if (record.pendingBrief.length === 0) return { message: task, leaderMessages: [] };
 		const messages = record.pendingBrief.join("\n\n");
+		const leaderMessages = record.pendingBriefLeaderMessages;
 		record.pendingBrief = [];
-		return `${task}\n\n---\n\n# Pending messages\n\n${messages}`;
+		record.pendingBriefLeaderMessages = [];
+		return { message: `${task}\n\n---\n\n# Pending messages\n\n${messages}`, leaderMessages };
 	}
 
 	private async writerChangeStatus(record: WorkerRecord, state: WorkerState): Promise<string> {
@@ -1659,7 +1696,7 @@ export class WorkerManager implements ChannelHandler {
 
 		// Enqueue task with staleness guard and any pending messages delivered together
 		const firstPrompt = this.withPendingBrief(record, fullTask);
-		this.enqueue(record, firstPrompt);
+		this.enqueue(record, firstPrompt.message, false, firstPrompt.leaderMessages);
 
 		this.openWorkerView(record);
 	}

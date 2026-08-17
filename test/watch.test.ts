@@ -223,10 +223,25 @@ describe("watch", () => {
 		// The header's truncated "task:" line stays; the whole brief follows it.
 		expect(lines[1]).toBe("task: Fix the auth flow. Start from login.ts, keep the tests green.");
 		expect(text).toContain("« task:\nFix the auth flow.\n\nStart from login.ts, keep the tests green.");
-		expect(text).toContain("« leader: keep going");
+		expect(text).toContain("« leader queued: keep going");
 		// A multi-line message reads like a "say": attribution, then the whole body.
-		expect(text).toContain("« leader:\nTwo more things:\n\nstop short of the tests.");
+		expect(text).toContain("« leader queued:\nTwo more things:\n\nstop short of the tests.");
 		expect(text).not.toContain("· Leader:");
+	});
+
+	it("renders queued, delivering, and historical leader phases in the plain view", async () => {
+		const worker = await manager.spawn({ role: "worker", tier: "expert", task: "inspect" });
+		manager.send(worker.id, "follow up");
+		transports[0].finish({ ok: true, summary: "first done" });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		transports[0].options.events.log("status", "Leader: historical checkpoint message");
+
+		const code = await watchWorker({ workerId: worker.id, once: true, hold: false, write });
+		expect(code).toBe(0);
+		const text = lines.join("\n");
+		expect(text).toContain("« leader queued: follow up");
+		expect(text).toContain("« leader delivering: follow up");
+		expect(text).toContain("« leader: historical checkpoint message");
 	});
 
 	describe("room view", () => {

@@ -55,6 +55,9 @@ export function sayEntry(post: RoomPost): WorkerLogEntry {
  * views pick them out and render them in their own style, never cut.
  */
 const SENT_PREFIXES: ReadonlyArray<readonly [prefix: string, label: string]> = [
+	["Leader delivering now as next turn: ", "leader delivering"],
+	["Leader queued for next turn: ", "leader queued"],
+	// Historical checkpoint entries remain readable after upgrading.
 	["Leader: ", "leader"],
 	["Leader answered: ", "leader answered"],
 	["Leader queued message (will be delivered at start): ", "leader queued"],

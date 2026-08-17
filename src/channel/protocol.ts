@@ -70,6 +70,8 @@ export type LeaderChannelRequest =
 	| { type: "wait"; token: string; workerIds: string[]; timeoutMs?: number }
 	| { type: "send"; token: string; workerId: string; text: string }
 	| { type: "answer"; token: string; workerId: string; text: string }
+	/** Pane-only atomic input: answer a live question, otherwise queue the next turn. */
+	| { type: "pane-input"; token: string; workerId: string; text: string }
 	| { type: "kill"; token: string; workerId: string };
 
 export type ChannelRequest = WorkerChannelRequest | LeaderChannelRequest;
@@ -84,6 +86,7 @@ export const LEADER_REQUEST_TYPES = new Set([
 	"wait",
 	"send",
 	"answer",
+	"pane-input",
 	"kill",
 ]);
 

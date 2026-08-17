@@ -20,14 +20,27 @@ class FakeTransport implements WorkerTransportDriver {
 	private pending: Array<(outcome: PromptOutcome) => void> = [];
 	private killGate: Promise<void> | undefined;
 	private unblockKill: (() => void) | undefined;
+	private startGate: Promise<void> | undefined;
+	private unblockStart: (() => void) | undefined;
+	private rejectStartGate: ((error: Error) => void) | undefined;
+	private killStartedResolve: (() => void) | undefined;
+	private readonly killStarted = new Promise<void>((resolve) => {
+		this.killStartedResolve = resolve;
+	});
 
-	constructor(options: TransportOptions) {
+	constructor(options: TransportOptions, holdStart = false) {
 		this.options = options;
+		if (holdStart) {
+			this.startGate = new Promise<void>((resolve, reject) => {
+				this.unblockStart = resolve;
+				this.rejectStartGate = reject;
+			});
+		}
 	}
 
-	start(): Promise<void> {
+	async start(): Promise<void> {
 		this.started = true;
-		return Promise.resolve();
+		await this.startGate;
 	}
 
 	prompt(text: string): Promise<PromptOutcome> {
@@ -37,6 +50,7 @@ class FakeTransport implements WorkerTransportDriver {
 
 	async kill(): Promise<void> {
 		this.killed = true;
+		this.killStartedResolve?.();
 		const killGate = this.killGate;
 		this.killGate = undefined;
 		if (killGate) await killGate;
@@ -59,6 +73,18 @@ class FakeTransport implements WorkerTransportDriver {
 			this.unblockKill = resolve;
 		});
 		return () => this.unblockKill?.();
+	}
+
+	releaseStart(): void {
+		this.unblockStart?.();
+	}
+
+	rejectStart(error: Error): void {
+		this.rejectStartGate?.(error);
+	}
+
+	waitForKill(): Promise<void> {
+		return this.killStarted;
 	}
 }
 
@@ -452,6 +478,58 @@ describe("WorkerManager", () => {
 		} finally {
 			await failureManager.dispose();
 			rmSync("/tmp/neta-selection-failure-test.sock", { force: true });
+		}
+	});
+
+	it("marks human messages queued during startup as undelivered when startup fails", async () => {
+		const startingTransports: FakeTransport[] = [];
+		const failureManager = new WorkerManager({
+			cwd: process.cwd(),
+			agentDir: "/nonexistent-agent-dir",
+			config,
+			channelAddress: "/tmp/neta-starting-failure-test.sock",
+			onEvent: () => {},
+			createTransport: (options) => {
+				const transport = new FakeTransport(options, startingTransports.length === 0);
+				startingTransports.push(transport);
+				return transport;
+			},
+		});
+
+		try {
+			const spawning = failureManager.spawn({ role: "scout", tier: "expert", task: "inspect" });
+			while (startingTransports.length === 0 || failureManager.get("ro1").state !== "starting") await flush();
+
+			await failureManager.spawn({ role: "worker", tier: "expert", task: "write", writer: true });
+			failureManager.send("ro1", "also inspect the migration");
+			startingTransports[0].rejectStart(new Error("Bridge exited during startup."));
+
+			await expect(spawning).rejects.toThrow("Bridge exited during startup.");
+			expect(failureManager.get("ro1")).toMatchObject({
+				state: "failed",
+				result: "Bridge exited during startup.",
+			});
+			expect(startingTransports[0].prompts).toEqual([]);
+
+			const log = failureManager.tailLog("ro1").entries;
+			expect(
+				log.filter((entry) => entry.text === "Leader queued for next turn: also inspect the migration"),
+			).toHaveLength(1);
+			expect(
+				log.filter(
+					(entry) =>
+						entry.kind === "error" &&
+						entry.text ===
+							"Leader message was not delivered because the worker failed to start: also inspect the migration",
+				),
+			).toHaveLength(1);
+			expect(log.some((entry) => entry.text.startsWith("Leader delivering now as next turn:"))).toBe(false);
+			expect(
+				log.some((entry) => entry.text.includes("not delivered") && entry.text.includes("Neta system notice")),
+			).toBe(false);
+		} finally {
+			await failureManager.dispose();
+			rmSync("/tmp/neta-starting-failure-test.sock", { force: true });
 		}
 	});
 
@@ -972,6 +1050,10 @@ describe("WorkerManager", () => {
 			// Send messages to queued worker
 			manager.send(second.id, "also fix the tests");
 			manager.send(second.id, "and update docs");
+			const queuedLog = manager.tailLog(second.id).entries.map((entry) => entry.text);
+			expect(queuedLog).toContain("Leader queued for next turn: also fix the tests");
+			expect(queuedLog).toContain("Leader queued for next turn: and update docs");
+			expect(queuedLog.some((entry) => entry.startsWith("Leader delivering"))).toBe(false);
 
 			// Finish first to dequeue second
 			transports[0].finish({ ok: true, summary: "first done" });
@@ -984,6 +1066,9 @@ describe("WorkerManager", () => {
 			expect(transports[1].prompts[0]).toContain("second");
 			expect(transports[1].prompts[0]).toContain("also fix the tests");
 			expect(transports[1].prompts[0]).toContain("and update docs");
+			const appliedLog = manager.tailLog(second.id).entries.map((entry) => entry.text);
+			expect(appliedLog).toContain("Leader delivering now as next turn: also fix the tests");
+			expect(appliedLog).toContain("Leader delivering now as next turn: and update docs");
 		});
 
 		// The spawn-time queue notice used to be stored in record.result, so every
@@ -1253,9 +1338,14 @@ describe("WorkerManager", () => {
 	// current turn, and then dropped: the turn's end marked the worker done, and
 	// the queued prompt hit the terminal-state check and returned without ever
 	// reaching the model.
-	it("delivers a message sent mid-turn instead of finishing the worker under it", async () => {
+	it("marks a mid-turn message queued before applying it as prompt two", async () => {
 		const summary = await manager.spawn({ role: "worker", tier: "expert", task: "do it" });
 		manager.send(summary.id, "also update the docs");
+		const before = manager.tailLog(summary.id).entries.map((entry) => entry.text);
+
+		expect(transports[0].prompts).toEqual(["do it"]);
+		expect(before).toContain("Leader queued for next turn: also update the docs");
+		expect(before).not.toContain("Leader delivering now as next turn: also update the docs");
 
 		transports[0].finish({ ok: true, summary: "code done" });
 		await flush();
@@ -1264,6 +1354,10 @@ describe("WorkerManager", () => {
 		expect(manager.get(summary.id).state).toBe("running");
 		expect(events).toHaveLength(0);
 		expect(transports[0].prompts.at(-1)).toBe("also update the docs");
+		const applied = manager.tailLog(summary.id).entries.map((entry) => entry.text);
+		expect(applied.indexOf("Leader queued for next turn: also update the docs")).toBeLessThan(
+			applied.indexOf("Leader delivering now as next turn: also update the docs"),
+		);
 
 		transports[0].finish({ ok: true, summary: "docs done" });
 		await flush();
@@ -1271,6 +1365,136 @@ describe("WorkerManager", () => {
 		expect(manager.get(summary.id).state).toBe("done");
 		expect(manager.get(summary.id).result).toBe("docs done");
 		expect(events).toEqual([{ type: "done", workerId: summary.id, summary: "docs done", dirtyFiles: undefined }]);
+	});
+
+	it("delivers two mid-turn human messages in strict FIFO with one phase pair each", async () => {
+		const summary = await manager.spawn({ role: "worker", tier: "expert", task: "original" });
+		manager.send(summary.id, "first follow-up");
+		manager.send(summary.id, "second follow-up");
+
+		expect(transports[0].prompts).toEqual(["original"]);
+		transports[0].finish({ ok: true, summary: "original done" });
+		await flush();
+		expect(manager.get(summary.id).state).toBe("running");
+		expect(transports[0].prompts).toEqual(["original", "first follow-up"]);
+
+		transports[0].finish({ ok: true, summary: "first done" });
+		await flush();
+		expect(manager.get(summary.id).state).toBe("running");
+		expect(transports[0].prompts).toEqual(["original", "first follow-up", "second follow-up"]);
+
+		const phases = manager
+			.tailLog(summary.id)
+			.entries.map((entry) => entry.text)
+			.filter((text) => text.startsWith("Leader queued") || text.startsWith("Leader delivering"));
+		expect(phases).toEqual([
+			"Leader queued for next turn: first follow-up",
+			"Leader queued for next turn: second follow-up",
+			"Leader delivering now as next turn: first follow-up",
+			"Leader delivering now as next turn: second follow-up",
+		]);
+
+		transports[0].finish({ ok: true, summary: "second done" });
+		await manager.waitFor([summary.id], 5000);
+	});
+
+	it("keeps a starting writer's real brief as prompt one and delivers the send once", async () => {
+		const heldTransports: FakeTransport[] = [];
+		const held = new WorkerManager({
+			cwd: process.cwd(),
+			agentDir: "/nonexistent-agent-dir",
+			config,
+			channelAddress: "/tmp/neta-starting-send.sock",
+			onEvent: () => {},
+			createTransport: (options) => {
+				const transport = new FakeTransport(options, heldTransports.length === 1);
+				heldTransports.push(transport);
+				return transport;
+			},
+		});
+		try {
+			const first = await held.spawn({ role: "worker", tier: "expert", task: "first", writer: true });
+			const second = await held.spawn({ role: "worker", tier: "expert", task: "real brief", writer: true });
+			heldTransports[0].finish({ ok: true, summary: "first done" });
+			await held.waitFor([first.id], 5000);
+			while (held.get(second.id).state !== "starting") await flush();
+
+			held.send(second.id, "review the tests too");
+			heldTransports[1].releaseStart();
+			await flush();
+
+			expect(heldTransports[1].prompts).toHaveLength(1);
+			expect(heldTransports[1].prompts[0]).toStartWith(
+				"Note: you were queued behind another writer that has since finished.",
+			);
+			expect(heldTransports[1].prompts[0]).toContain("# Task\n\nreal brief");
+			expect(heldTransports[1].prompts[0]).toContain("# Pending messages\n\nreview the tests too");
+			expect(heldTransports[1].prompts[0].match(/review the tests too/g)).toHaveLength(1);
+			const log = held.tailLog(second.id).entries.map((entry) => entry.text);
+			expect(log).toContain("Leader queued for next turn: review the tests too");
+			expect(log).toContain("Leader delivering now as next turn: review the tests too");
+		} finally {
+			await held.dispose();
+			rmSync("/tmp/neta-starting-send.sock", { force: true });
+		}
+	});
+
+	it("does not log a finishing worker's rejected automatic notice", async () => {
+		const reader = await manager.spawn({ role: "scout", tier: "expert", task: "inspect" });
+		const releaseReaderKill = transports[0].delayKill();
+		transports[0].finish({ ok: true, summary: "reader done" });
+		await transports[0].waitForKill();
+
+		const writer = await manager.spawn({ role: "worker", tier: "expert", task: "write", writer: true });
+		transports[1].finish({ ok: true, summary: "writer done" });
+		await transports[1].waitForKill();
+		await manager.waitFor([writer.id], 5000);
+
+		expect(
+			manager
+				.tailLog(reader.id)
+				.entries.map((entry) => entry.text)
+				.join("\n"),
+		).not.toContain("Neta system notice");
+		releaseReaderKill();
+		await manager.waitFor([reader.id], 5000);
+	});
+
+	it("does not log or deliver a writer notice while a read-only kill is in progress", async () => {
+		const reader = await manager.spawn({ role: "scout", tier: "expert", task: "inspect" });
+		const releaseReaderKill = transports[0].delayKill();
+		const killing = manager.kill(reader.id);
+		await transports[0].waitForKill();
+
+		await manager.spawn({ role: "worker", tier: "expert", task: "write", writer: true });
+		expect(manager.get(reader.id).state).toBe("running");
+		expect(transports[0].prompts).toEqual(["inspect"]);
+		expect(
+			manager
+				.tailLog(reader.id)
+				.entries.map((entry) => entry.text)
+				.join("\n"),
+		).not.toContain("Neta system notice");
+
+		releaseReaderKill();
+		await killing;
+		expect(manager.get(reader.id).state).toBe("killed");
+	});
+
+	it("atomically treats stale pane input as the pending answer", async () => {
+		const summary = await manager.spawn({ role: "worker", tier: "expert", task: "do it" });
+		const pending = manager.ask(summary.id, "which database?", new AbortController().signal);
+		await flush();
+
+		const response = await manager.leader(
+			{ type: "pane-input", token: manager.leaderToken, workerId: summary.id, text: "postgres" },
+			new AbortController().signal,
+		);
+
+		expect(response.ok).toBe(true);
+		expect(await pending).toEqual({ ok: true, text: "postgres" });
+		expect(manager.get(summary.id).state).toBe("running");
+		expect(transports[0].prompts).toEqual(["do it"]);
 	});
 
 	// The channel is opened on demand rather than at startup, so a leader session

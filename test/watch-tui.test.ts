@@ -8,7 +8,7 @@
 import { describe, expect, it } from "bun:test";
 import { stripTerminalSequences } from "@earendil-works/pi-tui";
 import type { WorkerLogEntry, WorkerSummary } from "../src/types.ts";
-import { colorDiff, SentBlock, StatusLine, TranscriptView } from "../src/watch-tui.ts";
+import { colorDiff, SentBlock, StatusLine, TranscriptView, WORKER_INPUT_HINT } from "../src/watch-tui.ts";
 
 const WIDTH = 80;
 
@@ -24,6 +24,9 @@ function rendered(view: TranscriptView): string {
 }
 
 describe("TranscriptView", () => {
+	it("states that Enter answers a question or queues the next turn", () => {
+		expect(WORKER_INPUT_HINT).toBe("enter answers a question or queues the next turn · ctrl+c closes this view");
+	});
 	// Paragraphs of one assistant message arrive as separate log entries; the
 	// pane has to read as one message, not as scattered fragments.
 	it("merges consecutive prose entries into one markdown block", () => {
@@ -146,6 +149,19 @@ describe("sent messages", () => {
 		expect(attribution).toHaveLength(WIDTH);
 		expect(body.endsWith("keep going")).toBe(true);
 		expect(body).toHaveLength(WIDTH);
+	});
+
+	it("distinguishes queued and delivering phases while retaining legacy leader entries", () => {
+		const view = new TranscriptView();
+		view.append(entry("status", "Leader queued for next turn: keep going"));
+		view.append(entry("status", "Leader delivering now as next turn: keep going"));
+		view.append(entry("status", "Leader: historical checkpoint message"));
+
+		const text = rendered(view);
+		expect(text).toContain("leader queued");
+		expect(text).toContain("leader delivering");
+		expect(text).toContain("historical checkpoint message");
+		expect(text).not.toContain("· Leader");
 	});
 
 	it("renders the leader's answer in the same sent style", () => {
