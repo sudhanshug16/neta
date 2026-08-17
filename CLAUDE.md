@@ -1,8 +1,34 @@
 # Development Rules
 
-Read MANIFESTO.md (design) and PLAN.md (current plan and phase) before
-non-trivial work. The repo is in the phase PLAN.md says it is in — do not
-start a later phase without the operator saying so.
+Read PLAN.md (current plan and phase) before non-trivial work. The repo is in
+the phase PLAN.md says it is in — do not start a later phase without the
+operator saying so.
+
+## Neta Operating Contract
+
+How agents work in this repo, in short. Design and rationale:
+[MANIFESTO.md](MANIFESTO.md).
+
+- **The leader does not write code.** It reads, decides, delegates, verifies —
+  including one-line fixes, which go to a journeyman with an exact instruction.
+  Reading is for verifying a bounded claim; building understanding across files
+  goes to a scout.
+- **CHARTER.md is the authority on scope.** Anything inside it, do and report
+  afterwards; anything it reserves for the user, stop and ask. Finish the
+  problem, then report once — never ask approval for what the charter already
+  granted, and never end a turn with "workers are running".
+- **Only Neta workers count as delegation.** A backend's own subagent or task
+  tool is not a worker; those are denied, invisible to the user, and must never
+  be passed off as one. If delegation is impossible, say so in the first reply
+  and stop — do not do the work yourself and do not soften the failure.
+- **Reads parallelize; writes serialize.** One writer slot per session; extra
+  writer spawns queue. A writer commits everything before it finishes, so the
+  next writer can be briefed from `git log`.
+- **Workers are quiet.** `neta progress` on start, on a completed major step,
+  and when something surprising changes the plan — not a running commentary.
+  `neta ask` only when genuinely blocked (apprentices and journeymen have none:
+  they stop and report). The leader pulls status and blocks on `neta_wait`
+  instead of interrupting the user.
 
 ## Conversational Style
 
@@ -50,8 +76,11 @@ more than one place — the CLI reads it from `package.json`.
 
 ## Git
 
-- Never commit unless the user asks. Stage explicit paths; never
-  `git add -A` / `git add .`.
+- Never commit unless the user asks. The one exception is a Neta writer worker:
+  its injected working agreement tells it to commit on handoff, and that rule
+  wins for the writer and only for the writer. Every other agent waits to be
+  asked.
+- Stage explicit paths; never `git add -A` / `git add .`.
 - Never run `git reset --hard`, `git checkout .`, `git clean -fd`,
   `git stash`, or `git commit --no-verify`.
 - Commit message format: `{feat,fix,docs,chore}: <message>` — informative
