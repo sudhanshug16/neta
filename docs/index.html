@@ -174,12 +174,12 @@
     <div class="two-col">
       <div>
         <p>A worker is an ordinary session of the CLI that ran it. <code class="brass">neta attach rw3</code> hands the worker's own session id to that CLI's resume command and drops you inside the conversation, where you can read what it did and keep talking to it yourself. Neta drove it; you can finish it.</p>
-        <p>With Zellij or tmux, each worker also gets a tab streaming its log — prose as markdown, tool calls as one-liners, changes as coloured diffs, and an input line that talks to the worker. Finished tabs show <code>✓</code>, <code>failed</code>, or <code>killed</code> in the tab bar. Panes read without consuming, so nothing shown there is taken from the leader. The leader can use <code>neta_attach</code> to reopen a terminal worker's exact native session in a fresh tab; without a multiplexer, workers run headless.</p>
+        <p>With Zellij or tmux, each worker also gets a tab streaming its log — prose as markdown, tool calls as one-liners, changes as coloured diffs, and an input line that talks to the worker. An existing watch tab is renamed in place with <code>✓</code>, <code>✗</code>, or <code>⊘</code> when its worker finishes; status marking never opens or retains a tab. Panes read without consuming, so nothing shown there is taken from the leader. CLI <code>neta attach</code> takes over its caller's terminal; the leader's <code>neta_attach</code> tool is the only attach action that opens a fresh tab. Without a multiplexer, workers run headless.</p>
         <div class="cmdlist">
           <div class="cmd-row"><span class="cmd">neta workers</span><span class="what">what is running, and what it has cost</span></div>
           <div class="cmd-row"><span class="cmd">neta watch rw1</span><span class="what">watch one worker, and type to it</span></div>
           <div class="cmd-row"><span class="cmd">neta watch auth-debate</span><span class="what">follow a room's merged transcript</span></div>
-          <div class="cmd-row"><span class="cmd">neta attach rw1</span><span class="what">open it in its own CLI and take over</span></div>
+          <div class="cmd-row"><span class="cmd">neta attach rw1</span><span class="what">take over this terminal with its own CLI</span></div>
           <div class="cmd-row"><span class="cmd">neta send rw1 &lt;msg&gt;</span><span class="what">give a running worker more instructions</span></div>
           <div class="cmd-row"><span class="cmd">neta answer rw1 &lt;text&gt;</span><span class="what">unblock a worker that asked you something</span></div>
           <div class="cmd-row"><span class="cmd">neta kill rw1</span><span class="what">stop it</span></div>

@@ -83,7 +83,7 @@ edit files through your shell either (no \`>\`, \`sed -i\`, \`tee\`, \`patch\`,
 inspecting git is your job.`,
 			spawn: `\`${APP_NAME} spawn --role <role> --tier <tier> [--writer] [--room <name>] <task>\``,
 			spawnFails: `additional writers queue automatically; the spawn result says queued vs running`,
-			status: `\`${APP_NAME} status\` shows the writer slot, queue, grouped worker states and open notes; \`${APP_NAME} workers\` lists workers; \`${APP_NAME} log <id>\` pulls a worker's new log lines; \`${APP_NAME} attach <id>\` opens a terminal worker in its native backend TUI`,
+			status: `\`${APP_NAME} status\` shows the writer slot, queue, grouped worker states and open notes; \`${APP_NAME} workers\` lists workers; \`${APP_NAME} log <id>\` pulls a worker's new log lines; \`${APP_NAME} attach <id>\` takes over the caller's terminal with that worker's native backend TUI`,
 			wait: `\`${APP_NAME} wait <id> [<id>...]\``,
 			answer: `\`${APP_NAME} answer <id> <text>\``,
 			closing: `You manage workers by running the \`${APP_NAME}\` CLI with your shell tool. Run

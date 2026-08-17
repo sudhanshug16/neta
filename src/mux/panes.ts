@@ -20,23 +20,36 @@ import { ZellijAdapter } from "./zellij.ts";
 
 export type PaneOpenOutcome = { opened: true } | { opened: false; reason: string };
 
+const TITLE_LIMIT = 22;
+
+function clampTitle(label: string, suffix: string, limit: number): string {
+	const full = `${label}${suffix}`;
+	if (full.length <= limit) return full;
+	const available = Math.max(1, limit - suffix.length - 1);
+	return `${label.slice(0, available).trimEnd()}…${suffix}`;
+}
+
 /**
  * What the tab is called. A tab bar has a few characters per tab before it
  * starts eliding, so the id comes first — it is what every command takes — and
  * the name gets whatever room is left.
  */
-export function tabTitle(id: string, name: string, stateOrLimit?: WorkerState | number, limit = 22): string {
+export function tabTitle(id: string, name: string, stateOrLimit?: WorkerState | number, limit = TITLE_LIMIT): string {
 	const state = typeof stateOrLimit === "number" ? undefined : stateOrLimit;
 	if (typeof stateOrLimit === "number") limit = stateOrLimit;
-	const marker = state === "done" ? "✓" : state === "failed" ? "failed" : state === "killed" ? "killed" : "";
+	const marker = state === "done" ? "✓" : state === "failed" ? "✗" : state === "killed" ? "⊘" : "";
 	const suffix = marker ? ` ${marker}` : "";
 	const label = `${id} ${name}`.replace(/\s+/g, " ").trim();
-	if (`${label}${suffix}`.length <= limit) return `${label}${suffix}`;
-	const available = Math.max(1, limit - suffix.length - 1);
-	return `${label.slice(0, available).trimEnd()}…${suffix}`;
+	return clampTitle(label, suffix, limit);
 }
 
 export const NETA_PANE_ENV = "NETA_PANE";
+export const NETA_MUX_ENV = "NETA_MUX";
+
+/** Keep the native-TUI identity visible even after a long worker name is clamped. */
+export function tuiTabTitle(id: string, name: string, limit = TITLE_LIMIT): string {
+	return clampTitle(`${id} ${name}`.replace(/\s+/g, " ").trim(), " tui", limit);
+}
 
 /**
  * A watcher may rename only a pane Neta marked when it opened it. That guard
@@ -47,8 +60,13 @@ export function markWorkerPaneTerminal(
 	env: Record<string, string | undefined> = process.env,
 ): boolean {
 	if (!isTerminalState(worker.state) || !env[NETA_PANE_ENV]) return false;
-	const mux = env.TMUX ? new TmuxAdapter() : env.ZELLIJ ? new ZellijAdapter() : undefined;
-	return mux?.renameCurrentPane?.(tabTitle(worker.id, worker.name, worker.state)) ?? false;
+	const mux =
+		env[NETA_MUX_ENV] === "tmux"
+			? new TmuxAdapter()
+			: env[NETA_MUX_ENV] === "zellij"
+				? new ZellijAdapter()
+				: undefined;
+	return mux?.renameCurrentPane?.(tabTitle(worker.id, worker.name, worker.state), env) ?? false;
 }
 
 export function createPaneHost(
@@ -64,12 +82,7 @@ export function createPaneHost(
 	// `neta watch` takes a worker id or a room name; the pane command is the same.
 	const open = (title: string, spec: ProcessSpec): PaneOpenOutcome => {
 		try {
-			const opened = mux.openPane(
-				title,
-				{ ...spec, env: { ...spec.env, [NETA_PANE_ENV]: title } },
-				cwd,
-				sessionName,
-			);
+			const opened = mux.openPane(title, spec, cwd, sessionName);
 			if (opened) return { opened: true };
 			return { opened: false, reason: `could not open a ${mux.id} view` };
 		} catch (error) {
@@ -80,11 +93,12 @@ export function createPaneHost(
 		open(title, {
 			command: invocation.command,
 			args: [...invocation.prefixArgs, "watch", target, "--session", sessionId, "--dir", agentDir],
+			env: { [NETA_MUX_ENV]: mux.id, [NETA_PANE_ENV]: title },
 		});
 
 	return {
 		open: (worker: WorkerSummary) => openView(tabTitle(worker.id, worker.name), worker.id),
 		openRoom: (room: string) => openView(tabTitle(room, ""), room),
-		attach: (worker: WorkerSummary, resume: ProcessSpec) => open(tabTitle(worker.id, `${worker.name} tui`), resume),
+		attach: (worker: WorkerSummary, resume: ProcessSpec) => open(tuiTabTitle(worker.id, worker.name), resume),
 	};
 }

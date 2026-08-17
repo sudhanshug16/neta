@@ -36,6 +36,9 @@ export function killSessionArgs(sessionName: string): string[] {
  * the window closes by itself when the watcher exits.
  */
 export function newWindowArgs(title: string, spec: ProcessSpec, cwd: string, sessionName?: string): string[] {
+	const environment = Object.entries(spec.env ?? {})
+		.sort(([left], [right]) => left.localeCompare(right))
+		.flatMap(([name, value]) => ["-e", `${name}=${value}`]);
 	return [
 		"new-window",
 		...(sessionName ? ["-t", sessionName] : []),
@@ -44,8 +47,7 @@ export function newWindowArgs(title: string, spec: ProcessSpec, cwd: string, ses
 		title,
 		"-c",
 		cwd,
-		"-e",
-		`NETA_PANE=${title}`,
+		...environment,
 		"--",
 		spec.command,
 		...spec.args,
@@ -53,8 +55,8 @@ export function newWindowArgs(title: string, spec: ProcessSpec, cwd: string, ses
 }
 
 /** Rename only the window containing the calling watcher. */
-export function renameWindowArgs(title: string): string[] {
-	return ["rename-window", title];
+export function renameWindowArgs(target: string, title: string): string[] {
+	return ["rename-window", "-t", target, title];
 }
 
 export class TmuxAdapter implements MuxAdapter {
@@ -91,9 +93,10 @@ export class TmuxAdapter implements MuxAdapter {
 		throw new Error(`tmux: ${(result.stderr || result.error?.message || `exit ${result.status}`).trim()}`);
 	}
 
-	renameCurrentPane(title: string): boolean {
-		if (!this.inSession()) return false;
-		const result = spawnSync("tmux", renameWindowArgs(title), { encoding: "utf-8" });
+	renameCurrentPane(title: string, env: Record<string, string | undefined> = process.env): boolean {
+		const target = env.TMUX_PANE;
+		if (env.NETA_MUX !== this.id || !env.NETA_PANE || !target) return false;
+		const result = spawnSync("tmux", renameWindowArgs(target, title), { encoding: "utf-8" });
 		return result.status === 0;
 	}
 }

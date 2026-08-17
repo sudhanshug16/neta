@@ -164,10 +164,12 @@ control. Panes read the log without consuming it, so nothing a pane shows is
 stolen from the leader, and `neta watch <id> --plain` prints the same stream
 as bare lines for piping.
 
-Terminal tabs stay readable and advertise their result in the tab bar: `✓` is
-done, while `failed` and `killed` are explicit and distinct. Only watch tabs
-marked as Neta-owned rename themselves; running `neta watch` in an ordinary
-user terminal does not rename that terminal's tmux window or Zellij tab.
+An existing worker watch tab advertises its result in the tab bar: `✓` is done,
+`✗` is failed, and `⊘` is killed. Status marking only renames the exact watch
+tab Neta marked and never opens or retains one; running `neta watch` in an
+ordinary user terminal does not rename that terminal's tmux window or Zellij
+tab. CLI `neta attach` takes over its caller's terminal; only the leader's
+`neta_attach` tool opens a fresh tab.
 
 A room gets one more pane of its own, opened when its first member joins:
 `neta watch <room-name>` follows the room's merged transcript, every post

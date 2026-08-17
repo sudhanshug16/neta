@@ -12,6 +12,15 @@ import { join } from "node:path";
 import { findOnPath } from "../detect.ts";
 import type { MuxAdapter, ProcessSpec } from "./types.ts";
 
+interface CommandResult {
+	status: number | null;
+	stdout: string;
+}
+
+type CommandRunner = (command: string, args: string[]) => CommandResult;
+
+const runCommand: CommandRunner = (command, args) => spawnSync(command, args, { encoding: "utf-8" });
+
 /** KDL strings escape backslash and double quote; nothing else needs quoting here. */
 function kdlString(value: string): string {
 	return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
@@ -134,9 +143,65 @@ export function newTabArgs(title: string, spec: ProcessSpec, cwd: string, sessio
 	];
 }
 
-/** Rename only the tab containing the calling watcher. */
-export function renameTabArgs(title: string): string[] {
-	return ["action", "rename-tab", title];
+/** Inspect only the calling pane's tab in the recorded session. */
+export function listTabPanesArgs(sessionName: string): string[] {
+	return ["--session", sessionName, "action", "list-panes", "--tab", "--json"];
+}
+
+/** Rename one proven tab id without focusing it. */
+export function renameTabByIdArgs(sessionName: string, tabId: number, title: string): string[] {
+	return ["--session", sessionName, "action", "rename-tab-by-id", String(tabId), title];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Zellij 0.44.3 exposes pane and tab ids as different fields. Resolve the tab
+ * only when one non-plugin pane proves both the pane id and original tab name.
+ */
+export function zellijTabId(stdout: string, paneId: string, originalTitle: string): number | undefined {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(stdout) as unknown;
+	} catch {
+		return undefined;
+	}
+	if (!Array.isArray(parsed)) return undefined;
+	const matches = parsed.filter(
+		(row) =>
+			isRecord(row) &&
+			row.is_plugin === false &&
+			(typeof row.id === "string" || typeof row.id === "number") &&
+			String(row.id) === paneId &&
+			row.tab_name === originalTitle &&
+			typeof row.tab_id === "number" &&
+			Number.isInteger(row.tab_id),
+	);
+	if (matches.length !== 1) return undefined;
+	return matches[0].tab_id as number;
+}
+
+/** Best-effort status rename: every missing or ambiguous fact fails closed. */
+export function renameZellijTab(
+	title: string,
+	env: Record<string, string | undefined> = process.env,
+	run: CommandRunner = runCommand,
+): boolean {
+	const sessionName = env.ZELLIJ_SESSION_NAME;
+	const originalTitle = env.NETA_PANE;
+	const paneId = env.ZELLIJ_PANE_ID;
+	if (env.NETA_MUX !== "zellij" || !originalTitle || !sessionName || !paneId) return false;
+	try {
+		const listed = run("zellij", listTabPanesArgs(sessionName));
+		if (listed.status !== 0) return false;
+		const tabId = zellijTabId(listed.stdout, paneId, originalTitle);
+		if (tabId === undefined) return false;
+		return run("zellij", renameTabByIdArgs(sessionName, tabId, title)).status === 0;
+	} catch {
+		return false;
+	}
 }
 
 export class ZellijAdapter implements MuxAdapter {
@@ -151,7 +216,7 @@ export class ZellijAdapter implements MuxAdapter {
 	}
 
 	sessionName(): string | undefined {
-		return process.env.ZELLIJ || undefined;
+		return process.env.ZELLIJ_SESSION_NAME || undefined;
 	}
 
 	wrapLeader(leader: ProcessSpec, sessionName: string, sessionDir: string): ProcessSpec | undefined {
@@ -189,9 +254,7 @@ export class ZellijAdapter implements MuxAdapter {
 		return true;
 	}
 
-	renameCurrentPane(title: string): boolean {
-		if (!this.inSession()) return false;
-		const result = spawnSync("zellij", renameTabArgs(title), { encoding: "utf-8" });
-		return result.status === 0;
+	renameCurrentPane(title: string, env: Record<string, string | undefined> = process.env): boolean {
+		return renameZellijTab(title, env);
 	}
 }

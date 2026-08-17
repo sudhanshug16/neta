@@ -49,8 +49,8 @@ const HELP = `${APP_NAME} ${VERSION} — a leader agent that delegates to worker
   ${APP_NAME} log <id>                  Drain a worker's new log lines. This moves the
                                         leader's read cursor; to look in on a worker
                                         without stealing lines, use watch.
-  ${APP_NAME} attach <id>               Open a worker in its own CLI (Claude Code,
-                                        Codex) to read it there and take over.
+  ${APP_NAME} attach <id>               Take over this terminal with a worker's own
+                                        CLI (Claude Code, Codex) to read it there.
   ${APP_NAME} kill <id>                 Stop a worker.
   ${APP_NAME} sessions                  List running leader sessions.
   ${APP_NAME} models [backend]          Show the models a worker backend offers,

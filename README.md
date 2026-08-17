@@ -180,7 +180,7 @@ neta spawn ...             start a worker from your terminal
 neta wait ro1 ro2          block until those workers finish
 neta watch ro1             watch one worker live, and type to talk to it
 neta watch auth-debate     follow a room's merged transcript live
-neta attach ro1            open that worker in its own CLI and take over
+neta attach ro1            take over this terminal with that worker's own CLI
 neta log ro1               its new lines since you last looked
 neta send rw2 <message>    give a worker more instructions
 neta answer ro1 <text>     unblock a worker that asked something
@@ -193,10 +193,11 @@ ran it: Neta hands the session id the worker's ACP handshake returned to that
 backend's own resume command — `claude --resume <id>`, `codex resume <id>`,
 `opencode --session <id>` — so it opens in the interface you already know,
 where you can read what it did and keep talking to it yourself. Neta drove it;
-you can finish it. Retained worker tabs show `✓` for success, `failed` for
-failure, or `killed` when terminated, so their outcome is visible from the tab
-bar. The leader's `neta_attach` tool opens a terminal worker in a fresh tab;
-it refuses active workers so two clients cannot drive one conversation.
+you can finish it. An existing worker watch tab is renamed in place with `✓`
+for success, `✗` for failure, or `⊘` when killed; status marking never opens or
+retains a tab. CLI `neta attach` takes over its caller's terminal. The leader's
+`neta_attach` tool is the only attach action that opens a fresh tab; it refuses
+active workers so two clients cannot drive one conversation.
 
 ## Configuring it
 

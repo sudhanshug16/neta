@@ -74,7 +74,16 @@ describe("leader prompt", () => {
 		const prompt = buildLeaderPrompt({ tiers: DEFAULT_TIERS, control: "cli" });
 
 		expect(prompt).toContain("neta spawn --role");
+		expect(prompt).toContain("takes over the caller's terminal");
 		expect(prompt).not.toContain("`neta_spawn`");
+		expect(prompt).not.toContain("neta attach <id>` opens");
+	});
+
+	it("reserves new attach tabs for the MCP action", () => {
+		const prompt = buildLeaderPrompt({ tiers: DEFAULT_TIERS, control: "mcp" });
+
+		expect(prompt).toContain("native backend TUI in a new tab");
+		expect(prompt).not.toContain("takes over the caller's terminal");
 	});
 
 	// A leader that cannot delegate has been seen reporting work its backend's

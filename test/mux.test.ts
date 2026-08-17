@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NoMux, selectMux } from "../src/mux/index.ts";
-import { createPaneHost, markWorkerPaneTerminal, tabTitle } from "../src/mux/panes.ts";
+import { createPaneHost, markWorkerPaneTerminal, tabTitle, tuiTabTitle } from "../src/mux/panes.ts";
 import {
 	newWindowArgs,
 	renameWindowArgs,
@@ -15,12 +15,15 @@ import {
 import type { MuxAdapter, ProcessSpec } from "../src/mux/types.ts";
 import {
 	leaderLayout,
+	listTabPanesArgs,
 	newSessionArgs,
 	newTabArgs,
-	renameTabArgs,
+	renameTabByIdArgs,
+	renameZellijTab,
 	ZellijAdapter,
 	attachSessionArgs as zellijAttachSessionArgs,
 	killSessionArgs as zellijKillSessionArgs,
+	zellijTabId,
 } from "../src/mux/zellij.ts";
 
 const leader: ProcessSpec = { command: "/usr/local/bin/claude", args: ["--append-system-prompt", "be a lead"] };
@@ -71,7 +74,12 @@ describe("tmux", () => {
 	// A window, not a split. Splitting the leader's window shrinks the thing the
 	// user is typing into, and five workers made it unreadable.
 	it("puts a worker in its own window, leaving the leader focused", () => {
-		const args = newWindowArgs("ro1 scout", { command: "neta", args: ["watch", "ro1"] }, "/repo", "neta-1");
+		const args = newWindowArgs(
+			"ro1 scout",
+			{ command: "neta", args: ["watch", "ro1"], env: { NETA_MUX: "tmux", NETA_PANE: "ro1 scout" } },
+			"/repo",
+			"neta-1",
+		);
 
 		expect(args).toEqual([
 			"new-window",
@@ -83,6 +91,8 @@ describe("tmux", () => {
 			"-c",
 			"/repo",
 			"-e",
+			"NETA_MUX=tmux",
+			"-e",
 			"NETA_PANE=ro1 scout",
 			"--",
 			"neta",
@@ -92,16 +102,25 @@ describe("tmux", () => {
 		expect(args).not.toContain("split-window");
 	});
 
-	it("renames only the calling watcher's current window", () => {
-		expect(renameWindowArgs("ro1 auth ✓")).toEqual(["rename-window", "ro1 auth ✓"]);
+	it("targets the calling watcher's exact tmux window", () => {
+		expect(renameWindowArgs("%17", "ro1 auth ✓")).toEqual(["rename-window", "-t", "%17", "ro1 auth ✓"]);
+	});
+
+	it("does not invent marker environment for an unmarked process", () => {
+		const args = newWindowArgs("ro1 auth tui", { command: "claude", args: ["--resume", "abc"] }, "/repo");
+
+		expect(args).not.toContain("-e");
+		expect(args).not.toContain("NETA_PANE=ro1 auth tui");
 	});
 });
 
 describe("zellij", () => {
 	const dirs: string[] = [];
 	const savedZellij = process.env.ZELLIJ;
+	const savedZellijSessionName = process.env.ZELLIJ_SESSION_NAME;
 	beforeEach(() => {
 		delete process.env.ZELLIJ;
+		delete process.env.ZELLIJ_SESSION_NAME;
 	});
 	afterEach(() => {
 		for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
@@ -109,6 +128,11 @@ describe("zellij", () => {
 			process.env.ZELLIJ = savedZellij;
 		} else {
 			delete process.env.ZELLIJ;
+		}
+		if (savedZellijSessionName !== undefined) {
+			process.env.ZELLIJ_SESSION_NAME = savedZellijSessionName;
+		} else {
+			delete process.env.ZELLIJ_SESSION_NAME;
 		}
 	});
 
@@ -200,7 +224,11 @@ describe("zellij", () => {
 
 	it("marks Neta-owned tabs through env without a shell", () => {
 		expect(
-			newTabArgs("ro1 scout", { command: "neta", args: ["watch", "ro1"], env: { NETA_PANE: "ro1 scout" } }, "/repo"),
+			newTabArgs(
+				"ro1 scout",
+				{ command: "neta", args: ["watch", "ro1"], env: { NETA_MUX: "zellij", NETA_PANE: "ro1 scout" } },
+				"/repo",
+			),
 		).toEqual([
 			"action",
 			"new-tab",
@@ -211,6 +239,7 @@ describe("zellij", () => {
 			"--close-on-exit",
 			"--",
 			"/usr/bin/env",
+			"NETA_MUX=zellij",
 			"NETA_PANE=ro1 scout",
 			"neta",
 			"watch",
@@ -218,8 +247,104 @@ describe("zellij", () => {
 		]);
 	});
 
-	it("renames only the calling watcher's current tab", () => {
-		expect(renameTabArgs("ro1 auth failed")).toEqual(["action", "rename-tab", "ro1 auth failed"]);
+	it("maps a divergent pane id to its tab id and renames that exact tab", () => {
+		const calls: Array<{ command: string; args: string[] }> = [];
+		const rows = JSON.stringify([
+			{ id: 41, is_plugin: false, tab_id: 7, tab_name: "ro1 auth" },
+			{ id: 42, is_plugin: false, tab_id: 9, tab_name: "another tab" },
+		]);
+		const renamed = renameZellijTab(
+			"ro1 auth ✗",
+			{
+				NETA_MUX: "zellij",
+				NETA_PANE: "ro1 auth",
+				ZELLIJ_SESSION_NAME: "neta-s1",
+				ZELLIJ_PANE_ID: "41",
+			},
+			(command, args) => {
+				calls.push({ command, args });
+				return { status: 0, stdout: calls.length === 1 ? rows : "" };
+			},
+		);
+
+		expect(renamed).toBe(true);
+		expect(calls).toEqual([
+			{ command: "zellij", args: listTabPanesArgs("neta-s1") },
+			{ command: "zellij", args: renameTabByIdArgs("neta-s1", 7, "ro1 auth ✗") },
+		]);
+		expect(calls.flatMap((call) => call.args)).not.toContain("rename-tab");
+		expect(calls.flatMap((call) => call.args)).not.toContain("new-tab");
+		expect(calls.flatMap((call) => call.args)).not.toContain("go-to-tab-name");
+	});
+
+	it("fails closed on missing Zellij ownership or target metadata", () => {
+		const complete = {
+			NETA_MUX: "zellij",
+			NETA_PANE: "ro1 auth",
+			ZELLIJ_SESSION_NAME: "neta-s1",
+			ZELLIJ_PANE_ID: "41",
+		};
+		for (const key of Object.keys(complete)) {
+			const env = { ...complete, [key]: undefined };
+			expect(renameZellijTab("ro1 auth ✓", env, () => ({ status: 0, stdout: "[]" }))).toBe(false);
+		}
+		expect(
+			renameZellijTab("ro1 auth ✓", { ...complete, NETA_MUX: "tmux" }, () => ({ status: 0, stdout: "[]" })),
+		).toBe(false);
+	});
+
+	it("fails closed on command errors, malformed or ambiguous rows, mismatches, and noninteger tab ids", () => {
+		const env = {
+			NETA_MUX: "zellij",
+			NETA_PANE: "ro1 auth",
+			ZELLIJ_SESSION_NAME: "neta-s1",
+			ZELLIJ_PANE_ID: "41",
+		};
+		const row = { id: 41, is_plugin: false, tab_id: 7, tab_name: "ro1 auth" };
+		const runWith = (stdout: string, renameStatus = 0) => {
+			let calls = 0;
+			return renameZellijTab("ro1 auth ✓", env, () => {
+				calls += 1;
+				return { status: calls === 1 ? 0 : renameStatus, stdout: calls === 1 ? stdout : "" };
+			});
+		};
+
+		expect(renameZellijTab("ro1 auth ✓", env, () => ({ status: 1, stdout: "" }))).toBe(false);
+		expect(runWith("not json")).toBe(false);
+		expect(runWith("{}")).toBe(false);
+		expect(runWith("[]")).toBe(false);
+		expect(runWith(JSON.stringify([row, row]))).toBe(false);
+		expect(runWith(JSON.stringify([{ ...row, id: 99 }]))).toBe(false);
+		expect(runWith(JSON.stringify([{ ...row, tab_name: "wrong" }]))).toBe(false);
+		expect(runWith(JSON.stringify([{ ...row, is_plugin: true }]))).toBe(false);
+		expect(runWith(JSON.stringify([{ ...row, tab_id: 7.5 }]))).toBe(false);
+		expect(runWith(JSON.stringify([row]), 1)).toBe(false);
+		expect(
+			renameZellijTab("ro1 auth ✓", env, () => {
+				throw new Error("missing binary");
+			}),
+		).toBe(false);
+	});
+
+	it("rejects malformed pane rows without treating pane ids as tab ids", () => {
+		expect(
+			zellijTabId(JSON.stringify([{ id: 41, is_plugin: false, tab_name: "ro1 auth" }]), "41", "ro1 auth"),
+		).toBeUndefined();
+		expect(renameTabByIdArgs("neta-s1", 7, "ro1 auth ⊘")).toEqual([
+			"--session",
+			"neta-s1",
+			"action",
+			"rename-tab-by-id",
+			"7",
+			"ro1 auth ⊘",
+		]);
+	});
+
+	it("uses ZELLIJ_SESSION_NAME because ZELLIJ is only an installed marker", () => {
+		process.env.ZELLIJ = "0";
+		process.env.ZELLIJ_SESSION_NAME = "neta-real";
+
+		expect(new ZellijAdapter().sessionName()).toBe("neta-real");
 	});
 
 	it("writes the layout file into the session directory", () => {
@@ -271,8 +396,12 @@ describe("worker views", () => {
 		scratchDir: "/tmp/x",
 	};
 
-	function recordingMux(): { mux: MuxAdapter; calls: Array<{ title: string; args: string[] }> } {
-		const calls: Array<{ title: string; args: string[] }> = [];
+	function recordingMux(): {
+		mux: MuxAdapter;
+		calls: Array<{ title: string; command: string; args: string[]; env: Record<string, string> | undefined }>;
+	} {
+		const calls: Array<{ title: string; command: string; args: string[]; env: Record<string, string> | undefined }> =
+			[];
 		return {
 			calls,
 			mux: {
@@ -282,7 +411,7 @@ describe("worker views", () => {
 				sessionName: () => "fallback",
 				wrapLeader: () => undefined,
 				openPane: (title, spec, _cwd, sessionName) => {
-					calls.push({ title, args: spec.args });
+					calls.push({ title, command: spec.command, args: spec.args, env: spec.env });
 					expect(sessionName).toBe("neta-s7");
 					return true;
 				},
@@ -311,18 +440,30 @@ describe("worker views", () => {
 
 	it("keeps terminal outcomes distinct and inside the title limit", () => {
 		expect(tabTitle("ro1", "auth flow", "done")).toBe("ro1 auth flow ✓");
-		expect(tabTitle("ro1", "auth flow", "failed")).toBe("ro1 auth flow failed");
-		expect(tabTitle("ro1", "auth flow", "killed")).toBe("ro1 auth flow killed");
+		expect(tabTitle("ro1", "auth flow", "failed")).toBe("ro1 auth flow ✗");
+		expect(tabTitle("ro1", "auth flow", "killed")).toBe("ro1 auth flow ⊘");
 		for (const state of ["done", "failed", "killed"] as const) {
 			const title = tabTitle("rw12", "the entire websocket reconnect subsystem", state);
 			expect(title).toStartWith("rw12");
 			expect(title.length).toBeLessThanOrEqual(22);
 		}
+		expect(tabTitle("rw12", "the entire websocket reconnect subsystem", "done")).toBe("rw12 the entire web… ✓");
+		expect(tabTitle("rw12", "the entire websocket reconnect subsystem", "failed")).toBe("rw12 the entire web… ✗");
+		expect(tabTitle("rw12", "the entire websocket reconnect subsystem", "killed")).toBe("rw12 the entire web… ⊘");
 	});
 
-	it("never renames an unmarked user-owned mux resource", () => {
-		expect(markWorkerPaneTerminal({ ...worker, state: "done" }, { TMUX: "/tmp/tmux" })).toBe(false);
-		expect(markWorkerPaneTerminal({ ...worker, state: "failed" }, { ZELLIJ: "1" })).toBe(false);
+	it("never guesses a mux or renames an unmarked user-owned resource", () => {
+		expect(markWorkerPaneTerminal({ ...worker, state: "done" }, { TMUX: "/tmp/tmux", TMUX_PANE: "%1" })).toBe(false);
+		expect(markWorkerPaneTerminal({ ...worker, state: "failed" }, { ZELLIJ: "0", ZELLIJ_PANE_ID: "1" })).toBe(false);
+		expect(
+			markWorkerPaneTerminal(
+				{ ...worker, state: "done" },
+				{ NETA_MUX: "tmux", NETA_PANE: "ro1 auth flow", TMUX: "/tmp/tmux" },
+			),
+		).toBe(false);
+		expect(markWorkerPaneTerminal(worker, { NETA_MUX: "tmux", NETA_PANE: "ro1 auth flow", TMUX_PANE: "%1" })).toBe(
+			false,
+		);
 	});
 
 	// Multiplexers start these from their own server process, which does not have
@@ -343,6 +484,7 @@ describe("worker views", () => {
 
 		expect(calls[0].title).toBe("ro1 auth flow");
 		expect(calls[0].args).toEqual(["/opt/cli.js", "watch", "ro1", "--session", "s7", "--dir", "/home/u/.neta"]);
+		expect(calls[0].env).toEqual({ NETA_MUX: "tmux", NETA_PANE: "ro1 auth flow" });
 	});
 
 	// The room's own view runs the same watch command; the tab is titled with
@@ -371,6 +513,7 @@ describe("worker views", () => {
 			"--dir",
 			"/home/u/.neta",
 		]);
+		expect(calls[0].env).toEqual({ NETA_MUX: "tmux", NETA_PANE: "auth-debate" });
 		expect(calls[1].title.length).toBeLessThanOrEqual(22);
 		expect(calls[1].title).toEndWith("…");
 	});
@@ -392,7 +535,22 @@ describe("worker views", () => {
 		);
 
 		expect(outcome).toEqual({ opened: true });
-		expect(calls[0]).toEqual({ title: "ro1 auth flow tui", args: ["--resume", "vendor-exact"] });
+		expect(calls[0]).toEqual({
+			title: "ro1 auth flow tui",
+			command: "claude",
+			args: ["--resume", "vendor-exact"],
+			env: undefined,
+		});
+	});
+
+	it("keeps a clamped attach tab distinct and leaves native TUI tabs unmarked", () => {
+		const watch = tabTitle("rw12", "the entire websocket reconnect subsystem");
+		const tui = tuiTabTitle("rw12", "the entire websocket reconnect subsystem");
+
+		expect(watch).toBe("rw12 the entire webso…");
+		expect(tui).toBe("rw12 the entire w… tui");
+		expect(tui).not.toBe(watch);
+		expect(tui).toEndWith(" tui");
 	});
 
 	it("reports why a view could not open rather than losing it", () => {
