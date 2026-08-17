@@ -8,9 +8,10 @@
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { execFile, spawn } from "node:child_process";
+import { execFile, spawn, spawnSync } from "node:child_process";
 import {
 	existsSync,
+	lstatSync,
 	mkdirSync,
 	mkdtempSync,
 	readdirSync,
@@ -26,7 +27,14 @@ import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { ClaudeAdapter } from "../src/adapters/claude.ts";
-import { CodexAdapter, codexSupportsHooks, createHomeOverlay, hooksConfig } from "../src/adapters/codex.ts";
+import {
+	CodexAdapter,
+	captureHookCommand,
+	codexSupportsHooks,
+	createHomeOverlay,
+	hooksConfig,
+	windowsHookCommand,
+} from "../src/adapters/codex.ts";
 import { capturePluginSource, OpenCodeAdapter } from "../src/adapters/opencode.ts";
 import type { LeaderLaunchContext } from "../src/adapters/types.ts";
 import {
@@ -40,6 +48,7 @@ import {
 	writeCheckpointAtomic,
 	writeVendorSessionCapture,
 } from "../src/checkpoint.ts";
+import { shellQuote } from "../src/cli-shim.ts";
 import { VERSION } from "../src/config.ts";
 import type { DetectedLeaderBackend } from "../src/detect.ts";
 import { resumeLeader } from "../src/launch.ts";
@@ -697,9 +706,12 @@ describe("the exact leader conversation", () => {
 			// for — otherwise Codex would hold it back and never report its id.
 			expect(readFileSync(join(leaderDir, "codex-home", "hooks.json"), "utf8")).toContain("SessionStart");
 			expect(supported.warnings.join(" ")).toContain("recorded Codex hook trust");
-			expect(readFileSync(join(realHome, "config.toml"), "utf8")).toContain(
+			// In this session's own config, which is the copy Codex reads. The user's
+			// stays as they left it — here, absent.
+			expect(readFileSync(join(leaderDir, "codex-home", "config.toml"), "utf8")).toContain(
 				`[hooks.state."${realpathSync(join(leaderDir, "codex-home", "hooks.json"))}:session_start:0:0"]`,
 			);
+			expect(existsSync(join(realHome, "config.toml"))).toBe(false);
 
 			// The refusal itself is covered by its own test; here it is enough that
 			// the hook file is only written where the mechanism exists.
@@ -727,11 +739,92 @@ describe("the exact leader conversation", () => {
 			JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", command: "user-hook" }] }] } }),
 		);
 		const merged = JSON.parse(hooksConfig(realHome, { command: "neta", args: ["capture-leader-session"] })) as {
-			hooks: { SessionStart: Array<{ hooks: Array<{ command: string }> }> };
+			hooks: { SessionStart: Array<{ hooks: Array<{ command: string; commandWindows?: string }> }> };
 		};
 		expect(merged.hooks.SessionStart).toHaveLength(2);
 		expect(merged.hooks.SessionStart[0].hooks[0].command).toBe("user-hook");
-		expect(merged.hooks.SessionStart[1].hooks[0].command).toBe("neta capture-leader-session");
+		expect(merged.hooks.SessionStart[1].hooks[0].command).toBe("'neta' 'capture-leader-session'");
+		expect(merged.hooks.SessionStart[1].hooks[0].commandWindows).toBe('"neta" "capture-leader-session"');
+	});
+
+	/**
+	 * Codex 0.147 takes a hook as one command string and runs it through a shell.
+	 * Neta does not choose the paths in that string — the executable is wherever
+	 * `neta` was installed and the directory comes from `NETA_DIR` — so the string
+	 * is quoted, not joined. These run the generated command for real.
+	 */
+	it("passes an adversarial executable path and arguments through the shell literally", () => {
+		const root = scratch("neta-hook-shell-");
+		const nasty = join(root, "b in 'dir' $(touch pwned) `touch pwned2`; touch pwned3 && echo x | tee y");
+		mkdirSync(nasty, { recursive: true });
+		const executable = join(nasty, "ne ta");
+		const seen = join(root, "seen.json");
+		// Records every argument it was given, plus what arrived on stdin.
+		writeFileSync(executable, `#!/bin/sh\nprintf '%s\\n' "$@" > ${shellQuote(seen)}\ncat >> ${shellQuote(seen)}\n`, {
+			mode: 0o755,
+		});
+		const args = [
+			"capture-leader-session",
+			"--session",
+			"logical 1; touch pwned4",
+			"--dir",
+			join(root, 'a "quoted" dir'),
+			"$HOME",
+			"a\nb",
+			"back\\slash",
+			"semi;colon`x`",
+		];
+		writeFileSync(join(root, "hooks.json"), hooksConfig(root, { command: executable, args }));
+		const command = (
+			JSON.parse(readFileSync(join(root, "hooks.json"), "utf8")) as {
+				hooks: { SessionStart: Array<{ hooks: Array<{ command: string }> }> };
+			}
+		).hooks.SessionStart[0].hooks[0].command;
+
+		const payload = JSON.stringify({ hook_event_name: "SessionStart", session_id: "1-2-3" });
+		const ran = spawnSync("/bin/sh", ["-c", command], { cwd: root, input: payload, encoding: "utf-8" });
+
+		expect({ status: ran.status, stderr: ran.stderr }).toMatchObject({ status: 0 });
+		// Every argument arrived exactly as written, and stdin is untouched.
+		expect(readFileSync(seen, "utf8")).toBe(`${args.join("\n")}\n${payload}`);
+		// Nothing the metacharacters would have done, was done.
+		for (const marker of ["pwned", "pwned2", "pwned3", "pwned4", "y"]) {
+			expect(existsSync(join(root, marker))).toBe(false);
+		}
+	});
+
+	it("refuses a Windows command line it cannot express, rather than mis-quoting one", () => {
+		expect(windowsHookCommand(["C:\\neta\\neta.exe", "capture-leader-session", "--dir", "C:\\a b\\dir\\"])).toBe(
+			'"C:\\neta\\neta.exe" "capture-leader-session" "--dir" "C:\\a b\\dir\\\\"',
+		);
+		// cmd.exe expands these inside double quotes; there is no quoting that stops it.
+		for (const argument of ['a"b', "50%done", "bang!", "line\nbreak"]) {
+			expect(windowsHookCommand(["neta", argument])).toBeUndefined();
+		}
+		expect(() => captureHookCommand({ command: "neta", args: ["50%done"] }, "win32")).toThrow(
+			/cannot be expressed as a cmd.exe command line/,
+		);
+		expect(captureHookCommand({ command: "neta", args: ["50%done"] }, "darwin")).toBe("'neta' '50%done'");
+		// A POSIX host still generates the hook; it just carries no Windows form.
+		expect(
+			hooksConfig(scratch("neta-nowin-"), { command: "neta", args: ["50%done"] }, () => {}, "darwin"),
+		).not.toContain("commandWindows");
+	});
+
+	it("refuses to start rather than silently drop hooks it cannot read", () => {
+		const realHome = scratch("neta-real-codex-");
+		mkdirSync(join(realHome, "hooks.json"));
+
+		expect(() => hooksConfig(realHome, { command: "neta", args: [] })).toThrow(/could not read your Codex hooks/);
+
+		// One Codex would reject anyway: the session goes ahead, and says so.
+		const other = scratch("neta-real-codex-");
+		writeFileSync(join(other, "hooks.json"), "not json at all");
+		const warnings: string[] = [];
+		expect(hooksConfig(other, { command: "neta", args: [] }, (message) => warnings.push(message))).toContain(
+			"SessionStart",
+		);
+		expect(warnings.join(" ")).toContain("not a JSON object");
 	});
 });
 
@@ -749,6 +842,11 @@ describe("the Codex overlay home survives the run that created it", () => {
 		expect(readFileSync(join(overlay, "AGENTS.md"), "utf8")).toContain("first instructions");
 		expect(readFileSync(join(overlay, "auth.json"), "utf8")).toContain("secret");
 
+		// config.toml is copied rather than linked, so this session's hook trust has
+		// somewhere private to live. The copy is the user's settings, verbatim.
+		expect(lstatSync(join(overlay, "config.toml")).isSymbolicLink()).toBe(false);
+		expect(readFileSync(join(overlay, "config.toml"), "utf8")).toBe("model = 'gpt'");
+
 		// The real home changes between runs; the overlay follows without ever
 		// copying credentials or sessions out of it.
 		rmSync(join(realHome, "config.toml"));
@@ -756,7 +854,8 @@ describe("the Codex overlay home survives the run that created it", () => {
 		await createHomeOverlay(realHome, overlay, "second instructions");
 		expect(readFileSync(join(overlay, "AGENTS.md"), "utf8")).toContain("second instructions");
 		expect(readFileSync(join(overlay, "AGENTS.md"), "utf8")).not.toContain("first instructions");
-		expect(() => readFileSync(join(overlay, "config.toml"), "utf8")).toThrow();
+		// Regenerated from what the real home says now, including its removal.
+		expect(readFileSync(join(overlay, "config.toml"), "utf8")).toBe("");
 		expect(readFileSync(join(overlay, "history.jsonl"), "utf8")).toBe("{}");
 		expect(() => readFileSync(join(overlay, "hooks.json"), "utf8")).toThrow();
 		expect(overlay.startsWith(tmpdir())).toBe(true); // the scratch root here is tmp; the path itself is Neta's

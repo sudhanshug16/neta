@@ -111,15 +111,42 @@ arguments that would move the conversation:
   included. Neta uses neither. Before the leader starts it asks the installed
   binary — `codex app-server`, `hooks/list`, offline, no session and no model —
   for the key and hash Codex files this hook under, records
-  `[hooks.state."<key>"] trusted_hash = "<hash>"` in the Codex config that
-  session will read, and asks again to confirm Codex now trusts it. If it does
-  not, the launch is refused rather than started unresumable. Neta vouches for
-  exactly two things: its own generated capture hook, and a hook of yours whose
-  identical definition your Codex config already trusts (the overlay gives your
-  hooks a new path, which Codex reads as new). Anything else — an unreviewed
-  hook of yours, anything a repository ships — stays untrusted and Codex asks
-  you, as it would without Neta. Trust entries Neta wrote for overlay homes that
-  no longer exist are pruned when it writes the next one.
+  `[hooks.state."<key>"] trusted_hash = "<hash>"` in the config that session will
+  read, and asks again to confirm Codex now trusts it. If it does not, the launch
+  is refused rather than started unresumable.
+
+  **Where that trust is written.** Not in your `~/.codex/config.toml`. Each
+  logical session's overlay home gets its own `config.toml`, generated from
+  yours at launch — your settings verbatim, plus this session's one trust entry.
+  Neta reads your config and never writes it. Two consequences worth knowing:
+
+  - Two `neta` launches in two directories cannot overwrite each other's trust.
+    They used to: each read your one config, each appended its entry, and
+    whichever wrote second dropped the other's. The losing session then started
+    with an untrusted capture hook, so Codex never ran it and that
+    conversation's id was lost with no error anywhere.
+  - A setting you change from inside a Neta-led Codex session — a `/model`, a
+    "Trust all" in the hooks screen — lands in that session's copy, not in your
+    own config. Change anything you want to keep in `~/.codex/config.toml`; the
+    next launch copies it forward. The copy is rebuilt from yours on every run,
+    including a resume, so your config is always what wins.
+
+  **What Neta vouches for.** Exactly two things: its own generated capture hook,
+  and a hook of yours whose identical definition your Codex config already
+  trusts (the overlay gives your hooks a new path, which Codex reads as new).
+  Anything else — an unreviewed hook of yours, anything a repository ships —
+  stays untrusted and Codex asks you, as it would without Neta. Trust entries
+  naming overlay homes that no longer exist are dropped when the copy is
+  generated, and only for paths genuinely inside Neta's own
+  `~/.neta/leader-sessions` directory — a sibling that merely starts with the
+  same characters is left alone.
+
+  **The hook command line.** Codex takes a hook as one command *string* and runs
+  it through a shell, so Neta quotes each argument rather than joining them with
+  spaces: an install path with a space, an apostrophe or a `$(…)` in it is passed
+  literally and never executed. Windows Codex gets the same command as
+  `commandWindows`, quoted for `cmd.exe`; on Windows a path containing `"`, `%`
+  or `!` is refused outright rather than mis-quoted.
 - **OpenCode** also assigns its own id (`ses_…`) and offers no way to name one.
   The leader runs in OpenCode's own TUI rather than over ACP, so there is no
   `session/new` response to read the id from; what there is, is the plugin
@@ -175,9 +202,12 @@ index. Neta's Codex overlay home therefore lives at
 `~/.neta/leader-sessions/<logical-id>/codex-home` (mode `0700`), not under the
 per-run temporary directory: an overlay that is deleted at exit leaves Codex
 pointing at a path that no longer exists, and `codex resume <id>` then fails
-even though the transcript is safe in the real Codex home. Only `AGENTS.md` and
-`hooks.json` are generated there; every other entry stays a symlink into the
-real home, so credentials, history and sessions are never copied.
+even though the transcript is safe in the real Codex home. Only `AGENTS.md`,
+`hooks.json` and `config.toml` are generated there; every other entry stays a
+symlink into the real home, so credentials, history and sessions are never
+copied. `config.toml` is a copy rather than a link so this session's hook trust
+has somewhere private to live — see
+[Reopening a closed session](#reopening-a-closed-session) above.
 
 OpenCode's capture plugin lives in the same per-session directory
 (`opencode-session-capture.mjs`) and is regenerated on every run, for the same
@@ -286,14 +316,19 @@ CLI differently, because the CLIs differ:
 - **OpenCode**: `instructions` in an inline `OPENCODE_CONFIG_CONTENT` config.
 - **Codex**: no append flag exists, so the session runs against an overlay
   `CODEX_HOME` — each entry of your real one symlinked in, with `AGENTS.md`
-  replaced by your own text plus Neta's. The copy is best-effort: an entry
-  that cannot be linked is silently skipped, and Codex simply does not see
-  it. Sessions, history and credentials live in your real home through the
-  links that succeed. When Codex refreshes credentials it replaces the
-  `auth.json` link with a real file; at the end of the session Neta copies
+  replaced by your own text plus Neta's, and `config.toml` copied from yours.
+  The linking is best-effort: an entry that cannot be linked is silently
+  skipped, and Codex simply does not see it. A `config.toml` that exists but
+  cannot be *read* is not: the launch is refused, because a session started
+  from an empty copy is a Codex running with none of your model, provider or
+  approval settings. Sessions, history and credentials live in your real home
+  through the links that succeed. When Codex refreshes credentials it replaces
+  the `auth.json` link with a real file; at the end of the session Neta copies
   those bytes back to your real home, verifies them there, and restores the
-  link — so Neta's own directory retains no copy of your credentials. If any
-  step fails it says so and leaves the file alone, because the alternative is
+  link — so Neta's own directory retains no copy of your credentials. The copy
+  goes through a temporary file beside the real one, and every way it can fail
+  removes that temporary file, because it holds your credentials too. If any
+  step fails it says so and leaves your files alone, because the alternative is
   deleting the only good copy.
 
 ## Taking a worker over

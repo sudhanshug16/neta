@@ -14,22 +14,29 @@
  *    run, each with the `key` Codex files trust under, the `currentHash` it
  *    computes, and whether it is trusted. No prompt, no model, no network.
  * 2. Neta writes `[hooks.state."<key>"] trusted_hash = "<currentHash>"` into the
- *    Codex config the session will read — the persisted-trust record the TUI
- *    writes when a person clicks "Trust", for exactly the keys Neta vouches for.
+ *    config the session will read — the persisted-trust record the TUI writes
+ *    when a person clicks "Trust", for exactly the keys Neta vouches for.
  * 3. A second `hooks/list` confirms Codex now considers it trusted. If it does
  *    not, the launch fails: a session whose id can never be captured is a
  *    session that can never be reopened, and pretending otherwise is worse than
  *    refusing.
  *
+ * That config is this session's own overlay copy, never the user's config.toml.
+ * Writing trust into the shared file made two Neta launches race: each read it,
+ * each appended its entry, and whichever wrote second dropped the other's, so a
+ * session that had been confirmed as trusted started with an untrusted hook and
+ * never reported its id. A copy per logical session has no such interleaving —
+ * and leaves the user's own config exactly as they wrote it.
+ *
  * Neta vouches for two kinds of hook, and no others: its own generated capture
- * hook, and a hook the user has already trusted elsewhere in this same Codex
- * config — the overlay home gives their hooks a new path, which Codex reads as a
- * new hook, and carrying the existing decision forward is not a new one.
+ * hook, and a hook the user has already trusted in their own config — the overlay
+ * home gives their hooks a new path, which Codex reads as a new hook, and
+ * carrying the existing decision forward is not a new decision.
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve, sep } from "node:path";
 
 /** One hook as `hooks/list` reports it. Fields Neta does not use are ignored. */
 export interface CodexHookEntry {
@@ -212,12 +219,31 @@ export function upsertHookTrust(config: string, key: string, hash: string): stri
 }
 
 /**
+ * Whether `path` is the directory `owner`, or something inside it.
+ *
+ * Comparing the two strings with `startsWith` is not the same question, and gets
+ * the answer wrong in both directions: `~/.neta/leader-sessions-backup` is not
+ * inside `~/.neta/leader-sessions`, and `~/.neta/leader-sessions/x/../../creds`
+ * is not either, though both share the prefix. Both paths are resolved first —
+ * which removes `.` and `..` — and the comparison then requires a separator, so
+ * only a real path boundary counts. The names themselves are compared byte for
+ * byte: a case-insensitive filesystem might resolve more paths into the
+ * directory than this allows, and the cost of that is one dead entry left in a
+ * file, against pruning something Neta does not own.
+ */
+export function pathIsInside(path: string, owner: string): boolean {
+	const target = resolve(path);
+	const root = resolve(owner);
+	if (target === root) return true;
+	return target.startsWith(root.endsWith(sep) ? root : root + sep);
+}
+
+/**
  * Drop trust entries for Neta-generated hook files that no longer exist.
  *
- * Each session's overlay home has its own path, so without this the user's
- * Codex config would collect one dead entry per session forever. Only paths
- * under Neta's own directory are ever removed, and only once the file they name
- * is gone.
+ * Each session's overlay home has its own path, so without this a config would
+ * collect one dead entry per session forever. Only paths inside Neta's own
+ * directory are ever removed, and only once the file they name is gone.
  */
 export function pruneStaleNetaHookTrust(
 	config: string,
@@ -226,10 +252,8 @@ export function pruneStaleNetaHookTrust(
 ): string {
 	let result = config;
 	for (const match of [...config.matchAll(/^\[hooks\.state\."([^"]+)"]/gm)].reverse()) {
-		// `<source path>:<event>:<group index>:<hook index>`, and a path may itself
-		// contain a colon, so the fields are counted from the end.
-		const sourcePath = match[1].split(":").slice(0, -3).join(":");
-		if (!sourcePath.startsWith(ownedPrefix) || exists(sourcePath)) continue;
+		const sourcePath = hookKeySourcePath(match[1]);
+		if (!sourcePath || !pathIsInside(sourcePath, ownedPrefix) || exists(sourcePath)) continue;
 		const start = result.indexOf(match[0]);
 		if (start === -1) continue;
 		const rest = result.slice(start + match[0].length);
@@ -240,37 +264,37 @@ export function pruneStaleNetaHookTrust(
 	return result;
 }
 
-/** The config file a Codex home reads, resolved through the overlay's symlink. */
-export function codexConfigPath(codexHome: string, realHome: string, resolve: (path: string) => string): string {
-	const overlayConfig = join(codexHome, "config.toml");
-	try {
-		if (existsSync(overlayConfig)) return resolve(overlayConfig);
-	} catch {
-		// A broken link is not a config file; fall through to the real home.
-	}
-	return join(realHome, "config.toml");
+/**
+ * The hook file a trust key names.
+ *
+ * A key is `<source path>:<event>:<group index>:<hook index>`, and the path
+ * itself may contain colons — `C:\Users\...` on Windows, and any macOS or Linux
+ * name may. So the three trailing fields are counted from the end, and a key
+ * without them is not one Neta wrote and is left alone.
+ */
+export function hookKeySourcePath(key: string): string | undefined {
+	const fields = key.split(":");
+	if (fields.length < 4) return undefined;
+	const path = fields.slice(0, -3).join(":");
+	return path || undefined;
 }
 
 export interface CaptureHookTrustOptions {
 	/** Codex binary to ask; the same one the session will run. */
 	binary: string;
-	/** The overlay home this session runs against. */
+	/** The overlay home this session runs against, and whose own config.toml trust is written to. */
 	codexHome: string;
-	/** The user's own Codex home, which owns the config trust is written to. */
-	realHome: string;
 	cwd: string;
 	/** Absolute path of the generated hooks file Neta wrote. */
 	hooksPath: string;
-	/** The exact command line of Neta's capture hook. */
+	/** The exact command line of Neta's capture hook, quoted as Codex will run it. */
 	captureCommand: string;
-	/** Neta's own directory of generated Codex homes; stale entries under it are pruned. */
-	ownedPrefix: string;
 	/** Test seam; production asks the installed binary. */
 	probe?: (binary: string, codexHome: string, cwd: string) => Promise<CodexHookEntry[]>;
-	/** Test seam for symlink resolution. */
-	resolvePath?: (path: string) => string;
-	/** Test seam for the staleness check of pruned entries. */
-	pathExists?: (path: string) => boolean;
+	/** Test seam for reading this session's config, between which and the write a race would live. */
+	readConfig?: (path: string) => string;
+	/** Test seam for writing this session's config. */
+	writeConfig?: (path: string, contents: string) => void | Promise<void>;
 }
 
 /** What was arranged, for the launch report. */
@@ -290,8 +314,8 @@ export interface CaptureHookTrustResult {
  */
 export async function ensureCaptureHookTrusted(options: CaptureHookTrustOptions): Promise<CaptureHookTrustResult> {
 	const probe = options.probe ?? probeCodexHooks;
-	const resolvePath = options.resolvePath ?? ((path: string) => path);
-	const pathExists = options.pathExists ?? existsSync;
+	const readConfig = options.readConfig ?? readCodexConfigFile;
+	const writeConfig = options.writeConfig ?? writeCodexConfigFile;
 
 	const entries = await probe(options.binary, options.codexHome, options.cwd);
 	const ours = entries.find(
@@ -313,7 +337,9 @@ export async function ensureCaptureHookTrusted(options: CaptureHookTrustOptions)
 		);
 	}
 
-	const configPath = codexConfigPath(options.codexHome, options.realHome, resolvePath);
+	// This session's own config, generated from the user's when the overlay home
+	// was built. Nothing else writes it, so the read below cannot go stale.
+	const configPath = join(options.codexHome, "config.toml");
 	// Already vouched for — the ordinary case for the second and later runs of one
 	// session, and nothing to write or re-ask about.
 	if (ours.trustStatus === "trusted" || ours.trustStatus === "managed") {
@@ -321,7 +347,7 @@ export async function ensureCaptureHookTrusted(options: CaptureHookTrustOptions)
 	}
 	const before = readConfig(configPath);
 	// Trust Neta's own hook, plus the user's own hooks whose identical definition
-	// this config already trusts under their real path. Nothing else.
+	// their config already trusts under their real path. Nothing else.
 	const alreadyTrusted = trustedHashes(before);
 	const wanted = entries.filter(
 		(entry) =>
@@ -332,16 +358,12 @@ export async function ensureCaptureHookTrusted(options: CaptureHookTrustOptions)
 	);
 	const wrote: string[] = [];
 	if (wanted.length > 0) {
-		let config = pruneStaleNetaHookTrust(before, options.ownedPrefix, pathExists);
+		let config = before;
 		for (const entry of wanted) {
 			config = upsertHookTrust(config, entry.key, entry.currentHash);
 			wrote.push(entry.key);
 		}
-		writeConfig(configPath, config);
-		// A user with no config.toml at all has nothing for the overlay to have
-		// linked, so link it now — otherwise the trust would be written to a file
-		// this session's Codex home cannot see.
-		linkOverlayConfig(options.codexHome, configPath);
+		await writeConfig(configPath, config);
 	}
 
 	// Codex has the last word on whether it will run the hook. Ask it again
@@ -358,29 +380,39 @@ export async function ensureCaptureHookTrusted(options: CaptureHookTrustOptions)
 	return { key: ours.key, wrote, configPath };
 }
 
-function linkOverlayConfig(codexHome: string, configPath: string): void {
-	const overlayConfig = join(codexHome, "config.toml");
-	if (overlayConfig === configPath || existsSync(overlayConfig)) return;
-	try {
-		symlinkSync(configPath, overlayConfig);
-	} catch {
-		// The overlay may not be ours to change; the confirming probe below is what
-		// decides whether this session can go ahead.
-	}
-}
-
-function readConfig(path: string): string {
+/**
+ * A Codex config file's contents, or "" when there is no such file.
+ *
+ * Only "no such file" reads as empty. Anything else — a directory in its place,
+ * a file the process may not read, an I/O error — is raised, because both callers
+ * write a config derived from what this returns: treating an unreadable file as
+ * empty would generate a session config with none of the user's settings in it,
+ * and (before the overlay copy existed) could have written that back over
+ * theirs. Refusing the launch is the only honest answer.
+ */
+export function readCodexConfigFile(path: string): string {
 	try {
 		return readFileSync(path, "utf-8");
-	} catch {
-		return "";
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
+		const detail = error instanceof Error ? error.message : String(error);
+		throw new CodexHookTrustError(
+			`could not read the Codex config at ${path}: ${detail}. Neta will not guess at its contents, so nothing was started.`,
+		);
 	}
 }
 
 /** Atomic, so a config Codex is reading is never half a file. */
-function writeConfig(path: string, contents: string): void {
+export function writeCodexConfigFile(path: string, contents: string): void {
 	mkdirSync(dirname(path), { recursive: true });
 	const temp = `${path}.neta-${process.pid}.tmp`;
-	writeFileSync(temp, contents, { encoding: "utf-8", mode: 0o600 });
-	renameSync(temp, path);
+	try {
+		writeFileSync(temp, contents, { encoding: "utf-8", mode: 0o600 });
+		renameSync(temp, path);
+	} catch (error) {
+		// A Codex config can hold API keys, so a failed write leaves no half-copy of
+		// one lying beside it.
+		rmSync(temp, { force: true });
+		throw error;
+	}
 }

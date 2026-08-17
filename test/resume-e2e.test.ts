@@ -117,13 +117,19 @@ function leaderEnv(options: {
 	} as Record<string, string>;
 }
 
-/** The one running manager, ignoring the crashed record a resume has yet to sweep. */
-function liveSession(agentDir: string, exclude?: string): SessionRecord {
+/** Every running manager, ignoring the crashed records a resume has yet to sweep. */
+function liveSessionsIn(agentDir: string, exclude?: string): SessionRecord[] {
 	const dir = join(agentDir, "sessions");
-	const records = readdirSync(dir)
+	return readdirSync(dir)
 		.filter((name) => name.endsWith(".json"))
 		.map((name) => JSON.parse(readFileSync(join(dir, name), "utf8")) as SessionRecord)
-		.filter((record) => record.id !== exclude && isAlive(record.pid));
+		.filter((record) => record.id !== exclude && isAlive(record.pid))
+		.sort((left, right) => left.startedAt - right.startedAt);
+}
+
+/** The one running manager, where a test expects exactly one. */
+function liveSession(agentDir: string, exclude?: string): SessionRecord {
+	const records = liveSessionsIn(agentDir, exclude);
 	if (records.length !== 1) throw new Error(`expected one live session, found ${records.length}`);
 	return records[0];
 }
@@ -363,6 +369,105 @@ describe("closing and reopening a session", () => {
 		expect(after.leader.vendorConversationId).toBe(conversationId);
 		expect(after.workers.find((worker) => worker.id === "ro1")?.state).toBe("done");
 	}, 90000);
+
+	/**
+	 * Two Codex sessions started at once, in two directories, against one Codex
+	 * home.
+	 *
+	 * Arranging hook trust used to mean rewriting the user's shared config.toml,
+	 * which two launches could do on top of each other: the loser started with an
+	 * untrusted capture hook, Codex never ran it, and that session's id was gone
+	 * with no error anywhere. Each session now has its own config, and this is the
+	 * whole chain end to end — two launchers, two Codexes, two hooks, two
+	 * checkpoints, two resumes. The forced interleaving is covered where it can be
+	 * forced, in the trust unit tests.
+	 */
+	it("captures both ids when two Codex sessions are launched at once, and leaves the user's config alone", async () => {
+		const binDir = fakeBackend("codex");
+		const agentDir = scratch("neta-resume-home-");
+		writeSettings(agentDir);
+		const realCodexHome = scratch("neta-codex-home-");
+		const userConfig =
+			'model = "gpt-5.6-sol"\n\n[hooks.state."/home/u/.codex/hooks.json:stop:0:0"]\ntrusted_hash = "sha256:user"\n';
+		writeFileSync(join(realCodexHome, "config.toml"), userConfig);
+
+		const launches = ["one", "two"].map((name) => {
+			const repo = scratch(`neta-concurrent-${name}-`);
+			const record = join(scratch("neta-record-"), `${name}.json`);
+			const env = leaderEnv({
+				binDir,
+				agentDir,
+				record,
+				quitFile: join(scratch("neta-quit-"), "quit"),
+				codexHome: realCodexHome,
+			});
+			return { name, repo, env };
+		});
+
+		// Both launchers are started before either has finished arranging trust.
+		const leaders = launches.map((launch) => ({
+			...launch,
+			leader: startLeader("codex", launch.repo, launch.env),
+		}));
+		try {
+			await waitFor(() => expect(liveSessionsIn(agentDir)).toHaveLength(2), 30000).catch((error) => {
+				throw new Error(
+					`${error}\n${leaders.map((entry) => `${entry.name}:\n${entry.leader.stderr()}`).join("\n")}`,
+				);
+			});
+			const sessions = liveSessionsIn(agentDir);
+			const checkpointIds = sessions.map((session) => session.checkpointId as string);
+			expect(new Set(checkpointIds).size).toBe(2);
+
+			// Both hooks ran: two different exact ids, one per session.
+			for (const id of checkpointIds) {
+				await waitFor(
+					() => expect(readCheckpointFile(agentDir, id).leader.vendorConversationId).toBeTruthy(),
+					30000,
+				);
+			}
+			const conversations = checkpointIds.map(
+				(id) => readCheckpointFile(agentDir, id).leader.vendorConversationId as string,
+			);
+			expect(new Set(conversations).size).toBe(2);
+
+			// Each session's trust lives in its own copy of the user's config, and the
+			// user's own file is exactly as they left it.
+			expect(readFileSync(join(realCodexHome, "config.toml"), "utf8")).toBe(userConfig);
+			for (const id of checkpointIds) {
+				const own = readFileSync(join(agentDir, "leader-sessions", id, "codex-home", "config.toml"), "utf8");
+				expect(own).toContain('model = "gpt-5.6-sol"');
+				expect(own).toContain(join(agentDir, "leader-sessions", id, "codex-home", "hooks.json"));
+				for (const other of checkpointIds.filter((candidate) => candidate !== id)) {
+					expect(own).not.toContain(join(agentDir, "leader-sessions", other));
+				}
+			}
+
+			for (const entry of leaders) expect((await entry.leader.quit()).code).toBe(0);
+
+			// And both reopen the conversation they recorded, not each other's.
+			for (const [index, id] of checkpointIds.entries()) {
+				const repo = readCheckpointFile(agentDir, id).canonicalCwd;
+				const record = join(scratch("neta-record-"), `resume-${index}.json`);
+				const env = leaderEnv({
+					binDir,
+					agentDir,
+					record,
+					quitFile: join(scratch("neta-quit-"), "quit"),
+					codexHome: realCodexHome,
+				});
+				const resumed = startLeader("codex", repo, env, ["resume", id, "--mux", "none"]);
+				await waitFor(() => expect(existsSync(record)).toBe(true), 30000).catch((error) => {
+					throw new Error(`${error}\nresume stderr:\n${resumed.stderr()}`);
+				});
+				const launch = JSON.parse(readFileSync(record, "utf8")) as LaunchRecord;
+				expect(launch.argv.slice(0, 2)).toEqual(["resume", conversations[index]]);
+				await resumed.quit();
+			}
+		} finally {
+			for (const entry of leaders) await entry.leader.quit();
+		}
+	}, 120000);
 
 	it("reaps a crashed manager's workers before hydrating, and starts nothing", async () => {
 		const binDir = fakeBackend("claude");

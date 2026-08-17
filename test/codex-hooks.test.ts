@@ -10,9 +10,11 @@
 
 import { afterEach, describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import {
 	existsSync,
 	lstatSync,
+	mkdirSync,
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
@@ -24,16 +26,25 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { preserveRefreshedAuth } from "../src/adapters/codex.ts";
+import { fileURLToPath } from "node:url";
+import { type AuthFileOps, posixHookCommand, preserveRefreshedAuth } from "../src/adapters/codex.ts";
 import {
 	type CodexHookEntry,
 	codexEnforcesHookTrust,
 	ensureCaptureHookTrusted,
+	hookKeySourcePath,
+	pathIsInside,
 	probeCodexHooks,
 	pruneStaleNetaHookTrust,
+	readCodexConfigFile,
 	trustedHashes,
 	upsertHookTrust,
+	writeCodexConfigFile,
 } from "../src/adapters/codex-hooks.ts";
+import { emptySessionCheckpoint, readCheckpoint, writeCheckpointAtomic } from "../src/checkpoint.ts";
+import { requireLeaderConversationId } from "../src/recovery.ts";
+
+const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 
 const dirs: string[] = [];
 
@@ -109,14 +120,89 @@ describe("Codex hook trust", () => {
 		expect(pruned).toContain("sha256:user");
 	});
 
+	/**
+	 * Ownership is a question about paths, not about strings. Every case here
+	 * shares a textual prefix with Neta's directory and only one of them is
+	 * actually inside it.
+	 */
+	describe("deciding what Neta owns", () => {
+		const owned = "/home/u/.neta/leader-sessions";
+		for (const [name, path, inside] of [
+			["the owned directory itself", "/home/u/.neta/leader-sessions", true],
+			["a session inside it", "/home/u/.neta/leader-sessions/abc/codex-home/hooks.json", true],
+			["a nested path several levels down", "/home/u/.neta/leader-sessions/abc/x/y/z/hooks.json", true],
+			["a sibling directory sharing the prefix", "/home/u/.neta/leader-sessions-backup/abc/hooks.json", false],
+			["a sibling file sharing the prefix", "/home/u/.neta/leader-sessions.old", false],
+			["a path that escapes through ..", "/home/u/.neta/leader-sessions/../secrets/hooks.json", false],
+			["a path that escapes further up", "/home/u/.neta/leader-sessions/a/../../../../etc/hooks.json", false],
+			["a path that leaves and comes back", "/home/u/.neta/leader-sessions/a/../b/hooks.json", true],
+			["somewhere else entirely", "/home/u/.codex/hooks.json", false],
+		] as const) {
+			it(`treats ${name} as ${inside ? "owned" : "not owned"}`, () => {
+				expect(pathIsInside(path, owned)).toBe(inside);
+			});
+		}
+
+		it("never prunes a sibling, an escape or an existing file", () => {
+			const config = [
+				'[hooks.state."/home/u/.neta/leader-sessions/dead/codex-home/hooks.json:session_start:0:0"]\ntrusted_hash = "sha256:dead"',
+				'[hooks.state."/home/u/.neta/leader-sessions-backup/dead/hooks.json:session_start:0:0"]\ntrusted_hash = "sha256:sibling"',
+				'[hooks.state."/home/u/.neta/leader-sessions/../secrets/hooks.json:session_start:0:0"]\ntrusted_hash = "sha256:escaped"',
+				'[hooks.state."/home/u/.neta/leader-sessions/live/codex-home/hooks.json:session_start:0:0"]\ntrusted_hash = "sha256:live"',
+				'[hooks.state."/home/u/.codex/hooks.json:stop:0:0"]\ntrusted_hash = "sha256:user"',
+			].join("\n\n");
+			// Only the live session's file is still on disk; everything else is gone.
+			const pruned = pruneStaleNetaHookTrust(config, "/home/u/.neta/leader-sessions", (path) =>
+				path.includes("/live/"),
+			);
+
+			expect(pruned).not.toContain("sha256:dead");
+			for (const kept of ["sha256:sibling", "sha256:escaped", "sha256:live", "sha256:user"]) {
+				expect(pruned).toContain(kept);
+			}
+		});
+
+		/**
+		 * A colon separates the fields of a trust key and is also a legal character
+		 * in a path — on macOS and Linux anywhere, on Windows right after the drive
+		 * letter. Counting the three trailing fields from the end is what keeps a
+		 * path with a colon in it from being read as some shorter path.
+		 */
+		it("reads a colon in the hook's own path as part of the path", () => {
+			expect(hookKeySourcePath("/home/u/.neta/leader-sessions/a:b/codex-home/hooks.json:session_start:0:0")).toBe(
+				"/home/u/.neta/leader-sessions/a:b/codex-home/hooks.json",
+			);
+			expect(hookKeySourcePath("C:\\neta\\leader-sessions\\a\\hooks.json:session_start:0:0")).toBe(
+				"C:\\neta\\leader-sessions\\a\\hooks.json",
+			);
+			// Not a key Neta wrote, and not one to guess a path out of.
+			expect(hookKeySourcePath("odd")).toBeUndefined();
+			expect(hookKeySourcePath(":session_start:0:0")).toBeUndefined();
+		});
+
+		it("prunes a dead session whose own path contains a colon", () => {
+			const config =
+				'[hooks.state."/home/u/.neta/leader-sessions/a:b/codex-home/hooks.json:session_start:0:0"]\ntrusted_hash = "sha256:colon"\n';
+			expect(pruneStaleNetaHookTrust(config, "/home/u/.neta/leader-sessions", () => false)).not.toContain(
+				"sha256:colon",
+			);
+		});
+
+		it("leaves a key that is not shaped like one Neta wrote", () => {
+			const config = '[hooks.state."odd"]\ntrusted_hash = "sha256:odd"\n';
+			expect(pruneStaleNetaHookTrust(config, "/", () => false)).toBe(config);
+		});
+	});
+
 	it("vouches for Neta's own hook and nothing it was not already trusted for", async () => {
 		const realHome = scratch("neta-codex-real-");
 		const codexHome = scratch("neta-codex-overlay-");
 		const hooksPath = join(codexHome, "hooks.json");
-		writeFileSync(
-			join(realHome, "config.toml"),
-			'[hooks.state."/home/.codex/hooks.json:stop:0:0"]\ntrusted_hash = "sha256:user-trusted"\n',
-		);
+		const userConfig = '[hooks.state."/home/.codex/hooks.json:stop:0:0"]\ntrusted_hash = "sha256:user-trusted"\n';
+		writeFileSync(join(realHome, "config.toml"), userConfig);
+		// The overlay carries the user's config forward, which is where the decisions
+		// they have already made are read from.
+		writeFileSync(join(codexHome, "config.toml"), userConfig);
 		const ours = entry({ key: `${hooksPath}:session_start:1:0`, sourcePath: hooksPath, currentHash: "sha256:neta" });
 		const carried = entry({
 			key: `${hooksPath}:stop:0:0`,
@@ -142,11 +228,9 @@ describe("Codex hook trust", () => {
 		const result = await ensureCaptureHookTrusted({
 			binary: "codex",
 			codexHome,
-			realHome,
 			cwd: "/repo",
 			hooksPath,
 			captureCommand: ours.command as string,
-			ownedPrefix: "/neta/leader-sessions",
 			probe: async () => {
 				round += 1;
 				return round === 1
@@ -157,14 +241,17 @@ describe("Codex hook trust", () => {
 
 		expect(result.key).toBe(ours.key);
 		expect(result.wrote).toEqual([ours.key, carried.key]);
-		const config = readFileSync(join(realHome, "config.toml"), "utf-8");
+		expect(result.configPath).toBe(join(codexHome, "config.toml"));
+		const config = readFileSync(join(codexHome, "config.toml"), "utf-8");
 		expect(config).toContain(`[hooks.state."${ours.key}"]`);
 		expect(config).toContain(`[hooks.state."${carried.key}"]`);
+		// The user's own settings are carried, not replaced.
+		expect(config).toContain("sha256:user-trusted");
 		// Neither an unreviewed hook of the user's nor anything the repository ships.
 		expect(config).not.toContain("sha256:stranger");
 		expect(config).not.toContain("/repo/.codex/hooks.json");
-		// The overlay can see the config the trust was written to.
-		expect(readlinkSync(join(codexHome, "config.toml"))).toBe(join(realHome, "config.toml"));
+		// The user's own config is read and never written.
+		expect(readFileSync(join(realHome, "config.toml"), "utf-8")).toBe(userConfig);
 	});
 
 	it("does nothing when Codex already trusts the capture hook", async () => {
@@ -176,15 +263,14 @@ describe("Codex hook trust", () => {
 		const result = await ensureCaptureHookTrusted({
 			binary: "codex",
 			codexHome,
-			realHome,
 			cwd: "/repo",
 			hooksPath,
 			captureCommand: ours.command as string,
-			ownedPrefix: "/neta/leader-sessions",
 			probe: async () => [ours],
 		});
 
 		expect(result.wrote).toEqual([]);
+		expect(existsSync(join(codexHome, "config.toml"))).toBe(false);
 		expect(existsSync(join(realHome, "config.toml"))).toBe(false);
 	});
 
@@ -206,20 +292,18 @@ describe("Codex hook trust", () => {
 				ensureCaptureHookTrusted({
 					binary: "codex",
 					codexHome,
-					realHome,
 					cwd: "/repo",
 					hooksPath,
 					captureCommand: ours.command as string,
-					ownedPrefix: "/neta/leader-sessions",
 					probe: async () => (entries.length === 0 ? [] : [ours]),
 				}),
 			).rejects.toThrow(error);
+			expect(existsSync(join(codexHome, "config.toml"))).toBe(false);
 			expect(existsSync(join(realHome, "config.toml"))).toBe(false);
 		});
 	}
 
 	it("refuses the launch when Codex still will not trust the hook after the write", async () => {
-		const realHome = scratch("neta-codex-real-");
 		const codexHome = scratch("neta-codex-overlay-");
 		const hooksPath = join(codexHome, "hooks.json");
 		const ours = entry({ key: `${hooksPath}:session_start:0:0`, sourcePath: hooksPath });
@@ -228,16 +312,181 @@ describe("Codex hook trust", () => {
 			ensureCaptureHookTrusted({
 				binary: "codex",
 				codexHome,
-				realHome,
 				cwd: "/repo",
 				hooksPath,
 				captureCommand: ours.command as string,
-				ownedPrefix: "/neta/leader-sessions",
 				// A build whose trust scheme Neta no longer matches never flips.
 				probe: async () => [ours],
 			}),
 		).rejects.toThrow(/still does not trust Neta's session-start capture hook/);
 	});
+
+	/**
+	 * A config that is there but unreadable must never be read as an empty one:
+	 * the session config is generated from those bytes, and an empty copy is a
+	 * Codex running with none of the user's model, provider or approval settings.
+	 */
+	it("refuses to treat an unreadable config as an empty one", () => {
+		const home = scratch("neta-codex-unreadable-");
+		// A directory where a config file should be: readable(2) fails with EISDIR.
+		mkdirSync(join(home, "config.toml"));
+
+		expect(readCodexConfigFile(join(home, "missing.toml"))).toBe("");
+		expect(() => readCodexConfigFile(join(home, "config.toml"))).toThrow(/could not read the Codex config/);
+	});
+});
+
+/**
+ * Two Neta launches, in two directories, at the same time.
+ *
+ * Trust used to be recorded in the user's one config.toml, which every session
+ * read and rewrote. The window between one session's read and its write is a
+ * window another session can write in, and the loser's entry disappears — after
+ * its own confirming probe said it was there. The session then starts with an
+ * untrusted capture hook, Codex never runs it, and that conversation's id is
+ * lost with no error anywhere.
+ *
+ * This drives exactly that interleaving, deterministically, through the seams
+ * either side of the read-modify-write. Codex is modelled from what it actually
+ * does: a hook runs only if the config that session reads records its hash, and
+ * a hook that runs is run through a shell with the payload on stdin. The end of
+ * the chain is the real one — `neta capture-leader-session`, real checkpoints —
+ * so what is proven is that both sessions come out resumable, not that two files
+ * hold the right bytes.
+ */
+describe("two Neta launches arranging Codex hook trust at once", () => {
+	interface Session {
+		id: string;
+		codexHome: string;
+		conversationId: string;
+	}
+
+	/** Codex's own rule: a hook is trusted when this session's config records its hash. */
+	function trustStatusIn(configPath: string, key: string, hash: string): CodexHookEntry["trustStatus"] {
+		let config = "";
+		try {
+			config = readFileSync(configPath, "utf-8");
+		} catch {
+			// No config yet is nothing trusted yet.
+		}
+		const recorded = new RegExp(
+			`\\[hooks\\.state\\."${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"]\\s*\\n\\s*trusted_hash\\s*=\\s*"([^"]+)"`,
+		).exec(config)?.[1];
+		return recorded === undefined ? "untrusted" : recorded === hash ? "trusted" : "modified";
+	}
+
+	it("records trust each session can still see, and both exact ids survive", async () => {
+		// Adversarial on purpose: the hook's arguments carry this path, so a joined
+		// command line would split it, and a shell would run the parts of it.
+		const agentDir = join(scratch("neta-codex-race-"), "neta dir 'with $(touch marker) `and`; more&");
+		mkdirSync(join(agentDir, "checkpoints"), { recursive: true });
+		const sessions: Session[] = [
+			{ id: "race-one", codexHome: scratch("neta-codex-one-"), conversationId: randomUUID() },
+			{ id: "race-two", codexHome: scratch("neta-codex-two-"), conversationId: randomUUID() },
+		];
+		for (const session of sessions) {
+			writeCheckpointAtomic(
+				emptySessionCheckpoint({ id: session.id, canonicalCwd: agentDir, leaderBackend: "codex" }),
+				agentDir,
+			);
+		}
+
+		const commandOf = (session: Session): string =>
+			posixHookCommand([
+				process.execPath,
+				CLI,
+				"capture-leader-session",
+				"--session",
+				session.id,
+				"--dir",
+				agentDir,
+			]);
+		const hashOf = (session: Session): string => `sha256:${session.id}`;
+		const keyOf = (session: Session): string => `${join(session.codexHome, "hooks.json")}:session_start:0:0`;
+		const probeFor = (session: Session) => async (): Promise<CodexHookEntry[]> => [
+			entry({
+				key: keyOf(session),
+				sourcePath: join(session.codexHome, "hooks.json"),
+				command: commandOf(session),
+				currentHash: hashOf(session),
+				trustStatus: trustStatusIn(join(session.codexHome, "config.toml"), keyOf(session), hashOf(session)),
+			}),
+		];
+
+		// The interleaving: the first session reads, then stops. The second reads,
+		// writes and confirms all the way through. Only then does the first write —
+		// on top of what it read before the second existed.
+		let releaseFirstWrite: () => void = () => {};
+		const firstHasRead = new Promise<void>((resolve) => {
+			releaseFirstWrite = resolve;
+		});
+		let secondFinished: () => void = () => {};
+		const secondIsDone = new Promise<void>((resolve) => {
+			secondFinished = resolve;
+		});
+
+		const first = ensureCaptureHookTrusted({
+			binary: "codex",
+			codexHome: sessions[0].codexHome,
+			cwd: agentDir,
+			hooksPath: join(sessions[0].codexHome, "hooks.json"),
+			captureCommand: commandOf(sessions[0]),
+			probe: probeFor(sessions[0]),
+			readConfig: (path) => {
+				const contents = readCodexConfigFile(path);
+				releaseFirstWrite();
+				return contents;
+			},
+			writeConfig: async (path, contents) => {
+				await secondIsDone;
+				writeCodexConfigFile(path, contents);
+			},
+		});
+		await firstHasRead;
+		const second = await ensureCaptureHookTrusted({
+			binary: "codex",
+			codexHome: sessions[1].codexHome,
+			cwd: agentDir,
+			hooksPath: join(sessions[1].codexHome, "hooks.json"),
+			captureCommand: commandOf(sessions[1]),
+			probe: probeFor(sessions[1]),
+		});
+		secondFinished();
+		const firstResult = await first;
+
+		expect(firstResult.wrote).toEqual([keyOf(sessions[0])]);
+		expect(second.wrote).toEqual([keyOf(sessions[1])]);
+		// Each session's trust lives in its own config, so neither write could be
+		// the one that removed the other's.
+		for (const session of sessions) {
+			expect(readFileSync(join(session.codexHome, "config.toml"), "utf-8")).toContain(hashOf(session));
+			expect(readFileSync(join(session.codexHome, "config.toml"), "utf-8")).not.toContain(
+				hashOf(sessions[sessions.indexOf(session) === 0 ? 1 : 0]),
+			);
+		}
+
+		// Now start both, as Codex would: run the SessionStart hook, and only the
+		// one this session's config trusts.
+		for (const session of sessions) {
+			expect(trustStatusIn(join(session.codexHome, "config.toml"), keyOf(session), hashOf(session))).toBe("trusted");
+			const hook = spawnSync("/bin/sh", ["-c", commandOf(session)], {
+				input: JSON.stringify({ hook_event_name: "SessionStart", session_id: session.conversationId }),
+				encoding: "utf-8",
+			});
+			expect({ id: session.id, status: hook.status, stderr: hook.stderr }).toMatchObject({ status: 0 });
+		}
+
+		// Both exact ids were recorded, each against its own session, and resume
+		// accepts them: these two sessions can be reopened.
+		for (const session of sessions) {
+			const checkpoint = readCheckpoint(session.id, agentDir);
+			expect(checkpoint.leader.vendorConversationId).toBe(session.conversationId);
+			expect(requireLeaderConversationId(checkpoint, agentDir)).toBe(session.conversationId);
+		}
+		// The adversarial directory name was passed as one argument, not run.
+		expect(existsSync(join(agentDir, "marker"))).toBe(false);
+		expect(existsSync("marker")).toBe(false);
+	}, 60_000);
 });
 
 describe("Codex credentials in the overlay home", () => {
@@ -306,6 +555,113 @@ describe("Codex credentials in the overlay home", () => {
 		expect(existsSync(join(overlay, "auth.json"))).toBe(false);
 		expect(readFileSync(join(realHome, "auth.json"), "utf-8")).toBe('{"token":"old"}');
 	});
+
+	/**
+	 * The copy goes through a temporary file beside the real credentials, so every
+	 * way that copy can fail is a way to leave a second copy of someone's Codex
+	 * token lying in their home directory. Each stage is made to fail on its own,
+	 * and each time: no temporary file survives, and neither of the two real
+	 * copies is destroyed.
+	 */
+	describe("when a stage of the copy fails", () => {
+		function tempSecrets(realHome: string): string[] {
+			return readdirSync(realHome).filter((name) => /\.neta-.*\.tmp$/.test(name));
+		}
+
+		for (const stage of ["open", "write", "fsync", "rename"] as const) {
+			it(`removes its temporary copy when ${stage} fails, and keeps both good copies`, () => {
+				const { overlay, realHome } = overlayWithRefreshedAuth();
+				const reported: string[] = [];
+				const ops: Partial<AuthFileOps> = {
+					[stage]: () => {
+						throw new Error(`injected ${stage} failure`);
+					},
+				};
+
+				preserveRefreshedAuth(overlay, realHome, (message) => reported.push(message), ops);
+
+				expect(reported.join(" ")).toContain(`injected ${stage} failure`);
+				expect(reported.join(" ")).toContain("could not copy Codex's refreshed credentials back");
+				// Nothing secret is left in a temporary file...
+				expect(tempSecrets(realHome)).toEqual([]);
+				// ...and neither of the copies that did exist was destroyed.
+				expect(readFileSync(join(overlay, "auth.json"), "utf-8")).toBe('{"token":"refreshed"}');
+				expect(readFileSync(join(realHome, "auth.json"), "utf-8")).toBe('{"token":"old"}');
+			});
+		}
+
+		it("keeps the copy when only closing the descriptor fails", () => {
+			const { overlay, realHome } = overlayWithRefreshedAuth();
+			const reported: string[] = [];
+
+			// The bytes are written and flushed by then; a descriptor that will not
+			// close is no reason to throw away a good copy.
+			preserveRefreshedAuth(overlay, realHome, (message) => reported.push(message), {
+				close: () => {
+					throw new Error("injected close failure");
+				},
+			});
+
+			expect(reported).toEqual([]);
+			expect(tempSecrets(realHome)).toEqual([]);
+			expect(readFileSync(join(realHome, "auth.json"), "utf-8")).toBe('{"token":"refreshed"}');
+			expect(lstatSync(join(overlay, "auth.json")).isSymbolicLink()).toBe(true);
+		});
+
+		it("reports a permissions failure without undoing a copy that landed", () => {
+			const { overlay, realHome } = overlayWithRefreshedAuth();
+			const reported: string[] = [];
+
+			preserveRefreshedAuth(overlay, realHome, (message) => reported.push(message), {
+				chmod: () => {
+					throw new Error("injected chmod failure");
+				},
+			});
+
+			expect(reported.join(" ")).toContain("could not set the permissions on");
+			expect(reported.join(" ")).toContain("injected chmod failure");
+			expect(tempSecrets(realHome)).toEqual([]);
+			// The file was created 0600 in the first place, so it is still private.
+			expect(statSync(join(realHome, "auth.json")).mode & 0o077).toBe(0);
+			expect(readFileSync(join(realHome, "auth.json"), "utf-8")).toBe('{"token":"refreshed"}');
+			expect(lstatSync(join(overlay, "auth.json")).isSymbolicLink()).toBe(true);
+		});
+
+		it("says so when it cannot even read what Codex left behind", () => {
+			const realHome = scratch("neta-codex-real-");
+			const overlay = scratch("neta-codex-overlay-");
+			writeFileSync(join(realHome, "auth.json"), '{"token":"old"}', { mode: 0o600 });
+			// A directory where the refreshed credentials should be: read(2) fails.
+			mkdirSync(join(overlay, "auth.json"));
+			const reported: string[] = [];
+
+			preserveRefreshedAuth(overlay, realHome, (message) => reported.push(message));
+
+			expect(reported.join(" ")).toContain("could not read Codex's refreshed credentials");
+			expect(readFileSync(join(realHome, "auth.json"), "utf-8")).toBe('{"token":"old"}');
+			expect(tempSecrets(realHome)).toEqual([]);
+		});
+
+		it("names the file it could not remove rather than leaving it to be found", () => {
+			const { overlay, realHome } = overlayWithRefreshedAuth();
+			const reported: string[] = [];
+
+			preserveRefreshedAuth(overlay, realHome, (message) => reported.push(message), {
+				rename: () => {
+					throw new Error("injected rename failure");
+				},
+				remove: () => {
+					throw new Error("injected remove failure");
+				},
+			});
+
+			expect(reported.join(" ")).toContain("could not remove its temporary copy at");
+			expect(reported.join(" ")).toContain("injected remove failure");
+			expect(reported.join(" ")).toContain("it holds your Codex credentials");
+			// The test's own cleanup, since the run under test was told it could not.
+			for (const name of tempSecrets(realHome)) rmSync(join(realHome, name), { force: true });
+		});
+	});
 });
 
 /**
@@ -340,15 +696,51 @@ describe("the installed Codex", () => {
 			const result = await ensureCaptureHookTrusted({
 				binary: codexPath,
 				codexHome,
-				realHome: codexHome,
 				cwd: codexHome,
 				hooksPath: ours?.sourcePath ?? hooksPath,
 				captureCommand: command,
-				ownedPrefix: codexHome,
 			});
 
 			expect(result.wrote).toEqual([ours?.key as string]);
+			expect(result.configPath).toBe(join(codexHome, "config.toml"));
 			expect(readFileSync(join(codexHome, "config.toml"), "utf-8")).toContain(ours?.currentHash as string);
+		},
+		60_000,
+	);
+
+	/**
+	 * The quoted command has to survive the round trip through Codex: Neta matches
+	 * the hook it vouches for by the exact command string Codex reports, so a build
+	 * that normalised the string would silently break the match. Still offline —
+	 * `hooks/list` starts no session.
+	 */
+	realCodexIt(
+		"reports back the exact quoted command line for an adversarial path",
+		async () => {
+			const codexHome = realpathSync(scratch("neta-codex-quoting-"));
+			const nasty = join(codexHome, "bin dir 'with $(everything) `and`; more&");
+			mkdirSync(nasty, { recursive: true });
+			const executable = join(nasty, "ne ta");
+			writeFileSync(executable, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+			const command = posixHookCommand([executable, "capture-leader-session", "--session", "a b;c"]);
+			writeFileSync(
+				join(codexHome, "hooks.json"),
+				JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", command }] }] } }),
+			);
+
+			const reported = (await probeCodexHooks(codexPath, codexHome, codexHome)).find(
+				(hook) => hook.sourcePath === join(codexHome, "hooks.json"),
+			);
+
+			expect(reported?.command).toBe(command);
+			const trusted = await ensureCaptureHookTrusted({
+				binary: codexPath,
+				codexHome,
+				cwd: codexHome,
+				hooksPath: join(codexHome, "hooks.json"),
+				captureCommand: command,
+			});
+			expect(trusted.wrote).toEqual([reported?.key as string]);
 		},
 		60_000,
 	);

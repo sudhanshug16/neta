@@ -1,8 +1,18 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+	CHECKPOINT_SCHEMA_VERSION,
 	CheckpointWriter,
 	checkpointPath,
 	listCheckpoints,
@@ -93,6 +103,39 @@ describe("durable session checkpoints", () => {
 		writeFileSync(path, JSON.stringify({ ...checkpoint, schemaVersion: 99 }), { mode: 0o600 });
 		expect(() => writeCheckpointAtomic(checkpoint, agentDir)).toThrow("schema version 99");
 		expect(JSON.parse(readFileSync(path, "utf8")).schemaVersion).toBe(99);
+	});
+
+	/**
+	 * Schema 1 is what Neta wrote before the shutdown proof existed. Its files are
+	 * still out there in people's `~/.neta`, and every field this build reads is
+	 * already in them — so they are read as they are and carried to the current
+	 * schema, with no proof of a clean shutdown, which is the truth about them.
+	 *
+	 * The upgrade suite resumes a real older Neta, and that runtime writes schema
+	 * 2; nothing else would notice if schema 1 stopped being readable.
+	 */
+	it("reads a schema-1 checkpoint and carries it to the current schema", () => {
+		const agentDir = tempDir("neta-checkpoint-");
+		const cwd = tempDir("neta-checkpoint-repo-");
+		const { schemaVersion: _current, ...rest } = emptyCheckpoint("old-schema", cwd);
+		const schemaOne = {
+			...rest,
+			schemaVersion: 1,
+			appVersion: "1.1.0",
+			leader: { backend: "codex", vendorConversationId: "22222222-2222-4222-8222-222222222222" },
+			notes: [{ id: "n1", text: "decide on the rollout window", open: true, createdAt: 1, workers: [] }],
+		};
+		// Written where an older Neta left it, not through this build's writer.
+		mkdirSync(join(agentDir, "checkpoints"), { recursive: true, mode: 0o700 });
+		writeFileSync(checkpointPath("old-schema", agentDir), JSON.stringify(schemaOne), { mode: 0o600 });
+
+		const read = readCheckpoint("old-schema", agentDir);
+		expect(read.schemaVersion).toBe(CHECKPOINT_SCHEMA_VERSION);
+		expect(read.appVersion).toBe("1.1.0");
+		expect(read.leader.vendorConversationId).toBe("22222222-2222-4222-8222-222222222222");
+		expect(read.notes[0]).toMatchObject({ id: "n1", open: true });
+		// It predates the shutdown proof, so it claims none.
+		expect(read.shutdown).toBeUndefined();
 	});
 
 	it("round-trips semantic state, excludes live secrets, and hydrates without side effects", async () => {

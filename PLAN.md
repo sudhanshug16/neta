@@ -148,6 +148,18 @@ socket, and drive it all through a real MCP client.
 Zellij command construction and fail-closed parsing are unit-tested in
 addition to the live adapter probe.
 
+The upgrade path is tested with two different Neta executables. The old half,
+`test/fixtures/neta-old-runtime.mjs`, is a real Neta built from commit
+`60e6a2c` — the first commit that made a session resumable — with
+`bun build --target=node`, checked in as one Node-runnable file with its
+provenance and SHA-256 in `neta-old-runtime.json`. It is run as a Neta: it
+starts leaders, registers sessions, runs its own MCP control plane, spawns ACP
+workers and writes its own checkpoints, and it cannot read the current `src/`
+any more than an installed copy could. The current build then lists and resumes
+what it left. Regenerate with `bun run scripts/build-old-runtime.ts`; never
+hand-edit the fixture, since an old bundle that keeps up with the source stops
+being evidence.
+
 ## Acceptance
 
 | Criterion | State |
@@ -162,6 +174,8 @@ addition to the live adapter probe.
 | A closed session reopens with `neta resume <id>`: same logical and vendor conversation ids, fresh runtime, no worker restarted | verified end to end with fixture Claude, Codex and OpenCode CLIs, including a killed manager on two of them |
 | Resume behaves identically across all three leader backends | verified: exact-id capture and reopen, sessions listing, death barrier, hydration, recovery briefing, preserved results |
 | Resume fails closed on a live manager, identity mismatch, unprovable process death, missing vendor id, corrupt or future schema, deleted directory, duplicate resume | verified |
+| A session an older Neta saved reopens on the current build | verified by running a real older Neta (pinned build of `60e6a2c`) for Claude, Codex and OpenCode, closing two cleanly and killing one, then resuming all three on the shipped artifact |
+| Two Neta launches at once each capture their own exact Codex id, and neither touches your `config.toml` | verified: forced read-write interleaving in unit tests, two concurrent real launches end to end |
 | Type-check and tests green, no real provider APIs in tests | yes |
 
 ## Deliberately not built

@@ -1,0 +1,9 @@
+{
+  "bundle": "neta-old-runtime.mjs",
+  "sha256": "6c6427f43bf27657178a70358f8453b90f0ddec47f936f304da831cbab382451",
+  "commit": "60e6a2c9d8f8fd54049d8a9cc31bcfab91349c3d",
+  "subject": "feat: resume neta sessions after restart",
+  "appVersion": "1.1.2",
+  "note": "Built from this repository at 60e6a2c with `bun build src/cli.ts --target=node`. That commit carries version 1.1.2 in package.json, which is the version string it stamps into checkpoints — it is a pre-release build of the resume work, not the released 1.1.2 artifact.",
+  "regenerate": "bun run scripts/build-old-runtime.ts"
+}

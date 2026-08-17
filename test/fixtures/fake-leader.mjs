@@ -17,6 +17,11 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, wr
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+/** What this stand-in claims to support, which is what Neta reads it off. */
+const HELP =
+	process.env.FAKE_LEADER_HELP ??
+	"Fake CLI\n  --dangerously-bypass-hook-trust  Run enabled hooks\n  opencode plugin <module>  install plugin\n";
+
 /** Claude Code takes it as a file, Codex as `-c` TOML overrides, OpenCode inline in its config. */
 function controlPlaneSpec(argv) {
 	const configIndex = argv.indexOf("--mcp-config");
@@ -165,9 +170,14 @@ async function runAppServer() {
 /**
  * Codex reports the id it assigned by running its SessionStart hooks — but only
  * the ones it has been told to trust, exactly like the installed build.
+ *
+ * Whether it withholds untrusted hooks at all is read from the same place Neta
+ * reads it: this fixture's own `--help`. A build that does not advertise
+ * `--dangerously-bypass-hook-trust` is a build from before hook trust, and it
+ * runs its hooks as configured.
  */
 function runSessionStartHooks(codexHome, sessionId, argv) {
-	const bypass = argv.includes("--dangerously-bypass-hook-trust");
+	const bypass = argv.includes("--dangerously-bypass-hook-trust") || !/--dangerously-bypass-hook-trust/.test(HELP);
 	let ran = false;
 	for (const entry of hookInventory(codexHome)) {
 		if (entry.eventName !== "sessionStart") continue;
@@ -177,6 +187,66 @@ function runSessionStartHooks(codexHome, sessionId, argv) {
 		ran = true;
 	}
 	return ran;
+}
+
+/**
+ * Call Neta's control plane the way a real vendor host does: over the MCP stdio
+ * transport it was configured with, as JSON-RPC.
+ *
+ * A leader reaches most of the orchestrator through these tools and nothing
+ * else — notes and room posts have no CLI at all — so a test that wants a
+ * session's state built the way a session builds it drives it from here.
+ * `FAKE_LEADER_MCP_CALLS` is a JSON array of `{name, arguments}`; every reply is
+ * written to `FAKE_LEADER_MCP_RESULT`.
+ */
+async function callControlPlaneTools(child, calls) {
+	const pending = new Map();
+	let buffered = "";
+	child.stdout.setEncoding("utf-8");
+	child.stdout.on("data", (chunk) => {
+		buffered += chunk;
+		let index = buffered.indexOf("\n");
+		while (index >= 0) {
+			const line = buffered.slice(0, index);
+			buffered = buffered.slice(index + 1);
+			index = buffered.indexOf("\n");
+			let message;
+			try {
+				message = JSON.parse(line);
+			} catch {
+				continue;
+			}
+			const waiting = pending.get(message.id);
+			if (waiting) {
+				pending.delete(message.id);
+				waiting(message);
+			}
+		}
+	});
+
+	let nextId = 1;
+	const request = (method, params) =>
+		new Promise((resolve, reject) => {
+			const id = nextId++;
+			pending.set(id, resolve);
+			const timer = setTimeout(() => reject(new Error(`no reply to ${method}`)), 30000);
+			timer.unref?.();
+			child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+		});
+
+	await request("initialize", {
+		protocolVersion: "2025-06-18",
+		capabilities: {},
+		clientInfo: { name: "fake-leader", version: "0.0.0" },
+	});
+	child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
+
+	const results = [];
+	for (const call of calls) {
+		const reply = await request("tools/call", { name: call.name, arguments: call.arguments ?? {} });
+		results.push({ name: call.name, error: reply.error, result: reply.result });
+	}
+	return results;
 }
 
 /**
@@ -198,10 +268,7 @@ function capture(paths) {
 // Neta gates its session-id capture on the installed CLI advertising the
 // mechanism it needs: hooks for Codex, plugins for OpenCode.
 if (process.argv.includes("--help") && process.env.FAKE_LEADER_HELP !== "") {
-	console.log(
-		process.env.FAKE_LEADER_HELP ??
-			"Fake CLI\n  --dangerously-bypass-hook-trust  Run enabled hooks\n  opencode plugin <module>  install plugin\n",
-	);
+	console.log(HELP);
 	process.exit(0);
 }
 
@@ -273,6 +340,13 @@ if (process.env.FAKE_LEADER_HOST_MCP === "1") {
 		const resumed = process.argv.indexOf("resume");
 		const sessionId = resumed === -1 ? randomUUID() : process.argv[resumed + 1];
 		runSessionStartHooks(process.env.CODEX_HOME, sessionId, process.argv.slice(2));
+	}
+	if (process.env.FAKE_LEADER_MCP_CALLS) {
+		const calls = JSON.parse(readFileSync(process.env.FAKE_LEADER_MCP_CALLS, "utf-8"));
+		const results = await callControlPlaneTools(child, calls);
+		if (process.env.FAKE_LEADER_MCP_RESULT) {
+			writeFileSync(process.env.FAKE_LEADER_MCP_RESULT, JSON.stringify(results), "utf-8");
+		}
 	}
 	const quitFile = process.env.FAKE_LEADER_QUIT_FILE;
 	const deadline = Date.now() + Number.parseInt(process.env.FAKE_LEADER_MAX_MS ?? "60000", 10);
