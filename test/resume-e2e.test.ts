@@ -147,11 +147,17 @@ function readCheckpointFile(agentDir: string, id: string): SessionCheckpoint {
 	return JSON.parse(readFileSync(join(agentDir, "checkpoints", `${id}.json`), "utf8")) as SessionCheckpoint;
 }
 
-function neta(args: string[], agentDir: string, cwd: string): Promise<{ stdout: string; stderr: string }> {
+function neta(
+	args: string[],
+	agentDir: string,
+	cwd: string,
+	environment: Record<string, string> = {},
+): Promise<{ stdout: string; stderr: string }> {
 	return run(process.execPath, [CLI, ...args], {
 		cwd,
 		env: {
 			...process.env,
+			...environment,
 			NETA_DIR: agentDir,
 			NETA_SOCKET: "",
 			NETA_LEADER_TOKEN: "",
@@ -789,11 +795,9 @@ describe("closing and reopening a session", () => {
 		expect(refused.stderr).toContain("will not guess");
 
 		for (const selector of ["--session", "--continue", "-c", "--fork"]) {
-			const rejected = await neta(
-				["--leader", "opencode", "--mux", "none", "--", selector, "x"],
-				agentDir,
-				repo,
-			).catch((error: { stderr: string }) => error);
+			const rejected = await neta(["--leader", "opencode", "--mux", "none", "--", selector, "x"], agentDir, repo, {
+				PATH: `${binDir}${delimiter}${process.env.PATH}`,
+			}).catch((error: { stderr: string }) => error);
 			expect(rejected.stderr).toContain(`"${selector}" cannot be passed through`);
 		}
 	}, 90000);
