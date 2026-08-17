@@ -38,6 +38,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { sendChannelRequest } from "./channel/client.ts";
 import { APP_NAME } from "./config.ts";
+import { markWorkerPaneTerminal } from "./mux/panes.ts";
 import {
 	displayModel,
 	isTerminalState,
@@ -335,6 +336,7 @@ export async function watchWorkerTui(options: WatchTuiOptions): Promise<number> 
 
 	const finish = (finalPage: WorkerLogPage) => {
 		finished = true;
+		if (finalPage.worker) markWorkerPaneTerminal(finalPage.worker);
 		loader.stop();
 		footerSlot.clear();
 		footerSlot.addChild(

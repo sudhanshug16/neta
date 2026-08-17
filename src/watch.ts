@@ -14,6 +14,7 @@
 import { sendChannelRequest } from "./channel/client.ts";
 import { NETA_LEADER_ENV, NETA_SOCKET_ENV } from "./channel/protocol.ts";
 import { getAgentDir } from "./config.ts";
+import { markWorkerPaneTerminal } from "./mux/panes.ts";
 import { estimateCost } from "./pricing.ts";
 import { findSession, listSessions } from "./session.ts";
 import {
@@ -288,7 +289,10 @@ export async function watchWorker(options: WatchOptions): Promise<number> {
 		}
 
 		if (isTerminalState(page.state) || options.once) {
-			if (isTerminalState(page.state)) write(footer(page));
+			if (isTerminalState(page.state)) {
+				if (page.worker) markWorkerPaneTerminal(page.worker);
+				write(footer(page));
+			}
 			break;
 		}
 		await new Promise((resolve) => setTimeout(resolve, POLL_MS));

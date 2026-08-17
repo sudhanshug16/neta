@@ -32,4 +32,6 @@ export interface MuxAdapter {
 	wrapLeader(leader: ProcessSpec, sessionName: string, sessionDir: string): ProcessSpec | undefined;
 	/** Open a pane running the command, targeting a named session when one is known. */
 	openPane(title: string, spec: ProcessSpec, cwd: string, sessionName?: string): boolean;
+	/** Rename the current Neta-owned window/tab. The caller proves ownership. */
+	renameCurrentPane?(title: string): boolean;
 }

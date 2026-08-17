@@ -116,6 +116,7 @@ host process, outside any sandbox:
 | `neta_plan` | Compute backend assignments without spawning — the staffing plan. |
 | `neta_workers` | List workers with state, token usage and results. |
 | `neta_status` | One snapshot: writer slot, queue, workers by state, open notes. |
+| `neta_attach` | Reopen a terminal worker's exact native backend session in a new tab. |
 | `neta_log` | A worker's new log lines since the leader last looked. |
 | `neta_wait` | Block until watched workers finish, ask a question, or a room posts. |
 | `neta_send` | Follow-up instruction, delivered as the worker's next turn. |
@@ -192,7 +193,10 @@ ran it: Neta hands the session id the worker's ACP handshake returned to that
 backend's own resume command — `claude --resume <id>`, `codex resume <id>`,
 `opencode --session <id>` — so it opens in the interface you already know,
 where you can read what it did and keep talking to it yourself. Neta drove it;
-you can finish it.
+you can finish it. Retained worker tabs show `✓` for success, `failed` for
+failure, or `killed` when terminated, so their outcome is visible from the tab
+bar. The leader's `neta_attach` tool opens a terminal worker in a fresh tab;
+it refuses active workers so two clients cannot drive one conversation.
 
 ## Configuring it
 

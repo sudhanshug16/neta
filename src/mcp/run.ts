@@ -180,8 +180,8 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 	const mcp = createMcpServer(
 		"neta",
 		leaderTools(manager),
-		"Neta worker control. Spawn workers with neta_spawn, collect their results with neta_wait, and answer blocked " +
-			"workers with neta_answer. If these tools fail, report the failure — never do the work yourself and never " +
+		"Neta worker control. Spawn workers with neta_spawn, collect their results with neta_wait, reopen a terminal " +
+			"worker's native TUI with neta_attach, and answer blocked workers with neta_answer. If these tools fail, report the failure — never do the work yourself and never " +
 			"substitute this backend's own subagents.",
 	);
 	mcp.onclose = exit;

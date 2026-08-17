@@ -60,6 +60,9 @@ describe("what each host calls our tools", () => {
 		expect(new ClaudeAdapter().toolName("neta_spawn")).toBe("mcp__neta__neta_spawn");
 		expect(new CodexAdapter().toolName("neta_spawn")).toBe("mcp__neta__neta_spawn");
 		expect(new OpenCodeAdapter().toolName("neta_spawn")).toBe("neta_neta_spawn");
+		expect(new ClaudeAdapter().toolName("neta_attach")).toBe("mcp__neta__neta_attach");
+		expect(new CodexAdapter().toolName("neta_attach")).toBe("mcp__neta__neta_attach");
+		expect(new OpenCodeAdapter().toolName("neta_attach")).toBe("neta_neta_attach");
 	});
 
 	// The prefix is derived from the server name, so registering the server under

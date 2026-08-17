@@ -146,6 +146,12 @@ still drove the worker, still gated its edits, still counted its tokens. If you
 attach while a worker is still running, you and Neta are both prompting one
 conversation, so `neta attach` says so before it opens.
 
+The leader's `neta_attach` tool is stricter: it opens a fresh mux tab only for
+a terminal worker with an exact recorded vendor session and configured resume
+command. It refuses active or unstarted workers and headless sessions, sends no
+prompt, and does not change worker state. Closing that TUI and calling the tool
+again opens another tab.
+
 ## Panes
 
 With Zellij or tmux available, each worker gets a pane running `neta watch
@@ -157,6 +163,11 @@ the worker, not the worker itself — the agent process stays under Neta's
 control. Panes read the log without consuming it, so nothing a pane shows is
 stolen from the leader, and `neta watch <id> --plain` prints the same stream
 as bare lines for piping.
+
+Terminal tabs stay readable and advertise their result in the tab bar: `✓` is
+done, while `failed` and `killed` are explicit and distinct. Only watch tabs
+marked as Neta-owned rename themselves; running `neta watch` in an ordinary
+user terminal does not rename that terminal's tmux window or Zellij tab.
 
 A room gets one more pane of its own, opened when its first member joins:
 `neta watch <room-name>` follows the room's merged transcript, every post

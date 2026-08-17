@@ -132,6 +132,120 @@ describe("WorkerManager", () => {
 		}
 	});
 
+	describe("reopen worker TUI", () => {
+		async function finishWorker(index = 0, outcome: PromptOutcome = { ok: true, summary: "done" }): Promise<void> {
+			transports[index].finish(outcome);
+			await manager.waitFor([index === 0 ? "ro1" : `ro${index + 1}`], 5000);
+		}
+
+		it("refuses unknown, queued, and active workers", async () => {
+			expect(() => manager.reopenWorkerTui("ro9")).toThrow('Unknown worker "ro9"');
+
+			await manager.spawn({ role: "scout", tier: "expert", task: "look" });
+			transports[0].options.events.vendorSession("active-session");
+			expect(() => manager.reopenWorkerTui("ro1")).toThrow("still active (running)");
+
+			await manager.spawn({ role: "worker", tier: "expert", task: "first", writer: true });
+			await manager.spawn({ role: "worker", tier: "expert", task: "second", writer: true });
+			expect(() => manager.reopenWorkerTui("rw3")).toThrow("queued and has not started");
+		});
+
+		it("refuses terminal workers with no vendor session or resume support", async () => {
+			await manager.spawn({ role: "scout", tier: "expert", task: "look" });
+			await finishWorker();
+			expect(() => manager.reopenWorkerTui("ro1")).toThrow("has not opened a backend session");
+
+			await manager.dispose();
+			transports = [];
+			manager = new WorkerManager({
+				cwd: process.cwd(),
+				agentDir: "/nonexistent-agent-dir",
+				config: fixtureBackendConfig({ backends: { mine: { detect: "bun", command: "mine" } } }),
+				channelAddress: "/tmp/neta-test.sock",
+				onEvent: () => {},
+				createTransport: (options) => {
+					const transport = new FakeTransport(options);
+					transports.push(transport);
+					return transport;
+				},
+			});
+			await manager.spawn({ role: "scout", tier: "expert", backend: "mine", task: "look" });
+			transports[0].options.events.vendorSession("mine-session");
+			await finishWorker();
+			expect(() => manager.reopenWorkerTui("ro1")).toThrow('Backend "mine" has no resume command configured');
+		});
+
+		it("refuses headless sessions and reports pane-open failures", async () => {
+			await manager.spawn({ role: "scout", tier: "expert", task: "look" });
+			transports[0].options.events.vendorSession("headless-session");
+			await finishWorker();
+			expect(() => manager.reopenWorkerTui("ro1")).toThrow("no live pane host (headless mode)");
+
+			await manager.dispose();
+			transports = [];
+			manager = new WorkerManager({
+				cwd: process.cwd(),
+				agentDir: "/nonexistent-agent-dir",
+				config,
+				channelAddress: "/tmp/neta-test.sock",
+				onEvent: () => {},
+				panes: {
+					open: () => ({ opened: true }),
+					openRoom: () => ({ opened: true }),
+					attach: () => ({ opened: false, reason: "tmux server exited" }),
+				},
+				createTransport: (options) => {
+					const transport = new FakeTransport(options);
+					transports.push(transport);
+					return transport;
+				},
+			});
+			await manager.spawn({ role: "scout", tier: "expert", task: "look" });
+			transports[0].options.events.vendorSession("failed-pane-session");
+			await finishWorker();
+			expect(() => manager.reopenWorkerTui("ro1")).toThrow("Could not open ro1's native TUI: tmux server exited");
+		});
+
+		it("reopens repeatedly with the exact session and never mutates worker state", async () => {
+			await manager.dispose();
+			transports = [];
+			const attached: Array<{ workerId: string; command: string; args: string[] }> = [];
+			manager = new WorkerManager({
+				cwd: process.cwd(),
+				agentDir: "/nonexistent-agent-dir",
+				config,
+				channelAddress: "/tmp/neta-test.sock",
+				onEvent: () => {},
+				panes: {
+					open: () => ({ opened: true }),
+					openRoom: () => ({ opened: true }),
+					attach: (worker, resume) => {
+						attached.push({ workerId: worker.id, command: resume.command, args: resume.args });
+						return { opened: true };
+					},
+				},
+				createTransport: (options) => {
+					const transport = new FakeTransport(options);
+					transports.push(transport);
+					return transport;
+				},
+			});
+			await manager.spawn({ role: "scout", tier: "expert", task: "look", name: "auth flow" });
+			transports[0].options.events.vendorSession("vendor-exact");
+			await finishWorker();
+			const before = manager.get("ro1");
+
+			manager.reopenWorkerTui("ro1");
+			manager.reopenWorkerTui("ro1");
+
+			expect(attached).toEqual([
+				{ workerId: "ro1", command: "claude", args: ["--resume", "vendor-exact"] },
+				{ workerId: "ro1", command: "claude", args: ["--resume", "vendor-exact"] },
+			]);
+			expect(manager.get("ro1")).toEqual(before);
+		});
+	});
+
 	it("does not add writer context when no writers are active or queued", async () => {
 		await manager.spawn({ role: "scout", tier: "expert", task: "map the auth flow" });
 

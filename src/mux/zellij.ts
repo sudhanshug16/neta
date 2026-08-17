@@ -109,6 +109,16 @@ export function killSessionArgs(sessionName: string): string[] {
  * is what lets a finished worker's tab clean itself up.
  */
 export function newTabArgs(title: string, spec: ProcessSpec, cwd: string, sessionName?: string): string[] {
+	const command = spec.env ? "/usr/bin/env" : spec.command;
+	const args = spec.env
+		? [
+				...Object.entries(spec.env)
+					.sort(([left], [right]) => left.localeCompare(right))
+					.map(([name, value]) => `${name}=${value}`),
+				spec.command,
+				...spec.args,
+			]
+		: spec.args;
 	return [
 		...(sessionName ? ["--session", sessionName] : []),
 		"action",
@@ -119,9 +129,14 @@ export function newTabArgs(title: string, spec: ProcessSpec, cwd: string, sessio
 		cwd,
 		"--close-on-exit",
 		"--",
-		spec.command,
-		...spec.args,
+		command,
+		...args,
 	];
+}
+
+/** Rename only the tab containing the calling watcher. */
+export function renameTabArgs(title: string): string[] {
+	return ["action", "rename-tab", title];
 }
 
 export class ZellijAdapter implements MuxAdapter {
@@ -172,5 +187,11 @@ export class ZellijAdapter implements MuxAdapter {
 			});
 		}
 		return true;
+	}
+
+	renameCurrentPane(title: string): boolean {
+		if (!this.inSession()) return false;
+		const result = spawnSync("zellij", renameTabArgs(title), { encoding: "utf-8" });
+		return result.status === 0;
 	}
 }

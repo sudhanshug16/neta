@@ -16,9 +16,25 @@
 import { spawn } from "node:child_process";
 import { sendChannelRequest } from "./channel/client.ts";
 import { APP_NAME } from "./config.ts";
-import { loadConfig } from "./settings.ts";
-import { isTerminalState, type WorkerLogPage } from "./types.ts";
+import type { ProcessSpec } from "./mux/types.ts";
+import { loadConfig, type NetaConfig } from "./settings.ts";
+import { isTerminalState, type WorkerLogPage, type WorkerSummary } from "./types.ts";
 import { resolveTarget } from "./watch.ts";
+
+/** The one exact-session resume resolver shared by CLI attach and pane reopen. */
+export function workerResumeCommand(config: NetaConfig, worker: WorkerSummary): ProcessSpec {
+	if (!worker.vendorSessionId) {
+		throw new Error(`${worker.id} has not opened a backend session yet; it cannot be attached.`);
+	}
+	const resume = config.resumeCommand(worker.backend, worker.vendorSessionId);
+	if (!resume) {
+		throw new Error(
+			`Backend "${worker.backend}" has no resume command configured. ` +
+				`Its session id is ${worker.vendorSessionId}; set backends.${worker.backend}.resume in settings.`,
+		);
+	}
+	return resume;
+}
 
 export interface AttachOptions {
 	workerId: string;
@@ -54,17 +70,11 @@ export async function attachWorker(options: AttachOptions): Promise<number> {
 		write(`No worker ${options.workerId} in this session.`);
 		return 1;
 	}
-	if (!worker.vendorSessionId) {
-		write(`${worker.id} has not opened a backend session yet; try again in a moment.`);
-		return 1;
-	}
-
-	const resume = loadConfig(cwd, options.agentDir).resumeCommand(worker.backend, worker.vendorSessionId);
-	if (!resume) {
-		write(
-			`Backend "${worker.backend}" has no resume command configured. ` +
-				`Its session id is ${worker.vendorSessionId}; set backends.${worker.backend}.resume in settings.`,
-		);
+	let resume: ProcessSpec;
+	try {
+		resume = workerResumeCommand(loadConfig(cwd, options.agentDir), worker);
+	} catch (error) {
+		write(error instanceof Error ? error.message : String(error));
 		return 1;
 	}
 

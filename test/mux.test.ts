@@ -3,9 +3,10 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NoMux, selectMux } from "../src/mux/index.ts";
-import { createPaneHost, tabTitle } from "../src/mux/panes.ts";
+import { createPaneHost, markWorkerPaneTerminal, tabTitle } from "../src/mux/panes.ts";
 import {
 	newWindowArgs,
+	renameWindowArgs,
 	TmuxAdapter,
 	attachSessionArgs as tmuxAttachSessionArgs,
 	killSessionArgs as tmuxKillSessionArgs,
@@ -16,6 +17,7 @@ import {
 	leaderLayout,
 	newSessionArgs,
 	newTabArgs,
+	renameTabArgs,
 	ZellijAdapter,
 	attachSessionArgs as zellijAttachSessionArgs,
 	killSessionArgs as zellijKillSessionArgs,
@@ -88,6 +90,10 @@ describe("tmux", () => {
 			"ro1",
 		]);
 		expect(args).not.toContain("split-window");
+	});
+
+	it("renames only the calling watcher's current window", () => {
+		expect(renameWindowArgs("ro1 auth ✓")).toEqual(["rename-window", "ro1 auth ✓"]);
 	});
 });
 
@@ -192,6 +198,30 @@ describe("zellij", () => {
 		]);
 	});
 
+	it("marks Neta-owned tabs through env without a shell", () => {
+		expect(
+			newTabArgs("ro1 scout", { command: "neta", args: ["watch", "ro1"], env: { NETA_PANE: "ro1 scout" } }, "/repo"),
+		).toEqual([
+			"action",
+			"new-tab",
+			"--name",
+			"ro1 scout",
+			"--cwd",
+			"/repo",
+			"--close-on-exit",
+			"--",
+			"/usr/bin/env",
+			"NETA_PANE=ro1 scout",
+			"neta",
+			"watch",
+			"ro1",
+		]);
+	});
+
+	it("renames only the calling watcher's current tab", () => {
+		expect(renameTabArgs("ro1 auth failed")).toEqual(["action", "rename-tab", "ro1 auth failed"]);
+	});
+
 	it("writes the layout file into the session directory", () => {
 		const dir = mkdtempSync(join(tmpdir(), "neta-mux-"));
 		dirs.push(dir);
@@ -275,6 +305,26 @@ describe("worker views", () => {
 		expect(title).toEndWith("…");
 	});
 
+	it("keeps the existing custom title-limit argument", () => {
+		expect(tabTitle("ro1", "authentication", 10)).toBe("ro1 authe…");
+	});
+
+	it("keeps terminal outcomes distinct and inside the title limit", () => {
+		expect(tabTitle("ro1", "auth flow", "done")).toBe("ro1 auth flow ✓");
+		expect(tabTitle("ro1", "auth flow", "failed")).toBe("ro1 auth flow failed");
+		expect(tabTitle("ro1", "auth flow", "killed")).toBe("ro1 auth flow killed");
+		for (const state of ["done", "failed", "killed"] as const) {
+			const title = tabTitle("rw12", "the entire websocket reconnect subsystem", state);
+			expect(title).toStartWith("rw12");
+			expect(title.length).toBeLessThanOrEqual(22);
+		}
+	});
+
+	it("never renames an unmarked user-owned mux resource", () => {
+		expect(markWorkerPaneTerminal({ ...worker, state: "done" }, { TMUX: "/tmp/tmux" })).toBe(false);
+		expect(markWorkerPaneTerminal({ ...worker, state: "failed" }, { ZELLIJ: "1" })).toBe(false);
+	});
+
 	// Multiplexers start these from their own server process, which does not have
 	// Neta's environment: a pane that cannot find the session dies instantly and
 	// the tab disappears before anyone sees it.
@@ -323,6 +373,26 @@ describe("worker views", () => {
 		]);
 		expect(calls[1].title.length).toBeLessThanOrEqual(22);
 		expect(calls[1].title).toEndWith("…");
+	});
+
+	it("opens an exact resume command in a fresh native TUI tab", () => {
+		const { mux, calls } = recordingMux();
+		const host = createPaneHost(
+			mux,
+			{ command: "node", prefixArgs: ["/opt/cli.js"] },
+			"s7",
+			"/repo",
+			"/home/u/.neta",
+			"neta-s7",
+		);
+
+		const outcome = host?.attach?.(
+			{ ...worker, state: "done", vendorSessionId: "vendor-exact" },
+			{ command: "claude", args: ["--resume", "vendor-exact"] },
+		);
+
+		expect(outcome).toEqual({ opened: true });
+		expect(calls[0]).toEqual({ title: "ro1 auth flow tui", args: ["--resume", "vendor-exact"] });
 	});
 
 	it("reports why a view could not open rather than losing it", () => {

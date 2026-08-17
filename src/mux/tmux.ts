@@ -52,6 +52,11 @@ export function newWindowArgs(title: string, spec: ProcessSpec, cwd: string, ses
 	];
 }
 
+/** Rename only the window containing the calling watcher. */
+export function renameWindowArgs(title: string): string[] {
+	return ["rename-window", title];
+}
+
 export class TmuxAdapter implements MuxAdapter {
 	readonly id = "tmux" as const;
 
@@ -84,5 +89,11 @@ export class TmuxAdapter implements MuxAdapter {
 		// tmux explains itself on stderr; throwing that away leaves a user with a
 		// missing window and no reason for it.
 		throw new Error(`tmux: ${(result.stderr || result.error?.message || `exit ${result.status}`).trim()}`);
+	}
+
+	renameCurrentPane(title: string): boolean {
+		if (!this.inSession()) return false;
+		const result = spawnSync("tmux", renameWindowArgs(title), { encoding: "utf-8" });
+		return result.status === 0;
 	}
 }

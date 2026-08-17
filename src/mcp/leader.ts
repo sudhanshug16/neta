@@ -382,6 +382,22 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 			},
 		},
 		{
+			name: "neta_attach",
+			description:
+				"Open a fresh multiplexer tab with a terminal worker's native backend TUI, resuming its exact recorded " +
+				"vendor session. Refuses active or unstarted workers and headless sessions. It sends no prompt and does not " +
+				"change worker state; call it again if the user closes the tab.",
+			inputSchema: {
+				type: "object",
+				properties: { workerId: { type: "string", description: "Terminal worker id, such as rw1 or ro2." } },
+				required: ["workerId"],
+			},
+			async run(args) {
+				const summary = manager.reopenWorkerTui(requireString(args, "workerId"));
+				return text(`Opened ${summary.id} "${summary.name}" in a new ${summary.backend} TUI tab.`);
+			},
+		},
+		{
 			name: "neta_log",
 			description:
 				"Read a worker's new log lines since you last looked. Each line is shown once. By default, omits " +

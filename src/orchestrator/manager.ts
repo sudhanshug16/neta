@@ -16,6 +16,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { AcpWorkerTransport } from "../acp/transport.ts";
+import { workerResumeCommand } from "../attach.ts";
 import type { ChannelResponse, LeaderChannelRequest } from "../channel/protocol.ts";
 import { NETA_SCRATCH_ENV, NETA_SOCKET_ENV, NETA_WORKER_ENV, NETA_WORKER_TOKEN_ENV } from "../channel/protocol.ts";
 import type { ChannelHandler } from "../channel/server.ts";
@@ -115,6 +116,15 @@ export interface WorkerPaneHost {
 	open(worker: WorkerSummary): { opened: true } | { opened: false; reason: string };
 	/** Opens the room's merged view; one pane per room, beside its members'. */
 	openRoom(room: string): { opened: true } | { opened: false; reason: string };
+	/** Opens a fresh native backend TUI for an already-terminal worker. */
+	attach?(
+		worker: WorkerSummary,
+		resume: { command: string; args: string[] },
+	):
+		| {
+				opened: true;
+		  }
+		| { opened: false; reason: string };
 }
 
 export type TransportFactory = (options: TransportOptions) => WorkerTransportDriver;
@@ -424,6 +434,29 @@ export class WorkerManager implements ChannelHandler {
 
 	get(workerId: string): WorkerSummary {
 		return this.summarize(this.require(workerId));
+	}
+
+	/** Open a fresh native backend TUI without changing any worker lifecycle state. */
+	reopenWorkerTui(workerId: string): WorkerSummary {
+		const record = this.require(workerId);
+		if (record.state === "queued") {
+			throw new Error(`Worker ${workerId} is queued and has not started; there is no backend session to attach.`);
+		}
+		if (!isTerminalState(record.state)) {
+			throw new Error(
+				`Worker ${workerId} is still active (${record.state}); refusing to open a second client on the same session.`,
+			);
+		}
+		const summary = this.summarize(record);
+		const resume = workerResumeCommand(this.options.config, summary);
+		if (!this.options.panes?.attach) {
+			throw new Error(
+				`Cannot open ${workerId}: this Neta session has no live pane host (${this.options.headlessReason ?? "headless mode"}).`,
+			);
+		}
+		const outcome = this.options.panes.attach(summary, resume);
+		if (!outcome.opened) throw new Error(`Could not open ${workerId}'s native TUI: ${outcome.reason}.`);
+		return summary;
 	}
 
 	/** One complete, point-in-time view for the MCP and socket status commands. */

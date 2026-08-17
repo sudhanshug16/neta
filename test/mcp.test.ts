@@ -55,15 +55,25 @@ describe("leader MCP tools", () => {
 	let manager: WorkerManager;
 	let transports: FakeTransport[];
 	let client: Client;
+	let attached: Array<{ workerId: string; command: string; args: string[] }>;
 
 	beforeEach(async () => {
 		transports = [];
+		attached = [];
 		manager = new WorkerManager({
 			cwd: process.cwd(),
 			agentDir: "/nonexistent-agent-dir",
 			config: fixtureBackendConfig(),
 			channelAddress: "/tmp/neta-mcp-test.sock",
 			onEvent: () => {},
+			panes: {
+				open: () => ({ opened: true }),
+				openRoom: () => ({ opened: true }),
+				attach: (worker, resume) => {
+					attached.push({ workerId: worker.id, command: resume.command, args: resume.args });
+					return { opened: true };
+				},
+			},
 			createTransport: (options) => {
 				const transport = new FakeTransport(options);
 				transports.push(transport);
@@ -86,10 +96,12 @@ describe("leader MCP tools", () => {
 		(await client.callTool({ name, arguments: args })) as CallToolResult;
 
 	it("offers the whole worker vocabulary and nothing else", async () => {
-		const names = (await client.listTools()).tools.map((tool) => tool.name).sort();
+		const listed = await client.listTools();
+		const names = listed.tools.map((tool) => tool.name).sort();
 
 		expect(names).toEqual([
 			"neta_answer",
+			"neta_attach",
 			"neta_kill",
 			"neta_log",
 			"neta_note",
@@ -103,6 +115,9 @@ describe("leader MCP tools", () => {
 			"neta_wait",
 			"neta_workers",
 		]);
+		expect(listed.tools.find((tool) => tool.name === "neta_attach")?.inputSchema).toMatchObject({
+			required: ["workerId"],
+		});
 	});
 
 	it("spawns a worker and describes what started", async () => {
@@ -114,6 +129,21 @@ describe("leader MCP tools", () => {
 			"Running — collect it with neta_wait before ending your turn; a worker that finishes after your turn ends reaches nobody.",
 		);
 		expect(transports[0].options.systemPrompt).toContain("You are a scout");
+	});
+
+	it("reopens a terminal worker's exact native session without changing its state", async () => {
+		await call("neta_spawn", { role: "scout", tier: "expert", task: "look", name: "auth flow" });
+		transports[0].options.events.vendorSession("vendor-exact");
+		transports[0].finish({ ok: true, summary: "done" });
+		await manager.waitFor(["ro1"], 5000);
+		const before = manager.get("ro1");
+
+		const result = await call("neta_attach", { workerId: "ro1" });
+
+		expect(result.isError).toBeFalsy();
+		expect(bodyOf(result)).toBe('Opened ro1 "auth flow" in a new claude TUI tab.');
+		expect(attached).toEqual([{ workerId: "ro1", command: "claude", args: ["--resume", "vendor-exact"] }]);
+		expect(manager.get("ro1")).toEqual(before);
 	});
 
 	it("queues a second writer and reports queued status", async () => {

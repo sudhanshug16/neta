@@ -54,6 +54,7 @@ describe("leader prompt", () => {
 			"neta_status",
 			"neta_log",
 			"neta_answer",
+			"neta_attach",
 			"neta_plan",
 			"neta_remember",
 			"neta_note",
@@ -61,7 +62,7 @@ describe("leader prompt", () => {
 			expect(prompt).toContain(`mcp__neta__${tool}`);
 		}
 		// No bare name survives to be copied by mistake.
-		expect(prompt).not.toMatch(/`neta_(spawn|wait|workers|log|answer|plan|remember|note)`/);
+		expect(prompt).not.toMatch(/`neta_(spawn|wait|workers|log|answer|attach|plan|remember|note)`/);
 	});
 
 	// If a host renames tools again, the leader should look before giving up.
