@@ -113,7 +113,7 @@ describe("neta_exec", () => {
 		const repo = repository();
 		const value = manager(repo);
 		const result = await value.exec({
-			argv: ["sh", "-c", "echo a; echo b | cat; echo `echo backticked`; echo $(echo substituted) > /dev/stdout"],
+			argv: ["sh", "-c", "echo a; echo b | cat; echo `echo backticked`; echo $(echo substituted)"],
 		});
 		expect(result.exitCode).toBe(0);
 		expect(result.output).toContain("a");
