@@ -7,7 +7,7 @@ import { AcpConnection, chooseModel, sanitizeInheritedEnv } from "../src/acp/con
 import { AcpWorkerTransport, describeToolCall, paragraphFlushIndex, renderDiffText } from "../src/acp/transport.ts";
 import type { NegotiatedSession, TransportOptions, WorkerMcpServer } from "../src/orchestrator/transport.ts";
 import type { WorkerLogEntry, WorkerUsage } from "../src/types.ts";
-import { EnvStub, waitFor } from "./helpers.ts";
+import { EnvStub, processGone, waitFor } from "./helpers.ts";
 
 const fakeAgent = fileURLToPath(new URL("./fixtures/fake-acp-agent.mjs", import.meta.url));
 
@@ -553,7 +553,7 @@ describe("AcpWorkerTransport", () => {
 		await transport.kill();
 
 		expect(Date.now() - killStart).toBeGreaterThanOrEqual(2900);
-		await waitFor(() => expect(() => process.kill(pid, 0)).toThrow(), 1000);
+		await waitFor(() => processGone(pid), 1000);
 	});
 
 	it("kill() waits for process exit before resolving", async () => {

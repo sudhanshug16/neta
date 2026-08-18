@@ -10,12 +10,14 @@ import { fixtureBackendConfig } from "./helpers.ts";
 
 class FakeTransport implements WorkerTransportDriver {
 	readonly options: TransportOptions;
+	private readonly startFailure: string | undefined;
 	private pending: Array<(outcome: PromptOutcome) => void> = [];
-	constructor(options: TransportOptions) {
+	constructor(options: TransportOptions, startFailure?: string) {
 		this.options = options;
+		this.startFailure = startFailure;
 	}
 	start(): Promise<void> {
-		return Promise.resolve();
+		return this.startFailure ? Promise.reject(new Error(this.startFailure)) : Promise.resolve();
 	}
 	prompt(): Promise<PromptOutcome> {
 		return new Promise((resolve) => this.pending.push(resolve));
@@ -41,9 +43,11 @@ describe("leader MCP redesign", () => {
 	let manager: WorkerManager;
 	let client: Client;
 	let transports: FakeTransport[];
+	let failStartAt: number | undefined;
 
 	beforeEach(async () => {
 		transports = [];
+		failStartAt = undefined;
 		manager = new WorkerManager({
 			cwd: process.cwd(),
 			agentDir: "/nonexistent-agent-dir",
@@ -51,7 +55,10 @@ describe("leader MCP redesign", () => {
 			channelAddress: "/tmp/neta-mcp-test.sock",
 			onEvent: () => {},
 			createTransport(options) {
-				const transport = new FakeTransport(options);
+				const transport = new FakeTransport(
+					options,
+					transports.length + 1 === failStartAt ? "fixture startup refused" : undefined,
+				);
 				transports.push(transport);
 				return transport;
 			},
@@ -111,11 +118,47 @@ describe("leader MCP redesign", () => {
 		expect(manager.roomTranscript("review")).toEqual([]);
 	});
 
+	it("collects a middle runtime startup failure and still attempts the full team", async () => {
+		failStartAt = 2;
+		const result = await call("neta_delegate", {
+			team: "startup-review",
+			seed: "compare all three",
+			workers: [
+				{ role: "scout", tier: "expert", task: "one" },
+				{ role: "reviewer", tier: "expert", task: "two" },
+				{ role: "scout", tier: "expert", task: "three" },
+			],
+		});
+		expect(result.isError).toBeFalsy();
+		expect(body(result)).toContain("ro1:");
+		expect(body(result)).toContain("ro2:");
+		expect(body(result)).toContain("Startup failure: fixture startup refused");
+		expect(body(result)).toContain("ro3:");
+		expect(manager.list().map((worker) => [worker.id, worker.state])).toEqual([
+			["ro1", "running"],
+			["ro2", "failed"],
+			["ro3", "running"],
+		]);
+		expect(manager.roomTranscript("startup-review")[0]?.text).toBe("compare all three");
+		for (const id of ["ro1", "ro2", "ro3"]) expect(manager.get(id).id).toBe(id);
+
+		const waiting = call("neta_wait", { workerIds: ["ro1", "ro2", "ro3"], timeoutSeconds: 5 });
+		transports[0].finish({ ok: true, summary: "one done" });
+		transports[2].finish({ ok: true, summary: "three done" });
+		expect(body(await waiting)).toContain("fixture startup refused");
+	});
+
 	it("waits for delegated work and returns the handoff", async () => {
 		await call("neta_delegate", { workers: [{ role: "scout", tier: "expert", task: "map" }] });
 		const waiting = call("neta_wait", { workerIds: ["ro1"], timeoutSeconds: 5 });
 		transports[0].finish({ ok: true, summary: "auth is in src/auth.ts" });
 		expect(body(await waiting)).toContain("auth is in src/auth.ts");
+	});
+
+	it("surfaces a blocked worker and its question when neta_wait has no ids", async () => {
+		await call("neta_delegate", { workers: [{ role: "scout", tier: "expert", task: "map" }] });
+		expect(manager.blocked("ro1", "Which account?")).toMatchObject({ ok: true });
+		expect(body(await call("neta_wait"))).toContain("ro1 blocked and stopped: Which account?");
 	});
 
 	it("keeps note, inspect, status and worker summaries available", async () => {

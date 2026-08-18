@@ -113,7 +113,9 @@ describe("the checkpoint schema", () => {
 
 	it("rejects future schemas with every supported version named", () => {
 		const checkpoint = emptySessionCheckpoint({ id: "sess", canonicalCwd: "/repo", leaderBackend: "claude" });
-		expect(() => validateCheckpoint({ ...checkpoint, schemaVersion: 4 })).toThrow("supported versions: 1, 2, or 3");
+		expect(() => validateCheckpoint({ ...checkpoint, schemaVersion: 5 })).toThrow(
+			"supported versions: 1, 2, 3, or 4",
+		);
 	});
 
 	it("round-trips through disk", () => {

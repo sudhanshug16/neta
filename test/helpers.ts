@@ -33,17 +33,30 @@ for (const name of SESSION_ENV_VARS) {
 	delete process.env[name];
 }
 
-/** Poll until the expectation stops throwing, or give up. */
-export async function waitFor(check: () => void | Promise<void>, timeoutMs = 2000, stepMs = 10): Promise<void> {
+/** Poll a side-effect-free predicate until it is true, or a throwing probe until it stops throwing. */
+export async function waitFor(
+	check: () => boolean | undefined | Promise<boolean | undefined>,
+	timeoutMs = 2000,
+	stepMs = 10,
+): Promise<void> {
 	const deadline = Date.now() + timeoutMs;
 	for (;;) {
 		try {
-			await check();
+			if ((await check()) === false) throw new Error("Condition is not ready.");
 			return;
 		} catch (error) {
 			if (Date.now() >= deadline) throw error;
 			await new Promise((resolve) => setTimeout(resolve, stepMs));
 		}
+	}
+}
+
+export function processGone(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return false;
+	} catch {
+		return true;
 	}
 }
 

@@ -113,7 +113,7 @@ describe("steering a worker", () => {
 	async function runningWorker(writer = false) {
 		const worker = await manager.spawn({ role: "scout", tier: "expert", task: "read the auth flow", writer });
 		const transport = transports[0];
-		await waitFor(() => expect(transport.prompts.length).toBe(1));
+		await waitFor(() => transport.prompts.length === 1);
 		return { worker, transport };
 	}
 
@@ -148,7 +148,7 @@ describe("steering a worker", () => {
 		transport.honorCancel = false;
 		const steering = manager.steer("ro1", "one more thing");
 		// The backend ignores the cancel and completes the turn it was on.
-		await waitFor(() => expect(transport.cancels).toBe(1));
+		await waitFor(() => transport.cancels === 1);
 		transport.finish({ ok: true, summary: "here is the auth flow" });
 
 		const result = await steering;
@@ -220,7 +220,7 @@ describe("steering a worker", () => {
 	it("bounds send and watch input when cancel dispatch never resolves, then remains killable", async () => {
 		const first = await manager.spawn({ role: "scout", tier: "expert", task: "first" });
 		const second = await manager.spawn({ role: "scout", tier: "expert", task: "second" });
-		await waitFor(() => expect(transports.every((transport) => transport.prompts.length === 1)).toBe(true));
+		await waitFor(() => transports.every((transport) => transport.prompts.length === 1));
 		for (const transport of transports) transport.cancelNeverResolves = true;
 
 		for (const [type, worker] of [
@@ -265,19 +265,19 @@ describe("steering a worker", () => {
 		const { transport } = await runningWorker();
 		transport.honorCancel = false;
 		const steering = manager.steer("ro1", "one more thing", { timeoutMs: 200 });
-		await waitFor(() => expect(transport.cancels).toBe(1));
+		await waitFor(() => transport.cancels === 1);
 
 		// The turn we aimed at ends normally, and the steering prompt starts.
 		transport.finish({ ok: true, summary: "here is the auth flow" });
 		expect(await steering).toMatchObject({ delivery: "turn-ended" });
-		await waitFor(() => expect(transport.prompts).toHaveLength(2));
+		await waitFor(() => transport.prompts.length === 2);
 
 		// Now the stale cancel arrives and stops that new turn instead.
 		transport.finish({ ok: false, cancelled: true, summary: "Turn cancelled." });
 
 		// The worker ends visibly rather than sitting in "running" forever with an
 		// empty queue, which nothing would ever wake the leader from.
-		await waitFor(() => expect(isTerminalState(manager.get("ro1").state)).toBe(true));
+		await waitFor(() => isTerminalState(manager.get("ro1").state));
 	});
 
 	// ACP cancel names the session, not the turn. If writing the notification is
@@ -288,7 +288,7 @@ describe("steering a worker", () => {
 		transport.honorCancel = false;
 		const releaseCancel = transport.delayCancelDispatch();
 		const steering = manager.steer("ro1", "inspect the session store", { timeoutMs: 200 });
-		await waitFor(() => expect(transport.cancels).toBe(1));
+		await waitFor(() => transport.cancels === 1);
 
 		transport.finish({ ok: true, summary: "old turn ended naturally" });
 		await Bun.sleep(5);
@@ -302,7 +302,7 @@ describe("steering a worker", () => {
 	it("requires a recorded vendor session to revive a finished worker", async () => {
 		const { transport } = await runningWorker();
 		transport.finish({ ok: true, summary: "done reading" });
-		await waitFor(() => expect(manager.get("ro1").state).toBe("done"));
+		await waitFor(() => manager.get("ro1").state === "done");
 
 		await expect(manager.steer("ro1", "one more thing")).rejects.toThrow(/no recorded vendor session id/);
 	});
@@ -324,7 +324,7 @@ describe("steering a worker", () => {
 		await manager.steer("ro1", "look at the session store instead");
 		transport.finish({ ok: true, summary: "the session store keys on user id" });
 
-		await waitFor(() => expect(manager.get("ro1").state).toBe("done"));
+		await waitFor(() => manager.get("ro1").state === "done");
 		expect(manager.get("ro1").result).toBe("the session store keys on user id");
 	});
 

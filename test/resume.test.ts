@@ -598,7 +598,7 @@ describe("the exact leader conversation", () => {
 			leaderSessionParent(leaderDir),
 			{ pollMs: 5, windowMs: 0, report: (message) => reports.push(message) },
 		);
-		await waitFor(() => expect(reports.length).toBeGreaterThan(0), 5000);
+		await waitFor(() => reports.length > 0, 5000);
 		expect(reports[0]).toContain("never reported its conversation id");
 		expect(reports[0]).toContain("will refuse this session");
 	});

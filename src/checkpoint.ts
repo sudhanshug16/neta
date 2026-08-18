@@ -27,10 +27,10 @@ import {
 	type WorkerUsage,
 } from "./types.ts";
 
-export const CHECKPOINT_SCHEMA_VERSION = 3;
+export const CHECKPOINT_SCHEMA_VERSION = 4;
 
 /** Schemas this build understands. Anything else is a future file and is never rewritten. */
-const READABLE_SCHEMA_VERSIONS = [1, 2, CHECKPOINT_SCHEMA_VERSION];
+const READABLE_SCHEMA_VERSIONS = [1, 2, 3, CHECKPOINT_SCHEMA_VERSION];
 
 export interface CheckpointLiveLease {
 	managerId: string;
@@ -99,10 +99,12 @@ export interface CheckpointWorker {
 	headlessReason?: string;
 	cwd?: string;
 	revivalCount?: number;
+	/** True once a native vendor TUI was given exclusive ownership of this conversation. */
+	nativeAttached?: boolean;
 }
 
 export interface SessionCheckpoint {
-	schemaVersion: 3;
+	schemaVersion: 4;
 	appVersion: string;
 	id: string;
 	canonicalCwd: string;
@@ -276,6 +278,7 @@ function validateWorker(value: unknown, path: string): void {
 			"headlessReason",
 			"cwd",
 			"revivalCount",
+			"nativeAttached",
 		],
 		path,
 	);
@@ -314,6 +317,7 @@ function validateWorker(value: unknown, path: string): void {
 	])
 		optional(worker[key], (item) => string(item, `${path}.${key}`));
 	optional(worker.revivalCount, (item) => number(item, `${path}.revivalCount`));
+	optional(worker.nativeAttached, (item) => boolean(item, `${path}.nativeAttached`));
 	optional(worker.archived, (item) => boolean(item, `${path}.archived`));
 	optional(worker.lastProgress, (item) => {
 		const progress = object(item, `${path}.lastProgress`);
@@ -381,7 +385,7 @@ export function validateCheckpoint(value: unknown): SessionCheckpoint {
 	);
 	if (typeof root.schemaVersion !== "number" || !READABLE_SCHEMA_VERSIONS.includes(root.schemaVersion)) {
 		throw new CheckpointError(
-			`Checkpoint schema version ${String(root.schemaVersion)} is not supported by this Neta version (supported versions: 1, 2, or 3). The original file was preserved.`,
+			`Checkpoint schema version ${String(root.schemaVersion)} is not supported by this Neta version (supported versions: 1, 2, 3, or 4). The original file was preserved.`,
 		);
 	}
 	for (const key of ["appVersion", "id", "canonicalCwd"]) string(root[key], `checkpoint.${key}`);
@@ -471,10 +475,18 @@ export function validateCheckpoint(value: unknown): SessionCheckpoint {
 	// tier selection. A short-lived build accidentally wrote sessionTiers while
 	// still claiming schema 2; accepting but ignoring that field keeps every v1/v2
 	// checkpoint compatible with the full ladder and makes the v3 boundary honest.
-	const sessionTiers = root.schemaVersion >= 3 ? (root.sessionTiers as string[] | undefined) : undefined;
+	const sourceSchema = root.schemaVersion;
+	const sessionTiers = sourceSchema >= 3 ? (root.sessionTiers as string[] | undefined) : undefined;
+	const workers = (root.workers as CheckpointWorker[]).map((worker) => ({
+		...worker,
+		// Schema 4 is the first version whose runtime understands that opening a
+		// native TUI permanently prevents safe headless ownership claims.
+		nativeAttached: sourceSchema >= 4 ? worker.nativeAttached : undefined,
+	}));
 	return {
 		...root,
 		schemaVersion: CHECKPOINT_SCHEMA_VERSION,
+		workers,
 		// Stored order is not trusted; readers get the canonical ladder order.
 		sessionTiers: sessionTiers ? TIERS.filter((tier) => sessionTiers.includes(tier)) : undefined,
 	} as unknown as SessionCheckpoint;

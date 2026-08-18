@@ -419,6 +419,7 @@ export class WorkerManager implements ChannelHandler {
 				headAtStart: worker.headAtStart,
 				headlessReason: worker.headlessReason,
 				revivalCount: worker.revivalCount ?? 0,
+				nativeAttached: worker.nativeAttached,
 			});
 			if (wasActive) {
 				const link = worker.noteId
@@ -518,6 +519,7 @@ export class WorkerManager implements ChannelHandler {
 				headAtStart: record.headAtStart,
 				headlessReason: record.headlessReason,
 				revivalCount: record.revivalCount,
+				nativeAttached: record.nativeAttached,
 			})),
 			activeWriter: this.activeWriter,
 			writerQueue: [...this.writerQueue],
@@ -951,6 +953,8 @@ export class WorkerManager implements ChannelHandler {
 
 	/** Resume a terminal worker in a fresh ACP process without creating a new conversation. */
 	private async revive(record: WorkerRecord, message: string): Promise<SteerResult> {
+		if (record.finishing) await record.finishing;
+		record.finishing = undefined;
 		if (record.reviving) throw new Error(`Worker ${record.id} is already being resumed.`);
 		if (record.nativeAttached) {
 			throw new Error(
@@ -1071,7 +1075,8 @@ export class WorkerManager implements ChannelHandler {
 			`Resumed exact session ${record.vendorSessionId} (revival ${record.revivalCount}).`,
 		);
 		if (record.writer) this.notifyReadOnlyWorkers(record, "started");
-		if (!this.enqueue(record, message, false, [message]))
+		const resumedPrompt = this.withPendingBrief(record, message);
+		if (!this.enqueue(record, resumedPrompt.message, false, [message, ...resumedPrompt.leaderMessages]))
 			throw new Error(`Worker ${record.id} could not accept resumed prompt.`);
 		return {
 			worker: this.summarize(record),
@@ -1227,6 +1232,7 @@ export class WorkerManager implements ChannelHandler {
 			);
 		}
 		record.nativeAttached = true;
+		this.checkpointChanged(record);
 		return summary;
 	}
 
@@ -1469,7 +1475,7 @@ export class WorkerManager implements ChannelHandler {
 	async exec(request: RepoExecRequest): Promise<RepoExecResult> {
 		if (this.disposed) throw new Error("This Neta session is shutting down.");
 		if (!this.options.execOutputDir) throw new Error("neta_exec has no session audit directory.");
-		const classification = classifyRepoCommand(request.argv, request.userApproved);
+		const classification = classifyRepoCommand(request.argv);
 		if (classification.writeCapable) {
 			if (this.execWriterGuard) throw new Error("Another write-capable neta_exec command is already running.");
 			if (this.activeWriter || this.writerQueue.length > 0 || this.recoveryWriterSlotHeld) {

@@ -31,10 +31,10 @@ import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import type { SessionCheckpoint } from "../src/checkpoint.ts";
-import { CHECKPOINT_SCHEMA_VERSION } from "../src/checkpoint.ts";
+import { CHECKPOINT_SCHEMA_VERSION, emptySessionCheckpoint, writeCheckpointAtomic } from "../src/checkpoint.ts";
 import { VERSION } from "../src/config.ts";
 import type { SessionRecord } from "../src/session.ts";
-import { waitFor } from "./helpers.ts";
+import { processGone, waitFor } from "./helpers.ts";
 
 const OLD_RUNTIME = fileURLToPath(new URL("./fixtures/neta-old-runtime.mjs", import.meta.url));
 const OLD_PROVENANCE = fileURLToPath(new URL("./fixtures/neta-old-runtime.json", import.meta.url));
@@ -191,6 +191,21 @@ describe("the pinned old Neta runtime", () => {
 		const help = spawnSync(nodePath, [OLD_RUNTIME, "--help"], { encoding: "utf-8" });
 		expect(help.stdout).toContain("neta resume");
 	}, 120000);
+
+	it("fails closed on the current schema-4 checkpoint", async () => {
+		const agentDir = scratch("neta-old-schema-");
+		const repo = scratch("neta-old-schema-repo-");
+		writeCheckpointAtomic(
+			emptySessionCheckpoint({ id: "schema-four", canonicalCwd: repo, leaderBackend: "claude" }),
+			agentDir,
+		);
+		const result = await run(nodePath, [OLD_RUNTIME, "sessions", "--all"], {
+			env: { ...process.env, NETA_DIR: agentDir },
+		});
+		expect(result.stdout).toContain("schema-four");
+		expect(result.stdout).toContain("schema version 4");
+		expect(result.stdout).toContain("unreadable");
+	});
 });
 
 describe("a session saved by an older Neta, reopened by the current build", () => {
@@ -289,13 +304,13 @@ describe("a session saved by an older Neta, reopened by the current build", () =
 				"review",
 				"WAIT_FOR_BARRIER SUBSTANTIVE_HANDOFF map the auth flow",
 			]);
-			await waitFor(() => expect(existsSync(scoutBarrierReady)).toBe(true), 30000);
+			await waitFor(() => existsSync(scoutBarrierReady), 30000);
 			await oldNeta(["spawn", "--role", "worker", "--tier", "expert", "--writer", "config work"]);
 			writeFileSync(scoutBarrier, "release\n", "utf-8");
 			await oldNeta(["wait", "ro1", "rw2", "--timeout", "30"]);
 
 			// The old runtime's own control plane recorded the note and the room post.
-			await waitFor(() => expect(existsSync(env.FAKE_LEADER_MCP_RESULT)).toBe(true), 30000);
+			await waitFor(() => existsSync(env.FAKE_LEADER_MCP_RESULT), 30000);
 			const mcp = JSON.parse(readFileSync(env.FAKE_LEADER_MCP_RESULT, "utf8")) as Array<{
 				name: string;
 				error?: unknown;
@@ -319,10 +334,10 @@ describe("a session saved by an older Neta, reopened by the current build", () =
 				// A crash: the manager is killed where it stands, with no shutdown and
 				// no proof of its own. The vendor process is quit afterwards.
 				process.kill(session.pid, "SIGKILL");
-				await waitFor(() => expect(() => process.kill(session.pid, 0)).toThrow(), 20000);
+				await waitFor(() => processGone(session.pid), 20000);
 				await old.quit();
 			}
-			await waitFor(() => expect(liveSessions(agentDir)).toEqual([]), 20000);
+			await waitFor(() => liveSessions(agentDir).length === 0, 20000);
 			saved.push({ backend: backend.id, checkpointId, conversation, repo });
 		}
 

@@ -223,11 +223,12 @@ to a journeyman with an exact instruction.
 
 Use ${toolName("neta_exec")} only as a guarded escape hatch for small, fully
 understood mechanical repository commands: for example \`git status\`, one
-targeted test, or a \`git push\` the user explicitly requested. Pass an argv
-array, never a shell string. It is not a way to edit source, run arbitrary
-scripts/interpreters, or implement ambiguous work; delegate those. Outward or
-destructive commands still need explicit user authority. Write-capable commands
-are refused while a worker owns or is queued for the writer slot.
+targeted repository test, or a bounded diff. Pass an argv array, never a shell
+string. Git grep, push, config injection, pagers, external diff helpers, source
+edits, arbitrary scripts and interpreters are outside this surface; delegate
+those. Bun tests may execute repository code by design, but outside paths and
+loader/runtime escape flags are rejected. Test commands are refused while a
+worker owns or is queued for the writer slot.
 
 ## Delegating
 

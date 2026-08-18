@@ -117,7 +117,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 		{
 			name: "neta_delegate",
 			description:
-				"Delegate one or more workers. Without team they are independent; team gives every worker one shared transcript. Returns the actual backend and access assignments. Always collect workers with neta_wait.",
+				"Delegate one or more workers. Input is prevalidated atomically. Runtime startup failures are collected per worker, do not roll back workers already started, and do not stop later workers from being attempted. Without team they are independent; team gives every worker one shared transcript. Returns every worker id, assignment, state and startup failure. Always collect workers with neta_wait.",
 			inputSchema: {
 				type: "object",
 				properties: {
@@ -147,10 +147,21 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 				manager.validateDelegation(requests);
 				if (seed && team) manager.postToRoom(team, "leader", "leader", seed);
 				const summaries: WorkerSummary[] = [];
-				for (const request of requests) summaries.push(await manager.spawn(request));
+				const startupFailures = new Map<string, string>();
+				for (const request of requests) {
+					const before = new Set(manager.list().map((worker) => worker.id));
+					try {
+						summaries.push(await manager.spawn(request));
+					} catch (error) {
+						const failed = manager.list().find((worker) => !before.has(worker.id));
+						if (!failed) throw error;
+						summaries.push(failed);
+						startupFailures.set(failed.id, error instanceof Error ? error.message : String(error));
+					}
+				}
 				const assignments = summaries.map(
 					(summary) =>
-						`${summary.id}: ${summary.role}/${summary.tier} -> ${summary.backend} (${summary.writer ? "writer" : "read-only"}, ${summary.state})${summary.state === "queued" ? " — Queued" : ""}${summary.headlessReason ? `\n  Worker view: headless — ${summary.headlessReason}` : ""}`,
+						`${summary.id}: ${summary.role}/${summary.tier} -> ${summary.backend} (${summary.writer ? "writer" : "read-only"}, ${summary.state})${summary.state === "queued" ? " — Queued" : ""}${startupFailures.has(summary.id) ? `\n  Startup failure: ${startupFailures.get(summary.id)}` : ""}${summary.headlessReason ? `\n  Worker view: headless — ${summary.headlessReason}` : ""}`,
 				);
 				return text(
 					`${team ? `Team "${team}"\n` : ""}${assignments.join("\n")}\nCollect with neta_wait before ending your turn.`,
@@ -160,7 +171,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 		{
 			name: "neta_exec",
 			description:
-				"Run one small, fully understood mechanical repository command without a worker: Git inspection, a targeted Bun test, or an explicitly user-approved git push. Uses an argv array with no shell and a strict executable/subcommand allowlist. Never use for source/code edits, arbitrary scripts, interpreters, or ambiguous implementation. Outward or destructive work still requires explicit user authority. Write-capable commands refuse while any worker owns or is queued for the writer slot.",
+				"Run one small, fully understood mechanical repository command without a worker. Uses a positive grammar for hardened read-only Git inspection or Bun tests confined to repository code. Git grep/push, config, pagers, helpers, loaders, outside paths, source edits, arbitrary scripts and interpreters are rejected. Bun tests refuse while any worker owns or is queued for the writer slot.",
 			inputSchema: {
 				type: "object",
 				properties: {
@@ -172,10 +183,6 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 					},
 					cwd: { type: "string", description: "Optional existing directory within the session repository." },
 					timeoutSeconds: { type: "number", description: "Timeout from 0.001 to 600 seconds; default 60." },
-					userApproved: {
-						type: "boolean",
-						description: "Set only when the user explicitly authorized an outward command such as git push.",
-					},
 				},
 				required: ["argv"],
 			},
@@ -194,7 +201,6 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 							argv: args.argv as string[],
 							cwd: optionalString(args, "cwd"),
 							timeoutMs: timeoutSeconds === undefined ? undefined : Math.round(timeoutSeconds * 1000),
-							userApproved: optionalBoolean(args, "userApproved"),
 						}),
 					),
 				);
@@ -259,7 +265,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 					optionalStringArray(args, "workerIds") ??
 					manager
 						.list()
-						.filter((worker) => !isTerminalState(worker.state))
+						.filter((worker) => !isTerminalState(worker.state) || worker.state === "blocked")
 						.map((worker) => worker.id);
 				if (!ids.length) return text("Nothing to wait for.");
 				const seconds = Math.min(optionalNumber(args, "timeoutSeconds") ?? DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS);

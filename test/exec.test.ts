@@ -1,8 +1,19 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+	copyFileSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	statSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { leaderTools } from "../src/mcp/leader.ts";
@@ -14,6 +25,7 @@ import { EnvStub, fixtureBackendConfig, waitFor } from "./helpers.ts";
 
 const timeoutFixture = fileURLToPath(new URL("./fixtures/exec-timeout-fixture.ts", import.meta.url));
 const outputFixture = fileURLToPath(new URL("./fixtures/exec-output-fixture.ts", import.meta.url));
+const childFixture = fileURLToPath(new URL("./fixtures/sigterm-ignoring-child.mjs", import.meta.url));
 
 class HoldingTransport implements WorkerTransportDriver {
 	readonly options: TransportOptions;
@@ -57,6 +69,10 @@ describe("neta_exec", () => {
 		writeFileSync(join(dir, "tracked.txt"), "initial\n");
 		execFileSync("git", ["add", "tracked.txt"], { cwd: dir });
 		execFileSync("git", ["commit", "-qm", "initial"], { cwd: dir });
+		mkdirSync(join(dir, "test", "fixtures"), { recursive: true });
+		copyFileSync(timeoutFixture, join(dir, "test", "fixtures", "exec-timeout-fixture.ts"));
+		copyFileSync(outputFixture, join(dir, "test", "fixtures", "exec-output-fixture.ts"));
+		copyFileSync(childFixture, join(dir, "test", "fixtures", "sigterm-ignoring-child.mjs"));
 		return dir;
 	}
 
@@ -82,12 +98,25 @@ describe("neta_exec", () => {
 		return found;
 	}
 
-	it("passes argv literally without shell interpolation", async () => {
-		const repo = repository();
-		const marker = join(repo, "interpolated");
-		const result = await tool(manager(repo)).run({ argv: ["git", "status", "--short", `$(touch ${marker})`] });
-
-		expect(body(result)).toContain("Exit code:");
+	it("rejects Git shell, pager, helper, alias, config and option injection", async () => {
+		const value = manager(repository());
+		const marker = "/tmp/PWNED2";
+		rmSync(marker, { force: true });
+		for (const argv of [
+			["git", "grep", `-O${marker}`, "initial"],
+			["git", "-c", `pager.grep=sh -c 'touch ${marker}'`, "grep", "-O", "initial"],
+			["git", "--config-env=alias.pwn=BAD", "pwn"],
+			["git", "status", `$(touch ${marker})`],
+			["git", "diff", "--ext-diff"],
+			["git", "diff", "--textconv"],
+			["git", "diff", "-O/tmp/order"],
+			["git", "log", "--exec=sh"],
+			["git", "show", "--output=/tmp/out"],
+			["git", "push", "--receive-pack=sh", "origin", "main"],
+			["git", "fetch", "--upload-pack=sh", "origin"],
+		]) {
+			await expect(tool(value).run({ argv })).rejects.toThrow();
+		}
 		expect(existsSync(marker)).toBe(false);
 	});
 
@@ -104,12 +133,37 @@ describe("neta_exec", () => {
 			["git", "-c", "alias.x=!sh", "x"],
 			["git", "branch", "-D", "main"],
 			["git", "diff", "--output=changed.patch"],
+			["bun", "test", "--preload=payload.ts"],
+			["bun", "test", "--config=payload.toml"],
+			["bun", "test", "--env-file=.env"],
+			["bun", "test", "--test-worker"],
+			["bun", "test", "--reporter-outfile=/tmp/report"],
 		]) {
 			await expect(tool(value).run({ argv })).rejects.toThrow();
 		}
-		await expect(
-			tool(value).run({ argv: ["git", "push", "--exec=sh", "origin", "main"], userApproved: true }),
-		).rejects.toThrow("does not allow Git option");
+	});
+
+	it("confines every Bun test path to the real repository", async () => {
+		const repo = repository();
+		const value = manager(repo);
+		const outside = mkdtempSync(join(tmpdir(), "neta-exec-outside-"));
+		dirs.push(outside);
+		const payload = join(outside, "payload.ts");
+		writeFileSync(
+			payload,
+			'import { test } from "bun:test"; import { writeFileSync } from "node:fs"; test("pwn", () => writeFileSync("/tmp/PWNED3", "yes"));\n',
+		);
+		symlinkSync(outside, join(repo, "outside-link"));
+		rmSync("/tmp/PWNED3", { force: true });
+
+		await expect(tool(value).run({ argv: ["bun", "test", payload] })).rejects.toThrow("must be relative");
+		await expect(tool(value).run({ argv: ["bun", "test", "--bail", payload] })).rejects.toThrow("must be relative");
+		await expect(tool(value).run({ argv: ["bun", "test", "../payload.ts"] })).rejects.toThrow("escapes");
+		await expect(tool(value).run({ argv: ["bun", "test", "outside-link/payload.ts"] })).rejects.toThrow("escapes");
+		await expect(tool(value).run({ argv: ["bun", "test", "outside-link/not-created.ts"] })).rejects.toThrow(
+			"escapes",
+		);
+		expect(existsSync("/tmp/PWNED3")).toBe(false);
 	});
 
 	it("refuses write-capable commands while a writer owns or waits for the slot", async () => {
@@ -121,17 +175,10 @@ describe("neta_exec", () => {
 		await expect(tool(value).run({ argv: ["bun", "test", "missing.test.ts"] })).rejects.toThrow(
 			"owns or is queued for the writer slot",
 		);
-		await expect(tool(value).run({ argv: ["git", "push", "origin", "main"], userApproved: true })).rejects.toThrow(
-			"owns or is queued for the writer slot",
-		);
 	});
 
-	it("classifies a push-shaped argv without contacting a remote", () => {
-		expect(() => classifyRepoCommand(["git", "push", "origin", "main"])).toThrow("explicitly authorized");
-		expect(classifyRepoCommand(["git", "push", "origin", "main"], true)).toEqual({
-			writeCapable: true,
-			outward: true,
-		});
+	it("removes outward Git commands from the mechanical command surface", () => {
+		expect(() => classifyRepoCommand(["git", "push", "origin", "main"])).toThrow("allowlisted Git subcommand");
 	});
 
 	it("returns nonzero exits with cwd, duration, and a full audit path", async () => {
@@ -145,6 +192,8 @@ describe("neta_exec", () => {
 		const path = /Output file: (.+)/.exec(text)?.[1];
 		expect(path).toBeTruthy();
 		expect(readFileSync(path as string, "utf-8")).toContain("Needed a single revision");
+		expect(statSync(dirname(path as string)).mode & 0o777).toBe(0o700);
+		expect(statSync(path as string).mode & 0o777).toBe(0o600);
 	});
 
 	it("captures stdout and stderr in their shared descriptor order", async () => {
@@ -152,7 +201,7 @@ describe("neta_exec", () => {
 		const env = new EnvStub();
 		env.set("NETA_EXEC_TEST_SECRET", "must-not-leak");
 		const result = await manager(repo)
-			.exec({ argv: ["bun", "test", outputFixture] })
+			.exec({ argv: ["bun", "test", "./test/fixtures/exec-output-fixture.ts"] })
 			.finally(() => env.restore());
 		const full = readFileSync(result.outputPath, "utf-8");
 
@@ -178,8 +227,11 @@ describe("neta_exec", () => {
 	it("times out and kills the detached Bun test process group and its descendant", async () => {
 		const repo = repository();
 		const value = manager(repo);
-		const running = value.exec({ argv: ["bun", "test", timeoutFixture], timeoutMs: 250 });
-		await waitFor(() => expect(existsSync(join(repo, "exec-descendant.pid"))).toBe(true));
+		const running = value.exec({
+			argv: ["bun", "test", "./test/fixtures/exec-timeout-fixture.ts"],
+			timeoutMs: 250,
+		});
+		await waitFor(() => existsSync(join(repo, "exec-descendant.pid")));
 		await expect(value.spawn({ role: "worker", tier: "expert", task: "must wait", writer: true })).rejects.toThrow(
 			"neta_exec command owns the writer safety guard",
 		);
@@ -193,8 +245,8 @@ describe("neta_exec", () => {
 	it("tells the leader the narrow scope, authority rule, and writer conflict", () => {
 		const prompt = buildLeaderPrompt({ tiers: {} });
 		expect(prompt).toContain("guarded escape hatch for small, fully");
-		expect(prompt).toContain("not a way to edit source");
-		expect(prompt).toContain("explicit user authority");
-		expect(prompt).toContain("refused while a worker owns or is queued for the writer slot");
+		expect(prompt).toContain("source\nedits");
+		expect(prompt).toContain("Git grep, push, config injection");
+		expect(prompt).toContain("refused while a\nworker owns or is queued for the writer slot");
 	});
 });

@@ -8,7 +8,7 @@
  * the shipped defaults are opinions, not facts.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir } from "./config.ts";
 import { findOnPath } from "./detect.ts";
@@ -571,50 +571,4 @@ export function loadNetaSettings(cwd: string, agentDir: string = getAgentDir()):
 /** Everything the process needs from settings, in one call. */
 export function loadConfig(cwd: string, agentDir: string = getAgentDir()): NetaConfig {
 	return new NetaConfig(loadNetaSettings(cwd, agentDir));
-}
-
-/**
- * Persist a tier override to the project's .neta/settings.json file. Merges
- * the new tier setting without clobbering other tiers or settings keys.
- * Creates the .neta directory if it does not exist.
- *
- * Note: This writes JSON with pretty-printing (2-space indent). JSON comments
- * are not preserved, as the settings files are JSON, not JSONC.
- */
-export async function persistTierOverride(
-	cwd: string,
-	tier: Tier,
-	override: NetaTierSettings,
-	agentDir: string = getAgentDir(),
-): Promise<void> {
-	const settingsDir = join(cwd, CONFIG_DIR_NAME);
-	const settingsPath = join(settingsDir, "settings.json");
-
-	// Read existing settings or start with empty object
-	const existing = readSettingsFile(settingsPath);
-
-	// Merge the new tier setting
-	const updated: NetaSettings = {
-		...existing,
-		tiers: {
-			...existing.tiers,
-			[tier]: override,
-		},
-	};
-	// Runtime resolution merges user settings with this project file. Validate
-	// that same prospective result before touching disk, so a user-only Claude
-	// alias cannot make persisted settings accept a model startup rejects.
-	const effective = loadNetaSettings(cwd, agentDir);
-	new NetaConfig({
-		...effective,
-		tiers: {
-			...effective.tiers,
-			[tier]: { ...effective.tiers?.[tier], ...override },
-		},
-	});
-
-	if (!existsSync(settingsDir)) mkdirSync(settingsDir, { recursive: true });
-
-	// Write back with pretty-printing
-	writeFileSync(settingsPath, `${JSON.stringify(updated, null, 2)}\n`, "utf-8");
 }

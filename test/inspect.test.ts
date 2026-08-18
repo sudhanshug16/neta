@@ -91,7 +91,7 @@ describe("inspecting a worker", () => {
 	async function worker() {
 		await manager.spawn({ role: "scout", tier: "expert", task: "read the auth flow" });
 		const transport = transports[0];
-		await waitFor(() => expect(transport.prompts.length).toBe(1));
+		await waitFor(() => transport.prompts.length === 1);
 		return transport;
 	}
 
@@ -137,7 +137,7 @@ describe("the inspection cap", () => {
 	async function chatty(lines: number, text = "a line of output") {
 		await manager.spawn({ role: "scout", tier: "expert", task: "read" });
 		const transport = transports[0];
-		await waitFor(() => expect(transport.prompts.length).toBe(1));
+		await waitFor(() => transport.prompts.length === 1);
 		for (let index = 0; index < lines; index++) transport.say("text", `${index}: ${text}`);
 		return transport;
 	}
@@ -192,7 +192,7 @@ describe("the inspection cap", () => {
 	it("caps the entire rendering when task and header metadata are oversized", async () => {
 		await manager.spawn({ role: "scout", tier: "expert", name: "n".repeat(10_000), task: "t".repeat(20_000) });
 		const transport = transports[0];
-		await waitFor(() => expect(transport.prompts.length).toBe(1));
+		await waitFor(() => transport.prompts.length === 1);
 		transport.say("text", `older output ${"x".repeat(500)} newest finding`);
 
 		const rendered = formatInspection(manager.inspect("ro1")).join("\n");
@@ -208,7 +208,7 @@ describe("a worker whose tab was never created", () => {
 	it("still expands, and says why it has no tab", async () => {
 		const { manager, transports } = build({ panes: refusingPanes });
 		await manager.spawn({ role: "scout", tier: "expert", task: "read" });
-		await waitFor(() => expect(transports[0].prompts.length).toBe(1));
+		await waitFor(() => transports[0].prompts.length === 1);
 		transports[0].say("text", "found it");
 
 		const inspection = manager.inspect("ro1");
@@ -224,9 +224,9 @@ describe("a worker whose tab was never created", () => {
 	it("points at what does work instead of dead-ending", async () => {
 		const { manager, transports } = build({ panes: refusingPanes });
 		await manager.spawn({ role: "scout", tier: "expert", task: "read" });
-		await waitFor(() => expect(transports[0].prompts.length).toBe(1));
+		await waitFor(() => transports[0].prompts.length === 1);
 		transports[0].finish({ ok: true, summary: "done" });
-		await waitFor(() => expect(manager.get("ro1").state).toBe("done"));
+		await waitFor(() => manager.get("ro1").state === "done");
 
 		// This pane host cannot attach at all, which is the headless case.
 		expect(() => manager.reopenWorkerTui("ro1")).toThrow(/neta inspect ro1/);
@@ -248,11 +248,11 @@ describe("worker rows", () => {
 	it("name their own expand command, in every state", async () => {
 		const { manager, transports } = build({ panes: refusingPanes });
 		await manager.spawn({ role: "scout", tier: "expert", task: "read" });
-		await waitFor(() => expect(transports[0].prompts.length).toBe(1));
+		await waitFor(() => transports[0].prompts.length === 1);
 		expect(formatStatusSnapshot(manager.statusSnapshot())).toContain(inspectHint("ro1"));
 
 		transports[0].finish({ ok: true, summary: "done" });
-		await waitFor(() => expect(manager.get("ro1").state).toBe("done"));
+		await waitFor(() => manager.get("ro1").state === "done");
 		const terminal = formatStatusSnapshot(manager.statusSnapshot());
 		expect(terminal).toContain("Terminal:");
 		expect(terminal).toContain(inspectHint("ro1"));

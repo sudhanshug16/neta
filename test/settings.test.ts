@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CONFIG_DIR_NAME } from "../src/config.ts";
-import { isForbiddenClaudeModel, loadNetaSettings, NetaConfig, persistTierOverride } from "../src/settings.ts";
+import { isForbiddenClaudeModel, loadNetaSettings, NetaConfig } from "../src/settings.ts";
 
 describe("NetaConfig", () => {
 	// A tier means a different model on each vendor, so the backend says what its
@@ -424,119 +424,6 @@ describe("loadNetaSettings", () => {
 			expect(settings.backends?.["review-primary"]?.tierModels?.expert).toBeUndefined();
 			expect(readFileSync(settingsPath, "utf-8")).toBe(contents);
 			expect(error).toHaveBeenCalledWith(expect.stringContaining("backends.review-primary.tierModels.expert"));
-		} finally {
-			error.mockRestore();
-		}
-	});
-
-	it("persists a tier override to .neta/settings.json without clobbering other tiers", async () => {
-		const cwd = scratch();
-		mkdirSync(join(cwd, CONFIG_DIR_NAME));
-		writeFileSync(
-			join(cwd, CONFIG_DIR_NAME, "settings.json"),
-			JSON.stringify({ tiers: { journeyman: { backend: "codex" } } }),
-		);
-
-		await persistTierOverride(cwd, "expert", { backend: "opencode" });
-
-		const updated = JSON.parse(readFileSync(join(cwd, CONFIG_DIR_NAME, "settings.json"), "utf-8"));
-		expect(updated.tiers).toEqual({
-			journeyman: { backend: "codex" },
-			expert: { backend: "opencode" },
-		});
-	});
-
-	it("creates .neta directory when persisting tier override if it does not exist", async () => {
-		const cwd = scratch();
-
-		await persistTierOverride(cwd, "architect", { backend: "claude", model: "opus" });
-
-		expect(existsSync(join(cwd, CONFIG_DIR_NAME))).toBe(true);
-		const settings = JSON.parse(readFileSync(join(cwd, CONFIG_DIR_NAME, "settings.json"), "utf-8"));
-		expect(settings.tiers).toEqual({ architect: { backend: "claude", model: "opus" } });
-	});
-
-	it("rejects persisting a new Claude Fable override before writing", async () => {
-		const cwd = scratch();
-
-		expect(persistTierOverride(cwd, "architect", { backend: "claude", model: "claude-fable-5[1m]" })).rejects.toThrow(
-			/Claude Fable model.*disabled.*tiers\.architect\.model/,
-		);
-		expect(existsSync(join(cwd, CONFIG_DIR_NAME, "settings.json"))).toBe(false);
-	});
-
-	it("rejects persisting Fable through a custom Claude alias before writing", async () => {
-		const cwd = scratch();
-		const settingsDir = join(cwd, CONFIG_DIR_NAME);
-		const settingsPath = join(settingsDir, "settings.json");
-		mkdirSync(settingsDir);
-		writeFileSync(
-			settingsPath,
-			JSON.stringify({
-				backends: {
-					"review-primary": {
-						command: "npx",
-						args: ["-y", "@agentclientprotocol/claude-agent-acp@0.68.0"],
-					},
-				},
-			}),
-		);
-		const before = readFileSync(settingsPath, "utf-8");
-
-		await expect(
-			persistTierOverride(cwd, "architect", { backend: "review-primary", model: "fable-5-latest" }),
-		).rejects.toThrow(/Claude Fable model.*tiers\.architect\.model/);
-		expect(readFileSync(settingsPath, "utf-8")).toBe(before);
-	});
-
-	it("rejects Fable through a user-only custom Claude alias before creating project settings", async () => {
-		const agentDir = scratch();
-		const cwd = scratch();
-		writeFileSync(
-			join(agentDir, "settings.json"),
-			JSON.stringify({
-				backends: {
-					"review-primary": {
-						command: "npx",
-						args: ["-y", "@agentclientprotocol/claude-agent-acp@0.68.0"],
-					},
-				},
-			}),
-		);
-
-		for (const model of ["fable", "claude-fable-5-latest", "anthropic/claude-fable-5-20260817-v1"]) {
-			await expect(
-				persistTierOverride(cwd, "architect", { backend: "review-primary", model }, agentDir),
-			).rejects.toThrow(/Claude Fable model.*tiers\.architect\.model/);
-			expect(existsSync(join(cwd, CONFIG_DIR_NAME, "settings.json"))).toBe(false);
-		}
-
-		await persistTierOverride(cwd, "architect", { backend: "review-primary", model: "opus[1m]" }, agentDir);
-		await persistTierOverride(cwd, "architect", { backend: "review-primary", model: "sonnet" }, agentDir);
-		expect(JSON.parse(readFileSync(join(cwd, CONFIG_DIR_NAME, "settings.json"), "utf-8"))).toMatchObject({
-			tiers: { architect: { backend: "review-primary", model: "sonnet" } },
-		});
-	});
-
-	it("drops a quarantined Fable value when persisting another setting and preserves unrelated keys", async () => {
-		const cwd = scratch();
-		const settingsDir = join(cwd, CONFIG_DIR_NAME);
-		const settingsPath = join(settingsDir, "settings.json");
-		mkdirSync(settingsDir);
-		writeFileSync(
-			settingsPath,
-			JSON.stringify({ mux: { panes: false }, tiers: { architect: { backend: "claude", model: "fable" } } }),
-		);
-		const error = spyOn(console, "error").mockImplementation(() => {});
-
-		try {
-			await persistTierOverride(cwd, "expert", { backend: "codex" });
-			const updated = JSON.parse(readFileSync(settingsPath, "utf-8"));
-			expect(updated).toEqual({
-				mux: { panes: false },
-				tiers: { architect: { backend: "claude" }, expert: { backend: "codex" } },
-			});
-			expect(error).toHaveBeenCalledWith(expect.stringContaining(`${settingsPath} at tiers.architect.model`));
 		} finally {
 			error.mockRestore();
 		}

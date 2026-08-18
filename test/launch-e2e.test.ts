@@ -552,7 +552,7 @@ describe("neta (launching a leader)", () => {
 
 		const first = launchProcess("claude", cwd, env);
 		const second = launchProcess("claude", cwd, env);
-		await waitFor(() => expect(listSessions(agentDir)).toHaveLength(1), 5000);
+		await waitFor(() => listSessions(agentDir).length === 1, 5000);
 		expect(listSessions(agentDir)).toHaveLength(1);
 		const outcomes = await Promise.all([first, second]);
 		expect(outcomes.map((outcome) => outcome.code).sort()).toEqual([0, 1]);

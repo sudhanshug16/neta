@@ -230,7 +230,7 @@ describe("neta mcp", () => {
 			stdio: ["pipe", "pipe", "ignore"],
 		});
 		try {
-			await waitFor(() => expect(listSessions(home)).toHaveLength(1), 5000);
+			await waitFor(() => listSessions(home).length === 1, 5000);
 
 			child.stdin?.end();
 
@@ -250,9 +250,6 @@ describe("neta mcp", () => {
 		// The control plane exits with its transport. Poll for the result rather
 		// than assuming an unwind window: on a loaded machine a fixed sleep only
 		// tests how busy the machine was.
-		await waitFor(() => {
-			expect(listSessions(agentDir)).toEqual([]);
-			expect(existsSync(session.socket)).toBe(false);
-		}, 15000);
+		await waitFor(() => listSessions(agentDir).length === 0 && !existsSync(session.socket), 15000);
 	});
 });

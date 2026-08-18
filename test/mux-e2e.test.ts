@@ -6,7 +6,7 @@
 
 import { afterEach, describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -79,46 +79,48 @@ describe("tmux leader environment isolation", () => {
 		}
 	});
 
-	tmuxIt("gives two different NETA_DIR launches and two shared-dir launches their own socket and id", async () => {
-		const socket = `neta-test-${process.pid}-${Date.now()}`;
-		const records = scratch("neta-tmux-records-");
-		const firstDir = scratch("neta-tmux-home-a-");
-		const secondDir = scratch("neta-tmux-home-b-");
-		const sharedDir = scratch("neta-tmux-home-shared-");
-		const specs = [
-			["a", firstDir, "/tmp/neta-a.sock", "a-id"],
-			["b", secondDir, "/tmp/neta-b.sock", "b-id"],
-			["c", sharedDir, "/tmp/neta-c.sock", "c-id"],
-			["d", sharedDir, "/tmp/neta-d.sock", "d-id"],
-		] as const;
+	tmuxIt(
+		"gives two different NETA_DIR launches and two shared-dir launches their own socket and id",
+		async () => {
+			const socket = `neta-test-${process.pid}-${Date.now()}`;
+			const records = scratch("neta-tmux-records-");
+			const firstDir = scratch("neta-tmux-home-a-");
+			const secondDir = scratch("neta-tmux-home-b-");
+			const sharedDir = scratch("neta-tmux-home-shared-");
+			const specs = [
+				["a", firstDir, "/tmp/neta-a.sock", "a-id"],
+				["b", secondDir, "/tmp/neta-b.sock", "b-id"],
+				["c", sharedDir, "/tmp/neta-c.sock", "c-id"],
+				["d", sharedDir, "/tmp/neta-d.sock", "d-id"],
+			] as const;
 
-		try {
-			for (const [name, agentDir, channel, sessionId] of specs) {
-				start(
-					socket,
-					`neta-${name}`,
-					leader(join(records, `${name}.json`), {
-						NETA_DIR: agentDir,
-						NETA_SOCKET: channel,
-						NETA_SESSION_ID: sessionId,
-						NETA_LEADER_TOKEN: `token-${name}`,
-					}),
-				);
-			}
-			await waitFor(() => {
-				for (const [name] of specs) expect(() => readFileSync(join(records, `${name}.json`))).not.toThrow();
-			}, 5000);
+			try {
+				for (const [name, agentDir, channel, sessionId] of specs) {
+					start(
+						socket,
+						`neta-${name}`,
+						leader(join(records, `${name}.json`), {
+							NETA_DIR: agentDir,
+							NETA_SOCKET: channel,
+							NETA_SESSION_ID: sessionId,
+							NETA_LEADER_TOKEN: `token-${name}`,
+						}),
+					);
+				}
+				await waitFor(() => specs.every(([name]) => existsSync(join(records, `${name}.json`))), 5000);
 
-			for (const [name, agentDir, channel, sessionId] of specs) {
-				const env = readEnv(join(records, `${name}.json`));
-				expect(env.NETA_DIR).toBe(agentDir);
-				expect(env.NETA_SOCKET).toBe(channel);
-				expect(env.NETA_SESSION_ID).toBe(sessionId);
+				for (const [name, agentDir, channel, sessionId] of specs) {
+					const env = readEnv(join(records, `${name}.json`));
+					expect(env.NETA_DIR).toBe(agentDir);
+					expect(env.NETA_SOCKET).toBe(channel);
+					expect(env.NETA_SESSION_ID).toBe(sessionId);
+				}
+			} finally {
+				spawnSync("tmux", ["-L", socket, "kill-server"], { stdio: "ignore" });
 			}
-		} finally {
-			spawnSync("tmux", ["-L", socket, "kill-server"], { stdio: "ignore" });
-		}
-	});
+		},
+		15000,
+	);
 
 	it.skip("skips live Zellij matrix: its layout environment is covered by unit tests; no shared-server repro is available.", () => {});
 });

@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
+import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleWorkerChannelCommand, sendChannelRequest } from "../src/channel/client.ts";
 import { LEADER_COMMANDS } from "../src/channel/leader-cli.ts";
 import {
+	type ChannelRequest,
 	LEADER_REQUEST_TYPES,
 	NETA_SOCKET_ENV,
 	NETA_WORKER_ENV,
@@ -59,6 +61,34 @@ describe("settled channel surface", () => {
 			await sendChannelRequest(address, { type: "blocked", workerId: "ro1", token: "token", text: "which db?" }),
 		).toEqual({ ok: true, text: "stopping" });
 		expect(calls).toEqual(["blocked:which db?"]);
+	});
+
+	it("rejects missing and wrong worker capability tokens", async () => {
+		expect(
+			await sendChannelRequest(address, {
+				type: "progress",
+				workerId: "ro1",
+				text: "missing",
+			} as unknown as ChannelRequest),
+		).toEqual({ ok: false, error: "bad token" });
+		expect(
+			await sendChannelRequest(address, { type: "progress", workerId: "ro1", token: "wrong", text: "wrong" }),
+		).toEqual({ ok: false, error: "bad token" });
+		expect(calls).toEqual([]);
+	});
+
+	it("answers malformed JSON instead of crashing the channel", async () => {
+		const response = await new Promise<string>((resolve, reject) => {
+			const socket = connect(address);
+			let output = "";
+			socket.on("connect", () => socket.write("{not-json}\n"));
+			socket.on("data", (chunk) => {
+				output += chunk.toString();
+			});
+			socket.on("end", () => resolve(output.trim()));
+			socket.on("error", reject);
+		});
+		expect(JSON.parse(response)).toMatchObject({ ok: false, error: expect.stringContaining("Malformed request") });
 	});
 
 	it("renames room posting and keeps progress", async () => {

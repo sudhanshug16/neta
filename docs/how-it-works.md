@@ -242,20 +242,33 @@ leader commands a person or token-holding process needs from a terminal —
 the worker commands and the view commands (`watch`, `attach`, `sessions`).
 Delegation, guarded mechanical execution, and notes are MCP-only surfaces of the leader's judgment loop.
 
+For a delegation batch, Neta validates every request before seeding a room or
+allocating a worker. That input boundary is atomic. Process startup is not
+rolled back: if a later worker fails to start after earlier workers are live,
+the remaining workers are still attempted and `neta_delegate` returns every
+allocated worker id with its running, queued, or failed state and explicit
+startup error.
+
 | Door | Who uses it | How |
 | --- | --- | --- |
 | MCP tools | the leader | all 10 `neta_*` tools in the vendor's tool loop |
 | Unix socket | workers, and you | 6 leader commands, worker commands, the view commands |
 
-`neta_exec` is deliberately narrower than a terminal. It accepts an argv array,
-never invokes a shell, and allowlists read-only Git inspection, `bun test`, and
-an explicitly user-approved `git push`. Shells, interpreters, package scripts,
-Git config/alias injection, source-changing Git commands, and cwd paths outside
-the session repository are rejected before process creation. A write-capable
-command temporarily owns the same safety boundary as a writer and is refused if
-a writer is active or queued. Every invocation writes combined stdout/stderr to
+`neta_exec` is deliberately narrower than a terminal. Its own process launch
+uses an argv array, but that alone is not a safety claim: Git can reintroduce
+shells through pagers, aliases, diff drivers and remote helpers. Neta therefore
+uses a small positive Git option grammar, disables paging, text conversion,
+external diffs and file-system monitor hooks, ignores user/system Git config,
+and does not allow Git grep or network commands such as push/fetch. Bun is
+limited to `bun test` with a positive test-flag grammar. Every test path is
+resolved through its nearest existing parent and must remain under the real
+repository root; preload, config, reporter-output, runtime and interpreter
+escapes are rejected. Tests execute repository code by design. A Bun test owns
+the same safety boundary as a writer and is refused if a writer is active or
+queued. Every invocation streams combined stdout/stderr directly to
 a unique mode-0600 file under the session's temporary directory; the tool result
-is bounded and points to the full file when truncated. Timeout or shutdown sends
+reads only a bounded prefix into memory and points to the full file when
+truncated. The audit directory is mode 0700. Timeout or shutdown sends
 TERM then KILL to the whole detached process group and waits until it is gone.
 
 The socket door is authorized per role, by token. Each worker's requests carry
@@ -365,6 +378,13 @@ a terminal worker with an exact recorded vendor session and configured resume
 command. It refuses active or unstarted workers and headless sessions, sends no
 prompt, and does not change worker state. Closing that TUI and calling the tool
 again opens another tab.
+
+Opening a native TUI transfers ownership of that vendor conversation outside
+the control plane. Neta persists that fact and fails closed: a leader restart
+will not headlessly resume the worker. Vendor CLIs do not provide proof that a
+detached native client has really exited, so closing the TUI cannot clear the
+flag safely. The recovery path is to close the native client and delegate a
+fresh worker.
 
 ## Panes
 

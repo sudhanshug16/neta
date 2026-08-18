@@ -20,7 +20,7 @@ import {
 	tryAcquireSessionLock,
 	writeSessionRecord,
 } from "../src/session.ts";
-import { waitFor } from "./helpers.ts";
+import { processGone, waitFor } from "./helpers.ts";
 
 const dirs: string[] = [];
 const SIGTERM_IGNORING_CHILD = fileURLToPath(new URL("./fixtures/sigterm-ignoring-child.mjs", import.meta.url));
@@ -123,7 +123,7 @@ describe("session registry", () => {
 			sweepStaleSessions(dir, { processStartTime: () => leaderStartedAt });
 			expect(existsSync(join(dir, "sessions", "dead.json"))).toBe(false);
 			expect(existsSync(socket)).toBe(false);
-			await waitFor(() => expect(() => process.kill(pgid, 0)).toThrow(), 5000);
+			await waitFor(() => processGone(pgid), 5000);
 		} finally {
 			try {
 				process.kill(-pgid, "SIGKILL");
@@ -149,11 +149,11 @@ describe("session registry", () => {
 		const leaderStartedAt = processStartTime(pgid);
 		if (!leaderStartedAt) throw new Error("Could not identify the group leader fixture.");
 		const group = { pgid, leaderStartedAt };
-		await waitFor(() => expect(readFileSync(marker, "utf-8")).toContain("ready"), 5000);
+		await waitFor(() => readFileSync(marker, "utf-8").includes("ready"), 5000);
 		const childPid = Number.parseInt(readFileSync(marker, "utf-8").split(":")[1] ?? "", 10);
 		// Wait for the leader itself to be gone, not merely finished.
 		await new Promise<void>((resolve) => leader.on("exit", () => resolve()));
-		await waitFor(() => expect(() => process.kill(pgid, 0)).toThrow(), 5000);
+		await waitFor(() => processGone(pgid), 5000);
 
 		try {
 			expect(isProcessGroupGone(group, processStartTime)).toBe(false);
@@ -162,7 +162,7 @@ describe("session registry", () => {
 			// Reaping it must both kill the child and prove it.
 			expect(reapProcessGroup(group, processStartTime, () => {})).toBe(true);
 			expect(isProcessGroupGone(group, processStartTime)).toBe(true);
-			await waitFor(() => expect(() => process.kill(childPid, 0)).toThrow(), 5000);
+			await waitFor(() => processGone(childPid), 5000);
 
 			// And the sweep must refuse to call the session stopped until then.
 			writeSessionRecord(record({ id: "orphaned", pid: 2147483646, workerGroups: [group] }), dir);
@@ -264,7 +264,7 @@ describe("session registry", () => {
 			sweepStaleSessions(dir, { killMuxSession: (mux) => killed.push(mux.name) });
 			expect(existsSync(join(dir, "sessions", "deleted-worktree.json"))).toBe(false);
 			expect(killed).toEqual(["deleted"]);
-			await waitFor(() => expect(() => process.kill(manager.pid as number, 0)).toThrow(), 5000);
+			await waitFor(() => processGone(manager.pid as number), 5000);
 		} finally {
 			manager.kill("SIGKILL");
 		}

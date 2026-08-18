@@ -20,6 +20,7 @@ import {
 	readCheckpoint,
 	readCheckpointForHydration,
 	type SessionCheckpoint,
+	validateCheckpoint,
 	writeCheckpointAtomic,
 } from "../src/checkpoint.ts";
 import { WorkerManager } from "../src/orchestrator/manager.ts";
@@ -186,10 +187,10 @@ describe("durable session checkpoints", () => {
 		await manager.waitFor([completed.id], 1000);
 
 		const waiting = await manager.spawn({ role: "reviewer", tier: "architect", task: "decide rollout" });
-		await waitFor(() => expect(transports[1]?.prompts).toHaveLength(1));
+		await waitFor(() => transports[1]?.prompts.length === 1);
 		manager.blocked(waiting.id, "Ship now?");
 		transports[1].finish({ ok: false, cancelled: true, summary: "Turn cancelled." });
-		await waitFor(() => expect(manager.get(waiting.id).state).toBe("blocked"));
+		await waitFor(() => manager.get(waiting.id).state === "blocked");
 		const activeWriter = await manager.spawn({ role: "worker", tier: "expert", task: "implement", writer: true });
 		const queuedWriter = await manager.spawn({ role: "worker", tier: "expert", task: "follow up", writer: true });
 		manager.send(queuedWriter.id, "also update tests");
@@ -277,6 +278,54 @@ describe("durable session checkpoints", () => {
 
 		await hydrated.flushCheckpoint();
 		await manager.dispose();
+		await hydrated.dispose();
+	});
+
+	it("persists native TUI ownership and fails closed after manager restart", async () => {
+		const agentDir = tempDir("neta-checkpoint-");
+		const cwd = tempDir("neta-checkpoint-repo-");
+		const transports: FakeTransport[] = [];
+		const manager = new WorkerManager({
+			cwd,
+			agentDir,
+			config: fixtureBackendConfig(),
+			channelAddress: "/tmp/native-owner.sock",
+			onEvent: () => {},
+			panes: {
+				open: () => ({ opened: true }),
+				openRoom: () => ({ opened: true }),
+				attach: () => ({ opened: true }),
+			},
+			createTransport: (options) => {
+				const transport = new FakeTransport(options);
+				transports.push(transport);
+				return transport;
+			},
+			checkpoint: { id: "native-owner", leaderBackend: "codex", writer: new CheckpointWriter(agentDir) },
+		});
+		const worker = await manager.spawn({ role: "scout", tier: "expert", task: "inspect" });
+		transports[0].options.events.vendorSession("vendor-native");
+		transports[0].finish({ ok: true, summary: "done" });
+		await waitFor(() => manager.get(worker.id).state === "done");
+		manager.reopenWorkerTui(worker.id);
+		await manager.flushCheckpoint();
+		const current = readCheckpoint("native-owner", agentDir);
+		expect(current.workers[0].nativeAttached).toBe(true);
+		expect(validateCheckpoint({ ...current, schemaVersion: 3 }).workers[0].nativeAttached).toBeUndefined();
+		await manager.dispose();
+
+		const hydrated = WorkerManager.hydrate(
+			{
+				cwd,
+				agentDir,
+				config: fixtureBackendConfig(),
+				channelAddress: "/tmp/native-owner-restored.sock",
+				onEvent: () => {},
+				checkpoint: { id: "native-owner", leaderBackend: "codex", writer: new CheckpointWriter(agentDir) },
+			},
+			readCheckpointForHydration("native-owner", agentDir),
+		);
+		await expect(hydrated.steer(worker.id, "continue headlessly")).rejects.toThrow("exclusive ownership");
 		await hydrated.dispose();
 	});
 

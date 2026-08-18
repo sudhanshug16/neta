@@ -27,7 +27,7 @@ import { promisify } from "node:util";
 import type { SessionCheckpoint } from "../src/checkpoint.ts";
 import { VERSION } from "../src/config.ts";
 import type { SessionRecord } from "../src/session.ts";
-import { waitFor } from "./helpers.ts";
+import { processGone, waitFor } from "./helpers.ts";
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const FAKE_LEADER = fileURLToPath(new URL("./fixtures/fake-leader.mjs", import.meta.url));
@@ -203,7 +203,7 @@ describe("closing and reopening a session", () => {
 		});
 
 		const leader = startLeader("claude", repo, env);
-		await waitFor(() => expect(existsSync(join(agentDir, "sessions"))).toBe(true), 20000);
+		await waitFor(() => existsSync(join(agentDir, "sessions")), 20000);
 		await waitFor(() => void liveSession(agentDir), 20000);
 		const session = liveSession(agentDir);
 		const checkpointId = session.checkpointId as string;
@@ -332,10 +332,7 @@ describe("closing and reopening a session", () => {
 		expect(readdirSync(overlay)).toContain("hooks.json");
 
 		// The hook the fixture ran wrote the exact conversation id.
-		await waitFor(
-			() => expect(readCheckpointFile(agentDir, checkpointId).leader.vendorConversationId).toBeTruthy(),
-			20000,
-		);
+		await waitFor(() => Boolean(readCheckpointFile(agentDir, checkpointId).leader.vendorConversationId), 20000);
 		const conversationId = readCheckpointFile(agentDir, checkpointId).leader.vendorConversationId as string;
 		expect(conversationId).toMatch(/^[0-9a-f-]{36}$/);
 
@@ -416,7 +413,7 @@ describe("closing and reopening a session", () => {
 			leader: startLeader("codex", launch.repo, launch.env),
 		}));
 		try {
-			await waitFor(() => expect(liveSessionsIn(agentDir)).toHaveLength(2), 30000).catch((error) => {
+			await waitFor(() => liveSessionsIn(agentDir).length === 2, 30000).catch((error) => {
 				throw new Error(
 					`${error}\n${leaders.map((entry) => `${entry.name}:\n${entry.leader.stderr()}`).join("\n")}`,
 				);
@@ -427,10 +424,7 @@ describe("closing and reopening a session", () => {
 
 			// Both hooks ran: two different exact ids, one per session.
 			for (const id of checkpointIds) {
-				await waitFor(
-					() => expect(readCheckpointFile(agentDir, id).leader.vendorConversationId).toBeTruthy(),
-					30000,
-				);
+				await waitFor(() => Boolean(readCheckpointFile(agentDir, id).leader.vendorConversationId), 30000);
 			}
 			const conversations = checkpointIds.map(
 				(id) => readCheckpointFile(agentDir, id).leader.vendorConversationId as string,
@@ -463,7 +457,7 @@ describe("closing and reopening a session", () => {
 					codexHome: realCodexHome,
 				});
 				const resumed = startLeader("codex", repo, env, ["resume", id, "--mux", "none"]);
-				await waitFor(() => expect(existsSync(record)).toBe(true), 30000).catch((error) => {
+				await waitFor(() => existsSync(record), 30000).catch((error) => {
 					throw new Error(`${error}\nresume stderr:\n${resumed.stderr()}`);
 				});
 				const launch = JSON.parse(readFileSync(record, "utf8")) as LaunchRecord;
@@ -515,18 +509,13 @@ describe("closing and reopening a session", () => {
 		const session = liveSession(agentDir);
 		const checkpointId = session.checkpointId as string;
 
-		await waitFor(() => {
-			const groups = liveSession(agentDir).workerGroups ?? [];
-			expect(groups.length).toBe(2);
-		}, 20000);
-		await waitFor(() => expect(readCheckpointFile(agentDir, checkpointId).workers).toHaveLength(3), 20000);
+		await waitFor(() => (liveSession(agentDir).workerGroups ?? []).length === 2, 20000);
+		await waitFor(() => readCheckpointFile(agentDir, checkpointId).workers.length === 3, 20000);
 		const groups = (liveSession(agentDir).workerGroups ?? []).map((group) => group.pgid);
 
 		// Kill the manager the way a crash does: no shutdown, no cleanup.
 		process.kill(session.pid, "SIGKILL");
-		await waitFor(() => {
-			expect(() => process.kill(session.pid, 0)).toThrow();
-		}, 10000);
+		await waitFor(() => processGone(session.pid), 10000);
 		rmSync(promptMarker, { force: true });
 
 		const resumeEnv = leaderEnv({
@@ -624,10 +613,7 @@ describe("closing and reopening a session", () => {
 
 		// The plugin ignored a child session and another directory's session, and
 		// reported this leader's exact id.
-		await waitFor(
-			() => expect(readCheckpointFile(agentDir, checkpointId).leader.vendorConversationId).toBeTruthy(),
-			20000,
-		);
+		await waitFor(() => Boolean(readCheckpointFile(agentDir, checkpointId).leader.vendorConversationId), 20000);
 		const conversationId = readCheckpointFile(agentDir, checkpointId).leader.vendorConversationId as string;
 		expect(conversationId).toMatch(/^ses_[A-Za-z0-9]{16,}$/);
 
@@ -713,18 +699,15 @@ describe("closing and reopening a session", () => {
 		await waitFor(() => void liveSession(agentDir), 20000);
 		const session = liveSession(agentDir);
 		const checkpointId = session.checkpointId as string;
-		await waitFor(
-			() => expect(readCheckpointFile(agentDir, checkpointId).leader.vendorConversationId).toBeTruthy(),
-			20000,
-		);
+		await waitFor(() => Boolean(readCheckpointFile(agentDir, checkpointId).leader.vendorConversationId), 20000);
 		const conversationId = readCheckpointFile(agentDir, checkpointId).leader.vendorConversationId as string;
 
-		await waitFor(() => expect((liveSession(agentDir).workerGroups ?? []).length).toBe(1), 20000);
-		await waitFor(() => expect(readCheckpointFile(agentDir, checkpointId).workers).toHaveLength(1), 20000);
+		await waitFor(() => (liveSession(agentDir).workerGroups ?? []).length === 1, 20000);
+		await waitFor(() => readCheckpointFile(agentDir, checkpointId).workers.length === 1, 20000);
 		const groups = (liveSession(agentDir).workerGroups ?? []).map((group) => group.pgid);
 
 		process.kill(session.pid, "SIGKILL");
-		await waitFor(() => expect(() => process.kill(session.pid, 0)).toThrow(), 10000);
+		await waitFor(() => processGone(session.pid), 10000);
 		rmSync(promptMarker, { force: true });
 
 		const resumeEnv = leaderEnv({

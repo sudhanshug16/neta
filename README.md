@@ -124,8 +124,8 @@ host process, outside any sandbox:
 
 | Tool | What it does |
 | --- | --- |
-| `neta_delegate` | Start one or more independent workers, or a team sharing one transcript; returns actual backend/access assignments. |
-| `neta_exec` | Run one guarded mechanical repo command by argv, such as `git status`, a targeted test, or an explicitly approved `git push`; never source edits or ambiguous implementation. |
+| `neta_delegate` | Start one or more independent workers, or a team sharing one transcript; input errors are atomic, while runtime startup failures are returned per worker and later workers are still attempted. |
+| `neta_exec` | Run one guarded mechanical repo command from a small Git-inspection/Bun-test grammar; never Git grep/push, source edits, outside test paths, loaders, or ambiguous implementation. |
 | `neta_workers` | List workers with state, token usage and results. |
 | `neta_status` | One snapshot: writer slot, queue, workers by state, open notes. |
 | `neta_attach` | Reopen a terminal worker's exact native backend session in a new tab. |
@@ -246,6 +246,10 @@ for success, `✗` for failure, or `⊘` when killed; status marking never opens
 retains a tab. CLI `neta attach` takes over its caller's terminal. The leader's
 `neta_attach` tool is the only attach action that opens a fresh tab; it refuses
 active workers so two clients cannot drive one conversation.
+Once a native TUI has been opened, Neta records that ownership durably and will
+not later resume the same worker headlessly, including after a leader restart.
+Closing or detaching a vendor TUI cannot be proven from Neta's control plane;
+close it and delegate a fresh worker when automated continuation is needed.
 
 ## Configuring it
 

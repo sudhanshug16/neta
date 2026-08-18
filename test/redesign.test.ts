@@ -110,7 +110,7 @@ describe("settled tool surface and revival", () => {
 	it("resumes done and failed workers twice in the exact recorded ACP session", async () => {
 		const value = manager();
 		const worker = await value.spawn({ role: "scout", tier: "expert", task: "first" });
-		await waitFor(() => expect(value.get(worker.id).state).toBe("done"));
+		await waitFor(() => value.get(worker.id).state === "done");
 		const vendor = value.get(worker.id).vendorSessionId;
 		await value.steer(worker.id, "second");
 		expect((await value.wait([worker.id], 5_000)).reason).toBe("completed");
@@ -126,7 +126,7 @@ describe("settled tool surface and revival", () => {
 	it("makes neta_blocked terminal, releases a writer, wakes wait distinctly, and resumes on send", async () => {
 		const value = manager();
 		const worker = await value.spawn({ role: "worker", tier: "expert", task: "HOLD_FOREVER", writer: true });
-		await waitFor(() => expect(value.get(worker.id).state).toBe("running"));
+		await waitFor(() => value.get(worker.id).state === "running");
 		const waiting = value.wait([worker.id], 5_000);
 		expect(value.blocked(worker.id, "Which database?")).toMatchObject({ ok: true });
 		const result = await waiting;
@@ -144,29 +144,42 @@ describe("settled tool surface and revival", () => {
 	it("queues a revived writer behind the active writer and resumes rather than rerunning its task", async () => {
 		const value = manager();
 		const first = await value.spawn({ role: "worker", tier: "expert", task: "original", writer: true });
-		await waitFor(() => expect(value.get(first.id).state).toBe("done"));
+		await waitFor(() => value.get(first.id).state === "done");
 		const holder = await value.spawn({ role: "worker", tier: "expert", task: "HOLD_FOREVER", writer: true });
-		await waitFor(() => expect(value.get(holder.id).state).toBe("running"));
+		await waitFor(() => value.get(holder.id).state === "running");
 		const queued = await value.steer(first.id, "resumed instruction");
 		expect(queued).toMatchObject({ delivery: "pending-brief", worker: { state: "queued", queuedBehind: holder.id } });
+		const appended = await value.steer(first.id, "second queued instruction");
+		expect(appended).toMatchObject({
+			delivery: "pending-brief",
+			worker: { state: "queued", queuedBehind: holder.id },
+		});
 		expect(value.statusSnapshot().writerSlot?.id).toBe(holder.id);
 		await value.kill(holder.id);
-		await waitFor(() => expect(value.get(first.id).state).toBe("done"));
-		expect(value.get(first.id).result).toContain("echo:resumed instruction");
+		await waitFor(() => value.get(first.id).state === "done");
+		expect(value.get(first.id).result).toContain("echo:second queued instruction");
+		const deliveries = value
+			.inspect(first.id)
+			.entries.filter((entry) => entry.text.startsWith("Leader delivering now as next turn:"))
+			.map((entry) => entry.text);
+		expect(deliveries.slice(-2)).toEqual([
+			"Leader delivering now as next turn: resumed instruction",
+			"Leader delivering now as next turn: second queued instruction",
+		]);
 		expect(value.get(first.id).result).not.toContain("echo:original");
 	});
 
 	it("refuses killed and interrupted workers and rolls back a rejected resume", async () => {
 		const value = manager();
 		const done = await value.spawn({ role: "scout", tier: "expert", task: "done" });
-		await waitFor(() => expect(value.get(done.id).state).toBe("done"));
+		await waitFor(() => value.get(done.id).state === "done");
 		const killed = await value.spawn({ role: "scout", tier: "expert", task: "HOLD_FOREVER" });
 		await value.kill(killed.id);
 		await expect(value.steer(killed.id, "again")).rejects.toThrow("cannot be resumed safely");
 
 		const rejecting = manager(["--reject-resume"]);
 		const terminal = await rejecting.spawn({ role: "scout", tier: "expert", task: "done" });
-		await waitFor(() => expect(rejecting.get(terminal.id).state).toBe("done"));
+		await waitFor(() => rejecting.get(terminal.id).state === "done");
 		const before = rejecting.get(terminal.id);
 		await expect(rejecting.steer(terminal.id, "again")).rejects.toThrow("failed to start an ACP session");
 		expect(rejecting.get(terminal.id)).toMatchObject({
