@@ -7,7 +7,8 @@ const DEFAULT_TIMEOUT_MS = 60_000;
 const MAX_TIMEOUT_MS = 600_000;
 /** Cap on the command-output excerpt alone (`RepoExecResult.output`) — not on the MCP tool text built around it. */
 export const OUTPUT_LIMIT_BYTES = 12_000;
-const TRUNCATION_MARKER = "\n… output truncated …\n";
+/** Exported so tests can assert its exact, uncut presence rather than a loosely matched substring. */
+export const TRUNCATION_MARKER = "\n… output truncated …\n";
 const TERM_GRACE_MS = 1_000;
 const KILL_GRACE_MS = 3_000;
 /** Exit code is always 0-255 (plus the synthetic 124/130 below); -1 can only mean the command never ran. */
@@ -119,28 +120,48 @@ async function terminateGroup(childPid: number, childExited: () => boolean): Pro
 }
 
 /**
- * Drops trailing characters until the UTF-8 encoding fits. Guards two cases:
- * a split multi-byte sequence at a raw byte cut decoding to a longer
- * replacement character, and arbitrary/binary input where every invalid byte
- * decodes to one 3-byte replacement character — up to 3x the raw byte count.
+ * Drops trailing characters until the UTF-8 encoding fits, keeping the
+ * string's own prefix. Guards the case where a raw byte cut splits a
+ * multi-byte sequence, or where decoding invalid bytes inflates length
+ * (each bad byte can decode to one 3-byte replacement character).
  */
-function capUtf8Bytes(text: string, maxBytes: number): string {
+function capUtf8BytesFromEnd(text: string, maxBytes: number): string {
 	if (maxBytes <= 0) return "";
 	let result = text;
 	while (Buffer.byteLength(result, "utf-8") > maxBytes) result = result.slice(0, -1);
 	return result;
 }
 
-/** How many raw bytes to read from the head and the tail so their decoded, marker-joined form fits `excerptBudget`. */
+/** Drops leading characters until the UTF-8 encoding fits, keeping the string's own suffix — the mirror of capUtf8BytesFromEnd, for content whose end matters more than its start. */
+function capUtf8BytesFromStart(text: string, maxBytes: number): string {
+	if (maxBytes <= 0) return "";
+	let result = text;
+	while (Buffer.byteLength(result, "utf-8") > maxBytes) result = result.slice(1);
+	return result;
+}
+
+/** How many raw bytes to read from the head and the tail so decoding each independently, even with maximum invalid-byte inflation, can still be capped to fit `excerptBudget` combined. */
 function headTailBudgets(size: number, excerptBudget: number): { headBudget: number; tailBudget: number } {
 	const headBudget = Math.min(size, Math.ceil((excerptBudget * 2) / 3));
 	const tailBudget = Math.min(Math.max(size - headBudget, 0), Math.max(excerptBudget - headBudget, 0));
 	return { headBudget, tailBudget };
 }
 
-function excerptFromHeadTail(head: Buffer, tail: Buffer): string {
-	const assembled = `${head.toString("utf-8")}${TRUNCATION_MARKER}${tail.toString("utf-8")}`;
-	return capUtf8Bytes(assembled, OUTPUT_LIMIT_BYTES);
+/**
+ * Assembles a head+marker+tail excerpt where the marker can never be pushed
+ * out and the tail can never be silently dropped. `headBudgetBytes` and
+ * `tailBudgetBytes` are enforced independently — the head is capped from its
+ * own end (keeping its prefix), the tail from its own start (keeping its
+ * suffix) — instead of decoding both, concatenating, and trimming the whole
+ * assembled string from the end: that would let head-side inflation from
+ * invalid UTF-8 eat the marker and the entire tail while still claiming both
+ * were shown. Combined byte length is always <= headBudgetBytes +
+ * TRUNCATION_MARKER's bytes + tailBudgetBytes <= OUTPUT_LIMIT_BYTES.
+ */
+function excerptFromHeadTail(head: Buffer, tail: Buffer, headBudgetBytes: number, tailBudgetBytes: number): string {
+	const headExcerpt = capUtf8BytesFromEnd(head.toString("utf-8"), headBudgetBytes);
+	const tailExcerpt = capUtf8BytesFromStart(tail.toString("utf-8"), tailBudgetBytes);
+	return `${headExcerpt}${TRUNCATION_MARKER}${tailExcerpt}`;
 }
 
 /**
@@ -154,7 +175,9 @@ function excerptFromHeadTail(head: Buffer, tail: Buffer): string {
  * each bad byte with a 3-byte replacement character, so a file at or under
  * the cap can still decode to something well over it (binary output is the
  * common case). Whichever branch overflows after decoding is marked
- * truncated, never silently cut.
+ * truncated, never silently cut — and never by trimming the assembled
+ * head+marker+tail string as a whole, which could erase the marker and tail
+ * (see excerptFromHeadTail).
  */
 function readBoundedOutput(path: string): { output: string; truncated: boolean } {
 	const size = statSync(path).size;
@@ -171,7 +194,12 @@ function readBoundedOutput(path: string): { output: string; truncated: boolean }
 			}
 			const { headBudget, tailBudget } = headTailBudgets(size, excerptBudget);
 			return {
-				output: excerptFromHeadTail(whole.subarray(0, headBudget), whole.subarray(size - tailBudget, size)),
+				output: excerptFromHeadTail(
+					whole.subarray(0, headBudget),
+					whole.subarray(size - tailBudget, size),
+					headBudget,
+					tailBudget,
+				),
 				truncated: true,
 			};
 		}
@@ -180,7 +208,7 @@ function readBoundedOutput(path: string): { output: string; truncated: boolean }
 		readSync(fd, head, 0, headBudget, 0);
 		const tail = Buffer.alloc(tailBudget);
 		readSync(fd, tail, 0, tailBudget, size - tailBudget);
-		return { output: excerptFromHeadTail(head, tail), truncated: true };
+		return { output: excerptFromHeadTail(head, tail, headBudget, tailBudget), truncated: true };
 	} finally {
 		closeSync(fd);
 	}
@@ -191,6 +219,8 @@ function readBoundedOutput(path: string): { output: string; truncated: boolean }
  * ever pushing the combined result back over OUTPUT_LIMIT_BYTES. The message
  * is the diagnostic — it explains why exitCode is SPAWN_FAILURE_EXIT_CODE —
  * so it is kept intact and any pre-failure captured output is trimmed first.
+ * When trimming is needed, TRUNCATION_MARKER is inserted at the cut so the
+ * result never silently drops content while still reporting `truncated`.
  */
 export function boundedOutputWithFailure(
 	existing: { output: string; truncated: boolean },
@@ -201,11 +231,13 @@ export function boundedOutputWithFailure(
 	if (Buffer.byteLength(assembled, "utf-8") <= OUTPUT_LIMIT_BYTES) {
 		return { output: assembled, truncated: existing.truncated };
 	}
-	const cappedMessage = capUtf8Bytes(message, OUTPUT_LIMIT_BYTES);
-	const remaining = OUTPUT_LIMIT_BYTES - Buffer.byteLength(cappedMessage, "utf-8") - separator.length;
-	const cappedExisting = capUtf8Bytes(existing.output, remaining);
+	const markerBytes = Buffer.byteLength(TRUNCATION_MARKER, "utf-8");
+	const messageBudget = Math.max(0, Math.min(Buffer.byteLength(message, "utf-8"), OUTPUT_LIMIT_BYTES - markerBytes));
+	const cappedMessage = capUtf8BytesFromEnd(message, messageBudget);
+	const existingBudget = Math.max(0, OUTPUT_LIMIT_BYTES - markerBytes - Buffer.byteLength(cappedMessage, "utf-8"));
+	const cappedExisting = capUtf8BytesFromEnd(existing.output, existingBudget);
 	return {
-		output: capUtf8Bytes(`${cappedExisting}${separator}${cappedMessage}`, OUTPUT_LIMIT_BYTES),
+		output: capUtf8BytesFromEnd(`${cappedExisting}${TRUNCATION_MARKER}${cappedMessage}`, OUTPUT_LIMIT_BYTES),
 		truncated: true,
 	};
 }

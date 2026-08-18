@@ -15,7 +15,12 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { leaderTools } from "../src/mcp/leader.ts";
-import { boundedOutputWithFailure, OUTPUT_LIMIT_BYTES, SPAWN_FAILURE_EXIT_CODE } from "../src/orchestrator/exec.ts";
+import {
+	boundedOutputWithFailure,
+	OUTPUT_LIMIT_BYTES,
+	SPAWN_FAILURE_EXIT_CODE,
+	TRUNCATION_MARKER,
+} from "../src/orchestrator/exec.ts";
 import { WorkerManager } from "../src/orchestrator/manager.ts";
 import type { PromptOutcome, TransportOptions, WorkerTransportDriver } from "../src/orchestrator/transport.ts";
 import { buildLeaderPrompt } from "../src/prompts/leader.ts";
@@ -304,29 +309,39 @@ describe("neta_exec", () => {
 		expect(statSync(path as string).mode & 0o777).toBe(0o600);
 	});
 
-	it("caps invalid/binary output that decodes past the byte cap even when the raw file is at or under it", async () => {
+	it("keeps the marker and the tail even when invalid/binary content between them would otherwise inflate past the cap on decode", async () => {
 		const repo = repository();
 		const value = manager(repo);
 		const bunPath = realpathSync(process.execPath);
+		const headBytes = Buffer.byteLength("HEAD_SENTINEL\n", "utf-8");
+		const tailBytes = Buffer.byteLength("\nTAIL_SENTINEL\n", "utf-8");
 
-		// Exactly at the raw cap: every 0xFF byte is its own invalid UTF-8 sequence,
-		// so decoding replaces each with a 3-byte replacement character — 3x inflation.
-		const atCap = await value.exec({ argv: [bunPath, invalidUtf8Fixture, String(OUTPUT_LIMIT_BYTES)] });
-		expect(atCap.exitCode).toBe(0);
-		expect(Buffer.byteLength(atCap.output, "utf-8")).toBeLessThanOrEqual(OUTPUT_LIMIT_BYTES);
-		expect(atCap.truncated).toBe(true);
-		const atCapFull = readFileSync(atCap.outputPath);
-		expect(atCapFull.length).toBe(OUTPUT_LIMIT_BYTES);
-		expect(atCapFull.every((byte) => byte === 0xff)).toBe(true);
+		async function assertPreservesHeadMarkerAndTail(totalSize: number, expectedFileSize: number) {
+			const result = await value.exec({ argv: [bunPath, invalidUtf8Fixture, String(totalSize)] });
+			expect(result.exitCode).toBe(0);
+			expect(result.truncated).toBe(true);
+			expect(Buffer.byteLength(result.output, "utf-8")).toBeLessThanOrEqual(OUTPUT_LIMIT_BYTES);
+			// The exact marker, not merely a related substring, must survive intact.
+			expect(result.output).toContain(TRUNCATION_MARKER);
+			expect(result.output).toContain("HEAD_SENTINEL");
+			expect(result.output).toContain("TAIL_SENTINEL");
+			// The marker must come after the head sentinel and before the tail sentinel — a real cut, not a reordering.
+			expect(result.output.indexOf("HEAD_SENTINEL")).toBeLessThan(result.output.indexOf(TRUNCATION_MARKER));
+			expect(result.output.indexOf(TRUNCATION_MARKER)).toBeLessThan(result.output.indexOf("TAIL_SENTINEL"));
 
-		// Well over the raw cap too, exercising the other branch with the same content.
-		const overCap = await value.exec({ argv: [bunPath, invalidUtf8Fixture, String(OUTPUT_LIMIT_BYTES * 3)] });
-		expect(overCap.exitCode).toBe(0);
-		expect(Buffer.byteLength(overCap.output, "utf-8")).toBeLessThanOrEqual(OUTPUT_LIMIT_BYTES);
-		expect(overCap.truncated).toBe(true);
-		const overCapFull = readFileSync(overCap.outputPath);
-		expect(overCapFull.length).toBe(OUTPUT_LIMIT_BYTES * 3);
-		expect(overCapFull.every((byte) => byte === 0xff)).toBe(true);
+			// The full on-disk capture is exactly what the fixture wrote, byte for byte, never rewritten.
+			const full = readFileSync(result.outputPath);
+			expect(full.length).toBe(expectedFileSize);
+			expect(full.subarray(0, headBytes).toString("utf-8")).toBe("HEAD_SENTINEL\n");
+			expect(full.subarray(full.length - tailBytes).toString("utf-8")).toBe("\nTAIL_SENTINEL\n");
+			expect(full.subarray(headBytes, full.length - tailBytes).every((byte) => byte === 0xff)).toBe(true);
+		}
+
+		// Raw file at the cap: garbage filler alone (0xFF bytes) inflates 3x on decode,
+		// which used to be enough to trim the marker and TAIL_SENTINEL away entirely.
+		await assertPreservesHeadMarkerAndTail(OUTPUT_LIMIT_BYTES, OUTPUT_LIMIT_BYTES);
+		// Raw file well over the cap too, exercising the other branch with the same content.
+		await assertPreservesHeadMarkerAndTail(OUTPUT_LIMIT_BYTES * 3, OUTPUT_LIMIT_BYTES * 3);
 	});
 
 	it("never lets a lifecycle-failure message pushed onto an already-bounded excerpt exceed the byte cap", () => {
@@ -341,6 +356,8 @@ describe("neta_exec", () => {
 		const tight = boundedOutputWithFailure({ output: nearCapOutput, truncated: false }, "boom: something failed");
 		expect(Buffer.byteLength(tight.output, "utf-8")).toBeLessThanOrEqual(OUTPUT_LIMIT_BYTES);
 		expect(tight.output).toContain("boom: something failed");
+		// Trimming happened here, so the cut must be marked — never a silent drop of the pre-failure capture.
+		expect(tight.output).toContain(TRUNCATION_MARKER);
 		expect(tight.truncated).toBe(true);
 
 		const hugeMessage = "E".repeat(OUTPUT_LIMIT_BYTES * 2);

@@ -39,7 +39,7 @@ function formatExecResult(result: Awaited<ReturnType<WorkerManager["exec"]>>): s
 	const sections = [`${header}\n${output}`];
 	if (result.truncated) {
 		sections.push(
-			`The command's own output was too large for you to inspect here: it exceeded the ${OUTPUT_LIMIT_BYTES}-byte cap neta_exec keeps on that excerpt (this header and this note are not counted against it), so only its head and tail are shown above. Do not try to read around this truncation yourself — delegate inspecting the full output to an apprentice or scout. Full output: ${result.outputPath}`,
+			`The command's own output was too large for you to inspect here: it exceeded the ${OUTPUT_LIMIT_BYTES}-byte cap neta_exec keeps on that excerpt (this header and this note are not counted against it), so only a bounded excerpt is shown above with the cut marked by "…" — not the whole output, and never a silent drop. Do not try to read around this truncation yourself — delegate inspecting the full output to an apprentice or scout. Full output: ${result.outputPath}`,
 		);
 	}
 	if (result.callNumber > 1) {
