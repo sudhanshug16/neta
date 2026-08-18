@@ -118,41 +118,96 @@ async function terminateGroup(childPid: number, childExited: () => boolean): Pro
 	}
 }
 
-/** Drops trailing characters until the UTF-8 encoding fits, guarding the boundary case where a split multi-byte sequence decodes to a longer replacement character. */
+/**
+ * Drops trailing characters until the UTF-8 encoding fits. Guards two cases:
+ * a split multi-byte sequence at a raw byte cut decoding to a longer
+ * replacement character, and arbitrary/binary input where every invalid byte
+ * decodes to one 3-byte replacement character — up to 3x the raw byte count.
+ */
 function capUtf8Bytes(text: string, maxBytes: number): string {
+	if (maxBytes <= 0) return "";
 	let result = text;
 	while (Buffer.byteLength(result, "utf-8") > maxBytes) result = result.slice(0, -1);
 	return result;
 }
 
+/** How many raw bytes to read from the head and the tail so their decoded, marker-joined form fits `excerptBudget`. */
+function headTailBudgets(size: number, excerptBudget: number): { headBudget: number; tailBudget: number } {
+	const headBudget = Math.min(size, Math.ceil((excerptBudget * 2) / 3));
+	const tailBudget = Math.min(Math.max(size - headBudget, 0), Math.max(excerptBudget - headBudget, 0));
+	return { headBudget, tailBudget };
+}
+
+function excerptFromHeadTail(head: Buffer, tail: Buffer): string {
+	const assembled = `${head.toString("utf-8")}${TRUNCATION_MARKER}${tail.toString("utf-8")}`;
+	return capUtf8Bytes(assembled, OUTPUT_LIMIT_BYTES);
+}
+
 /**
  * Reads from the full-output file so the returned excerpt's own UTF-8 byte
- * length — marker included — never exceeds OUTPUT_LIMIT_BYTES. A command that
- * overflows the budget loses its middle, not its ending: the tail is where a
- * failing build's actual error usually lands, so a head-only cap would hide it.
+ * length — marker included — never exceeds OUTPUT_LIMIT_BYTES, regardless of
+ * the file's raw byte size or its content. A command that overflows the
+ * budget loses its middle, not its ending: the tail is where a failing
+ * build's actual error usually lands, so a head-only cap would hide it.
+ *
+ * Raw size alone cannot decide truncation: decoding invalid UTF-8 replaces
+ * each bad byte with a 3-byte replacement character, so a file at or under
+ * the cap can still decode to something well over it (binary output is the
+ * common case). Whichever branch overflows after decoding is marked
+ * truncated, never silently cut.
  */
 function readBoundedOutput(path: string): { output: string; truncated: boolean } {
 	const size = statSync(path).size;
 	const fd = openSync(path, "r");
 	try {
-		if (size <= OUTPUT_LIMIT_BYTES) {
-			const buffer = Buffer.alloc(size);
-			readSync(fd, buffer, 0, size, 0);
-			return { output: buffer.toString("utf-8"), truncated: false };
-		}
 		const markerBytes = Buffer.byteLength(TRUNCATION_MARKER, "utf-8");
 		const excerptBudget = Math.max(0, OUTPUT_LIMIT_BYTES - markerBytes);
-		const headBudget = Math.ceil((excerptBudget * 2) / 3);
-		const tailBudget = excerptBudget - headBudget;
+		if (size <= OUTPUT_LIMIT_BYTES) {
+			const whole = Buffer.alloc(size);
+			readSync(fd, whole, 0, size, 0);
+			const decoded = whole.toString("utf-8");
+			if (Buffer.byteLength(decoded, "utf-8") <= OUTPUT_LIMIT_BYTES) {
+				return { output: decoded, truncated: false };
+			}
+			const { headBudget, tailBudget } = headTailBudgets(size, excerptBudget);
+			return {
+				output: excerptFromHeadTail(whole.subarray(0, headBudget), whole.subarray(size - tailBudget, size)),
+				truncated: true,
+			};
+		}
+		const { headBudget, tailBudget } = headTailBudgets(size, excerptBudget);
 		const head = Buffer.alloc(headBudget);
 		readSync(fd, head, 0, headBudget, 0);
 		const tail = Buffer.alloc(tailBudget);
 		readSync(fd, tail, 0, tailBudget, size - tailBudget);
-		const assembled = `${head.toString("utf-8")}${TRUNCATION_MARKER}${tail.toString("utf-8")}`;
-		return { output: capUtf8Bytes(assembled, OUTPUT_LIMIT_BYTES), truncated: true };
+		return { output: excerptFromHeadTail(head, tail), truncated: true };
 	} finally {
 		closeSync(fd);
 	}
+}
+
+/**
+ * Folds a lifecycle-failure message onto an already-bounded excerpt without
+ * ever pushing the combined result back over OUTPUT_LIMIT_BYTES. The message
+ * is the diagnostic — it explains why exitCode is SPAWN_FAILURE_EXIT_CODE —
+ * so it is kept intact and any pre-failure captured output is trimmed first.
+ */
+export function boundedOutputWithFailure(
+	existing: { output: string; truncated: boolean },
+	message: string,
+): { output: string; truncated: boolean } {
+	const separator = existing.output ? "\n" : "";
+	const assembled = `${existing.output}${separator}${message}`;
+	if (Buffer.byteLength(assembled, "utf-8") <= OUTPUT_LIMIT_BYTES) {
+		return { output: assembled, truncated: existing.truncated };
+	}
+	const cappedMessage = capUtf8Bytes(message, OUTPUT_LIMIT_BYTES);
+	const remaining = OUTPUT_LIMIT_BYTES - Buffer.byteLength(cappedMessage, "utf-8") - separator.length;
+	const cappedExisting = capUtf8Bytes(existing.output, remaining);
+	return {
+		output: capUtf8Bytes(`${cappedExisting}${separator}${cappedMessage}`, OUTPUT_LIMIT_BYTES),
+		truncated: true,
+	};
 }
 
 /**
@@ -251,13 +306,14 @@ export async function executeRepoCommand(
 			// an uncaught rejection that would strand the frequency warning.
 			const bounded = readBoundedOutput(outputPath);
 			const message = error instanceof Error ? error.message : String(error);
+			const withFailure = boundedOutputWithFailure(bounded, message);
 			return {
 				exitCode: SPAWN_FAILURE_EXIT_CODE,
 				durationMs: Date.now() - startedAt,
 				cwd,
 				outputPath,
-				output: bounded.output ? `${bounded.output}\n${message}` : message,
-				truncated: bounded.truncated,
+				output: withFailure.output,
+				truncated: withFailure.truncated,
 				timedOut: false,
 				callNumber,
 			};

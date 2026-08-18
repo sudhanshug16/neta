@@ -15,7 +15,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { leaderTools } from "../src/mcp/leader.ts";
-import { OUTPUT_LIMIT_BYTES, SPAWN_FAILURE_EXIT_CODE } from "../src/orchestrator/exec.ts";
+import { boundedOutputWithFailure, OUTPUT_LIMIT_BYTES, SPAWN_FAILURE_EXIT_CODE } from "../src/orchestrator/exec.ts";
 import { WorkerManager } from "../src/orchestrator/manager.ts";
 import type { PromptOutcome, TransportOptions, WorkerTransportDriver } from "../src/orchestrator/transport.ts";
 import { buildLeaderPrompt } from "../src/prompts/leader.ts";
@@ -25,6 +25,7 @@ const timeoutFixture = fileURLToPath(new URL("./fixtures/exec-timeout-fixture.ts
 const outputFixture = fileURLToPath(new URL("./fixtures/exec-output-fixture.ts", import.meta.url));
 const childFixture = fileURLToPath(new URL("./fixtures/sigterm-ignoring-child.mjs", import.meta.url));
 const echoFixture = fileURLToPath(new URL("./fixtures/exec-echo-fixture.mjs", import.meta.url));
+const invalidUtf8Fixture = fileURLToPath(new URL("./fixtures/exec-invalid-utf8-fixture.mjs", import.meta.url));
 
 class HoldingTransport implements WorkerTransportDriver {
 	readonly options: TransportOptions;
@@ -301,6 +302,65 @@ describe("neta_exec", () => {
 		expect(full).toContain("TAIL_MARKER");
 		expect(statSync(dirname(path as string)).mode & 0o777).toBe(0o700);
 		expect(statSync(path as string).mode & 0o777).toBe(0o600);
+	});
+
+	it("caps invalid/binary output that decodes past the byte cap even when the raw file is at or under it", async () => {
+		const repo = repository();
+		const value = manager(repo);
+		const bunPath = realpathSync(process.execPath);
+
+		// Exactly at the raw cap: every 0xFF byte is its own invalid UTF-8 sequence,
+		// so decoding replaces each with a 3-byte replacement character — 3x inflation.
+		const atCap = await value.exec({ argv: [bunPath, invalidUtf8Fixture, String(OUTPUT_LIMIT_BYTES)] });
+		expect(atCap.exitCode).toBe(0);
+		expect(Buffer.byteLength(atCap.output, "utf-8")).toBeLessThanOrEqual(OUTPUT_LIMIT_BYTES);
+		expect(atCap.truncated).toBe(true);
+		const atCapFull = readFileSync(atCap.outputPath);
+		expect(atCapFull.length).toBe(OUTPUT_LIMIT_BYTES);
+		expect(atCapFull.every((byte) => byte === 0xff)).toBe(true);
+
+		// Well over the raw cap too, exercising the other branch with the same content.
+		const overCap = await value.exec({ argv: [bunPath, invalidUtf8Fixture, String(OUTPUT_LIMIT_BYTES * 3)] });
+		expect(overCap.exitCode).toBe(0);
+		expect(Buffer.byteLength(overCap.output, "utf-8")).toBeLessThanOrEqual(OUTPUT_LIMIT_BYTES);
+		expect(overCap.truncated).toBe(true);
+		const overCapFull = readFileSync(overCap.outputPath);
+		expect(overCapFull.length).toBe(OUTPUT_LIMIT_BYTES * 3);
+		expect(overCapFull.every((byte) => byte === 0xff)).toBe(true);
+	});
+
+	it("never lets a lifecycle-failure message pushed onto an already-bounded excerpt exceed the byte cap", () => {
+		const nearCapOutput = "x".repeat(OUTPUT_LIMIT_BYTES - 20);
+
+		const roomy = boundedOutputWithFailure({ output: "short output", truncated: false }, "boom: something failed");
+		expect(Buffer.byteLength(roomy.output, "utf-8")).toBeLessThanOrEqual(OUTPUT_LIMIT_BYTES);
+		expect(roomy.output).toContain("short output");
+		expect(roomy.output).toContain("boom: something failed");
+		expect(roomy.truncated).toBe(false);
+
+		const tight = boundedOutputWithFailure({ output: nearCapOutput, truncated: false }, "boom: something failed");
+		expect(Buffer.byteLength(tight.output, "utf-8")).toBeLessThanOrEqual(OUTPUT_LIMIT_BYTES);
+		expect(tight.output).toContain("boom: something failed");
+		expect(tight.truncated).toBe(true);
+
+		const hugeMessage = "E".repeat(OUTPUT_LIMIT_BYTES * 2);
+		const degenerate = boundedOutputWithFailure({ output: nearCapOutput, truncated: true }, hugeMessage);
+		expect(Buffer.byteLength(degenerate.output, "utf-8")).toBeLessThanOrEqual(OUTPUT_LIMIT_BYTES);
+		expect(degenerate.truncated).toBe(true);
+
+		const alreadyTruncated = boundedOutputWithFailure({ output: "kept", truncated: true }, "boom");
+		expect(alreadyTruncated.truncated).toBe(true);
+	});
+
+	it("returns a completed result carrying a bounded message when the spawned command cannot be launched", async () => {
+		const repo = repository();
+		const value = manager(repo);
+		const missing = "neta-exec-test-missing-binary-xyz";
+
+		const raw = await value.exec({ argv: [missing] });
+		expect(raw.exitCode).toBe(SPAWN_FAILURE_EXIT_CODE);
+		expect(Buffer.byteLength(raw.output, "utf-8")).toBeLessThanOrEqual(OUTPUT_LIMIT_BYTES);
+		expect(raw.output.toLowerCase()).toMatch(/enoent|not found/);
 	});
 
 	it("warns starting at the second accepted call, naming the exact call number, and never on the first", async () => {
