@@ -125,7 +125,7 @@ host process, outside any sandbox:
 | Tool | What it does |
 | --- | --- |
 | `neta_delegate` | Start one or more independent workers, or a team sharing one transcript; input errors are atomic, while runtime startup failures are returned per worker and later workers are still attempted. |
-| `neta_exec` | Run one guarded mechanical repo command from a small Git-inspection/Bun-test grammar; inspection disables repository Git hooks, and Bun requires an explicit confined test file. Never Git grep/push, bare test discovery, source edits, outside test paths, loaders, or ambiguous implementation. |
+| `neta_exec` | Run any argv command directly — any executable, any arguments, Git or Bun with any options, in any existing directory. No command allowlist; output is the only bound: it's capped in the response, with the full capture always on disk and named when truncated, and the response flags repeated calls from the second one on. |
 | `neta_workers` | List workers with state, token usage and results. |
 | `neta_status` | One snapshot: writer slot, queue, workers by state, open notes. |
 | `neta_attach` | Reopen a terminal worker's exact native backend session in a new tab. |

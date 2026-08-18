@@ -240,7 +240,7 @@ MCP door has ten leader tools. The socket door carries the six
 leader commands a person or token-holding process needs from a terminal —
 `workers`, `status`, `inspect`, `wait`, `send`, `kill` — plus
 the worker commands and the view commands (`watch`, `attach`, `sessions`).
-Delegation, guarded mechanical execution, and notes are MCP-only surfaces of the leader's judgment loop.
+Delegation, unrestricted command execution, and notes are MCP-only surfaces of the leader's judgment loop.
 
 For a delegation batch, Neta validates every request before seeding a room or
 allocating a worker. That input boundary is atomic. Process startup is not
@@ -254,36 +254,46 @@ startup error.
 | MCP tools | the leader | all 10 `neta_*` tools in the vendor's tool loop |
 | Unix socket | workers, and you | 6 leader commands, worker commands, the view commands |
 
-`neta_exec` is deliberately narrower than a terminal. Its own process launch
-uses an argv array, but that alone is not a safety claim: Git can reintroduce
-shells through pagers, aliases, diff drivers and remote helpers. Neta therefore
-uses a small positive Git option grammar, disables paging, text conversion,
-external diffs, repository Git hooks and file-system monitor hooks, ignores user/system Git config,
-and does not allow Git grep or network commands such as fetch. Before status or
-diff reads worktree content, Neta checks the effective repository-local config
-under the same sanitized config environment and refuses the command if any
-`filter.*.clean` or `filter.*.process` command is configured. It disables
-system and global Git attributes as well as config; it does not try to guess
-filter names or neutralize their commands. Bun is
-limited to `bun test` with a positive test-flag grammar and at least one explicit
-existing test file; bare discovery is rejected because it can follow an in-repo
-symlink to tests outside the repository. Every test path is
-resolved through its nearest existing parent and must remain under the real
-repository root; preload, config, reporter-output, runtime and interpreter
-escapes are rejected. Tests execute repository code by design. A Bun test owns
-the same safety boundary as a writer and is refused if a writer is active or
-queued. Every invocation streams combined stdout/stderr directly to
-a unique mode-0600 file under the session's temporary directory; the tool result
-reads only a bounded prefix into memory and points to the full file when
-truncated. The audit directory is mode 0700. Timeout or shutdown sends
-TERM then KILL to the whole detached process group and waits until it is gone.
+`neta_exec` carries no command grammar. Its argv is handed to the OS process
+launch exactly as given: any executable name or path, any arguments —
+including shell or interpreter flags and inline shell source such as
+`["sh", "-c", "..."]` — and Git or Bun with any options, because a positive
+grammar for Git alone cannot hold (Git can reintroduce a shell through pagers,
+aliases, diff drivers and remote helpers) and narrowing Bun or Git specifically
+while leaving every other executable open only relocates the boundary rather
+than enforcing one. There is no replacement allowlist. What remains before
+spawn is structural: argv must be a non-empty array of non-empty strings with
+no NUL byte (the OS cannot carry one through exec regardless of policy), the
+resolved cwd must exist as a directory — any existing directory, not only the
+session repository — and the timeout must be a valid millisecond integer
+within the bound Neta already enforced operationally. `userApproved` still
+exists on the request for callers built against the old schema, but nothing
+reads it: no command, including `git push`, is gated on it, and Neta neither
+disables Git hooks nor refuses the command because a writer owns or is queued
+for the writer slot. A `git push` issued this way runs the repository's normal
+`pre-push` hook with host permissions, exactly as an unauthorized shell would.
 
-An explicitly authorized `git push` is a different path. `neta_exec` accepts
-only a plain configured remote name and at most one non-forcing branch refspec,
-and only when the leader passes `userApproved:true` after the user directly
-authorized that exact push. It refuses while a writer owns or waits for the
-slot. Git runs the repository's normal `pre-push` hook with host permissions;
-Neta does not suppress that hook or describe the outward command as sandboxed.
+Output is the boundary that is left. Every invocation streams combined
+stdout/stderr directly to a unique mode-0600 file under the session's
+temporary directory (audit directory mode 0700). The tool result never holds
+more than 12,000 bytes of it in memory: under that cap it carries everything;
+over it, it keeps the head and the tail of the capture — a failing command's
+actual error usually lands at the end — states plainly that the output was too
+large to return in full, names the exact temp file path, and tells the leader
+to delegate reading that file to an apprentice or scout rather than trying to
+read around the cut itself. Timeout or shutdown sends TERM then KILL to the
+whole detached process group and waits until it is gone, unchanged from
+before.
+
+Each session counts its own accepted `neta_exec` calls — accepted meaning
+argv, cwd and timeout all passed structural validation, whether or not the
+command itself then exited nonzero. The counter lives only in the running
+manager, not the checkpoint, so a resumed process legitimately restarts it at
+one. The first call in a session carries no warning; every call from the
+second on returns with its exact call number and a line telling the leader
+that repeated discovery belongs to a delegated worker, not to another
+`neta_exec` call. The warning never rejects or delays the command — it is
+carried on the same completed result as the command's own output.
 
 The socket door is authorized per role, by token. Each worker's requests carry
 its own per-worker token, and a worker can only report progress, report a blocker,

@@ -221,19 +221,22 @@ ${options.recovery ? `${options.recovery}\n\n` : ""}## You do not write code
 ${s.noEdit} Changing files is a worker's job — including one-line fixes; those go
 to a journeyman with an exact instruction.
 
-Use ${toolName("neta_exec")} only as a guarded escape hatch for small, fully
-understood mechanical repository commands: for example \`git status\`, one
-targeted repository test, or a bounded diff. Pass an argv array, never a shell
-string. Git grep, fetch, config injection, pagers, external diff helpers, source
-edits, arbitrary scripts and interpreters are outside this surface; delegate
-those. Inspection commands disable repository Git hooks and refuse status or
-diff when repository clean/process filters are configured. A simple git push is
-allowed only after the user directly authorizes that exact push: pass
-\`userApproved:true\`. Its normal pre-push hook runs with host permissions and
-is not sandboxed by neta_exec. Bun tests may
-execute repository code by design, but bare discovery, outside paths and
-loader/runtime escape flags are rejected. Test commands are refused while a
-worker owns or is queued for the writer slot.
+Use ${toolName("neta_exec")} for small, fully understood mechanical checks: for
+example \`git status\`, one targeted repository test, or a bounded diff — not
+to edit files yourself. That is your own discipline; the tool enforces none of
+it. It runs whatever argv you give it verbatim with no command allowlist: any
+executable name or path, any arguments including shell or interpreter flags and
+inline shell source, and Git or Bun with any options, in any existing
+directory. It does not disable Git hooks, does not sandbox \`git push\`, and
+does not gate push or any other command on user approval — \`userApproved\` is
+accepted for compatibility but ignored. Full combined stdout+stderr always
+lands in a session-owned mode-0600 file; the text you get back is capped, and
+when a command's output was too large to return in full the result says so and
+names that file — delegate reading it to an apprentice or scout rather than
+picking through the truncation yourself. From the second call in a session on,
+the result also names its call number and tells you to delegate repeated
+discovery to a worker instead of calling it again yourself; treat that as a
+real instruction, not noise.
 
 ## Delegating
 

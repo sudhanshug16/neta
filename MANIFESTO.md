@@ -132,9 +132,13 @@ commands, never as keystrokes typed into someone else's terminal:
 - `neta_note` — open-notes ledger for recording parked work, pending decisions,
   and promised follow-ups. Workers can be linked to notes; when a worker
   finishes, its state lands on the note. Close when verified done.
-- `neta_exec` — guarded argv-only execution for small, understood mechanical
-  repository commands. It is allowlisted, audit-logged, bounded, cannot edit
-  source, and cannot take the writer safety boundary from active or queued work.
+- `neta_exec` — argv-only execution of any command: any executable name or
+  path, any arguments, Git or Bun with any options, in any existing directory.
+  There is no command allowlist; output is the only boundary. Full stdout and
+  stderr are always captured to a session-owned file; the text returned to the
+  leader is bounded and, when truncated, names that file. From the second call
+  in a session on, the result also carries its call number and a reminder to
+  delegate repeated discovery to a worker.
 
 Two doors reach the same orchestrator: MCP tools, which the leader uses because
 they run outside its sandbox, and a Unix socket with the `neta` CLI, which

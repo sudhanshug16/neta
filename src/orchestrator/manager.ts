@@ -55,7 +55,7 @@ import {
 	type WorkerSummary,
 	type WorkerUsage,
 } from "../types.ts";
-import { classifyRepoCommand, executeRepoCommand, type RepoExecRequest, type RepoExecResult } from "./exec.ts";
+import { executeRepoCommand, type RepoExecRequest, type RepoExecResult } from "./exec.ts";
 import {
 	formatInspection,
 	formatLastProgress,
@@ -302,10 +302,10 @@ export class WorkerManager implements ChannelHandler {
 	private readonly writerQueueHistory: CheckpointWriterQueueEvent[] = [];
 	/** Shutdown has begun; no queued writer may acquire the slot. */
 	private disposed = false;
-	/** A write-capable neta_exec command temporarily owns the writer safety boundary. */
-	private execWriterGuard = false;
 	private readonly execControllers = new Set<AbortController>();
 	private readonly execPromises = new Set<Promise<RepoExecResult>>();
+	/** In-memory only: a resume starts a fresh manager and legitimately restarts this at 0. */
+	private execCallCount = 0;
 	/** Hydrated writers remain held until recovery proves their old processes are dead. */
 	private recoveryWriterSlotHeld = false;
 	/** Set only when this run ended with every worker process confirmed gone. */
@@ -619,9 +619,6 @@ export class WorkerManager implements ChannelHandler {
 			if (requests[index].writer && this.recoveryWriterSlotHeld) {
 				throw new Error("Recovered writer slot is held until prior worker process death is proven.");
 			}
-			if (requests[index].writer && this.execWriterGuard) {
-				throw new Error("A write-capable neta_exec command owns the writer safety guard; wait for it to finish.");
-			}
 		}
 	}
 
@@ -631,9 +628,6 @@ export class WorkerManager implements ChannelHandler {
 		// session exactly as it found it.
 		this.assertTierAvailable(request.tier);
 		const writer = request.writer ?? false;
-		if (writer && this.execWriterGuard) {
-			throw new Error("A write-capable neta_exec command owns the writer safety guard; wait for it to finish.");
-		}
 		if (writer && this.recoveryWriterSlotHeld) {
 			throw new Error("Recovered writer slot is held until prior worker process death is proven.");
 		}
@@ -963,9 +957,6 @@ export class WorkerManager implements ChannelHandler {
 		}
 		if (!record.vendorSessionId) {
 			throw new Error(`Worker ${record.id} has no recorded vendor session id; delegate a fresh worker.`);
-		}
-		if (record.writer && this.execWriterGuard) {
-			throw new Error("A write-capable neta_exec command owns the writer safety guard; wait for it to finish.");
 		}
 		if (record.writer && this.activeWriter && this.activeWriter !== record.id) {
 			record.revivalFromState = record.state as "blocked" | "done" | "failed";
@@ -1471,30 +1462,28 @@ export class WorkerManager implements ChannelHandler {
 		return (await this.wait(workerIds, timeoutMs)).workers;
 	}
 
-	/** Run one allowlisted mechanical command without delegating an agent. */
+	/** Run one caller-specified command without delegating an agent. Unrestricted; only its output is bounded. */
 	async exec(request: RepoExecRequest): Promise<RepoExecResult> {
 		if (this.disposed) throw new Error("This Neta session is shutting down.");
 		if (!this.options.execOutputDir) throw new Error("neta_exec has no session audit directory.");
-		const classification = classifyRepoCommand(request.argv, request.userApproved);
-		if (classification.writeCapable) {
-			if (this.execWriterGuard) throw new Error("Another write-capable neta_exec command is already running.");
-			if (this.activeWriter || this.writerQueue.length > 0 || this.recoveryWriterSlotHeld) {
-				throw new Error(
-					"neta_exec refused this write-capable command because a worker owns or is queued for the writer slot.",
-				);
-			}
-			this.execWriterGuard = true;
-		}
 		const controller = new AbortController();
 		this.execControllers.add(controller);
-		const execution = executeRepoCommand(this.options.cwd, this.options.execOutputDir, request, controller.signal);
+		const execution = executeRepoCommand(
+			this.options.cwd,
+			this.options.execOutputDir,
+			request,
+			controller.signal,
+			() => {
+				this.execCallCount += 1;
+				return this.execCallCount;
+			},
+		);
 		this.execPromises.add(execution);
 		try {
 			return await execution;
 		} finally {
 			this.execPromises.delete(execution);
 			this.execControllers.delete(controller);
-			if (classification.writeCapable) this.execWriterGuard = false;
 		}
 	}
 

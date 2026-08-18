@@ -1,3 +1,4 @@
+import { OUTPUT_LIMIT_BYTES } from "../orchestrator/exec.ts";
 import type { WorkerManager } from "../orchestrator/manager.ts";
 import {
 	formatInspection,
@@ -31,8 +32,18 @@ function formatExecResult(result: Awaited<ReturnType<WorkerManager["exec"]>>): s
 		"Output:",
 	].join("\n");
 	const output = result.output || "(no output)";
-	if (result.truncated) return `${header}\n${output}\nRead the entire response here: ${result.outputPath}`;
-	return `${header}\n${output}`;
+	const sections = [`${header}\n${output}`];
+	if (result.truncated) {
+		sections.push(
+			`This output was too large for you to inspect here: it exceeded the ${OUTPUT_LIMIT_BYTES}-byte cap on what neta_exec returns, so only its head and tail are shown above. Do not try to read around this truncation yourself — delegate inspecting the full output to an apprentice or scout. Full output: ${result.outputPath}`,
+		);
+	}
+	if (result.callNumber > 1) {
+		sections.push(
+			`This is neta_exec call #${result.callNumber} in this session. You should not be doing repeated discovery yourself through neta_exec — delegate discovery work to workers instead.`,
+		);
+	}
+	return sections.join("\n\n");
 }
 
 function clip(value: string, limit: number): string {
@@ -181,7 +192,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 		{
 			name: "neta_exec",
 			description:
-				"Run one small, fully understood mechanical repository command without a worker. Uses a positive grammar for hardened Git inspection, Bun tests naming explicit repository test files, or a simple git push carrying direct user authority as userApproved:true. Push is refused without that exact authority and while a writer owns or waits for the slot; its normal pre-push hook runs with host permissions. Git grep/fetch, config injection, pagers, helpers, bare test discovery, loaders, outside paths, source edits, arbitrary scripts and interpreters are rejected.",
+				'Run any command directly, without a worker: any executable name or absolute/relative path, any arguments — including shell or interpreter flags and inline shell source strings such as ["sh","-c","..."] — and Git or Bun with any options. There is no command allowlist and the working directory may be any existing directory, not only the session repository. Full combined stdout+stderr is always captured to a session-owned mode-0600 file; the text this tool returns is capped and, when the command\'s output was too large to return in full, the result says so and names that file so you can delegate reading it. From the second call in a session onward, the result also names the call number and says to delegate repeated discovery to workers instead of calling this again yourself.',
 			inputSchema: {
 				type: "object",
 				properties: {
@@ -189,14 +200,19 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 						type: "array",
 						items: { type: "string" },
 						minItems: 1,
-						description: 'Argument vector, for example ["git", "status", "--short"]. No shell string.',
+						description:
+							'Argument vector, for example ["git", "push", "origin", "main"] or ["sh", "-c", "some source"]. Not a shell string — to get shell semantics, pass the shell as argv[0] yourself.',
 					},
-					cwd: { type: "string", description: "Optional existing directory within the session repository." },
+					cwd: {
+						type: "string",
+						description:
+							"Optional. Any existing directory, absolute or relative to the session's cwd; defaults to the session's cwd.",
+					},
 					timeoutSeconds: { type: "number", description: "Timeout from 0.001 to 600 seconds; default 60." },
 					userApproved: {
 						type: "boolean",
 						description:
-							"Set true only when the user directly authorized this exact git push. It does not suppress pre-push hooks.",
+							"Deprecated and ignored. No command is gated on this field; it is kept only for compatibility with older callers.",
 					},
 				},
 				required: ["argv"],
