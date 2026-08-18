@@ -3,8 +3,12 @@ import { randomBytes } from "node:crypto";
 import { chmodSync, closeSync, mkdirSync, openSync, readSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 
-const DEFAULT_TIMEOUT_MS = 60_000;
-const MAX_TIMEOUT_MS = 600_000;
+/**
+ * Node's timers store their delay in a 32-bit signed field; past this, `setTimeout`
+ * silently fires almost immediately instead of throwing. This is not a policy
+ * ceiling — a caller-selected timeout may be any positive value up to here.
+ */
+export const MAX_SAFE_TIMEOUT_MS = 2_147_483_647;
 /** Cap on the command-output excerpt alone (`RepoExecResult.output`) — not on the MCP tool text built around it. */
 export const OUTPUT_LIMIT_BYTES = 12_000;
 /** Exported so tests can assert its exact, uncut presence rather than a loosely matched substring. */
@@ -17,6 +21,12 @@ export const SPAWN_FAILURE_EXIT_CODE = -1;
 export interface RepoExecRequest {
 	argv: string[];
 	cwd?: string;
+	/**
+	 * Optional. Omitted means neta_exec imposes no timeout of its own and waits
+	 * for the command to finish or for the session to shut down. When given, it
+	 * is a positive integer of milliseconds up to MAX_SAFE_TIMEOUT_MS — a
+	 * caller-selected operational bound, not a command policy.
+	 */
 	timeoutMs?: number;
 	/**
 	 * Deprecated and ignored. neta_exec no longer gates any command on user
@@ -68,12 +78,15 @@ function resolveCwd(defaultCwd: string, requested?: string): string {
 	return real;
 }
 
-function resolveTimeoutMs(timeoutMs?: number): number {
-	const value = timeoutMs ?? DEFAULT_TIMEOUT_MS;
-	if (!Number.isInteger(value) || value < 1 || value > MAX_TIMEOUT_MS) {
-		throw new Error(`neta_exec timeout must be an integer from 1 to ${MAX_TIMEOUT_MS} ms.`);
+/** `undefined` means no timeout at all — never defaulted to one. */
+export function resolveTimeoutMs(timeoutMs?: number): number | undefined {
+	if (timeoutMs === undefined) return undefined;
+	if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_SAFE_TIMEOUT_MS) {
+		throw new Error(
+			`neta_exec timeoutMs must be a positive integer up to ${MAX_SAFE_TIMEOUT_MS} (Node's safe timer limit).`,
+		);
 	}
-	return value;
+	return timeoutMs;
 }
 
 function groupAlive(childPid: number, childExited: boolean): boolean {
@@ -288,8 +301,10 @@ export async function executeRepoCommand(
 			});
 			let timer: ReturnType<typeof setTimeout> | undefined;
 			let abortListener: (() => void) | undefined;
+			// No timeoutMs means no timer at all: the command runs until it exits on
+			// its own or the session shuts down (still reachable through `signal`).
 			const stopped = new Promise<"timeout" | "aborted">((resolveStopped) => {
-				timer = setTimeout(() => resolveStopped("timeout"), timeoutMs);
+				if (timeoutMs !== undefined) timer = setTimeout(() => resolveStopped("timeout"), timeoutMs);
 				if (signal) {
 					abortListener = () => resolveStopped("aborted");
 					if (signal.aborted) abortListener();

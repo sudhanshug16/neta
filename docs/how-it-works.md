@@ -265,8 +265,11 @@ than enforcing one. There is no replacement allowlist. What remains before
 spawn is structural: argv must be a non-empty array of non-empty strings with
 no NUL byte (the OS cannot carry one through exec regardless of policy), the
 resolved cwd must exist as a directory — any existing directory, not only the
-session repository — and the timeout must be a valid millisecond integer
-within the bound Neta already enforced operationally. `userApproved` still
+session repository — and, if a timeout is given at all, it must be a positive
+number representable as a millisecond integer the runtime's own timer can
+hold. Omitting the timeout is not the same as a large one: neta_exec then
+imposes none of its own and waits for the command to finish or for the
+session to shut down. `userApproved` still
 exists on the request for callers built against the old schema, but nothing
 reads it: no command, including `git push`, is gated on it, and Neta neither
 disables Git hooks nor refuses the command because a writer owns or is queued
@@ -288,15 +291,18 @@ command that cannot even be launched (bad executable, a process group that
 cannot be proven stopped) does not raise a tool error either: it comes back as
 a completed result with a distinct exit code and the launch failure folded
 into that same bounded excerpt, so it still carries its call number and
-warning like any other accepted call. Timeout or shutdown sends TERM then KILL
-to the whole detached process group and waits until it is gone, unchanged from
-before.
+warning like any other accepted call. An explicit timeout firing, or the
+session shutting down, sends TERM then KILL to the whole detached process
+group and waits until it is gone; with no timeout given, only shutdown can
+stop the command early.
 
 Each session counts its own accepted `neta_exec` calls — accepted meaning
-argv, cwd and timeout all passed structural validation (including the MCP
-layer's own bound on `timeoutSeconds`, checked before it is rounded into
-milliseconds, so an out-of-range value cannot round into a valid one),
-whether or not the command itself then exited nonzero or failed to launch.
+argv, cwd and, when supplied, timeout all passed structural validation (the
+MCP layer checks `timeoutSeconds` itself — finite, positive, and small enough
+to round into a millisecond value the runtime's timer can hold — before it is
+rounded, so an invalid value can neither slip through rounding nor count as
+accepted), whether or not the command itself then exited nonzero or failed to
+launch.
 The counter lives only in the running manager, not the checkpoint, so a
 resumed process legitimately restarts it at one. The first call in a session
 carries no warning; every call from the

@@ -1,4 +1,4 @@
-import { OUTPUT_LIMIT_BYTES, SPAWN_FAILURE_EXIT_CODE } from "../orchestrator/exec.ts";
+import { MAX_SAFE_TIMEOUT_MS, OUTPUT_LIMIT_BYTES, SPAWN_FAILURE_EXIT_CODE } from "../orchestrator/exec.ts";
 import type { WorkerManager } from "../orchestrator/manager.ts";
 import {
 	formatInspection,
@@ -22,8 +22,8 @@ const DEFAULT_WAIT_SECONDS = 240;
 const MAX_WAIT_SECONDS = 900;
 const MAX_RESULT_CHARS = 3000;
 const ROOM_WAKE_TAIL = 5;
-const MIN_TIMEOUT_SECONDS = 0.001;
-const MAX_TIMEOUT_SECONDS = 600;
+/** The largest timeoutSeconds that still rounds to a millisecond value Node's timer can hold. */
+const MAX_TIMEOUT_SECONDS = MAX_SAFE_TIMEOUT_MS / 1000;
 
 function formatExecResult(result: Awaited<ReturnType<WorkerManager["exec"]>>): string {
 	const exitNote =
@@ -212,7 +212,11 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 						description:
 							"Optional. Any existing directory, absolute or relative to the session's cwd; defaults to the session's cwd.",
 					},
-					timeoutSeconds: { type: "number", description: "Timeout from 0.001 to 600 seconds; default 60." },
+					timeoutSeconds: {
+						type: "number",
+						description:
+							"Optional. A positive number of seconds, up to the ~24.8 days Node's timer can safely hold. Omit for no timeout at all — the command then runs until it exits or the session shuts down.",
+					},
 					userApproved: {
 						type: "boolean",
 						description:
@@ -230,22 +234,24 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 					throw new Error('"argv" must be a non-empty list of strings.');
 				}
 				const timeoutSeconds = optionalNumber(args, "timeoutSeconds");
-				if (
-					timeoutSeconds !== undefined &&
-					(!Number.isFinite(timeoutSeconds) ||
-						timeoutSeconds < MIN_TIMEOUT_SECONDS ||
-						timeoutSeconds > MAX_TIMEOUT_SECONDS)
-				) {
-					throw new Error(
-						`"timeoutSeconds" must be a finite number from ${MIN_TIMEOUT_SECONDS} to ${MAX_TIMEOUT_SECONDS} inclusive.`,
-					);
+				let timeoutMs: number | undefined;
+				if (timeoutSeconds !== undefined) {
+					if (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) {
+						throw new Error('"timeoutSeconds" must be a finite number greater than 0.');
+					}
+					timeoutMs = Math.round(timeoutSeconds * 1000);
+					if (timeoutMs < 1 || timeoutMs > MAX_SAFE_TIMEOUT_MS) {
+						throw new Error(
+							`"timeoutSeconds" must round to between 1 ms and ${MAX_SAFE_TIMEOUT_MS} ms (about ${MAX_TIMEOUT_SECONDS.toFixed(0)} seconds) — the largest delay Node's timers can represent safely.`,
+						);
+					}
 				}
 				return text(
 					formatExecResult(
 						await manager.exec({
 							argv: args.argv as string[],
 							cwd: optionalString(args, "cwd"),
-							timeoutMs: timeoutSeconds === undefined ? undefined : Math.round(timeoutSeconds * 1000),
+							timeoutMs,
 							userApproved: args.userApproved === true,
 						}),
 					),

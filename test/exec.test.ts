@@ -17,7 +17,9 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { leaderTools } from "../src/mcp/leader.ts";
 import {
 	boundedOutputWithFailure,
+	MAX_SAFE_TIMEOUT_MS,
 	OUTPUT_LIMIT_BYTES,
+	resolveTimeoutMs,
 	SPAWN_FAILURE_EXIT_CODE,
 	TRUNCATION_MARKER,
 } from "../src/orchestrator/exec.ts";
@@ -207,22 +209,61 @@ describe("neta_exec", () => {
 		await expect(value.exec({ argv: ["true"], cwd: join(repo, "does-not-exist") })).rejects.toThrow("does not exist");
 		await expect(value.exec({ argv: ["true"], cwd: join(repo, "tracked.txt") })).rejects.toThrow("not a directory");
 		await expect(value.exec({ argv: ["true"], timeoutMs: 0 })).rejects.toThrow("timeout");
-		await expect(value.exec({ argv: ["true"], timeoutMs: 700_000 })).rejects.toThrow("timeout");
+		await expect(value.exec({ argv: ["true"], timeoutMs: -5 })).rejects.toThrow("timeout");
 		await expect(value.exec({ argv: ["true"], timeoutMs: 1.5 })).rejects.toThrow("timeout");
+		await expect(value.exec({ argv: ["true"], timeoutMs: MAX_SAFE_TIMEOUT_MS + 1 })).rejects.toThrow("timeout");
 
 		const stillFirst = await tool(value).run({ argv: ["true"] });
 		expect(body(stillFirst)).not.toContain("call #");
 	});
 
-	it("rejects an out-of-range timeoutSeconds structurally at the MCP boundary before it can round into a valid millisecond value, and never counts it", async () => {
+	it("never defaults timeoutMs to anything: omitted means no timeout is imposed at all", () => {
+		expect(resolveTimeoutMs(undefined)).toBeUndefined();
+		expect(resolveTimeoutMs(1)).toBe(1);
+		expect(resolveTimeoutMs(MAX_SAFE_TIMEOUT_MS)).toBe(MAX_SAFE_TIMEOUT_MS);
+		expect(() => resolveTimeoutMs(0)).toThrow();
+		expect(() => resolveTimeoutMs(-1)).toThrow();
+		expect(() => resolveTimeoutMs(Number.NaN)).toThrow();
+		expect(() => resolveTimeoutMs(Number.POSITIVE_INFINITY)).toThrow();
+		expect(() => resolveTimeoutMs(MAX_SAFE_TIMEOUT_MS + 1)).toThrow();
+	});
+
+	it("runs to completion with no default or imposed timeout when timeoutSeconds/timeoutMs is omitted", async () => {
 		const repo = repository();
 		const value = manager(repo);
 
-		await expect(tool(value).run({ argv: ["true"], timeoutSeconds: 600.0004 })).rejects.toThrow();
+		const raw = await value.exec({ argv: ["true"] });
+		expect(raw.exitCode).toBe(0);
+		expect(raw.timedOut).toBe(false);
+
+		const viaTool = body(await tool(value).run({ argv: ["true"] }));
+		expect(viaTool).toMatch(/Exit code: 0/);
+	});
+
+	it("accepts a timeout far beyond the old 600-second product ceiling, since output is the only remaining restriction", async () => {
+		const repo = repository();
+		const value = manager(repo);
+		const twentyDaysInSeconds = 20 * 24 * 60 * 60;
+
+		const raw = await value.exec({ argv: ["true"], timeoutMs: MAX_SAFE_TIMEOUT_MS });
+		expect(raw.exitCode).toBe(0);
+		expect(raw.timedOut).toBe(false);
+
+		const viaTool = body(await tool(value).run({ argv: ["true"], timeoutSeconds: twentyDaysInSeconds }));
+		expect(viaTool).toMatch(/Exit code: 0/);
+	});
+
+	it("rejects a non-positive, non-finite, or overflowing timeoutSeconds structurally at the MCP boundary, and never counts it", async () => {
+		const repo = repository();
+		const value = manager(repo);
+
 		await expect(tool(value).run({ argv: ["true"], timeoutSeconds: 0 })).rejects.toThrow();
 		await expect(tool(value).run({ argv: ["true"], timeoutSeconds: -1 })).rejects.toThrow();
 		await expect(tool(value).run({ argv: ["true"], timeoutSeconds: Number.POSITIVE_INFINITY })).rejects.toThrow();
 		await expect(tool(value).run({ argv: ["true"], timeoutSeconds: Number.NaN })).rejects.toThrow();
+		await expect(
+			tool(value).run({ argv: ["true"], timeoutSeconds: MAX_SAFE_TIMEOUT_MS / 1000 + 1_000 }),
+		).rejects.toThrow();
 
 		const stillFirst = body(await tool(value).run({ argv: ["true"] }));
 		expect(stillFirst).not.toContain("call #");

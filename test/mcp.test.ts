@@ -283,12 +283,26 @@ describe("neta_exec through the real MCP client/server boundary", () => {
 		expect(body(second).toLowerCase()).toContain("delegate");
 	});
 
-	it("rejects an out-of-range timeoutSeconds as an MCP tool error before it can round into a valid value, and does not count it", async () => {
-		const rejected = await call("neta_exec", { argv: ["true"], timeoutSeconds: 600.0004 });
+	it("rejects a non-positive or non-finite timeoutSeconds as an MCP tool error, and does not count it", async () => {
+		const rejected = await call("neta_exec", { argv: ["true"], timeoutSeconds: 0 });
 		expect(rejected.isError).toBe(true);
+		const rejectedNegative = await call("neta_exec", { argv: ["true"], timeoutSeconds: -1 });
+		expect(rejectedNegative.isError).toBe(true);
+		const rejectedInfinite = await call("neta_exec", { argv: ["true"], timeoutSeconds: Number.POSITIVE_INFINITY });
+		expect(rejectedInfinite.isError).toBe(true);
 
 		const first = await call("neta_exec", { argv: ["true"] });
 		expect(first.isError).toBeFalsy();
 		expect(body(first)).not.toContain("call #");
+	});
+
+	it("accepts a timeoutSeconds far beyond the old 600-second ceiling, and no timeout at all when it is omitted", async () => {
+		const beyondOldCeiling = await call("neta_exec", { argv: ["true"], timeoutSeconds: 20 * 24 * 60 * 60 });
+		expect(beyondOldCeiling.isError).toBeFalsy();
+		expect(body(beyondOldCeiling)).toMatch(/Exit code: 0/);
+
+		const omitted = await call("neta_exec", { argv: ["true"] });
+		expect(omitted.isError).toBeFalsy();
+		expect(body(omitted)).toMatch(/Exit code: 0/);
 	});
 });
