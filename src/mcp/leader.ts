@@ -181,7 +181,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 		{
 			name: "neta_exec",
 			description:
-				"Run one small, fully understood mechanical repository command without a worker. Uses a positive grammar for hardened, hook-disabled Git inspection or Bun tests naming explicit repository test files. Git grep/push, config, pagers, helpers, bare test discovery, loaders, outside paths, source edits, arbitrary scripts and interpreters are rejected. Bun tests refuse while any worker owns or is queued for the writer slot.",
+				"Run one small, fully understood mechanical repository command without a worker. Uses a positive grammar for hardened Git inspection, Bun tests naming explicit repository test files, or a simple git push carrying direct user authority as userApproved:true. Push is refused without that exact authority and while a writer owns or waits for the slot; its normal pre-push hook runs with host permissions. Git grep/fetch, config injection, pagers, helpers, bare test discovery, loaders, outside paths, source edits, arbitrary scripts and interpreters are rejected.",
 			inputSchema: {
 				type: "object",
 				properties: {
@@ -193,6 +193,11 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 					},
 					cwd: { type: "string", description: "Optional existing directory within the session repository." },
 					timeoutSeconds: { type: "number", description: "Timeout from 0.001 to 600 seconds; default 60." },
+					userApproved: {
+						type: "boolean",
+						description:
+							"Set true only when the user directly authorized this exact git push. It does not suppress pre-push hooks.",
+					},
 				},
 				required: ["argv"],
 			},
@@ -211,6 +216,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 							argv: args.argv as string[],
 							cwd: optionalString(args, "cwd"),
 							timeoutMs: timeoutSeconds === undefined ? undefined : Math.round(timeoutSeconds * 1000),
+							userApproved: args.userApproved === true,
 						}),
 					),
 				);

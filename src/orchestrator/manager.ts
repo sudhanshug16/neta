@@ -1475,7 +1475,7 @@ export class WorkerManager implements ChannelHandler {
 	async exec(request: RepoExecRequest): Promise<RepoExecResult> {
 		if (this.disposed) throw new Error("This Neta session is shutting down.");
 		if (!this.options.execOutputDir) throw new Error("neta_exec has no session audit directory.");
-		const classification = classifyRepoCommand(request.argv);
+		const classification = classifyRepoCommand(request.argv, request.userApproved);
 		if (classification.writeCapable) {
 			if (this.execWriterGuard) throw new Error("Another write-capable neta_exec command is already running.");
 			if (this.activeWriter || this.writerQueue.length > 0 || this.recoveryWriterSlotHeld) {

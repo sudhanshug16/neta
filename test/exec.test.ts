@@ -71,8 +71,8 @@ describe("neta_exec", () => {
 		execFileSync("git", ["add", "tracked.txt"], { cwd: dir });
 		execFileSync("git", ["commit", "-qm", "initial"], { cwd: dir });
 		mkdirSync(join(dir, "test", "fixtures"), { recursive: true });
-		copyFileSync(timeoutFixture, join(dir, "test", "fixtures", "exec-timeout-fixture.ts"));
-		copyFileSync(outputFixture, join(dir, "test", "fixtures", "exec-output-fixture.ts"));
+		copyFileSync(timeoutFixture, join(dir, "test", "fixtures", "exec-timeout-fixture.test.ts"));
+		copyFileSync(outputFixture, join(dir, "test", "fixtures", "exec-output-fixture.test.ts"));
 		copyFileSync(childFixture, join(dir, "test", "fixtures", "sigterm-ignoring-child.mjs"));
 		return dir;
 	}
@@ -100,8 +100,9 @@ describe("neta_exec", () => {
 	}
 
 	it("rejects Git shell, pager, helper, alias, config and option injection", async () => {
-		const value = manager(repository());
-		const marker = "/tmp/PWNED2";
+		const repo = repository();
+		const value = manager(repo);
+		const marker = join(repo, "shell-injection-marker");
 		rmSync(marker, { force: true });
 		for (const argv of [
 			["git", "grep", `-O${marker}`, "initial"],
@@ -149,47 +150,69 @@ describe("neta_exec", () => {
 		const value = manager(repo);
 		const outside = mkdtempSync(join(tmpdir(), "neta-exec-outside-"));
 		dirs.push(outside);
-		const payload = join(outside, "payload.ts");
+		const marker = join(outside, "outside-marker");
+		const payload = join(outside, "payload.test.ts");
 		writeFileSync(
 			payload,
-			'import { test } from "bun:test"; import { writeFileSync } from "node:fs"; test("pwn", () => writeFileSync("/tmp/PWNED3", "yes"));\n',
+			`import { test } from "bun:test"; import { writeFileSync } from "node:fs"; test("pwn", () => writeFileSync(${JSON.stringify(marker)}, "yes"));\n`,
 		);
 		symlinkSync(outside, join(repo, "outside-link"));
-		rmSync("/tmp/PWNED3", { force: true });
 
 		await expect(tool(value).run({ argv: ["bun", "test", payload] })).rejects.toThrow("must be relative");
 		await expect(tool(value).run({ argv: ["bun", "test", "--bail", payload] })).rejects.toThrow("must be relative");
-		await expect(tool(value).run({ argv: ["bun", "test", "../payload.ts"] })).rejects.toThrow("escapes");
-		await expect(tool(value).run({ argv: ["bun", "test", "outside-link/payload.ts"] })).rejects.toThrow("escapes");
-		await expect(tool(value).run({ argv: ["bun", "test", "outside-link/not-created.ts"] })).rejects.toThrow(
+		await expect(tool(value).run({ argv: ["bun", "test", "../payload.test.ts"] })).rejects.toThrow("escapes");
+		await expect(tool(value).run({ argv: ["bun", "test", "outside-link/payload.test.ts"] })).rejects.toThrow(
 			"escapes",
 		);
-		expect(existsSync("/tmp/PWNED3")).toBe(false);
+		await expect(tool(value).run({ argv: ["bun", "test", "outside-link/not-created.test.ts"] })).rejects.toThrow(
+			"escapes",
+		);
+		expect(existsSync(marker)).toBe(false);
 	});
 
-	it("rejects bare Bun discovery before it can follow a symlink to an outside test", async () => {
+	it("canonicalizes every supported Bun target form before running exactly one local test", async () => {
 		const repo = repository();
 		const value = manager(repo);
 		const outside = mkdtempSync(join(tmpdir(), "neta-exec-outside-discovery-"));
 		dirs.push(outside);
+		const localMarker = join(repo, "local-test-marker");
+		const outsideMarker = join(outside, "outside-test-marker");
 		writeFileSync(
-			join(outside, "outside.test.ts"),
-			'import { test } from "bun:test"; import { writeFileSync } from "node:fs"; test("outside", () => writeFileSync("/tmp/neta-probe-outsidetest", "ran"));\n',
+			join(repo, "test", "exec.test.ts"),
+			`import { test } from "bun:test"; import { appendFileSync } from "node:fs"; test("local target", () => appendFileSync(${JSON.stringify(localMarker)}, "ran\\n"));\n`,
 		);
-		symlinkSync(outside, join(repo, "test", "outside-link"));
-		rmSync("/tmp/neta-probe-outsidetest", { force: true });
+		mkdirSync(join(outside, "test"));
+		writeFileSync(
+			join(outside, "test", "exec.test.ts"),
+			`import { test } from "bun:test"; import { writeFileSync } from "node:fs"; test("outside", () => writeFileSync(${JSON.stringify(outsideMarker)}, "ran"));\n`,
+		);
+		symlinkSync(outside, join(repo, "outside-link"));
 
 		await expect(tool(value).run({ argv: ["bun", "test"] })).rejects.toThrow("explicit repository test file");
-		const targeted = await value.exec({ argv: ["bun", "test", "./test/fixtures/exec-output-fixture.ts"] });
-
-		expect(targeted.exitCode).toBe(0);
-		expect(existsSync("/tmp/neta-probe-outsidetest")).toBe(false);
+		for (const argv of [
+			["bun", "test", "test/exec.test.ts"],
+			["bun", "test", "--", "test/exec.test.ts"],
+			["bun", "test", "test/exec.test.ts", "-t", "local target"],
+			["bun", "test", "./test/exec.test.ts"],
+		]) {
+			rmSync(localMarker, { force: true });
+			rmSync(outsideMarker, { force: true });
+			const targeted = await value.exec({ argv });
+			expect(targeted.exitCode).toBe(0);
+			expect(readFileSync(localMarker, "utf-8")).toBe("ran\n");
+			expect(existsSync(outsideMarker)).toBe(false);
+		}
+		rmSync(localMarker, { force: true });
+		const nested = await value.exec({ argv: ["bun", "test", "exec.test.ts"], cwd: "test" });
+		expect(nested.exitCode).toBe(0);
+		expect(readFileSync(localMarker, "utf-8")).toBe("ran\n");
+		expect(existsSync(outsideMarker)).toBe(false);
 	});
 
 	it("disables repository hooks for every allowed Git inspection command", async () => {
 		const repo = repository();
 		const value = manager(repo);
-		const marker = "/tmp/neta-probe-defaulthook";
+		const marker = join(repo, "hook-marker");
 		const hook = join(repo, ".git", "hooks", "post-index-change");
 		writeFileSync(hook, `#!/bin/sh\ntouch ${marker}\n`);
 		chmodSync(hook, 0o755);
@@ -210,6 +233,33 @@ describe("neta_exec", () => {
 		}
 	});
 
+	it("refuses configured clean/process filters before status or diff can run them", async () => {
+		const repo = repository();
+		const value = manager(repo);
+		const marker = join(repo, "filter-marker");
+		writeFileSync(join(repo, ".gitattributes"), "tracked.txt filter=reviewer-probe\n");
+		execFileSync("git", ["config", "filter.reviewer-probe.clean", `sh -c 'touch ${marker}'`], { cwd: repo });
+		execFileSync("git", ["config", "filter.reviewer-probe.process", `sh -c 'touch ${marker}'`], { cwd: repo });
+		writeFileSync(join(repo, "tracked.txt"), "changed\n");
+
+		for (const argv of [
+			["git", "status", "--porcelain"],
+			["git", "diff", "--", "tracked.txt"],
+		]) {
+			await expect(value.exec({ argv })).rejects.toThrow("filter.*.clean/process");
+			expect(existsSync(marker)).toBe(false);
+		}
+		for (const argv of [
+			["git", "log", "-n1"],
+			["git", "ls-files"],
+			["git", "rev-parse", "--show-toplevel"],
+			["git", "show", "--stat", "HEAD"],
+		]) {
+			expect((await value.exec({ argv })).exitCode).toBe(0);
+			expect(existsSync(marker)).toBe(false);
+		}
+	});
+
 	it("accepts the documented Git status porcelain and untracked-file grammar only", () => {
 		for (const argv of [
 			["git", "status", "--porcelain"],
@@ -221,7 +271,7 @@ describe("neta_exec", () => {
 			["git", "status", "--untracked-files", "all", "--show-stash"],
 			["git", "status", "--untracked-files=no", "--ahead-behind"],
 		]) {
-			expect(classifyRepoCommand(argv)).toEqual({ writeCapable: false });
+			expect(classifyRepoCommand(argv)).toEqual({ writeCapable: false, kind: "git-inspection" });
 		}
 		for (const argv of [
 			["git", "status", "--porcelain=v3"],
@@ -243,10 +293,50 @@ describe("neta_exec", () => {
 		await expect(tool(value).run({ argv: ["bun", "test", "missing.test.ts"] })).rejects.toThrow(
 			"owns or is queued for the writer slot",
 		);
+		await expect(
+			tool(value).run({ argv: ["git", "push", "origin", "HEAD:main"], userApproved: true }),
+		).rejects.toThrow("owns or is queued for the writer slot");
 	});
 
-	it("removes outward Git commands from the mechanical command surface", () => {
-		expect(() => classifyRepoCommand(["git", "push", "origin", "main"])).toThrow("allowlisted Git subcommand");
+	it("pushes only with direct authority and runs the normal pre-push hook", async () => {
+		const repo = repository();
+		const value = manager(repo);
+		const remote = mkdtempSync(join(tmpdir(), "neta-exec-remote-"));
+		dirs.push(remote);
+		execFileSync("git", ["init", "--bare", "-q"], { cwd: remote });
+		execFileSync("git", ["remote", "add", "reviewer-remote", remote], { cwd: repo });
+		writeFileSync(join(repo, "tracked.txt"), "authorized push\n");
+		execFileSync("git", ["add", "tracked.txt"], { cwd: repo });
+		execFileSync("git", ["commit", "-qm", "push fixture"], { cwd: repo });
+		const marker = join(repo, "pre-push-marker");
+		const hook = join(repo, ".git", "hooks", "pre-push");
+		writeFileSync(hook, `#!/bin/sh\ntouch ${marker}\n`);
+		chmodSync(hook, 0o755);
+		const argv = ["git", "push", "reviewer-remote", "HEAD:refs/heads/main"];
+
+		await expect(tool(value).run({ argv })).rejects.toThrow("direct user authority");
+		expect(existsSync(marker)).toBe(false);
+		expect(() => execFileSync("git", ["rev-parse", "--verify", "refs/heads/main"], { cwd: remote })).toThrow();
+
+		const result = await value.exec({ argv, userApproved: true });
+		expect(result.exitCode).toBe(0);
+		expect(existsSync(marker)).toBe(true);
+		expect(execFileSync("git", ["rev-parse", "refs/heads/main"], { cwd: remote, encoding: "utf-8" }).trim()).toBe(
+			execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf-8" }).trim(),
+		);
+	});
+
+	it("rejects push option, URL, deletion, force, and multi-refspec forms", () => {
+		for (const argv of [
+			["git", "push"],
+			["git", "push", "https://example.invalid/repo.git", "main"],
+			["git", "push", "origin", "--all"],
+			["git", "push", "origin", "+main"],
+			["git", "push", "origin", ":main"],
+			["git", "push", "origin", "main", "other"],
+		]) {
+			expect(() => classifyRepoCommand(argv, true)).toThrow();
+		}
 	});
 
 	it("returns nonzero exits with cwd, duration, and a full audit path", async () => {
@@ -269,7 +359,7 @@ describe("neta_exec", () => {
 		const env = new EnvStub();
 		env.set("NETA_EXEC_TEST_SECRET", "must-not-leak");
 		const result = await manager(repo)
-			.exec({ argv: ["bun", "test", "./test/fixtures/exec-output-fixture.ts"] })
+			.exec({ argv: ["bun", "test", "./test/fixtures/exec-output-fixture.test.ts"] })
 			.finally(() => env.restore());
 		const full = readFileSync(result.outputPath, "utf-8");
 
@@ -296,7 +386,7 @@ describe("neta_exec", () => {
 		const repo = repository();
 		const value = manager(repo);
 		const running = value.exec({
-			argv: ["bun", "test", "./test/fixtures/exec-timeout-fixture.ts"],
+			argv: ["bun", "test", "./test/fixtures/exec-timeout-fixture.test.ts"],
 			timeoutMs: 250,
 		});
 		await waitFor(() => existsSync(join(repo, "exec-descendant.pid")));
@@ -314,7 +404,9 @@ describe("neta_exec", () => {
 		const prompt = buildLeaderPrompt({ tiers: {} });
 		expect(prompt).toContain("guarded escape hatch for small, fully");
 		expect(prompt).toContain("source\nedits");
-		expect(prompt).toContain("Git grep, push, config injection");
+		expect(prompt).toContain("userApproved:true");
+		expect(prompt).toContain("pre-push hook runs with host permissions");
+		expect(prompt).toContain("repository clean/process filters are configured");
 		expect(prompt).toContain("refused while a\nworker owns or is queued for the writer slot");
 	});
 });

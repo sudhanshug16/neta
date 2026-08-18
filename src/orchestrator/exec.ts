@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readSync, realpathSync, statSync } from "node:fs";
 import { basename, delimiter, isAbsolute, join, relative, resolve } from "node:path";
@@ -40,6 +40,8 @@ export interface RepoExecRequest {
 	argv: string[];
 	cwd?: string;
 	timeoutMs?: number;
+	/** Direct user authority is required for the outward, host-permission push path. */
+	userApproved?: boolean;
 }
 
 export interface RepoExecResult {
@@ -54,6 +56,7 @@ export interface RepoExecResult {
 
 export interface RepoCommandClassification {
 	writeCapable: boolean;
+	kind: "bun-test" | "git-inspection" | "git-push";
 }
 
 /**
@@ -62,7 +65,7 @@ export interface RepoCommandClassification {
  * process was started with argv, so rejecting merely "dangerous-looking"
  * options is not a sufficient boundary.
  */
-export function classifyRepoCommand(argv: readonly string[]): RepoCommandClassification {
+export function classifyRepoCommand(argv: readonly string[], userApproved = false): RepoCommandClassification {
 	if (argv.length === 0 || argv.some((argument) => argument.length === 0 || argument.includes("\0"))) {
 		throw new Error("neta_exec requires a non-empty argv list with no empty or NUL arguments.");
 	}
@@ -83,18 +86,48 @@ export function classifyRepoCommand(argv: readonly string[]): RepoCommandClassif
 			);
 		}
 		validateBunArguments(argv.slice(2));
-		return { writeCapable: true };
+		return { writeCapable: true, kind: "bun-test" };
 	}
 
 	if (argv[0] !== "git") {
 		throw new Error('neta_exec allows only "git" and "bun test"; shells and interpreters are not allowed.');
 	}
 	const command = argv[1];
+	if (command === "push") {
+		validateGitPushArguments(argv.slice(2));
+		if (!userApproved) {
+			throw new Error("neta_exec git push requires direct user authority via userApproved:true.");
+		}
+		return { writeCapable: true, kind: "git-push" };
+	}
 	if (!command || command.startsWith("-") || !GIT_COMMANDS.has(command)) {
 		throw new Error("neta_exec requires an allowlisted Git subcommand and forbids Git config/alias injection.");
 	}
 	validateGitArguments(command, argv.slice(2));
-	return { writeCapable: false };
+	return { writeCapable: false, kind: "git-inspection" };
+}
+
+function validateGitPushArguments(args: readonly string[]): void {
+	if (args.length < 1 || args.length > 2) {
+		throw new Error("neta_exec git push requires one configured remote name and at most one refspec.");
+	}
+	const [remote, refspec] = args;
+	if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(remote)) {
+		throw new Error("neta_exec git push requires a plain configured remote name; URLs and options are not allowed.");
+	}
+	if (refspec === undefined) return;
+	if (
+		!/^(?:HEAD|[A-Za-z0-9][A-Za-z0-9._/-]*)(?::(?:refs\/heads\/)?[A-Za-z0-9][A-Za-z0-9._/-]*)?$/.test(refspec) ||
+		refspec.includes("..") ||
+		refspec.includes("//") ||
+		refspec.endsWith(".") ||
+		refspec.endsWith("/") ||
+		refspec.includes("@{")
+	) {
+		throw new Error(
+			"neta_exec git push requires one non-forcing branch refspec; deletion and option forms are not allowed.",
+		);
+	}
 }
 
 function optionWithValue(argument: string, options: ReadonlySet<string>): string | undefined {
@@ -258,10 +291,21 @@ function safeEnvironment(command: "git" | "bun", safeHome: string): NodeJS.Proce
 		TERM: "dumb",
 		NO_COLOR: "1",
 		GIT_CONFIG_NOSYSTEM: command === "git" ? "1" : undefined,
+		GIT_ATTR_NOSYSTEM: command === "git" ? "1" : undefined,
 		GIT_PAGER: command === "git" ? "" : undefined,
 		PAGER: command === "git" ? "" : undefined,
 	};
 	return Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => entry[1] !== undefined));
+}
+
+function pushEnvironment(): NodeJS.ProcessEnv {
+	return {
+		...process.env,
+		GIT_PAGER: "",
+		PAGER: "",
+		TERM: "dumb",
+		NO_COLOR: "1",
+	};
 }
 
 function withinRoot(root: string, candidate: string): boolean {
@@ -299,16 +343,19 @@ function canonicalNearestExisting(path: string): string {
 	return realpathSync(candidate);
 }
 
-function validateBunTestPaths(root: string, cwd: string, args: readonly string[]): void {
+function canonicalBunArguments(root: string, cwd: string, args: readonly string[]): string[] {
+	const rewritten: string[] = [];
 	let afterSeparator = false;
 	for (let index = 0; index < args.length; index += 1) {
 		const argument = args[index];
 		if (argument === "--") {
 			afterSeparator = true;
+			rewritten.push(argument);
 			continue;
 		}
 		if (!afterSeparator && argument.startsWith("-")) {
-			if (BUN_SEPARATE_VALUE_FLAGS.has(argument)) index += 1;
+			rewritten.push(argument);
+			if (BUN_SEPARATE_VALUE_FLAGS.has(argument)) rewritten.push(args[++index]);
 			continue;
 		}
 		if (isAbsolute(argument))
@@ -324,7 +371,54 @@ function validateBunTestPaths(root: string, cwd: string, args: readonly string[]
 		if (!existsSync(requested) || !statSync(realpathSync(requested)).isFile()) {
 			throw new Error(`neta_exec Bun test path must name an existing repository test file: ${argument}`);
 		}
+		const canonical = realpathSync(requested);
+		const repositoryRelative = relative(root, canonical).split("\\").join("/");
+		if (!/\.(?:test|spec)\.[^/]+$/.test(repositoryRelative)) {
+			throw new Error(`neta_exec Bun test path must name a *.test.* or *.spec.* file: ${argument}`);
+		}
+		// A bare Bun positional is a name filter, not necessarily a file. Passing
+		// only this canonical ./ path from the execution cwd prevents a same-named
+		// symlinked test from joining the run after the boundary check completes.
+		rewritten.push(`./${relative(cwd, canonical).split("\\").join("/")}`);
 	}
+	return rewritten;
+}
+
+function refuseConfiguredWorktreeFilters(cwd: string, safeHome: string, command: string): void {
+	if (command !== "status" && command !== "diff") return;
+	const nullDevice = process.platform === "win32" ? "NUL" : "/dev/null";
+	const result = spawnSync(
+		"git",
+		[
+			"--no-pager",
+			"-c",
+			"core.fsmonitor=false",
+			"-c",
+			`core.hooksPath=${nullDevice}`,
+			"-c",
+			`core.attributesFile=${nullDevice}`,
+			"config",
+			"--includes",
+			"--name-only",
+			"--get-regexp",
+			"^filter\\..*\\.(clean|process)$",
+		],
+		{
+			cwd,
+			env: safeEnvironment("git", safeHome),
+			encoding: "utf-8",
+			maxBuffer: 64 * 1024,
+		},
+	);
+	if (result.status === 1 && !result.error) return;
+	if (result.status === 0) {
+		throw new Error(
+			`neta_exec refuses git ${command} because repository filter.*.clean/process commands could run outside the sandbox.`,
+		);
+	}
+	throw new Error(
+		`neta_exec could not safely inspect repository clean/process filter configuration for git ${command}.`,
+	);
 }
 
 function bunExecutable(root: string): string {
@@ -399,16 +493,20 @@ export async function executeRepoCommand(
 	request: RepoExecRequest,
 	signal?: AbortSignal,
 ): Promise<RepoExecResult> {
-	classifyRepoCommand(request.argv);
+	const classification = classifyRepoCommand(request.argv, request.userApproved);
 	const cwd = repositoryCwd(root, request.cwd);
 	const canonicalRoot = realpathSync(root);
-	if (request.argv[0] === "bun") validateBunTestPaths(canonicalRoot, cwd, request.argv.slice(2));
+	const bunArgs =
+		classification.kind === "bun-test" ? canonicalBunArguments(canonicalRoot, cwd, request.argv.slice(2)) : undefined;
 	const timeoutMs = request.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 	if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS) {
 		throw new Error(`neta_exec timeout must be an integer from 1 to ${MAX_TIMEOUT_MS} ms.`);
 	}
 	mkdirSync(auditDir, { recursive: true, mode: 0o700 });
 	chmodSync(auditDir, 0o700);
+	if (classification.kind === "git-inspection") {
+		refuseConfiguredWorktreeFilters(cwd, auditDir, request.argv[1]);
+	}
 	const outputPath = join(auditDir, `neta-exec-${Date.now()}-${randomBytes(6).toString("hex")}.log`);
 	const outputFd = openSync(outputPath, "wx", 0o600);
 	chmodSync(outputPath, 0o600);
@@ -421,22 +519,30 @@ export async function executeRepoCommand(
 			request.argv[1] === "diff" || request.argv[1] === "show" || request.argv[1] === "log"
 				? ["--no-ext-diff", "--no-textconv"]
 				: [];
+		const nullDevice = process.platform === "win32" ? "NUL" : "/dev/null";
 		const childArgs =
 			request.argv[0] === "git"
-				? [
-						"--no-pager",
-						"-c",
-						"core.fsmonitor=false",
-						"-c",
-						"core.hooksPath=/dev/null",
-						request.argv[1],
-						...gitSafetyArgs,
-						...request.argv.slice(2),
-					]
-				: request.argv.slice(1);
+				? classification.kind === "git-push"
+					? request.argv.slice(1)
+					: [
+							"--no-pager",
+							"-c",
+							"core.fsmonitor=false",
+							"-c",
+							`core.hooksPath=${nullDevice}`,
+							"-c",
+							`core.attributesFile=${nullDevice}`,
+							request.argv[1],
+							...gitSafetyArgs,
+							...request.argv.slice(2),
+						]
+				: ["test", ...(bunArgs as string[])];
 		const child = spawn(executable, childArgs, {
 			cwd,
-			env: safeEnvironment(request.argv[0] as "git" | "bun", auditDir),
+			env:
+				classification.kind === "git-push"
+					? pushEnvironment()
+					: safeEnvironment(request.argv[0] as "git" | "bun", auditDir),
 			detached: true,
 			// One shared file descriptor preserves stdout/stderr write order. Two
 			// pipes only preserve order within each stream and cannot be merged later.
