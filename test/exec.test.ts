@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { execFileSync } from "node:child_process";
 import {
+	chmodSync,
 	copyFileSync,
 	existsSync,
 	mkdirSync,
@@ -164,6 +165,73 @@ describe("neta_exec", () => {
 			"escapes",
 		);
 		expect(existsSync("/tmp/PWNED3")).toBe(false);
+	});
+
+	it("rejects bare Bun discovery before it can follow a symlink to an outside test", async () => {
+		const repo = repository();
+		const value = manager(repo);
+		const outside = mkdtempSync(join(tmpdir(), "neta-exec-outside-discovery-"));
+		dirs.push(outside);
+		writeFileSync(
+			join(outside, "outside.test.ts"),
+			'import { test } from "bun:test"; import { writeFileSync } from "node:fs"; test("outside", () => writeFileSync("/tmp/neta-probe-outsidetest", "ran"));\n',
+		);
+		symlinkSync(outside, join(repo, "test", "outside-link"));
+		rmSync("/tmp/neta-probe-outsidetest", { force: true });
+
+		await expect(tool(value).run({ argv: ["bun", "test"] })).rejects.toThrow("explicit repository test file");
+		const targeted = await value.exec({ argv: ["bun", "test", "./test/fixtures/exec-output-fixture.ts"] });
+
+		expect(targeted.exitCode).toBe(0);
+		expect(existsSync("/tmp/neta-probe-outsidetest")).toBe(false);
+	});
+
+	it("disables repository hooks for every allowed Git inspection command", async () => {
+		const repo = repository();
+		const value = manager(repo);
+		const marker = "/tmp/neta-probe-defaulthook";
+		const hook = join(repo, ".git", "hooks", "post-index-change");
+		writeFileSync(hook, `#!/bin/sh\ntouch ${marker}\n`);
+		chmodSync(hook, 0o755);
+		rmSync(marker, { force: true });
+		writeFileSync(join(repo, "tracked.txt"), "changed\n");
+
+		for (const argv of [
+			["git", "status", "--porcelain"],
+			["git", "diff", "--", "tracked.txt"],
+			["git", "log", "-n1"],
+			["git", "ls-files"],
+			["git", "rev-parse", "--show-toplevel"],
+			["git", "show", "--stat", "HEAD"],
+		]) {
+			const result = await value.exec({ argv });
+			expect(result.exitCode).toBe(0);
+			expect(existsSync(marker)).toBe(false);
+		}
+	});
+
+	it("accepts the documented Git status porcelain and untracked-file grammar only", () => {
+		for (const argv of [
+			["git", "status", "--porcelain"],
+			["git", "status", "--porcelain=v1"],
+			["git", "status", "--porcelain=v2", "-uall", "--branch"],
+			["git", "status", "-u"],
+			["git", "status", "-uno", "--short"],
+			["git", "status", "-unormal", "-b"],
+			["git", "status", "--untracked-files", "all", "--show-stash"],
+			["git", "status", "--untracked-files=no", "--ahead-behind"],
+		]) {
+			expect(classifyRepoCommand(argv)).toEqual({ writeCapable: false });
+		}
+		for (const argv of [
+			["git", "status", "--porcelain=v3"],
+			["git", "status", "--porcelain=../../payload"],
+			["git", "status", "-usometimes"],
+			["git", "status", "--untracked-files=../../payload"],
+			["git", "status", "--untracked-files", "sometimes"],
+		]) {
+			expect(() => classifyRepoCommand(argv)).toThrow();
+		}
 	});
 
 	it("refuses write-capable commands while a writer owns or waits for the slot", async () => {

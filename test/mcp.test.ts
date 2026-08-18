@@ -44,16 +44,26 @@ describe("leader MCP redesign", () => {
 	let client: Client;
 	let transports: FakeTransport[];
 	let failStartAt: number | undefined;
+	let failPrepareAt: number | undefined;
+	let prepareCalls: number;
 
 	beforeEach(async () => {
 		transports = [];
 		failStartAt = undefined;
+		failPrepareAt = undefined;
+		prepareCalls = 0;
 		manager = new WorkerManager({
 			cwd: process.cwd(),
 			agentDir: "/nonexistent-agent-dir",
 			config: fixtureBackendConfig(),
 			channelAddress: "/tmp/neta-mcp-test.sock",
 			onEvent: () => {},
+			prepareEnv: () => {
+				prepareCalls += 1;
+				return prepareCalls === failPrepareAt
+					? Promise.reject(new Error("fixture prepareEnv refused"))
+					: Promise.resolve({});
+			},
 			createTransport(options) {
 				const transport = new FakeTransport(
 					options,
@@ -146,6 +156,48 @@ describe("leader MCP redesign", () => {
 		transports[0].finish({ ok: true, summary: "one done" });
 		transports[2].finish({ ok: true, summary: "three done" });
 		expect(body(await waiting)).toContain("fixture startup refused");
+	});
+
+	it("returns a read-only pre-record failure and still attempts the later member", async () => {
+		failPrepareAt = 2;
+		const result = await call("neta_delegate", {
+			workers: [
+				{ role: "scout", tier: "expert", task: "one", name: "first read" },
+				{ role: "reviewer", tier: "expert", task: "two", name: "broken read" },
+				{ role: "scout", tier: "expert", task: "three", name: "later read" },
+			],
+		});
+
+		expect(result.isError).toBeFalsy();
+		expect(body(result)).toContain("ro1:");
+		expect(body(result)).toContain("unallocated: broken read (reviewer/expert) -> codex (read-only, startup failed)");
+		expect(body(result)).toContain("Startup failure: fixture prepareEnv refused");
+		expect(body(result)).not.toContain("ro2:");
+		expect(body(result)).toContain("ro3:");
+		expect(manager.list().map((worker) => worker.id)).toEqual(["ro1", "ro3"]);
+		expect(transports).toHaveLength(2);
+	});
+
+	it("keeps the writer holder visible when a queued writer fails before its record", async () => {
+		failPrepareAt = 2;
+		const result = await call("neta_delegate", {
+			workers: [
+				{ role: "worker", tier: "expert", task: "hold", name: "holder", writer: true },
+				{ role: "worker", tier: "expert", task: "fail", name: "broken writer", writer: true },
+				{ role: "scout", tier: "expert", task: "later", name: "later read" },
+			],
+		});
+
+		expect(result.isError).toBeFalsy();
+		expect(body(result)).toContain("rw1:");
+		expect(body(result)).toContain(
+			"unallocated: broken writer (worker/expert) -> codex (writer, startup failed; writer holder: rw1)",
+		);
+		expect(body(result)).not.toContain("rw2:");
+		expect(body(result)).toContain("ro3:");
+		expect(manager.statusSnapshot().writerSlot?.id).toBe("rw1");
+		expect(manager.list().map((worker) => worker.id)).toEqual(["rw1", "ro3"]);
+		expect(transports).toHaveLength(2);
 	});
 
 	it("waits for delegated work and returns the handoff", async () => {

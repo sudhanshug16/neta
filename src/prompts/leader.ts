@@ -226,7 +226,10 @@ understood mechanical repository commands: for example \`git status\`, one
 targeted repository test, or a bounded diff. Pass an argv array, never a shell
 string. Git grep, push, config injection, pagers, external diff helpers, source
 edits, arbitrary scripts and interpreters are outside this surface; delegate
-those. Bun tests may execute repository code by design, but outside paths and
+those. Inspection commands disable repository Git hooks. An explicitly
+authorized push is different: its normal pre-push hook runs with the writer's
+actual shell permissions and is not sandboxed by neta_exec. Bun tests may
+execute repository code by design, but bare discovery, outside paths and
 loader/runtime escape flags are rejected. Test commands are refused while a
 worker owns or is queued for the writer slot.
 

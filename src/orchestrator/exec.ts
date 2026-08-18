@@ -103,6 +103,7 @@ function optionWithValue(argument: string, options: ReadonlySet<string>): string
 }
 
 function validateBunArguments(args: readonly string[]): void {
+	let testPathCount = 0;
 	let positional = false;
 	for (let index = 0; index < args.length; index += 1) {
 		const argument = args[index];
@@ -110,7 +111,10 @@ function validateBunArguments(args: readonly string[]): void {
 			positional = true;
 			continue;
 		}
-		if (positional || !argument.startsWith("-")) continue;
+		if (positional || !argument.startsWith("-")) {
+			testPathCount += 1;
+			continue;
+		}
 		if (BUN_BOOLEAN_FLAGS.has(argument)) continue;
 		if (optionWithValue(argument, BUN_VALUE_FLAGS)) continue;
 		if (BUN_SEPARATE_VALUE_FLAGS.has(argument)) {
@@ -121,11 +125,24 @@ function validateBunArguments(args: readonly string[]): void {
 		}
 		throw new Error(`neta_exec does not allow Bun test option ${argument}.`);
 	}
+	if (testPathCount === 0) {
+		throw new Error("neta_exec bun test requires at least one explicit repository test file path.");
+	}
 }
 
 function validateGitArguments(command: string, args: readonly string[]): void {
 	const booleanByCommand: Record<string, ReadonlySet<string>> = {
-		status: new Set(["--short", "-s", "--branch", "-b", "--show-stash", "--ahead-behind", "--no-ahead-behind"]),
+		status: new Set([
+			"--short",
+			"-s",
+			"--branch",
+			"-b",
+			"--show-stash",
+			"--ahead-behind",
+			"--no-ahead-behind",
+			"--porcelain",
+			"-u",
+		]),
 		diff: new Set([
 			"--stat",
 			"--numstat",
@@ -186,7 +203,7 @@ function validateGitArguments(command: string, args: readonly string[]): void {
 		]),
 	};
 	const valuesByCommand: Record<string, ReadonlySet<string>> = {
-		status: new Set(["--porcelain", "--untracked-files", "-u"]),
+		status: new Set([]),
 		diff: new Set(["--unified", "-U"]),
 		log: new Set(["--max-count", "-n", "--since", "--until"]),
 		show: new Set(["--unified", "-U"]),
@@ -203,6 +220,15 @@ function validateGitArguments(command: string, args: readonly string[]): void {
 		if (positional || !argument.startsWith("-")) continue;
 		if (booleanByCommand[command].has(argument) || (command === "ls-files" && argument === "--exclude-standard"))
 			continue;
+		if (/^--porcelain=v[12]$/.test(argument) && command === "status") continue;
+		if (/^--untracked-files=(?:no|normal|all)$/.test(argument) && command === "status") continue;
+		if (argument === "--untracked-files" && command === "status") {
+			const value = args[++index];
+			if (!value || !/^(?:no|normal|all)$/.test(value)) {
+				throw new Error("neta_exec git status --untracked-files requires one of: no, normal, all.");
+			}
+			continue;
+		}
 		if (/^-U\d+$/.test(argument) && (command === "diff" || command === "show")) continue;
 		if (/^-n\d+$/.test(argument) && command === "log") continue;
 		if (/^-u(?:no|normal|all)$/.test(argument) && command === "status") continue;
@@ -294,6 +320,9 @@ function validateBunTestPaths(root: string, cwd: string, args: readonly string[]
 		}
 		if (existsSync(requested) && !withinRoot(root, realpathSync(requested))) {
 			throw new Error(`neta_exec Bun test path escapes the session repository through a symlink: ${argument}`);
+		}
+		if (!existsSync(requested) || !statSync(realpathSync(requested)).isFile()) {
+			throw new Error(`neta_exec Bun test path must name an existing repository test file: ${argument}`);
 		}
 	}
 }
@@ -394,7 +423,16 @@ export async function executeRepoCommand(
 				: [];
 		const childArgs =
 			request.argv[0] === "git"
-				? ["--no-pager", "-c", "core.fsmonitor=false", request.argv[1], ...gitSafetyArgs, ...request.argv.slice(2)]
+				? [
+						"--no-pager",
+						"-c",
+						"core.fsmonitor=false",
+						"-c",
+						"core.hooksPath=/dev/null",
+						request.argv[1],
+						...gitSafetyArgs,
+						...request.argv.slice(2),
+					]
 				: request.argv.slice(1);
 		const child = spawn(executable, childArgs, {
 			cwd,

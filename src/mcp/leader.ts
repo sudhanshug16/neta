@@ -145,24 +145,34 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 				}));
 				// Resolve the complete batch before the seed or first process: invalid input has no partial side effects.
 				manager.validateDelegation(requests);
+				const plannedAssignments = manager.planAssignments(requests);
 				if (seed && team) manager.postToRoom(team, "leader", "leader", seed);
-				const summaries: WorkerSummary[] = [];
+				const results: Array<{ summary: WorkerSummary } | { failure: string }> = [];
 				const startupFailures = new Map<string, string>();
-				for (const request of requests) {
+				for (const [index, request] of requests.entries()) {
 					const before = new Set(manager.list().map((worker) => worker.id));
 					try {
-						summaries.push(await manager.spawn(request));
+						results.push({ summary: await manager.spawn(request) });
 					} catch (error) {
 						const failed = manager.list().find((worker) => !before.has(worker.id));
-						if (!failed) throw error;
-						summaries.push(failed);
-						startupFailures.set(failed.id, error instanceof Error ? error.message : String(error));
+						const message = error instanceof Error ? error.message : String(error);
+						if (!failed) {
+							const assignment = plannedAssignments[index];
+							const holder = request.writer ? manager.statusSnapshot().writerSlot?.id : undefined;
+							results.push({
+								failure: `unallocated: ${(request.name ?? request.role).trim() || request.role} (${request.role}/${request.tier}) -> ${assignment.backend} (${request.writer ? "writer" : "read-only"}, startup failed${holder ? `; writer holder: ${holder}` : ""})\n  Startup failure: ${message}`,
+							});
+							continue;
+						}
+						results.push({ summary: failed });
+						startupFailures.set(failed.id, message);
 					}
 				}
-				const assignments = summaries.map(
-					(summary) =>
-						`${summary.id}: ${summary.role}/${summary.tier} -> ${summary.backend} (${summary.writer ? "writer" : "read-only"}, ${summary.state})${summary.state === "queued" ? " — Queued" : ""}${startupFailures.has(summary.id) ? `\n  Startup failure: ${startupFailures.get(summary.id)}` : ""}${summary.headlessReason ? `\n  Worker view: headless — ${summary.headlessReason}` : ""}`,
-				);
+				const assignments = results.map((result) => {
+					if ("failure" in result) return result.failure;
+					const summary = result.summary;
+					return `${summary.id}: ${summary.role}/${summary.tier} -> ${summary.backend} (${summary.writer ? "writer" : "read-only"}, ${summary.state})${summary.state === "queued" ? " — Queued" : ""}${startupFailures.has(summary.id) ? `\n  Startup failure: ${startupFailures.get(summary.id)}` : ""}${summary.headlessReason ? `\n  Worker view: headless — ${summary.headlessReason}` : ""}`;
+				});
 				return text(
 					`${team ? `Team "${team}"\n` : ""}${assignments.join("\n")}\nCollect with neta_wait before ending your turn.`,
 				);
@@ -171,7 +181,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 		{
 			name: "neta_exec",
 			description:
-				"Run one small, fully understood mechanical repository command without a worker. Uses a positive grammar for hardened read-only Git inspection or Bun tests confined to repository code. Git grep/push, config, pagers, helpers, loaders, outside paths, source edits, arbitrary scripts and interpreters are rejected. Bun tests refuse while any worker owns or is queued for the writer slot.",
+				"Run one small, fully understood mechanical repository command without a worker. Uses a positive grammar for hardened, hook-disabled Git inspection or Bun tests naming explicit repository test files. Git grep/push, config, pagers, helpers, bare test discovery, loaders, outside paths, source edits, arbitrary scripts and interpreters are rejected. Bun tests refuse while any worker owns or is queued for the writer slot.",
 			inputSchema: {
 				type: "object",
 				properties: {

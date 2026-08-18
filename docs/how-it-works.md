@@ -258,9 +258,11 @@ startup error.
 uses an argv array, but that alone is not a safety claim: Git can reintroduce
 shells through pagers, aliases, diff drivers and remote helpers. Neta therefore
 uses a small positive Git option grammar, disables paging, text conversion,
-external diffs and file-system monitor hooks, ignores user/system Git config,
+external diffs, repository Git hooks and file-system monitor hooks, ignores user/system Git config,
 and does not allow Git grep or network commands such as push/fetch. Bun is
-limited to `bun test` with a positive test-flag grammar. Every test path is
+limited to `bun test` with a positive test-flag grammar and at least one explicit
+existing test file; bare discovery is rejected because it can follow an in-repo
+symlink to tests outside the repository. Every test path is
 resolved through its nearest existing parent and must remain under the real
 repository root; preload, config, reporter-output, runtime and interpreter
 escapes are rejected. Tests execute repository code by design. A Bun test owns
@@ -270,6 +272,11 @@ a unique mode-0600 file under the session's temporary directory; the tool result
 reads only a bounded prefix into memory and points to the full file when
 truncated. The audit directory is mode 0700. Timeout or shutdown sends
 TERM then KILL to the whole detached process group and waits until it is gone.
+
+An explicitly authorized `git push` is a different path: `neta_exec` cannot run
+it, so a writer runs the repository's normal push command. Git may run that
+repository's `pre-push` hook with the writer's actual shell permissions. Neta
+does not describe that outward command or its hook as sandboxed.
 
 The socket door is authorized per role, by token. Each worker's requests carry
 its own per-worker token, and a worker can only report progress, report a blocker,
