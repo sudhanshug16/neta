@@ -56,7 +56,7 @@ describe("formatStatusSnapshot", () => {
 		expect(status).toContain("model=gpt-4o | mode=workspace-write | 2,000,000 tokens, est. $12.50");
 		expect(status).toContain('Writer queue:\n  rw2 "docs pass" worker/expert | backend=codex | queued | writer');
 		expect(status).toContain(
-			'Waiting (blocked on leader answer):\n  ro3 "db decision" worker/expert | backend=codex | waiting | ' +
+			'Waiting (legacy active state):\n  ro3 "db decision" worker/expert | backend=codex | waiting | ' +
 				"model unknown — backend default | asking: Use Postgres?",
 		);
 		expect(status).toContain(

@@ -60,9 +60,9 @@ Then delegate:
 
 > Find out why the release workflow is flaky, and fix it.
 
-The leader presents a numbered staffing plan — which backend each worker would
-run on — then spawns the workers, blocks on `neta_wait` until they finish or
-ask a question, and reports once. It never edits files itself; that
+The leader delegates the workers in one call, receives their actual backend
+assignments, blocks on `neta_wait` until they finish or report a blocker, and
+reports once. It never edits files itself; that
 restriction is a mechanism, not a prompt:
 
 | Leader | Typed edit tools | Its shell |
@@ -105,9 +105,6 @@ Tiers ship unconfigured, and unconfigured tiers follow the spread policy:
 deterministic round-robin across installed backends, stable per session, with
 two diversity rules — reviewers and debaters prefer a different backend than
 the most recent writer, and debaters in one room are spread across vendors.
-When neither a charter nor any tier-to-backend mapping is configured, the
-first staffing plan of the session states this policy, so you learn it exists
-before it spends anything.
 
 Settings pin tiers down. `{ "tiers": { "architect": { "backend": "codex" } } }`
 puts architect work on `gpt-5.6-sol[max]` while the rest keep the spread, and
@@ -127,34 +124,30 @@ host process, outside any sandbox:
 
 | Tool | What it does |
 | --- | --- |
-| `neta_spawn` | Start a worker: role + tier + task, optional writer slot. |
-| `neta_spawn_group` | Spawn several workers into one room with a shared transcript. |
-| `neta_plan` | Compute backend assignments without spawning — the staffing plan. |
+| `neta_delegate` | Start one or more independent workers, or a team sharing one transcript; returns actual backend/access assignments. |
+| `neta_exec` | Run one guarded mechanical repo command by argv, such as `git status`, a targeted test, or an explicitly approved `git push`; never source edits or ambiguous implementation. |
 | `neta_workers` | List workers with state, token usage and results. |
 | `neta_status` | One snapshot: writer slot, queue, workers by state, open notes. |
 | `neta_attach` | Reopen a terminal worker's exact native backend session in a new tab. |
-| `neta_log` | A worker's new log lines since the leader last looked. |
-| `neta_wait` | Block until watched workers finish, ask a question, or a room posts. |
-| `neta_send` | Steer a worker: interrupt its current turn and make this its next prompt, same session. |
+| `neta_wait` | Block until watched workers finish, report a blocker, or a team posts. |
+| `neta_send` | Steer a live worker or resume a done, failed, or blocked worker in its exact ACP conversation. |
 | `neta_inspect` | Expand one worker's recent input and output, bounded, without consuming lines. |
-| `neta_answer` | Answer a worker blocked on a question. |
 | `neta_kill` | Terminate a worker, releasing the writer slot. |
-| `neta_room` | Read a room's transcript, optionally post to it. |
 | `neta_note` | Open-notes ledger: parked work, pending decisions, follow-ups. |
-| `neta_remember` | Persist a tier-to-backend override to `.neta/settings.json`. |
 
 ## The worker channel
 
 Workers report back through their own MCP tools — `neta_progress`,
-`neta_ask`, `neta_say`, `neta_room`, `neta_status` — or the same commands in
+`neta_blocked`, and `neta_status` — or the same commands in
 their shell; both doors reach the same socket, and every request carries that
-worker's own token. Workers hold no leader token and cannot run leader
+worker's own token. Team workers additionally receive `neta_room` and
+`neta_room_post`; independent workers do not see either. Workers hold no leader token and cannot run leader
 commands:
 
 ```
 neta progress <message>    record a progress milestone; the leader pulls it
-neta ask <question>        block until the leader answers (apprentices and journeymen cannot ask)
-neta say <message>         post to your room
+neta blocked <question>    stop this turn with a blocker; the leader resumes it with send
+neta room-post <message>   post to your team transcript
 neta room [--tail N]       read your room's transcript
 neta status --writers      show active, queued and finished writers
 ```
@@ -195,17 +188,14 @@ neta sessions --all        live and closed sessions, with the ids resume takes
 neta resume <session-id>   reopen a closed session by its exact id
 neta status                writer slot, worker states, queue and open notes
 neta workers               what is running, and what it has cost
-neta spawn ...             start a worker from your terminal
 neta wait ro1 ro2          block until those workers finish
 neta watch ro1             watch one worker live; typed text uses the same
                            cancel-and-reprompt steering as neta send
 neta watch auth-debate     follow a room's merged transcript live
 neta attach ro1            take over this terminal with that worker's own CLI
-neta log ro1               its new lines since you last looked
 neta inspect ro1           its recent input and output, bounded, without
                            consuming lines — works with no tab at all
 neta send rw2 <message>    give a worker more instructions
-neta answer ro1 <text>     unblock a worker that asked something
 neta kill rw2              stop it
 neta --backends            which agent CLIs are installed
 ```
@@ -236,10 +226,12 @@ outright rather than started as a session you could never reopen. If capture was
 arranged and still never arrived, the session says so while it runs, lists as
 `conversation-id:no`, and is refused by `neta resume` rather than guessed at.
 
-**No worker is ever restarted.** Workers that were running when the session
+Workers that were running when the leader session
 stopped come back as `interrupted` — their history, results and vendor session
 ids are intact, and `neta attach <id>` still opens one in its own CLI — but
-nothing re-runs, and queued writers stay queued until you say otherwise. Resume
+nothing re-runs automatically. Separately, `neta_send` revives terminal `done`,
+`failed`, and `blocked` workers headlessly with ACP `session/resume`; it never
+falls back to a new session. Revived writers reacquire or queue for the writer slot. Resume
 refuses outright if the old session is still live (reattach instead), if its
 directory is gone, or if it cannot prove the previous run's worker processes
 are dead.

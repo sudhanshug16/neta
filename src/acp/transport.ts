@@ -92,16 +92,18 @@ export class AcpWorkerTransport implements WorkerTransportDriver {
 	private readonly options: TransportOptions;
 	private connection: AcpConnection | undefined;
 	private assistantText = "";
-	private firstPrompt = true;
+	private firstPrompt: boolean;
 	/** Streaming prose held back until a paragraph completes. */
 	private readonly pending = { text: "", thought: "" };
 	/** Tool calls whose diff has been logged; updates repeat content verbatim. */
 	private readonly diffLogged = new Set<string>();
 	/** Cumulative across turns, because backends report per-turn totals. */
-	private readonly usage: WorkerUsage = {};
+	private readonly usage: WorkerUsage;
 
 	constructor(options: TransportOptions) {
 		this.options = options;
+		this.firstPrompt = options.resumeSessionId === undefined;
+		this.usage = { ...options.initialUsage };
 	}
 
 	async start(): Promise<void> {
@@ -116,6 +118,7 @@ export class AcpWorkerTransport implements WorkerTransportDriver {
 			mcpServers: this.options.mcpServers,
 			model: this.options.model,
 			requireExactModel: this.options.requireExactModel,
+			resumeSessionId: this.options.resumeSessionId,
 			onUpdate: (update) => this.sessionUpdate(update),
 			onSession: (description) => this.options.events.log("status", `Running as ${description}.`),
 			onVendorSession: (sessionId) => this.options.events.vendorSession(sessionId),

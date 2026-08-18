@@ -99,9 +99,8 @@ Unconfigured tiers are assigned deterministically: spread round-robin across
 installed backends, with reviewer/debater roles preferring a different backend
 than the most recent writer when multiple backends are installed (diversity
 rule). Debaters in one room are spread across different vendors automatically.
-Explicit overrides pass through `backend` on spawn; `neta_remember` persists
-them to `.neta/settings.json`. `neta_plan` computes assignments without
-spawning, so the leader can present a staffing plan before proceeding.
+Explicit overrides pass through `backend` on delegation. `neta_delegate`
+returns the actual computed assignments after validating the full batch.
 
 ### Roles
 
@@ -114,30 +113,28 @@ reviewer and an architect reviewer run the same prompt on different models.
 Hub-and-spoke. Workers talk to the leader; workers never talk to each other —
 with one exception the leader controls:
 
-- **Rooms.** The leader may spawn a group with intercommunication enabled.
+- **Teams.** The leader may delegate a batch with intercommunication enabled.
   Members post to a shared transcript; the leader reads it when it chooses and
   is never used as a message relay. This is how debates run.
 
-Everything crosses agent boundaries as a **blocking tool call**, never as
-keystrokes typed into someone else's terminal:
+Everything crosses agent boundaries through Neta's structured tools or worker
+commands, never as keystrokes typed into someone else's terminal:
 
 - `neta progress <msg>` — records a progress milestone in the worker's log.
   The leader pulls this on demand; it does not push. The latest progress also
   shows as a `last:` line in worker listings and the live worker watch header.
-- `neta ask <question>` — blocks the worker until the leader answers.
-  Tier-gated: apprentices and journeymen do not get `ask` — a blocked worker
-  fails fast with a report and the leader respawns it with a better spec.
-- `neta_plan` — computes backend assignments for proposed workers without
-  spawning them, so the leader can present a staffing plan.
-- `neta_remember` — persists a tier-to-backend override to the project's
-  `.neta/settings.json` (JSON rewrite; comments not preserved).
+- `neta blocked <question>` — records the blocker, safely cancels that exact
+  ACP turn, stops the worker, and releases its resources and writer slot.
 - `neta_wait` — blocks the leader until the watched workers need it: all of
   them finishing (or the first one, with `first`), one of them blocking on
-  `ask`, or — opted in per call with `roomEvents` — a new post in a room.
+  a blocker, or — opted in per call with `roomEvents` — a new team post.
   Returns what woke it.
 - `neta_note` — open-notes ledger for recording parked work, pending decisions,
   and promised follow-ups. Workers can be linked to notes; when a worker
   finishes, its state lands on the note. Close when verified done.
+- `neta_exec` — guarded argv-only execution for small, understood mechanical
+  repository commands. It is allowlisted, audit-logged, bounded, cannot edit
+  source, and cannot take the writer safety boundary from active or queued work.
 
 Two doors reach the same orchestrator: MCP tools, which the leader uses because
 they run outside its sandbox, and a Unix socket with the `neta` CLI, which
@@ -145,7 +142,7 @@ workers and humans use from any shell.
 
 ## Workspace
 
-All workers run in the directory they were spawned in.
+All workers run in the directory where they were delegated.
 
 - **Read-only by default.** Enforced at the ACP permission layer: the client
   (Neta) approves reads and reporting, denies edits and writes. Not prompt
@@ -153,8 +150,8 @@ All workers run in the directory they were spawned in.
   *shell* is only sandboxed where its backend supports it; that gap is
   documented rather than assumed away.
 - **Single writer slot, per session.** When a writer is already active,
-  additional writer spawns queue automatically (FIFO) and start when the slot
-  frees. Queued workers can be killed. The spawn result says queued vs
+  additional delegated writers queue automatically (FIFO) and start when the slot
+  frees. Queued workers can be killed. The delegate result says queued vs
   running. Reads and thinking parallelize; repo writes serialize.
 - **Commit on handoff.** A writer is told to commit everything before
   finishing, with a message stating what was done and why — the role prompt

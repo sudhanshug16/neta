@@ -12,13 +12,16 @@
 
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
 	createChannelAddress,
 	NETA_LEADER_ENV,
 	NETA_SOCKET_ENV,
 	NETA_WORKER_ENV,
+	NETA_WORKER_TEAM_ENV,
 	NETA_WORKER_TOKEN_ENV,
 } from "../channel/protocol.ts";
 import { ChannelServer } from "../channel/server.ts";
@@ -88,8 +91,8 @@ function describeEvent(event: WorkerEvent): string {
 			return `${event.workerId} finished${event.dirtyFiles ? `; uncommitted changes: ${event.dirtyFiles.length} files` : ""}`;
 		case "failed":
 			return `${event.workerId} failed: ${event.error}`;
-		case "ask":
-			return `${event.workerId} is waiting for an answer: ${event.question}`;
+		case "blocked":
+			return `${event.workerId} blocked and stopped: ${event.question}`;
 	}
 }
 
@@ -109,6 +112,8 @@ export interface ControlPlaneOptions {
 	leaderSessionDir?: string;
 	/** Worker tiers this session may staff. Omitted means every tier. */
 	sessionTiers?: Tier[];
+	/** Session-scoped temporary directory; generated for hand-registered MCP servers. */
+	sessionTempDir?: string;
 }
 
 /** How often the control plane looks for a conversation id its vendor's hook has written. */
@@ -130,6 +135,11 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 	const token = process.env[NETA_LEADER_ENV] || randomBytes(16).toString("hex");
 	const sessionId = options.sessionId ?? process.env.NETA_SESSION_ID ?? `s${process.pid}`;
 	const checkpointId = options.checkpointId ?? process.env.NETA_CHECKPOINT_ID ?? sessionId;
+	const providedSessionTempDir = options.sessionTempDir ?? process.env.NETA_SESSION_TEMP_DIR;
+	const ownedSessionTempDir = providedSessionTempDir
+		? undefined
+		: await mkdtemp(join(tmpdir(), `${APP_NAME}-session-`));
+	const sessionTempDir = providedSessionTempDir ?? (ownedSessionTempDir as string);
 	const resuming = options.resume ?? process.env.NETA_RESUME === "1";
 	const leaderConversationId = options.leaderConversationId ?? process.env.NETA_LEADER_CONVERSATION_ID;
 	// Hydration happens only after the checkpoint is confirmed unowned and the
@@ -192,16 +202,22 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 		channelAddress: address,
 		leaderToken: token,
 		onEvent: (event) => note(describeEvent(event)),
+		execOutputDir: join(sessionTempDir, "exec"),
 		prepareEnv: async () => {
 			shimDir ??= await createLeaderCliShim(invocation);
 			return { PATH: prependToPath(shimDir, process.env.PATH) };
 		},
-		workerMcpServers: (workerId, _scratchDir, token) => [
+		workerMcpServers: (workerId, _scratchDir, token, team) => [
 			{
 				name: "neta",
 				command: invocation.command,
 				args: [...invocation.prefixArgs, "mcp", "--worker"],
-				env: { [NETA_SOCKET_ENV]: address, [NETA_WORKER_ENV]: workerId, [NETA_WORKER_TOKEN_ENV]: token },
+				env: {
+					[NETA_SOCKET_ENV]: address,
+					[NETA_WORKER_ENV]: workerId,
+					[NETA_WORKER_TOKEN_ENV]: token,
+					...(team ? { [NETA_WORKER_TEAM_ENV]: team } : {}),
+				},
 			},
 		],
 		// `--mux` at launch decided this; settings answer when nobody did.
@@ -286,6 +302,7 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 			});
 			await server.stop();
 			if (shimDir) await rm(shimDir, { recursive: true, force: true }).catch(() => {});
+			if (ownedSessionTempDir) await rm(ownedSessionTempDir, { recursive: true, force: true }).catch(() => {});
 			removeSessionRecord(sessionId, agentDir);
 		})();
 		return shutdownPromise;
@@ -305,8 +322,7 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 	const mcp = createMcpServer(
 		"neta",
 		leaderTools(manager),
-		"Neta worker control. Spawn workers with neta_spawn, collect their results with neta_wait, reopen a terminal " +
-			"worker's native TUI with neta_attach, and answer blocked workers with neta_answer. If these tools fail, report the failure — never do the work yourself and never " +
+		"Neta worker control. Delegate workers with neta_delegate, use neta_exec only for guarded mechanical commands, collect results with neta_wait, inspect with neta_inspect, and answer blocked workers with neta_send. If these tools fail, report the failure — never do the work yourself and never " +
 			"substitute this backend's own subagents.",
 	);
 	mcp.onclose = exit;
@@ -373,6 +389,7 @@ export async function runWorkerBridge(): Promise<void> {
 	const address = process.env[NETA_SOCKET_ENV];
 	const workerId = process.env[NETA_WORKER_ENV];
 	const token = process.env[NETA_WORKER_TOKEN_ENV];
+	const team = process.env[NETA_WORKER_TEAM_ENV];
 	if (!address || !workerId || !token) {
 		process.stderr.write(
 			`[neta] ${NETA_SOCKET_ENV}, ${NETA_WORKER_ENV} and ${NETA_WORKER_TOKEN_ENV} must be set; this server only runs inside a Neta worker.\n`,
@@ -382,8 +399,8 @@ export async function runWorkerBridge(): Promise<void> {
 	}
 	const mcp = createMcpServer(
 		"neta-worker",
-		workerTools(address, workerId, token),
-		"Report progress milestones to your leader with neta_progress, and use neta_ask when you are blocked.",
+		workerTools(address, workerId, token, team),
+		"Report milestones with neta_progress. If genuinely blocked, call neta_blocked; the leader resumes this exact conversation with neta_send.",
 	);
 	await mcp.connect(new StdioServerTransport());
 }

@@ -1,7 +1,7 @@
 /**
  * Wire protocol for the worker channel.
  *
- * Workers reach the leader by running `neta progress|ask|say|room` from whatever
+ * Workers reach the leader by running `neta progress|blocked|room-post|room` from whatever
  * shell tool their backend gives them. This is the second door into the
  * orchestrator: the leader itself uses MCP tools, but any unsandboxed process
  * — and any human with a terminal — can use this one.
@@ -19,11 +19,13 @@ export const NETA_SOCKET_ENV = "NETA_SOCKET";
 export const NETA_WORKER_ENV = "NETA_WORKER_ID";
 /** Per-worker capability token. It authorizes worker-channel requests for that one worker. */
 export const NETA_WORKER_TOKEN_ENV = "NETA_WORKER_TOKEN";
+/** Present only for workers delegated into a shared team transcript. */
+export const NETA_WORKER_TEAM_ENV = "NETA_WORKER_TEAM";
 /** Scratch directory outside the repo, one per worker. */
 export const NETA_SCRATCH_ENV = "NETA_SCRATCH";
 /**
  * Set on the leader's process. Holding this token authorizes the leader-only
- * channel commands (spawn, kill, answer, ...); workers never see it.
+ * channel commands; workers never see it.
  */
 export const NETA_LEADER_ENV = "NETA_LEADER_TOKEN";
 
@@ -31,9 +33,9 @@ export type WorkerChannelRequest =
 	/** Record a progress milestone in this worker's log. The leader pulls it; nothing is pushed. */
 	| { type: "progress"; workerId: string; token: string; text: string }
 	/** Block until the leader answers. Not available to juniors. */
-	| { type: "ask"; workerId: string; token: string; text: string }
+	| { type: "blocked"; workerId: string; token: string; text: string }
 	/** Post to the worker's room transcript. */
-	| { type: "say"; workerId: string; token: string; text: string }
+	| { type: "room-post"; workerId: string; token: string; text: string }
 	/** Read the worker's room transcript. */
 	| { type: "room"; workerId: string; token: string; tail?: number }
 	/** Read only active, queued and finished writers. */
@@ -44,21 +46,8 @@ export type WorkerChannelRequest =
  * so the same operations are reachable from a plain shell.
  */
 export type LeaderChannelRequest =
-	| {
-			type: "spawn";
-			token: string;
-			role: string;
-			tier: string;
-			task: string;
-			name?: string;
-			writer?: boolean;
-			room?: string;
-			backend?: string;
-			note?: string;
-	  }
 	| { type: "workers"; token: string }
 	| { type: "status"; token: string }
-	| { type: "log"; token: string; workerId: string }
 	/**
 	 * Read a worker's log without consuming it. `log` moves the leader's cursor;
 	 * this is for extra readers — the pane watcher, a person in another terminal.
@@ -75,7 +64,6 @@ export type LeaderChannelRequest =
 	/** Block until the listed workers are terminal or the timeout fires. */
 	| { type: "wait"; token: string; workerIds: string[]; timeoutMs?: number }
 	| { type: "send"; token: string; workerId: string; text: string }
-	| { type: "answer"; token: string; workerId: string; text: string }
 	/** Pane-only atomic input: answer a live question, otherwise queue the next turn. */
 	| { type: "pane-input"; token: string; workerId: string; text: string }
 	| { type: "kill"; token: string; workerId: string };
@@ -83,16 +71,13 @@ export type LeaderChannelRequest =
 export type ChannelRequest = WorkerChannelRequest | LeaderChannelRequest;
 
 export const LEADER_REQUEST_TYPES = new Set([
-	"spawn",
 	"workers",
 	"status",
-	"log",
 	"tail",
 	"room-tail",
 	"inspect",
 	"wait",
 	"send",
-	"answer",
 	"pane-input",
 	"kill",
 ]);

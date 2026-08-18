@@ -94,11 +94,10 @@ error.`;
 interface Surface {
 	/** How the leader is told it cannot edit. */
 	noEdit: string;
-	spawn: string;
-	spawnFails: string;
+	delegate: string;
+	writerQueue: string;
 	status: string;
 	wait: string;
-	answer: string;
 	/** How the leader steers a worker that is going the wrong way. */
 	send: string;
 	closing: string;
@@ -111,15 +110,12 @@ function surface(control: LeaderControl, tool: (base: string) => string): Surfac
 edit files through your shell either (no \`>\`, \`sed -i\`, \`tee\`, \`patch\`,
 \`git commit\` of your own work). Reading, searching, running tests, and
 inspecting git is your job.`,
-			spawn: `\`${APP_NAME} spawn --role <role> --tier <tier> [--writer] [--room <name>] <task>\``,
-			spawnFails: `additional writers queue automatically; the spawn result says queued vs running`,
-			status: `\`${APP_NAME} status\` shows the writer slot, queue, grouped worker states and open notes; \`${APP_NAME} workers\` lists workers; \`${APP_NAME} log <id>\` pulls a worker's new log lines; \`${APP_NAME} inspect <id>\` prints one worker's recent input and output, bounded, without consuming lines, and works for a worker with no tab; \`${APP_NAME} attach <id>\` takes over the caller's terminal with that worker's native backend TUI`,
+			delegate: "the neta_delegate MCP tool (there is no CLI delegation alias)",
+			writerQueue: `additional writers queue automatically; the delegate result says queued vs running`,
+			status: `\`${APP_NAME} status\` shows the writer slot, queue, grouped worker states and open notes; \`${APP_NAME} workers\` lists workers; \`${APP_NAME} inspect <id>\` prints one worker's bounded recent input and output; \`${APP_NAME} attach <id>\` takes over the caller's terminal with that worker's native backend TUI`,
 			wait: `\`${APP_NAME} wait <id> [<id>...]\``,
-			answer: `\`${APP_NAME} answer <id> <text>\``,
 			send: `\`${APP_NAME} send <id> <message>\``,
-			closing: `You manage workers by running the \`${APP_NAME}\` CLI with your shell tool. Run
-\`${APP_NAME} spawn --help\` if you need the exact flags. Workers report back
-through the same CLI and already know how to use it.`,
+			closing: `Use the MCP control plane for delegation. The CLI remains available for status, wait, send, inspect, attach, and kill.`,
 		};
 	}
 	return {
@@ -127,11 +123,10 @@ through the same CLI and already know how to use it.`,
 attempting one wastes a turn. You must not edit files through bash either (no
 \`>\`, \`sed -i\`, \`tee\`, \`patch\`, \`git commit\` of your own work). Reading,
 searching, running tests, and inspecting git is your job.`,
-		spawn: `\`${tool("neta_spawn")}\``,
-		spawnFails: `additional writers queue automatically; the spawn result says queued vs running`,
-		status: `\`${tool("neta_status")}\` shows the writer slot, queue, grouped worker states and open notes; \`${tool("neta_workers")}\` lists workers; \`${tool("neta_log")}\` pulls a worker's new log lines; \`${tool("neta_inspect")}\` expands one worker's recent input and output, bounded, without consuming lines, and works for a worker with no tab; \`${tool("neta_attach")}\` reopens a terminal worker's native backend TUI in a new tab`,
+		delegate: `\`${tool("neta_delegate")}\``,
+		writerQueue: `additional writers queue automatically; the delegate result says queued vs running`,
+		status: `\`${tool("neta_status")}\` shows the writer slot, queue, grouped worker states and open notes; \`${tool("neta_workers")}\` lists workers; \`${tool("neta_inspect")}\` expands one worker's bounded recent input and output; \`${tool("neta_attach")}\` reopens a terminal worker's native backend TUI in a new tab`,
 		wait: `\`${tool("neta_wait")}\``,
-		answer: `\`${tool("neta_answer")}\``,
 		send: `\`${tool("neta_send")}\``,
 		closing: `The worker CLI is \`${APP_NAME}\`; workers already know how to use it.`,
 	};
@@ -177,20 +172,6 @@ export function buildLeaderPrompt(options: LeaderPromptOptions): string {
 		.map((tier) => `${tier} -> ${tiers[tier]?.backend}`)
 		.join(", ");
 	const s = surface(control, toolName);
-
-	// A user with no charter and no tier mappings never chose a policy, so the
-	// first staffing plan is where they learn one exists and how to change it.
-	const disclosure =
-		!options.charter && !mapping
-			? `
-
-No charter and no tier mappings are configured, so the user is running on
-defaults they never chose. The first staffing plan of the session must state
-the assignment policy in effect — unconfigured tiers spread round-robin across
-installed backends; reviewer/debater diversity rule on — and how to change it:
-a CHARTER.md in this repo or in ~/.neta/, or persisted tier overrides in
-.neta/settings.json via neta_remember.`
-			: "";
 
 	// Embedded rather than referenced: the leader runs in someone else's CLI, so
 	// there is no guarantee it would read a path we merely pointed at.
@@ -240,9 +221,18 @@ ${options.recovery ? `${options.recovery}\n\n` : ""}## You do not write code
 ${s.noEdit} Changing files is a worker's job — including one-line fixes; those go
 to a journeyman with an exact instruction.
 
+Use ${toolName("neta_exec")} only as a guarded escape hatch for small, fully
+understood mechanical repository commands: for example \`git status\`, one
+targeted test, or a \`git push\` the user explicitly requested. Pass an argv
+array, never a shell string. It is not a way to edit source, run arbitrary
+scripts/interpreters, or implement ambiguous work; delegate those. Outward or
+destructive commands still need explicit user authority. Write-capable commands
+are refused while a worker owns or is queued for the writer slot.
+
 ## Delegating
 
-Spawn a worker with a role, a tier and a task: ${s.spawn}. Roles available: ${roleNames().join(", ")}.
+Delegate one or more workers in a single call with ${s.delegate}. One worker is normal. Omit team
+for independent workers; set team only when every worker should share one transcript. Roles available: ${roleNames().join(", ")}.
 
 ${tierLadder(available)}
 
@@ -255,16 +245,9 @@ default to a different backend than the most recent writer when multiple
 backends are installed (diversity rule). Debaters in one room are automatically
 spread across different vendors.
 
-Before spawning workers for a task, use ${toolName("neta_plan")} to compute backend assignments
-and present them to the user as a numbered staffing plan. Then proceed
-immediately without waiting for approval. The user may request changes
-conversationally ("use codex for the reviewer", "remember that expert scouts run
-on opencode"). Apply requested changes as explicit backend overrides when you
-spawn.${disclosure}
-
-When the user says "remember" after a backend override, use ${toolName("neta_remember")} to
-persist the change to .neta/settings.json so future sessions use the updated
-mapping.
+The delegate result reports the actual computed backend and read/write access for every worker.
+Do not present staffing-plan ceremony before delegating. Apply explicit backend overrides only
+when the user asks for one.
 
 You have no stake in which vendor runs a worker. Never favor your own backend
 when describing assignments or applying user overrides. The policy computes
@@ -278,7 +261,7 @@ Rules that matter in practice:
   "rails cable"). The user sees that name on the worker's tab, and five workers
   all called "scout" tell them nothing.
 - Reads parallelize; writes serialize. You may run several read-only workers at
-  once, but only one writer can run at a time. ${s.spawnFails}. Queue
+  once, but only one writer can run at a time. ${s.writerQueue}. Queue
   independent tasks freely, but when the next write depends on the previous
   worker's outcome, prefer waiting and briefing it fresh.
 - Every writer commits its work before finishing, so the next writer can be
@@ -289,8 +272,9 @@ Rules that matter in practice:
   is complete. Present open notes before declaring work done.
 - A journeyman that fails on ambiguity is a spec problem, not a model problem.
   Rewrite the spec and respawn rather than escalating by reflex.
-- Verify before you believe. When a worker says it fixed something, check the
-  diff or run the test yourself. Reports and reality diverge.
+- Verify before you believe. When a worker says it fixed something, use
+  ${toolName("neta_exec")} for a small targeted check, or delegate broader
+  verification. Reports and reality diverge.
 - Read to verify, not to explore. Reading is for answering a bounded question
   you already hold — checking a worker's claim, a failing test, a handoff
   assertion. Building understanding across files (maps, designs, surveys) goes
@@ -311,8 +295,8 @@ Rules that matter in practice:
   After spawning, either do other useful work and then wait, or wait
   immediately; if the wait times out, call it again. Your turn ends with
   delivered results or a blocking question, never with "workers are running".
-- A worker blocked on a question shows up as state "waiting"; answer it with
-  ${s.answer}.
+- A worker that calls neta_blocked stops and releases resources. Answer with ${s.send}; Neta
+  resumes the exact recorded conversation and delivers the answer as its next prompt.
 - A worker going the wrong way does not have to be killed and respawned. ${s.send}
   interrupts its current turn and makes your message its next prompt, in the same
   session, so it keeps everything it has learned. The result tells you whether the

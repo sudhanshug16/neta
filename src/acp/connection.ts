@@ -94,6 +94,8 @@ export interface AcpConnectionOptions {
 	model?: string;
 	/** Reject startup unless the exact composite model selection is confirmed. */
 	requireExactModel?: boolean;
+	/** Exact vendor session to resume; never falls back to session/new. */
+	resumeSessionId?: string;
 	onUpdate: (update: AcpSessionUpdate) => void;
 	onStderr: (text: string) => void;
 	onDenied: (kind: string, title: string, reason: "read-only" | "terminal") => void;
@@ -259,12 +261,22 @@ export class AcpConnection {
 				args: server.args,
 				env: Object.entries(server.env).map(([name, value]) => ({ name, value })),
 			}));
-			const session = await this.connection.agent.request(acp.methods.agent.session.new, {
-				cwd: this.options.cwd,
-				mcpServers,
-			});
-			this.sessionId = session.sessionId;
-			this.options.onVendorSession?.(session.sessionId);
+			const resumeSessionId = this.options.resumeSessionId;
+			if (resumeSessionId && initialized.agentCapabilities?.sessionCapabilities?.resume == null) {
+				throw new Error("Backend does not advertise ACP session/resume; refusing to create a replacement session.");
+			}
+			const session = resumeSessionId
+				? await this.connection.agent.request(acp.methods.agent.session.resume, {
+						sessionId: resumeSessionId,
+						cwd: this.options.cwd,
+						mcpServers,
+					})
+				: await this.connection.agent.request(acp.methods.agent.session.new, {
+						cwd: this.options.cwd,
+						mcpServers,
+					});
+			this.sessionId = resumeSessionId ?? (session as acp.NewSessionResponse).sessionId;
+			this.options.onVendorSession?.(this.sessionId);
 			await this.negotiate(session);
 		} catch (error) {
 			// Fire-and-forget during startup failure: we're re-throwing anyway.
@@ -281,14 +293,14 @@ export class AcpConnection {
 	 * requireExactModel and fail startup unless both model and thought level are
 	 * confirmed, so the caller cannot silently spend a turn on a fallback.
 	 */
-	private async negotiate(response: acp.NewSessionResponse): Promise<void> {
+	private async negotiate(response: acp.NewSessionResponse | acp.ResumeSessionResponse): Promise<void> {
 		const connection = this.connection;
 		const sessionId = this.sessionId;
 		if (!connection || !sessionId) return;
 		const chosen: string[] = [];
 		// configOptions is how the SDK reports models and modes now; bridges that
 		// predate it used these extension fields. Prefer the former, keep the latter.
-		const session = response as acp.NewSessionResponse & SessionNegotiation;
+		const session = response as (acp.NewSessionResponse | acp.ResumeSessionResponse) & SessionNegotiation;
 
 		this.offered.models = (session.models?.availableModels ?? []).map((model) => model.modelId);
 		this.offered.modes = (session.modes?.availableModes ?? []).map((mode) => mode.id);

@@ -111,7 +111,7 @@ export interface LeaderAdapter {
 	 * What the leader must actually type to call one of our tools.
 	 *
 	 * Hosts namespace MCP tools by server, and they do not agree on how, so a
-	 * prompt that says `neta_spawn` is wrong everywhere. Each of these was read
+	 * prompt that says `neta_delegate` is wrong everywhere. Each of these was read
 	 * off the running CLI, not guessed.
 	 */
 	toolName(base: string): string;
@@ -123,6 +123,7 @@ export function controlPlaneEnv(context: LeaderLaunchContext): Record<string, st
 		NETA_SOCKET: context.socket,
 		NETA_LEADER_TOKEN: context.token,
 		NETA_SESSION_ID: context.sessionId,
+		NETA_SESSION_TEMP_DIR: context.sessionDir,
 		NETA_CHECKPOINT_ID: context.logicalSessionId ?? context.sessionId,
 		NETA_LEADER_BACKEND: context.backend.id,
 		// Codex starts MCP servers with a cleared environment, so a control plane

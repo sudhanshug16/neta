@@ -37,10 +37,12 @@ export type WorkerState =
 	| "starting"
 	/** Working on its task. */
 	| "running"
-	/** Blocked on `neta ask`, waiting for the leader to answer. */
+	/** Legacy active state retained when reading older checkpoints. */
 	| "waiting"
 	/** Queued behind another writer, not yet started. */
 	| "queued"
+	/** Stopped after `neta_blocked`; resumable with `neta_send`. */
+	| "blocked"
 	/** Finished its task. */
 	| "done"
 	/** Crashed, refused, or was rejected by its backend. */
@@ -51,7 +53,9 @@ export type WorkerState =
 	| "interrupted";
 
 export function isTerminalState(state: WorkerState): boolean {
-	return state === "done" || state === "failed" || state === "killed" || state === "interrupted";
+	return (
+		state === "blocked" || state === "done" || state === "failed" || state === "killed" || state === "interrupted"
+	);
 }
 
 /**
@@ -127,7 +131,7 @@ export interface WorkerLogPage {
 export type WorkerEvent =
 	| { type: "done"; workerId: string; summary: string; dirtyFiles?: string[] }
 	| { type: "failed"; workerId: string; error: string }
-	| { type: "ask"; workerId: string; question: string };
+	| { type: "blocked"; workerId: string; question: string };
 
 export interface SpawnRequest {
 	role: string;
@@ -203,6 +207,8 @@ export interface WorkerSummary {
 	agentInfo?: string;
 	/** Why this worker has no visible mux tab. */
 	headlessReason?: string;
+	/** Number of confirmed ACP session/resume revivals. */
+	revivalCount?: number;
 }
 
 /**
@@ -263,7 +269,7 @@ export interface SteerResult {
 }
 
 /** What can end a leader's wait. */
-export type WaitWakeReason = "completed" | "first" | "ask" | "room" | "timeout";
+export type WaitWakeReason = "completed" | "first" | "blocked" | "room" | "timeout";
 
 /** Options for WorkerManager.wait. */
 export interface WaitOptions {
@@ -278,7 +284,7 @@ export interface WaitResult {
 	reason: WaitWakeReason;
 	/** The watched workers, summarized at wake time, in the order they were named. */
 	workers: WorkerSummary[];
-	/** The worker whose completion ("first") or question ("ask") woke the wait. */
+	/** The worker whose completion ("first") or question ("blocked") woke the wait. */
 	wokeBy?: WorkerSummary;
 	/** The new posts that woke the wait ("room"), and the room they landed in. */
 	roomActivity?: { room: string; posts: RoomPost[] };

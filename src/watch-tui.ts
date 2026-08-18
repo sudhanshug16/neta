@@ -6,7 +6,7 @@
  * calls as quiet one-liners, diffs colored, room posts as an attribution line
  * over a markdown body — and adds an input line. What you type becomes the
  * worker's next turn (the same path as the leader's neta_send). A blocked ask
- * is answered with `neta answer` from another terminal; watch input remains a
+ * is resumed with `neta send` from another terminal; watch input remains a
  * queued steering message. The stream still comes from the control plane's
  * non-consuming `tail`, so watching and typing never disturb what the leader sees.
  *

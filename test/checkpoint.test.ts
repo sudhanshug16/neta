@@ -25,7 +25,7 @@ import {
 import { WorkerManager } from "../src/orchestrator/manager.ts";
 import type { PromptOutcome, TransportOptions, WorkerTransportDriver } from "../src/orchestrator/transport.ts";
 import { processStartTime, writeSessionRecord } from "../src/session.ts";
-import { fixtureBackendConfig } from "./helpers.ts";
+import { fixtureBackendConfig, waitFor } from "./helpers.ts";
 
 class FakeTransport implements WorkerTransportDriver {
 	readonly prompts: string[] = [];
@@ -186,7 +186,10 @@ describe("durable session checkpoints", () => {
 		await manager.waitFor([completed.id], 1000);
 
 		const waiting = await manager.spawn({ role: "reviewer", tier: "architect", task: "decide rollout" });
-		void manager.ask(waiting.id, "Ship now?", new AbortController().signal);
+		await waitFor(() => expect(transports[1]?.prompts).toHaveLength(1));
+		manager.blocked(waiting.id, "Ship now?");
+		transports[1].finish({ ok: false, cancelled: true, summary: "Turn cancelled." });
+		await waitFor(() => expect(manager.get(waiting.id).state).toBe("blocked"));
 		const activeWriter = await manager.spawn({ role: "worker", tier: "expert", task: "implement", writer: true });
 		const queuedWriter = await manager.spawn({ role: "worker", tier: "expert", task: "follow up", writer: true });
 		manager.send(queuedWriter.id, "also update tests");
@@ -264,7 +267,7 @@ describe("durable session checkpoints", () => {
 		expect(openedPanes).toBe(0);
 		expect(hydrated.get(completed.id).state).toBe("done");
 		expect(hydrated.get(completed.id).result).toBe("Substantive auth handoff");
-		expect(hydrated.get(waiting.id)).toMatchObject({ state: "interrupted", stateBeforeStop: "waiting" });
+		expect(hydrated.get(waiting.id)).toMatchObject({ state: "blocked", pendingQuestion: "Ship now?" });
 		expect(hydrated.get(activeWriter.id)).toMatchObject({ state: "interrupted", stateBeforeStop: "running" });
 		expect(hydrated.get(queuedWriter.id)).toMatchObject({ state: "interrupted", stateBeforeStop: "queued" });
 		expect(hydrated.statusSnapshot().writerQueue.map((worker) => worker.id)).toEqual([queuedWriter.id]);

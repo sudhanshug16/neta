@@ -124,7 +124,8 @@ describe("neta (launching a leader)", () => {
 		const prompt = launched.argv[launched.argv.indexOf("--append-system-prompt") + 1];
 		expect(prompt).toContain("You are Neta, a leader");
 		// The name Claude Code will actually accept, not the bare tool name.
-		expect(prompt).toContain("mcp__neta__neta_spawn");
+		expect(prompt).toContain("mcp__neta__neta_delegate");
+		expect(prompt).not.toContain("mcp__neta__neta_spawn");
 
 		const mcp = JSON.parse(launched.files[launched.argv[launched.argv.indexOf("--mcp-config") + 1]]);
 		expect(mcp.mcpServers.neta.args.at(-1)).toBe("mcp");

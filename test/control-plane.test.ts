@@ -48,7 +48,18 @@ describe("neta mcp", () => {
 	it("starts, advertises the worker tools, and explains itself to the leader", async () => {
 		const tools = await client.listTools();
 
-		expect(tools.tools.map((tool) => tool.name)).toContain("neta_spawn");
+		expect(tools.tools.map((tool) => tool.name)).toEqual([
+			"neta_delegate",
+			"neta_exec",
+			"neta_workers",
+			"neta_status",
+			"neta_attach",
+			"neta_inspect",
+			"neta_wait",
+			"neta_send",
+			"neta_kill",
+			"neta_note",
+		]);
 		expect(client.getInstructions()).toContain("never do the work yourself");
 	});
 
@@ -71,18 +82,20 @@ describe("neta mcp", () => {
 		const tierClient = new Client({ name: "vendor-cli", version: "0.0.0" });
 		await tierClient.connect(tierTransport);
 		try {
-			const spawn = (await tierClient.listTools()).tools.find((tool) => tool.name === "neta_spawn");
-			const tiers = (spawn?.inputSchema.properties as { tier: { enum: string[] } }).tier.enum;
+			const delegate = (await tierClient.listTools()).tools.find((tool) => tool.name === "neta_delegate");
+			const tiers = (
+				delegate?.inputSchema.properties as { workers: { items: { properties: { tier: { enum: string[] } } } } }
+			).workers.items.properties.tier.enum;
 			expect(tiers).toEqual(["journeyman", "expert"]);
 
 			// And the refusal is real, not just a narrowed schema: this call names a
 			// tier the schema does not offer, the way a leader ignoring it would.
 			const refused = await tierClient.callTool({
-				name: "neta_spawn",
-				arguments: { role: "scout", tier: "architect", task: "think hard" },
+				name: "neta_delegate",
+				arguments: { workers: [{ role: "scout", tier: "architect", task: "think hard" }] },
 			});
 			expect(refused.isError).toBe(true);
-			expect(JSON.stringify(refused.content)).toContain("not available in this session");
+			expect(JSON.stringify(refused.content)).toContain("is unavailable");
 		} finally {
 			await tierClient.close().catch(() => {});
 			rmSync(home, { recursive: true, force: true });
@@ -90,8 +103,10 @@ describe("neta mcp", () => {
 	});
 
 	it("staffs every tier when the launcher chose none", async () => {
-		const spawn = (await client.listTools()).tools.find((tool) => tool.name === "neta_spawn");
-		const tiers = (spawn?.inputSchema.properties as { tier: { enum: string[] } }).tier.enum;
+		const delegate = (await client.listTools()).tools.find((tool) => tool.name === "neta_delegate");
+		const tiers = (
+			delegate?.inputSchema.properties as { workers: { items: { properties: { tier: { enum: string[] } } } } }
+		).workers.items.properties.tier.enum;
 		expect(tiers).toEqual(["apprentice", "journeyman", "expert", "architect"]);
 	});
 

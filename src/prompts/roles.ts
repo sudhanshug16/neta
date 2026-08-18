@@ -107,23 +107,17 @@ export function workingAgreement(options: WorkingAgreementOptions): string {
 		`- \`${options.binary} progress <message>\` records a progress milestone in your log. Use it when you start, when a major step completes, and when something surprising changes your plan — one line each, not a running commentary. The leader and the user read these at a glance; frequent trivial calls bury the signal.`,
 	);
 
-	if (options.tier === "apprentice" || options.tier === "journeyman") {
-		lines.push(
-			`- You cannot ask the leader questions. If the spec is ambiguous or blocked, stop and finish with a report saying exactly what is missing.`,
-		);
-	} else {
-		lines.push(
-			`- \`${options.binary} ask <question>\` blocks you until the leader answers. Use it only when you genuinely cannot proceed; try to answer it from the code first.`,
-		);
-	}
+	lines.push(
+		`- \`${options.binary} blocked <question>\` records a genuine blocker and ends this turn. The leader resumes this exact conversation with send. Try to answer it from the code first.`,
+	);
 
 	if (options.room) {
 		lines.push(
 			"",
 			"# Room",
 			"",
-			`- You are in room "${options.room}" with other workers.`,
-			`- \`${options.binary} say <message>\` posts to the room. \`${options.binary} room\` reads the transcript.`,
+			`- You are in team "${options.room}" with other workers.`,
+			`- \`${options.binary} room-post <message>\` posts to the transcript. \`${options.binary} room\` reads it.`,
 			"- Read the room before you post so you answer what was actually said.",
 		);
 	}

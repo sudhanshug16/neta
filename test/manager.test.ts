@@ -154,7 +154,7 @@ describe("WorkerManager", () => {
 		expect(transport.prompts[0]).toBe("map the auth flow");
 	});
 
-	it("returns the headless reason in neta_spawn output when no mux target exists", async () => {
+	it("returns the headless reason in neta_delegate output when no mux target exists", async () => {
 		const headlessManager = new WorkerManager({
 			cwd: process.cwd(),
 			agentDir: "/nonexistent-agent-dir",
@@ -165,9 +165,9 @@ describe("WorkerManager", () => {
 			createTransport: (options) => new FakeTransport(options),
 		});
 		try {
-			const spawn = leaderTools(headlessManager).find((tool) => tool.name === "neta_spawn");
-			if (!spawn) throw new Error("neta_spawn was not registered.");
-			const response = await spawn.run({ role: "scout", tier: "expert", task: "inspect" });
+			const spawn = leaderTools(headlessManager).find((tool) => tool.name === "neta_delegate");
+			if (!spawn) throw new Error("neta_delegate was not registered.");
+			const response = await spawn.run({ workers: [{ role: "scout", tier: "expert", task: "inspect" }] });
 			const output = response.content[0];
 
 			expect(output?.type).toBe("text");
@@ -360,14 +360,14 @@ describe("WorkerManager", () => {
 		expect(manager.tailLog(first.id).archived).toBe(false);
 	});
 
-	it("tells apprentices and journeymen they cannot ask, while experts can", async () => {
+	it("gives every tier the terminal blocker instruction", async () => {
 		await manager.spawn({ role: "worker", tier: "apprentice", task: "rename foo to bar" });
 		await manager.spawn({ role: "worker", tier: "journeyman", task: "run the named test" });
 		await manager.spawn({ role: "worker", tier: "architect", task: "find the leak" });
 
-		expect(transports[0].options.systemPrompt).toContain("You cannot ask the leader questions");
-		expect(transports[1].options.systemPrompt).toContain("You cannot ask the leader questions");
-		expect(transports[2].options.systemPrompt).toContain("ask <question>` blocks you");
+		expect(transports[0].options.systemPrompt).toContain("`neta blocked <question>`");
+		expect(transports[1].options.systemPrompt).toContain("`neta blocked <question>`");
+		expect(transports[2].options.systemPrompt).toContain("`neta blocked <question>`");
 	});
 
 	it("hands the worker the backend its tier maps to", async () => {
@@ -883,35 +883,6 @@ describe("WorkerManager", () => {
 		expect(manager.get(summary.id).lastProgress?.text).toBe("found it");
 	});
 
-	it("blocks a expert on ask until the leader answers", async () => {
-		const summary = await manager.spawn({ role: "worker", tier: "expert", task: "do it" });
-		const abort = new AbortController();
-
-		const pending = manager.ask(summary.id, "which database?", abort.signal);
-		await flush();
-
-		expect(manager.get(summary.id).state).toBe("waiting");
-		expect(events).toEqual([{ type: "ask", workerId: summary.id, question: "which database?" }]);
-
-		manager.answer(summary.id, "postgres");
-		expect(await pending).toEqual({ ok: true, text: "postgres" });
-		expect(manager.get(summary.id).state).toBe("running");
-	});
-
-	it("refuses ask for apprentices and journeymen, and tells them what to do instead", async () => {
-		const apprentice = await manager.spawn({ role: "worker", tier: "apprentice", task: "rename it" });
-		const journeyman = await manager.spawn({ role: "worker", tier: "journeyman", task: "run the named test" });
-
-		const response = await manager.ask(apprentice.id, "which one?", new AbortController().signal);
-
-		expect(response).toEqual({
-			ok: false,
-			error: "Apprentice and journeyman workers cannot ask the leader. Stop and finish with a report describing what is missing.",
-		});
-		expect(await manager.ask(journeyman.id, "which test?", new AbortController().signal)).toEqual(response);
-		expect(manager.get(apprentice.id).state).toBe("running");
-	});
-
 	it("shares a room transcript between its members", async () => {
 		const first = await manager.spawn({ role: "debater", tier: "architect", task: "argue for", room: "db" });
 		const second = await manager.spawn({ role: "debater", tier: "architect", task: "argue against", room: "db" });
@@ -1306,24 +1277,6 @@ describe("WorkerManager", () => {
 		expect(manager.get(second.id).state).toBe("running");
 	});
 
-	// A blocked worker's question used to sit until every watched worker finished
-	// or the timeout fired: waiters were only resolved in the terminal transition,
-	// never when a worker entered "waiting" through ask.
-	it("wakes a wait when a watched worker blocks on a question", async () => {
-		const summary = await manager.spawn({ role: "worker", tier: "expert", task: "do it" });
-
-		const waiting = manager.wait([summary.id], 5000);
-		const pending = manager.ask(summary.id, "which database?", new AbortController().signal);
-
-		const result = await waiting;
-		expect(result.reason).toBe("ask");
-		expect(result.wokeBy?.id).toBe(summary.id);
-		expect(result.wokeBy?.pendingQuestion).toBe("which database?");
-
-		manager.answer(summary.id, "postgres");
-		expect(await pending).toEqual({ ok: true, text: "postgres" });
-	});
-
 	it("wakes a wait on room activity when opted in", async () => {
 		const member = await manager.spawn({ role: "debater", tier: "architect", task: "argue", room: "db" });
 		manager.postToRoom("db", "leader", "leader", "old post");
@@ -1503,25 +1456,6 @@ describe("WorkerManager", () => {
 		expect(manager.get(reader.id).state).toBe("killed");
 	});
 
-	it("routes pane input through steering even while a worker has a pending question", async () => {
-		const summary = await manager.spawn({ role: "worker", tier: "expert", task: "do it" });
-		const pending = manager.ask(summary.id, "which database?", new AbortController().signal);
-		await flush();
-
-		const response = await manager.leader(
-			{ type: "pane-input", token: manager.leaderToken, workerId: summary.id, text: "postgres" },
-			new AbortController().signal,
-		);
-
-		expect(response.ok).toBe(true);
-		expect(response.ok && response.text).toContain("neta answer ro1 <answer>");
-		expect(manager.get(summary.id).state).toBe("waiting");
-		expect(transports[0].cancels).toBe(0);
-		expect(transports[0].prompts).toEqual(["do it"]);
-		manager.answer(summary.id, "postgres");
-		expect(await pending).toEqual({ ok: true, text: "postgres" });
-	});
-
 	// The channel is opened on demand rather than at startup, so a leader session
 	// that never delegates never creates a socket. Deduplication is the caller's
 	// job; the manager just asks before every spawn.
@@ -1577,69 +1511,13 @@ describe("WorkerManager", () => {
 			});
 		});
 
-		it("spawns a worker and reports what was started", async () => {
-			const response = await manager.leader(
-				{ type: "spawn", token: manager.leaderToken, role: "scout", tier: "expert", task: "map auth" },
-				signal,
-			);
-
-			expect(response.ok).toBe(true);
-			expect(response.ok && response.text).toContain("scout/expert, read-only");
-			expect(response.ok && response.text).toContain(
-				"Running — collect it with neta wait before ending your turn; a worker that finishes after your turn ends reaches nobody.",
-			);
-			expect(transports[0].prompts[0]).toBe("map auth");
-		});
-
-		it("rejects an unknown tier by name instead of spawning", async () => {
-			const response = await manager.leader(
-				{ type: "spawn", token: manager.leaderToken, role: "scout", tier: "principal", task: "x" },
-				signal,
-			);
-
-			expect(response).toEqual({
-				ok: false,
-				error: 'Unknown tier "principal". Tiers: apprentice, journeyman, expert, architect.',
-			});
-			expect(transports).toHaveLength(0);
-		});
-
-		it("queues a second writer through the channel and reports queued status", async () => {
-			await manager.spawn({ role: "worker", tier: "expert", task: "first", writer: true });
-
-			const response = await manager.leader(
-				{ type: "spawn", token: manager.leaderToken, role: "worker", tier: "expert", task: "second", writer: true },
-				signal,
-			);
-
-			expect(response.ok).toBe(true);
-			expect(response.ok && response.text).toContain("Queued");
-			expect(response.ok && response.text).toContain("rw1");
-			expect(response.ok && response.text).toContain(
-				"Queued — when it starts, collect it with neta wait before ending your turn; a worker that finishes after your turn ends reaches nobody.",
-			);
-		});
-
-		it("lists workers, drains a log, and answers a blocked worker", async () => {
+		it("lists workers with their latest milestone", async () => {
 			const summary = await manager.spawn({ role: "worker", tier: "expert", task: "do it" });
 			manager.progress(summary.id, "reading auth.ts");
 
 			const listed = await manager.leader({ type: "workers", token: manager.leaderToken }, signal);
 			expect(listed.ok && listed.text).toContain(`${summary.id} [worker/expert`);
 			expect(listed.ok && listed.text).toContain("last: reading auth.ts");
-
-			const log = await manager.leader({ type: "log", token: manager.leaderToken, workerId: summary.id }, signal);
-			expect(log.ok && log.text).toContain("[progress] reading auth.ts");
-
-			const pending = manager.ask(summary.id, "which database?", signal);
-			await flush();
-			const answered = await manager.leader(
-				{ type: "answer", token: manager.leaderToken, workerId: summary.id, text: "postgres" },
-				signal,
-			);
-
-			expect(answered.ok).toBe(true);
-			expect(await pending).toEqual({ ok: true, text: "postgres" });
 		});
 
 		it("waits for the named workers and returns their results", async () => {

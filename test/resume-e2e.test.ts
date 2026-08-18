@@ -101,7 +101,11 @@ function leaderEnv(options: {
 	record: string;
 	quitFile: string;
 	codexHome?: string;
+	mcpCalls?: Array<{ name: string; arguments: Record<string, unknown> }>;
 }): Record<string, string> {
+	const callsFile = options.mcpCalls ? join(scratch("neta-mcp-calls-"), "calls.json") : undefined;
+	const resultFile = options.mcpCalls ? join(scratch("neta-mcp-results-"), "results.json") : undefined;
+	if (callsFile) writeFileSync(callsFile, JSON.stringify(options.mcpCalls), "utf-8");
 	return {
 		...process.env,
 		PATH: `${options.binDir}${delimiter}${process.env.PATH}`,
@@ -114,6 +118,7 @@ function leaderEnv(options: {
 		FAKE_LEADER_QUIT_FILE: options.quitFile,
 		FAKE_LEADER_HOST_MCP: "1",
 		CODEX_HOME: options.codexHome ?? join(options.agentDir, "real-codex"),
+		...(callsFile ? { FAKE_LEADER_MCP_CALLS: callsFile, FAKE_LEADER_MCP_RESULT: resultFile as string } : {}),
 	} as Record<string, string>;
 }
 
@@ -178,7 +183,24 @@ describe("closing and reopening a session", () => {
 		const repo = scratch("neta-resume-repo-");
 		writeSettings(agentDir);
 		const firstRecord = join(scratch("neta-record-"), "first.json");
-		const env = leaderEnv({ binDir, agentDir, record: firstRecord, quitFile: join(scratch("neta-quit-"), "quit") });
+		const env = leaderEnv({
+			binDir,
+			agentDir,
+			record: firstRecord,
+			quitFile: join(scratch("neta-quit-"), "quit"),
+			mcpCalls: [
+				{
+					name: "neta_delegate",
+					arguments: {
+						team: "review",
+						workers: [
+							{ role: "scout", tier: "expert", name: "auth", task: "WAIT_FOR_NOTICE SUBSTANTIVE_HANDOFF" },
+							{ role: "worker", tier: "expert", writer: true, task: "config work" },
+						],
+					},
+				},
+			],
+		});
 
 		const leader = startLeader("claude", repo, env);
 		await waitFor(() => expect(existsSync(join(agentDir, "sessions"))).toBe(true), 20000);
@@ -194,29 +216,6 @@ describe("closing and reopening a session", () => {
 
 		// Real worker state to carry across the restart, including the automatic
 		// writer notice that must not overwrite the reader's substantive handoff.
-		await neta(
-			[
-				"spawn",
-				"--session",
-				session.id,
-				"--role",
-				"scout",
-				"--tier",
-				"expert",
-				"--name",
-				"auth",
-				"--room",
-				"review",
-				"WAIT_FOR_NOTICE SUBSTANTIVE_HANDOFF",
-			],
-			agentDir,
-			repo,
-		);
-		await neta(
-			["spawn", "--session", session.id, "--role", "worker", "--tier", "expert", "--writer", "config work"],
-			agentDir,
-			repo,
-		);
 		await neta(["wait", "ro1", "rw2", "--timeout", "30", "--session", session.id], agentDir, repo);
 		const beforeClose = readCheckpointFile(agentDir, checkpointId);
 		expect(beforeClose.leader.vendorConversationId).toBe(conversationId);
@@ -308,6 +307,12 @@ describe("closing and reopening a session", () => {
 			record: firstRecord,
 			quitFile: join(scratch("neta-quit-"), "quit"),
 			codexHome: realCodexHome,
+			mcpCalls: [
+				{
+					name: "neta_delegate",
+					arguments: { workers: [{ role: "scout", tier: "expert", name: "codex scout", task: "hello" }] },
+				},
+			],
 		});
 
 		const leader = startLeader("codex", repo, env);
@@ -334,11 +339,6 @@ describe("closing and reopening a session", () => {
 		const conversationId = readCheckpointFile(agentDir, checkpointId).leader.vendorConversationId as string;
 		expect(conversationId).toMatch(/^[0-9a-f-]{36}$/);
 
-		await neta(
-			["spawn", "--session", session.id, "--role", "scout", "--tier", "expert", "--name", "codex scout", "hello"],
-			agentDir,
-			repo,
-		);
 		await neta(["wait", "ro1", "--timeout", "30", "--session", session.id], agentDir, repo);
 		await leader.quit();
 
@@ -485,6 +485,18 @@ describe("closing and reopening a session", () => {
 			agentDir,
 			record: join(scratch("neta-record-"), "first.json"),
 			quitFile: join(scratch("neta-quit-"), "quit"),
+			mcpCalls: [
+				{
+					name: "neta_delegate",
+					arguments: {
+						workers: [
+							{ role: "scout", tier: "expert", task: "HOLD_FOREVER reader" },
+							{ role: "worker", tier: "expert", writer: true, task: "HOLD_FOREVER writer" },
+							{ role: "worker", tier: "expert", writer: true, task: "queued write" },
+						],
+					},
+				},
+			],
 		});
 		const promptMarker = join(scratch("neta-marker-"), "prompted");
 		writeFileSync(
@@ -503,25 +515,11 @@ describe("closing and reopening a session", () => {
 		const session = liveSession(agentDir);
 		const checkpointId = session.checkpointId as string;
 
-		await neta(
-			["spawn", "--session", session.id, "--role", "scout", "--tier", "expert", "HOLD_FOREVER reader"],
-			agentDir,
-			repo,
-		);
-		await neta(
-			["spawn", "--session", session.id, "--role", "worker", "--tier", "expert", "--writer", "HOLD_FOREVER writer"],
-			agentDir,
-			repo,
-		);
-		await neta(
-			["spawn", "--session", session.id, "--role", "worker", "--tier", "expert", "--writer", "queued write"],
-			agentDir,
-			repo,
-		);
 		await waitFor(() => {
 			const groups = liveSession(agentDir).workerGroups ?? [];
 			expect(groups.length).toBe(2);
 		}, 20000);
+		await waitFor(() => expect(readCheckpointFile(agentDir, checkpointId).workers).toHaveLength(3), 20000);
 		const groups = (liveSession(agentDir).workerGroups ?? []).map((group) => group.pgid);
 
 		// Kill the manager the way a crash does: no shutdown, no cleanup.
@@ -557,15 +555,6 @@ describe("closing and reopening a session", () => {
 		expect(checkpoint.liveLease?.managerId).toBe(resumedSession.id);
 		expect(checkpoint.shutdown).toBeUndefined();
 
-		// The writer slot is free again only because death was proven.
-		const spawned = await neta(
-			["spawn", "--session", resumedSession.id, "--role", "worker", "--tier", "expert", "--writer", "fresh write"],
-			agentDir,
-			repo,
-		);
-		expect(spawned.stdout).toContain("rw4");
-
-		await neta(["kill", "rw4", "--session", resumedSession.id], agentDir, repo);
 		await resumed.quit();
 		// The crashed run's vendor process is still sitting there; let it go too.
 		await leader.quit();
@@ -599,7 +588,18 @@ describe("closing and reopening a session", () => {
 		const repo = scratch("neta-resume-repo-");
 		writeSettings(agentDir);
 		const firstRecord = join(scratch("neta-record-"), "first.json");
-		const env = leaderEnv({ binDir, agentDir, record: firstRecord, quitFile: join(scratch("neta-quit-"), "quit") });
+		const env = leaderEnv({
+			binDir,
+			agentDir,
+			record: firstRecord,
+			quitFile: join(scratch("neta-quit-"), "quit"),
+			mcpCalls: [
+				{
+					name: "neta_delegate",
+					arguments: { workers: [{ role: "scout", tier: "expert", name: "oc", task: "SUBSTANTIVE_HANDOFF" }] },
+				},
+			],
+		});
 
 		const leader = startLeader("opencode", repo, env);
 		await waitFor(() => void liveSession(agentDir), 20000).catch((error) => {
@@ -631,22 +631,6 @@ describe("closing and reopening a session", () => {
 		const conversationId = readCheckpointFile(agentDir, checkpointId).leader.vendorConversationId as string;
 		expect(conversationId).toMatch(/^ses_[A-Za-z0-9]{16,}$/);
 
-		await neta(
-			[
-				"spawn",
-				"--session",
-				session.id,
-				"--role",
-				"scout",
-				"--tier",
-				"expert",
-				"--name",
-				"oc",
-				"SUBSTANTIVE_HANDOFF",
-			],
-			agentDir,
-			repo,
-		);
 		await neta(["wait", "ro1", "--timeout", "30", "--session", session.id], agentDir, repo);
 		await leader.quit();
 
@@ -717,6 +701,12 @@ describe("closing and reopening a session", () => {
 			agentDir,
 			record: join(scratch("neta-record-"), "first.json"),
 			quitFile: join(scratch("neta-quit-"), "quit"),
+			mcpCalls: [
+				{
+					name: "neta_delegate",
+					arguments: { workers: [{ role: "worker", tier: "expert", writer: true, task: "HOLD_FOREVER work" }] },
+				},
+			],
 		});
 
 		const leader = startLeader("opencode", repo, env);
@@ -729,12 +719,8 @@ describe("closing and reopening a session", () => {
 		);
 		const conversationId = readCheckpointFile(agentDir, checkpointId).leader.vendorConversationId as string;
 
-		await neta(
-			["spawn", "--session", session.id, "--role", "worker", "--tier", "expert", "--writer", "HOLD_FOREVER work"],
-			agentDir,
-			repo,
-		);
 		await waitFor(() => expect((liveSession(agentDir).workerGroups ?? []).length).toBe(1), 20000);
+		await waitFor(() => expect(readCheckpointFile(agentDir, checkpointId).workers).toHaveLength(1), 20000);
 		const groups = (liveSession(agentDir).workerGroups ?? []).map((group) => group.pgid);
 
 		process.kill(session.pid, "SIGKILL");

@@ -37,7 +37,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 
@@ -48,6 +48,10 @@ const bare = process.argv.includes("--bare");
 const missingExactOpus = process.argv.includes("--missing-exact-opus");
 const missingMax = process.argv.includes("--missing-max");
 const failSetConfig = process.argv.includes("--fail-set-config");
+const unsupportedResume = process.argv.includes("--unsupported-resume");
+const rejectResume = process.argv.includes("--reject-resume");
+const sessionStoreIndex = process.argv.indexOf("--session-store");
+const sessionStore = sessionStoreIndex === -1 ? undefined : process.argv[sessionStoreIndex + 1];
 // A Claude-shaped backend whose own default is the model Neta must never run.
 const claudeShaped = process.argv.includes("--claude-fable-default");
 const missingSonnet = process.argv.includes("--missing-sonnet");
@@ -58,13 +62,21 @@ const barrierFile = barrierFileIndex === -1 ? undefined : process.argv[barrierFi
 const barrierReadyFileIndex = process.argv.indexOf("--barrier-ready-file");
 const barrierReadyFile = barrierReadyFileIndex === -1 ? undefined : process.argv[barrierReadyFileIndex + 1];
 
-const sessions = new Set();
+const stored =
+	sessionStore && existsSync(sessionStore)
+		? JSON.parse(readFileSync(sessionStore, "utf-8"))
+		: { counter: 0, sessions: {} };
+const sessions = new Set(Object.keys(stored.sessions));
 const activePrompts = new Map();
 let counter = 0;
 /** Whatever the client asked us to launch at session/new, echoed back on request. */
 let mcpServers = [];
 const selectedConfig = new Map();
 let selectedLegacyModel = "test-model";
+
+function persist() {
+	if (sessionStore) writeFileSync(sessionStore, JSON.stringify(stored), "utf-8");
+}
 
 /** The configOptions wire shape, with the selected model and thought level. */
 function configOptions(current, thoughtLevel = "medium") {
@@ -156,6 +168,15 @@ async function runPrompt(params, cx, signal) {
 	if (promptMarker) writeFileSync(promptMarker, "prompted\n", "utf-8");
 	const sessionId = params.sessionId;
 	const text = params.prompt.map((block) => (block.type === "text" ? block.text : "")).join("");
+	const saved = stored.sessions[sessionId];
+	if (saved) {
+		saved.history.push(text);
+		persist();
+	}
+	if (text.includes("HISTORY")) {
+		await say(cx, sessionId, JSON.stringify(saved?.history ?? []));
+		return { stopReason: "end_turn" };
+	}
 
 	if (text.includes("FAIL")) {
 		await say(cx, sessionId, "giving up");
@@ -343,7 +364,8 @@ async function runPrompt(params, cx, signal) {
 	if (text.includes("HOLD_FOREVER")) {
 		// A worker that is still running when its manager is killed. Recovery has
 		// to prove this process group is gone before it may hydrate.
-		await new Promise(() => {});
+		await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+		return { stopReason: "cancelled" };
 	}
 
 	if (text.includes("SUBSTANTIVE_HANDOFF")) {
@@ -370,13 +392,22 @@ const stream = acp.ndJsonStream(Writable.toWeb(process.stdout), Readable.toWeb(p
 acp.agent({ name: "fake-acp-agent" })
 	.onRequest("initialize", () => ({
 		protocolVersion: acp.PROTOCOL_VERSION,
-		agentCapabilities: {},
+		agentCapabilities: unsupportedResume ? {} : { sessionCapabilities: { resume: {} } },
 		agentInfo: { name: "fake-acp-agent", version: "1.0.0" },
 	}))
 	.onRequest("session/new", (ctx) => {
 		mcpServers = ctx.params.mcpServers ?? [];
-		const sessionId = `s${sessions.size + 1}`;
+		const sessionId = `s${++stored.counter}`;
 		sessions.add(sessionId);
+		stored.sessions[sessionId] = {
+			cwd: ctx.params.cwd,
+			mcpServers,
+			history: [],
+			model: "fixture-default",
+			thoughtLevel: "medium",
+			mode: "test-mode",
+		};
+		persist();
 		if (bare) return { sessionId };
 		const response = {
 			sessionId,
@@ -396,12 +427,32 @@ acp.agent({ name: "fake-acp-agent" })
 		}
 		return response;
 	})
+	.onRequest(acp.methods.agent.session.resume, (ctx) => {
+		if (rejectResume) throw new Error("fixture rejected resume");
+		const saved = stored.sessions[ctx.params.sessionId];
+		if (!saved) throw new Error(`unknown session ${ctx.params.sessionId}`);
+		if (saved.cwd !== ctx.params.cwd) throw new Error("resume cwd mismatch");
+		mcpServers = ctx.params.mcpServers ?? [];
+		saved.mcpServers = mcpServers;
+		selectedConfig.set(ctx.params.sessionId, { model: saved.model, thoughtLevel: saved.thoughtLevel });
+		persist();
+		return {
+			modes: { availableModes: [{ id: "test-mode" }], currentModeId: saved.mode },
+			configOptions: useConfigOptions ? configOptions(saved.model, saved.thoughtLevel) : undefined,
+		};
+	})
 	.onRequest(acp.methods.agent.session.setConfigOption, (ctx) => {
 		if (failSetConfig) throw new Error("fixture setConfig failure");
 		const selected = selectedConfig.get(ctx.params.sessionId);
 		if (!selected) throw new Error("config options are not supported");
 		if (ctx.params.configId === "model") selected.model = ctx.params.value;
 		if (ctx.params.configId === "thought-level") selected.thoughtLevel = ctx.params.value;
+		const saved = stored.sessions[ctx.params.sessionId];
+		if (saved) {
+			saved.model = selected.model;
+			saved.thoughtLevel = selected.thoughtLevel;
+			persist();
+		}
 		return { configOptions: configOptions(selected.model, selected.thoughtLevel) };
 	})
 	.onRequest("session/set_model", { parse: (params) => params }, (ctx) => {

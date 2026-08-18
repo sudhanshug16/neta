@@ -55,6 +55,7 @@ import {
 	type WorkerSummary,
 	type WorkerUsage,
 } from "../types.ts";
+import { classifyRepoCommand, executeRepoCommand, type RepoExecRequest, type RepoExecResult } from "./exec.ts";
 import {
 	formatInspection,
 	formatLastProgress,
@@ -78,6 +79,7 @@ interface WorkerRecord {
 	writer: boolean;
 	room: string | undefined;
 	task: string;
+	cwd: string;
 	state: WorkerState;
 	stateBeforeStop?: ActiveWorkerState;
 	startedAt: number;
@@ -99,7 +101,7 @@ interface WorkerRecord {
 	logFirstIndex: number;
 	/** Log entries the leader has already been shown. */
 	logCursor: number;
-	pendingAsk?: { question: string; resolve: (response: ChannelResponse) => void };
+	/** Legacy in-process test hook; no public tool or socket command exposes it. */
 	/** Hydrated question text retained without recreating its live resolver callback. */
 	pendingQuestion?: string;
 	/** The worker's most recent `neta progress`, for a "last:" line in listings. */
@@ -150,6 +152,16 @@ interface WorkerRecord {
 	processGroupId?: number;
 	/** Why this worker has no visible mux tab. */
 	headlessReason?: string;
+	revivalCount: number;
+	/** Message to deliver after a queued writer reacquires its slot. */
+	revivalMessage?: string;
+	/** A native TUI was opened for this persisted conversation; ownership is no longer provable. */
+	nativeAttached?: boolean;
+	/** Exact turn which invoked neta_blocked. */
+	blockedTurn?: number;
+	revivalFromState?: "blocked" | "done" | "failed";
+	revivalPreviousQueuedBehind?: string;
+	reviving?: Promise<SteerResult>;
 }
 
 /** Opens a pane per worker, when a multiplexer is running. */
@@ -195,7 +207,7 @@ export interface WorkerManagerOptions {
 	 * door a sandboxed worker uses to reach Neta, since its shell may not be
 	 * allowed to open a socket.
 	 */
-	workerMcpServers?: (workerId: string, scratchDir: string, token: string) => WorkerMcpServer[];
+	workerMcpServers?: (workerId: string, scratchDir: string, token: string, team?: string) => WorkerMcpServer[];
 	/** Opens a pane per worker. Omitted means headless. */
 	panes?: WorkerPaneHost;
 	/** The explicit reason every worker runs headless when there is no pane host. */
@@ -204,6 +216,8 @@ export interface WorkerManagerOptions {
 	onWorkerProcessGroup?: (workerId: string, pgid: number | undefined) => void;
 	/** Test seam for the public steering deadline. */
 	steerTimeoutMs?: number;
+	/** Session-scoped directory for full neta_exec audit output. */
+	execOutputDir?: string;
 	/** Test seam: swap in a fake transport without touching real CLIs. */
 	createTransport?: TransportFactory;
 	/** Durable semantic checkpoint. Live channel and process data never enters it. */
@@ -288,6 +302,10 @@ export class WorkerManager implements ChannelHandler {
 	private readonly writerQueueHistory: CheckpointWriterQueueEvent[] = [];
 	/** Shutdown has begun; no queued writer may acquire the slot. */
 	private disposed = false;
+	/** A write-capable neta_exec command temporarily owns the writer safety boundary. */
+	private execWriterGuard = false;
+	private readonly execControllers = new Set<AbortController>();
+	private readonly execPromises = new Set<Promise<RepoExecResult>>();
 	/** Hydrated writers remain held until recovery proves their old processes are dead. */
 	private recoveryWriterSlotHeld = false;
 	/** Set only when this run ended with every worker process confirmed gone. */
@@ -363,6 +381,7 @@ export class WorkerManager implements ChannelHandler {
 				writer: worker.writer,
 				room: worker.room,
 				task: worker.task,
+				cwd: worker.cwd ?? checkpoint.canonicalCwd,
 				state,
 				stateBeforeStop,
 				startedAt: worker.startedAt,
@@ -399,6 +418,7 @@ export class WorkerManager implements ChannelHandler {
 				pendingBriefLeaderMessages: [],
 				headAtStart: worker.headAtStart,
 				headlessReason: worker.headlessReason,
+				revivalCount: worker.revivalCount ?? 0,
 			});
 			if (wasActive) {
 				const link = worker.noteId
@@ -470,6 +490,7 @@ export class WorkerManager implements ChannelHandler {
 				writer: record.writer,
 				room: record.room,
 				task: record.task,
+				cwd: record.cwd,
 				state: record.state,
 				stateBeforeStop: record.stateBeforeStop,
 				startedAt: record.startedAt,
@@ -482,7 +503,7 @@ export class WorkerManager implements ChannelHandler {
 				log: record.log.map((entry) => ({ ...entry })),
 				logFirstIndex: record.logFirstIndex,
 				logCursor: record.logCursor,
-				pendingQuestion: record.pendingAsk?.question ?? record.pendingQuestion,
+				pendingQuestion: record.pendingQuestion,
 				lastProgress: record.lastProgress ? { ...record.lastProgress } : undefined,
 				usage: record.usage ? { ...record.usage } : undefined,
 				vendorSessionId: record.vendorSessionId,
@@ -496,6 +517,7 @@ export class WorkerManager implements ChannelHandler {
 				pendingBrief: [...record.pendingBrief],
 				headAtStart: record.headAtStart,
 				headlessReason: record.headlessReason,
+				revivalCount: record.revivalCount,
 			})),
 			activeWriter: this.activeWriter,
 			writerQueue: [...this.writerQueue],
@@ -568,7 +590,7 @@ export class WorkerManager implements ChannelHandler {
 	/**
 	 * Check a whole batch before any of it happens.
 	 *
-	 * A group spawn that validated per member would seed the room and start the
+	 * A batch that validated per member would seed the team and start the
 	 * first two workers before refusing the third, leaving the leader to clean up
 	 * a half-built room. Reporting every unavailable tier at once also beats
 	 * making the leader discover them one spawn at a time.
@@ -579,12 +601,37 @@ export class WorkerManager implements ChannelHandler {
 		this.assertTierAvailable(unavailable[0]);
 	}
 
+	/** Validate a complete delegate batch without mutating assignment cursors or session state. */
+	validateDelegation(requests: readonly SpawnRequest[]): void {
+		this.assertTiersAvailable(requests.map((request) => request.tier));
+		for (const request of requests) {
+			if (!loadRoleText(request.role, this.options.cwd, this.options.agentDir)) {
+				throw new Error(`Unknown role "${request.role}". Available roles: ${roleNames().join(", ")}.`);
+			}
+			if (request.note && !this.notes.has(request.note)) throw new Error(`Unknown note id "${request.note}".`);
+		}
+		const assignments = this.planAssignments([...requests]);
+		for (const [index, assignment] of assignments.entries()) {
+			const backend = this.options.config.resolve(assignment.tier, assignment.backend, assignment.writer);
+			assertClaudeModelAllowed(backend.claudeLineage, backend.model, `delegate ${assignment.tier} assignment`);
+			if (requests[index].writer && this.recoveryWriterSlotHeld) {
+				throw new Error("Recovered writer slot is held until prior worker process death is proven.");
+			}
+			if (requests[index].writer && this.execWriterGuard) {
+				throw new Error("A write-capable neta_exec command owns the writer safety guard; wait for it to finish.");
+			}
+		}
+	}
+
 	async spawn(request: SpawnRequest): Promise<WorkerSummary> {
 		// First, before the writer-slot reservation, the batch archive sweep, the
 		// worker counter, or the scratch directory: a refused spawn must leave the
 		// session exactly as it found it.
 		this.assertTierAvailable(request.tier);
 		const writer = request.writer ?? false;
+		if (writer && this.execWriterGuard) {
+			throw new Error("A write-capable neta_exec command owns the writer safety guard; wait for it to finish.");
+		}
 		if (writer && this.recoveryWriterSlotHeld) {
 			throw new Error("Recovered writer slot is held until prior worker process death is proven.");
 		}
@@ -657,6 +704,7 @@ export class WorkerManager implements ChannelHandler {
 			writer,
 			room: request.room,
 			task: request.task,
+			cwd: this.options.cwd,
 			state: shouldQueue ? "queued" : "starting",
 			startedAt: Date.now(),
 			updatedAt: Date.now(),
@@ -676,6 +724,7 @@ export class WorkerManager implements ChannelHandler {
 			noteId: request.note,
 			pendingBrief: [],
 			pendingBriefLeaderMessages: [],
+			revivalCount: 0,
 		};
 
 		this.workers.set(id, record);
@@ -773,6 +822,14 @@ export class WorkerManager implements ChannelHandler {
 	 */
 	async steer(workerId: string, message: string, options: { timeoutMs?: number } = {}): Promise<SteerResult> {
 		const record = this.require(workerId);
+		if (record.state === "killed" || record.state === "interrupted") {
+			throw new Error(
+				`Worker ${workerId} is ${record.state}; its conversation cannot be resumed safely. Inspect/attach it or delegate a fresh worker.`,
+			);
+		}
+		if (record.state === "blocked" || record.state === "done" || record.state === "failed") {
+			return this.revive(record, message);
+		}
 		this.assertSendable(record, workerId);
 
 		// Not started yet: a follow-up must not become prompt one and displace the
@@ -781,19 +838,6 @@ export class WorkerManager implements ChannelHandler {
 		if (record.state === "queued" || record.state === "starting") {
 			this.send(workerId, message);
 			return { worker: this.summarize(record), delivery: "pending-brief" };
-		}
-
-		// Blocked on `neta ask`: the turn is technically in flight, but the worker
-		// is waiting on Neta, not thinking. Cancelling would throw away the turn
-		// that asked the question and leave the asker's own call dangling, so this
-		// queues instead and says which tool actually unblocks it.
-		if (record.pendingAsk) {
-			this.send(workerId, message);
-			return {
-				worker: this.summarize(record),
-				delivery: "next-turn",
-				note: `${workerId} is blocked on a question; it will not read this until you run \`${APP_NAME} answer ${workerId} <answer>\` in another terminal.`,
-			};
 		}
 
 		// The exact turn this steer is aimed at, captured before anything is
@@ -905,6 +949,137 @@ export class WorkerManager implements ChannelHandler {
 		};
 	}
 
+	/** Resume a terminal worker in a fresh ACP process without creating a new conversation. */
+	private async revive(record: WorkerRecord, message: string): Promise<SteerResult> {
+		if (record.reviving) throw new Error(`Worker ${record.id} is already being resumed.`);
+		if (record.nativeAttached) {
+			throw new Error(
+				`Worker ${record.id} was opened in a native client; exclusive ownership of its session cannot be proven. Close it and delegate a fresh worker.`,
+			);
+		}
+		if (!record.vendorSessionId) {
+			throw new Error(`Worker ${record.id} has no recorded vendor session id; delegate a fresh worker.`);
+		}
+		if (record.writer && this.execWriterGuard) {
+			throw new Error("A write-capable neta_exec command owns the writer safety guard; wait for it to finish.");
+		}
+		if (record.writer && this.activeWriter && this.activeWriter !== record.id) {
+			record.revivalFromState = record.state as "blocked" | "done" | "failed";
+			record.revivalPreviousQueuedBehind = record.queuedBehind;
+			record.revivalMessage = message;
+			record.state = "queued";
+			record.queuedBehind = this.activeWriter;
+			this.writerQueue.push(record.id);
+			this.writerQueueHistory.push({ workerId: record.id, action: "queued", at: Date.now() });
+			this.appendLog(
+				record,
+				"status",
+				`Resume queued behind ${this.activeWriter}; the original task will not rerun.`,
+			);
+			this.checkpointChanged(record);
+			return {
+				worker: this.summarize(record),
+				delivery: "pending-brief",
+				note: "Exact-session resume is queued for the writer slot.",
+			};
+		}
+
+		const revival = this.resumeRecord(record, message);
+		record.reviving = revival;
+		try {
+			return await revival;
+		} finally {
+			record.reviving = undefined;
+		}
+	}
+
+	private async resumeRecord(record: WorkerRecord, message: string): Promise<SteerResult> {
+		const priorState = record.revivalFromState ?? (record.state as "blocked" | "done" | "failed");
+		const prior = {
+			state: priorState,
+			endedAt: record.endedAt,
+			result: record.result,
+			pendingQuestion: record.pendingQuestion,
+			archived: record.archived,
+			unsafeToPrompt: record.unsafeToPrompt,
+			queuedBehind: record.revivalPreviousQueuedBehind,
+		};
+		const reservedWriter = record.writer && !this.activeWriter;
+		if (reservedWriter) this.activeWriter = record.id;
+		try {
+			record.scratchDir ??= await mkdtemp(join(tmpdir(), `neta-${record.id}-resume-`));
+			record.channelToken ??= randomBytes(16).toString("hex");
+			const configuredBackend = this.options.config.resolve(record.tier, record.backend, record.writer);
+			const backend = { ...configuredBackend, model: record.modelId ?? configuredBackend.model };
+			assertClaudeModelAllowed(backend.claudeLineage, backend.model, `resume ${record.tier} assignment`);
+			const runtimeEnv = (await this.options.prepareEnv?.()) ?? {};
+			const roleText = loadRoleText(record.role, record.cwd, this.options.agentDir);
+			if (!roleText) throw new Error(`Unknown role "${record.role}".`);
+			const systemPrompt = [
+				roleText.trim(),
+				"",
+				workingAgreement({ tier: record.tier, writer: record.writer, room: record.room, binary: APP_NAME }),
+				"",
+				`Your scratch directory (outside the repository) is ${record.scratchDir}. Use it for notes and throwaway files.`,
+			].join("\n");
+			record.driver = this.createWorkerTransport(record, backend, runtimeEnv, systemPrompt, record.vendorSessionId);
+			await record.driver.start();
+		} catch (error) {
+			await record.driver?.kill().catch(() => {});
+			if (record.processGroupId !== undefined) {
+				this.options.onWorkerProcessGroup?.(record.id, undefined);
+				record.processGroupId = undefined;
+			}
+			record.driver = undefined;
+			record.state = prior.state;
+			record.endedAt = prior.endedAt;
+			record.result = prior.result;
+			record.pendingQuestion = prior.pendingQuestion;
+			record.archived = prior.archived;
+			record.unsafeToPrompt = prior.unsafeToPrompt;
+			record.queuedBehind = prior.queuedBehind;
+			record.revivalFromState = undefined;
+			record.revivalPreviousQueuedBehind = undefined;
+			record.revivalMessage = undefined;
+			if (reservedWriter && this.activeWriter === record.id) {
+				this.activeWriter = undefined;
+				void this.dequeueNextWriter();
+			}
+			this.checkpointChanged(record);
+			throw error;
+		}
+
+		record.finishing = undefined;
+		record.killReason = undefined;
+		record.endedAt = undefined;
+		record.archived = false;
+		record.unsafeToPrompt = undefined;
+		record.pendingQuestion = undefined;
+		record.blockedTurn = undefined;
+		record.revivalFromState = undefined;
+		record.revivalPreviousQueuedBehind = undefined;
+		record.revivalMessage = undefined;
+		record.queuedBehind = undefined;
+		record.revivalCount += 1;
+		record.headlessReason = "resumed headlessly in a fresh ACP process";
+		record.queue = Promise.resolve();
+		record.queuedPrompts = 0;
+		this.setState(record, "running");
+		this.appendLog(
+			record,
+			"status",
+			`Resumed exact session ${record.vendorSessionId} (revival ${record.revivalCount}).`,
+		);
+		if (record.writer) this.notifyReadOnlyWorkers(record, "started");
+		if (!this.enqueue(record, message, false, [message]))
+			throw new Error(`Worker ${record.id} could not accept resumed prompt.`);
+		return {
+			worker: this.summarize(record),
+			delivery: "next-turn",
+			note: "Resumed the exact recorded ACP conversation headlessly.",
+		};
+	}
+
 	/** Dispatch at most one session-wide cancel for a particular prompt turn. */
 	private cancelTurn(record: WorkerRecord, turn: number): Promise<boolean> {
 		const existing = record.cancelDispatches.get(turn);
@@ -985,19 +1160,6 @@ export class WorkerManager implements ChannelHandler {
 		return this.summarize(record);
 	}
 
-	answer(workerId: string, answer: string): WorkerSummary {
-		const record = this.require(workerId);
-		const pending = record.pendingAsk;
-		if (!pending) throw new Error(`Worker ${workerId} is not waiting for an answer.`);
-		record.pendingAsk = undefined;
-		record.pendingQuestion = undefined;
-		this.appendLog(record, "status", `Leader answered: ${answer}`);
-		this.setState(record, "running");
-		pending.resolve({ ok: true, text: answer });
-		this.checkpointChanged(record);
-		return this.summarize(record);
-	}
-
 	async kill(workerId: string): Promise<WorkerSummary> {
 		const record = this.require(workerId);
 		if (!isTerminalState(record.state)) {
@@ -1064,6 +1226,7 @@ export class WorkerManager implements ChannelHandler {
 				`Could not open ${workerId}'s native TUI: ${outcome.reason}. ${this.headlessAlternatives(workerId)}`,
 			);
 		}
+		record.nativeAttached = true;
 		return summary;
 	}
 
@@ -1230,9 +1393,8 @@ export class WorkerManager implements ChannelHandler {
 	/**
 	 * Block until the watched workers need the leader: all of them terminal (or
 	 * the first one, in first mode), one of them blocking on a question, a new
-	 * post in a watched room, or the timeout. A pending question always wakes
-	 * the wait — an unanswered ask is more urgent than continuing to block. A
-	 * condition already true at call time returns immediately.
+	 * post in a watched room, or the timeout. A pending blocker always wakes
+	 * the wait. A condition already true at call time returns immediately.
 	 */
 	async wait(workerIds: string[], timeoutMs: number, options: WaitOptions = {}): Promise<WaitResult> {
 		const records = workerIds.map((id) => this.require(id));
@@ -1251,8 +1413,8 @@ export class WorkerManager implements ChannelHandler {
 		});
 
 		const evaluate = (): WaitResult | undefined => {
-			const asking = records.find((record) => record.state === "waiting" && record.pendingAsk);
-			if (asking) return snapshot("ask", asking);
+			const blocked = records.find((record) => record.state === "blocked" && record.pendingQuestion);
+			if (blocked) return snapshot("blocked", blocked);
 			const terminal = records.filter((record) => isTerminalState(record.state));
 			if (terminal.length === records.length) return snapshot("completed");
 			if (options.first && terminal.length > 0) return snapshot("first", terminal[0]);
@@ -1303,6 +1465,33 @@ export class WorkerManager implements ChannelHandler {
 		return (await this.wait(workerIds, timeoutMs)).workers;
 	}
 
+	/** Run one allowlisted mechanical command without delegating an agent. */
+	async exec(request: RepoExecRequest): Promise<RepoExecResult> {
+		if (this.disposed) throw new Error("This Neta session is shutting down.");
+		if (!this.options.execOutputDir) throw new Error("neta_exec has no session audit directory.");
+		const classification = classifyRepoCommand(request.argv, request.userApproved);
+		if (classification.writeCapable) {
+			if (this.execWriterGuard) throw new Error("Another write-capable neta_exec command is already running.");
+			if (this.activeWriter || this.writerQueue.length > 0 || this.recoveryWriterSlotHeld) {
+				throw new Error(
+					"neta_exec refused this write-capable command because a worker owns or is queued for the writer slot.",
+				);
+			}
+			this.execWriterGuard = true;
+		}
+		const controller = new AbortController();
+		this.execControllers.add(controller);
+		const execution = executeRepoCommand(this.options.cwd, this.options.execOutputDir, request, controller.signal);
+		this.execPromises.add(execution);
+		try {
+			return await execution;
+		} finally {
+			this.execPromises.delete(execution);
+			this.execControllers.delete(controller);
+			if (classification.writeCapable) this.execWriterGuard = false;
+		}
+	}
+
 	/**
 	 * Stop everything this manager owns.
 	 *
@@ -1314,6 +1503,8 @@ export class WorkerManager implements ChannelHandler {
 	 */
 	async dispose(options: { confirmProcessesStopped?: () => boolean } = {}): Promise<void> {
 		this.disposed = true;
+		for (const controller of this.execControllers) controller.abort();
+		await Promise.allSettled([...this.execPromises]);
 		const records = [...this.workers.values()];
 		await Promise.all(
 			records.map(async (record) => {
@@ -1351,8 +1542,8 @@ export class WorkerManager implements ChannelHandler {
 	}
 
 	/**
-	 * Compute backend assignments for proposed workers without spawning them.
-	 * Used by the neta_plan tool to present a staffing plan before spawning.
+	 * Compute backend assignments on a copy of assignment state so a delegate
+	 * batch can be validated before it creates a worker or team transcript.
 	 * Returns a list of computed assignments in the same order as the requests.
 	 *
 	 * Operates on a deep copy of the live state so planning never mutates the
@@ -1363,8 +1554,7 @@ export class WorkerManager implements ChannelHandler {
 	planAssignments(
 		requests: Array<{ role: string; tier: Tier; writer?: boolean; backend?: string; room?: string }>,
 	): Array<{ role: string; tier: Tier; backend: string; writer: boolean }> {
-		// A staffing plan the user approves and the session then refuses is worse
-		// than no plan; the whole batch is checked before any of it is computed.
+		// A delegate batch is all-or-nothing at the validation boundary.
 		this.assertTiersAvailable(requests.map((request) => request.tier));
 		// Deep copy state so planning never mutates live cursors or room assignments
 		const simulatedState = {
@@ -1451,40 +1641,39 @@ export class WorkerManager implements ChannelHandler {
 		return { ok: true, text: posts.map((post) => `[${post.label}] ${post.text}`).join("\n") };
 	}
 
-	ask(workerId: string, text: string, signal: AbortSignal): Promise<ChannelResponse> {
+	blocked(workerId: string, text: string): ChannelResponse {
 		const record = this.workers.get(workerId);
-		if (!record) return Promise.resolve({ ok: false, error: `Unknown worker ${workerId}.` });
-		if (record.tier === "apprentice" || record.tier === "journeyman") {
-			return Promise.resolve({
-				ok: false,
-				error: "Apprentice and journeyman workers cannot ask the leader. Stop and finish with a report describing what is missing.",
-			});
+		if (!record) return { ok: false, error: `Unknown worker ${workerId}.` };
+		if (!record.promptInFlight || record.currentTurn === undefined) {
+			return { ok: false, error: "neta_blocked must be called from the worker's active ACP turn." };
 		}
-		if (record.pendingAsk) {
-			return Promise.resolve({ ok: false, error: "You already have a question waiting for an answer." });
-		}
-
-		return new Promise<ChannelResponse>((resolve) => {
-			const settle = (response: ChannelResponse) => {
-				if (record.pendingAsk?.resolve === settle) record.pendingAsk = undefined;
-				resolve(response);
-			};
-			record.pendingAsk = { question: text, resolve: settle };
-			record.pendingQuestion = text;
-			this.appendLog(record, "status", `Asked the leader: ${text}`);
-			this.setState(record, "waiting");
-			signal.addEventListener(
-				"abort",
-				() => {
-					if (record.pendingAsk?.resolve !== settle) return;
-					record.pendingAsk = undefined;
-					record.pendingQuestion = undefined;
-					if (record.state === "waiting") this.setState(record, "running");
-				},
-				{ once: true },
-			);
-			this.options.onEvent({ type: "ask", workerId, question: text });
+		if (record.blockedTurn !== undefined) return { ok: false, error: "This worker already reported a blocker." };
+		record.pendingQuestion = text;
+		record.blockedTurn = record.currentTurn;
+		this.appendLog(record, "status", `Blocked: ${text}`);
+		this.checkpointChanged(record);
+		const turn = record.currentTurn;
+		queueMicrotask(() => {
+			void (async () => {
+				try {
+					await this.cancelTurn(record, turn);
+				} catch (error) {
+					this.appendLog(
+						record,
+						"error",
+						`Could not cancel blocked turn: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				}
+				// Some bridges acknowledge cancel without ending the turn. Blocking is
+				// still terminal: force-stop after a short grace period so a writer slot
+				// cannot remain held forever.
+				await this.settle(record.queue, 1_000);
+				if (record.blockedTurn === turn && !isTerminalState(record.state) && !record.finishing) {
+					await this.finish(record, "blocked", record.pendingQuestion ?? text);
+				}
+			})();
 		});
+		return { ok: true, text: "Blocker recorded. This turn will stop now; the leader resumes it with neta_send." };
 	}
 
 	/**
@@ -1497,36 +1686,6 @@ export class WorkerManager implements ChannelHandler {
 		}
 		try {
 			switch (request.type) {
-				case "spawn": {
-					if (!(TIERS as readonly string[]).includes(request.tier)) {
-						return { ok: false, error: `Unknown tier "${request.tier}". Tiers: ${TIERS.join(", ")}.` };
-					}
-					const summary = await this.spawn({
-						role: request.role,
-						tier: request.tier as Tier,
-						task: request.task,
-						name: request.name,
-						writer: request.writer,
-						room: request.room,
-						backend: request.backend,
-						note: request.note,
-					});
-					const access = summary.writer ? "writer" : "read-only";
-					if (summary.state === "queued") {
-						return {
-							ok: true,
-							text:
-								`Queued ${summary.id} (writer) behind ${summary.queuedBehind}; starts automatically when the writer slot frees.\n` +
-								"Queued — when it starts, collect it with neta wait before ending your turn; a worker that finishes after your turn ends reaches nobody.",
-						};
-					}
-					return {
-						ok: true,
-						text:
-							`Spawned ${summary.id} (${summary.role}/${summary.tier}, ${access}, backend ${summary.backend}). You get a message when it finishes or asks a question.\n` +
-							"Running — collect it with neta wait before ending your turn; a worker that finishes after your turn ends reaches nobody.",
-					};
-				}
 				case "workers": {
 					const workers = this.list();
 					if (workers.length === 0) return { ok: true, text: "No workers." };
@@ -1534,11 +1693,6 @@ export class WorkerManager implements ChannelHandler {
 				}
 				case "status":
 					return { ok: true, text: this.status() };
-				case "log": {
-					const entries = this.drainLog(request.workerId);
-					if (entries.length === 0) return { ok: true, text: "(no new log entries)" };
-					return { ok: true, text: entries.map((entry) => `[${entry.kind}] ${entry.text}`).join("\n") };
-				}
 				case "tail": {
 					const page = this.tailLog(request.workerId, request.since);
 					return {
@@ -1575,8 +1729,6 @@ export class WorkerManager implements ChannelHandler {
 						data: { delivery: steered.delivery, note: steered.note },
 					};
 				}
-				case "answer":
-					return { ok: true, text: this.statusLine(this.answer(request.workerId, request.text), 200) };
 				case "kill":
 					return { ok: true, text: this.statusLine(await this.kill(request.workerId), 200) };
 			}
@@ -1745,6 +1897,7 @@ export class WorkerManager implements ChannelHandler {
 		backend: ResolvedBackend,
 		runtimeEnv: Record<string, string>,
 		systemPrompt: string,
+		resumeSessionId?: string,
 	): WorkerTransportDriver {
 		if (!record.scratchDir) throw new Error(`Worker ${record.id} has no live scratch directory.`);
 		if (!record.channelToken) throw new Error(`Worker ${record.id} has no live channel token.`);
@@ -1755,7 +1908,7 @@ export class WorkerManager implements ChannelHandler {
 		const runtimePath = runtimeEnv.PATH;
 		return this.createTransport({
 			workerId: record.id,
-			cwd: this.options.cwd,
+			cwd: record.cwd,
 			env: {
 				...runtimeEnv,
 				...backend.env,
@@ -1776,7 +1929,10 @@ export class WorkerManager implements ChannelHandler {
 			writer: record.writer,
 			systemPrompt,
 			scratchDir: record.scratchDir,
-			mcpServers: this.options.workerMcpServers?.(record.id, record.scratchDir, record.channelToken) ?? [],
+			mcpServers:
+				this.options.workerMcpServers?.(record.id, record.scratchDir, record.channelToken, record.room) ?? [],
+			resumeSessionId,
+			initialUsage: resumeSessionId ? record.usage : undefined,
 			events: {
 				log: (kind, text) => this.appendLog(record, kind, text),
 				usage: (usage) => {
@@ -1805,12 +1961,6 @@ export class WorkerManager implements ChannelHandler {
 	private setState(record: WorkerRecord, state: WorkerState): void {
 		record.state = state;
 		record.updatedAt = Date.now();
-		// A worker blocking on ask wakes any wait watching it: an unanswered
-		// question is more urgent than continuing to block. Unlike finish(), the
-		// waiters stay registered — a wait that does not settle keeps listening.
-		if (state === "waiting") {
-			for (const waiter of [...record.waiters]) waiter();
-		}
 		if (record.noteId) {
 			const link = this.notes.get(record.noteId)?.workers.find((w) => w.workerId === record.id);
 			if (link) link.state = state;
@@ -1854,6 +2004,11 @@ export class WorkerManager implements ChannelHandler {
 				}
 				const steered = record.steeredTurns.delete(turn);
 				record.cancelDispatches.delete(turn);
+				if (record.blockedTurn === turn) {
+					record.lastResponse = outcome.summary;
+					await this.finish(record, "blocked", record.pendingQuestion ?? "Worker is blocked.");
+					return;
+				}
 				if (isTerminalState(record.state) || record.finishing || record.killReason) return;
 				// A turn Neta cancelled on purpose, to put a new instruction in front
 				// of this worker. It is not a failure: the worker is healthy, its
@@ -2025,8 +2180,12 @@ export class WorkerManager implements ChannelHandler {
 			// their reason, which did not stream.
 			this.appendLog(
 				record,
-				state === "done" ? "status" : "error",
-				state === "done" ? "done" : `${state}: ${options.failure ?? result}`,
+				state === "done" || state === "blocked" ? "status" : "error",
+				state === "done"
+					? "done"
+					: state === "blocked"
+						? `blocked: ${record.pendingQuestion ?? result}`
+						: `${state}: ${options.failure ?? result}`,
 			);
 			// A preserved report ends "done"; the thing that went wrong after it
 			// still has to be visible in the log, not only on the summary.
@@ -2041,6 +2200,8 @@ export class WorkerManager implements ChannelHandler {
 				});
 			} else if (state === "failed") {
 				this.options.onEvent({ type: "failed", workerId: record.id, error: options.failure ?? result });
+			} else if (state === "blocked") {
+				this.options.onEvent({ type: "blocked", workerId: record.id, question: record.pendingQuestion ?? result });
 			}
 
 			const wasActiveWriter = this.activeWriter === record.id;
@@ -2048,9 +2209,7 @@ export class WorkerManager implements ChannelHandler {
 			if (wasActiveWriter) this.activeWriter = undefined;
 			this.checkpointChanged(record);
 
-			record.pendingAsk?.resolve({ ok: false, error: `Worker ${state}.` });
-			record.pendingAsk = undefined;
-			if (state !== "interrupted") record.pendingQuestion = undefined;
+			if (state !== "interrupted" && state !== "blocked") record.pendingQuestion = undefined;
 			this.checkpointChanged(record);
 			const waiters = record.waiters;
 			record.waiters = [];
@@ -2112,6 +2271,22 @@ export class WorkerManager implements ChannelHandler {
 		this.checkpointChanged(record);
 
 		this.activeWriter = nextId;
+		if (record.revivalMessage !== undefined) {
+			const message = record.revivalMessage;
+			try {
+				await this.resumeRecord(record, message);
+			} catch (error) {
+				this.appendLog(
+					record,
+					"error",
+					`Exact-session resume failed: ${error instanceof Error ? error.message : String(error)}`,
+				);
+				if (this.activeWriter === record.id) this.activeWriter = undefined;
+				this.checkpointChanged(record);
+				void this.dequeueNextWriter();
+			}
+			return;
+		}
 
 		// Prepend staleness guard to task
 		const stalenessGuard =
@@ -2155,7 +2330,7 @@ export class WorkerManager implements ChannelHandler {
 		this.openWorkerView(record);
 	}
 
-	/** A missing pane is visible in the spawn result; it never blocks the worker. */
+	/** A missing pane is visible in the delegate result; it never blocks the worker. */
 	private openWorkerView(record: WorkerRecord): void {
 		const outcome = this.options.panes?.open(this.summarize(record));
 		const reason = outcome && !outcome.opened ? outcome.reason : this.options.headlessReason;
@@ -2192,7 +2367,7 @@ export class WorkerManager implements ChannelHandler {
 			result: record.result,
 			laterFailure: record.laterFailure,
 			queuedBehind: record.state === "queued" ? record.queuedBehind : undefined,
-			pendingQuestion: record.pendingAsk?.question ?? record.pendingQuestion,
+			pendingQuestion: record.pendingQuestion,
 			promptBlockedReason: record.unsafeToPrompt,
 			lastProgress: record.lastProgress,
 			scratchDir: record.scratchDir,
@@ -2203,6 +2378,7 @@ export class WorkerManager implements ChannelHandler {
 			mode: record.mode,
 			agentInfo: record.agentInfo,
 			headlessReason: record.headlessReason,
+			revivalCount: record.revivalCount,
 		};
 	}
 }

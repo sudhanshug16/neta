@@ -97,6 +97,8 @@ export interface CheckpointWorker {
 	pendingBrief: string[];
 	headAtStart?: string;
 	headlessReason?: string;
+	cwd?: string;
+	revivalCount?: number;
 }
 
 export interface SessionCheckpoint {
@@ -192,6 +194,7 @@ const WORKER_STATES: readonly WorkerState[] = [
 	"running",
 	"waiting",
 	"queued",
+	"blocked",
 	"done",
 	"failed",
 	"killed",
@@ -271,6 +274,8 @@ function validateWorker(value: unknown, path: string): void {
 			"pendingBrief",
 			"headAtStart",
 			"headlessReason",
+			"cwd",
+			"revivalCount",
 		],
 		path,
 	);
@@ -282,7 +287,7 @@ function validateWorker(value: unknown, path: string): void {
 	workerState(worker.state, `${path}.state`);
 	optional(worker.stateBeforeStop, (item) => {
 		workerState(item, `${path}.stateBeforeStop`);
-		if (item === "done" || item === "failed" || item === "killed" || item === "interrupted")
+		if (item === "blocked" || item === "done" || item === "failed" || item === "killed" || item === "interrupted")
 			throw new CheckpointError(`Corrupt checkpoint: ${path}.stateBeforeStop must be nonterminal.`);
 	});
 	for (const key of ["startedAt", "updatedAt", "logFirstIndex", "logCursor"]) number(worker[key], `${path}.${key}`);
@@ -305,8 +310,10 @@ function validateWorker(value: unknown, path: string): void {
 		"queuedBehind",
 		"headAtStart",
 		"headlessReason",
+		"cwd",
 	])
 		optional(worker[key], (item) => string(item, `${path}.${key}`));
+	optional(worker.revivalCount, (item) => number(item, `${path}.revivalCount`));
 	optional(worker.archived, (item) => boolean(item, `${path}.archived`));
 	optional(worker.lastProgress, (item) => {
 		const progress = object(item, `${path}.lastProgress`);

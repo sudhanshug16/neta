@@ -63,9 +63,8 @@ spread policy applies: Neta assigns workers deterministically round-robin across
 installed backends (stable per session), and reviewer/debater roles prefer a
 different backend than the most recent writer when multiple backends are
 installed (diversity rule). Debaters in one room are spread across different
-vendors automatically. Explicit overrides pass through `backend` on spawn; use
-`neta_remember` to persist an override to `.neta/settings.json` (JSON rewrite;
-comments not preserved). Point a tier at another vendor:
+vendors automatically. Explicit overrides pass through `backend` on delegation;
+edit `.neta/settings.json` to persist an override. Point a tier at another vendor:
 
 ```json
 { "tiers": { "architect": { "backend": "codex" } } }

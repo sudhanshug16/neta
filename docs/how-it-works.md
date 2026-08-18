@@ -236,24 +236,33 @@ checkpoint claim stop two resumes from building two managers over one session.
 ## The two doors
 
 Two doors reach one manager, but they do not carry the same operations. The
-MCP door has all fifteen leader tools. The socket door carries the nine
+MCP door has ten leader tools. The socket door carries the six
 leader commands a person or token-holding process needs from a terminal —
-`spawn`, `workers`, `status`, `log`, `inspect`, `wait`, `send`, `answer`, `kill` — plus
+`workers`, `status`, `inspect`, `wait`, `send`, `kill` — plus
 the worker commands and the view commands (`watch`, `attach`, `sessions`).
-The five tools without socket twins (`neta_plan`, `neta_spawn_group`,
-`neta_room`, `neta_note`, `neta_remember`) are staffing and bookkeeping
-surfaces of the leader's own judgment loop, which lives in the MCP door.
+Delegation, guarded mechanical execution, and notes are MCP-only surfaces of the leader's judgment loop.
 
 | Door | Who uses it | How |
 | --- | --- | --- |
-| MCP tools | the leader | all 15 `neta_*` tools in the vendor's tool loop |
-| Unix socket | workers, and you | 9 leader commands, 5 worker commands, the view commands |
+| MCP tools | the leader | all 10 `neta_*` tools in the vendor's tool loop |
+| Unix socket | workers, and you | 6 leader commands, worker commands, the view commands |
+
+`neta_exec` is deliberately narrower than a terminal. It accepts an argv array,
+never invokes a shell, and allowlists read-only Git inspection, `bun test`, and
+an explicitly user-approved `git push`. Shells, interpreters, package scripts,
+Git config/alias injection, source-changing Git commands, and cwd paths outside
+the session repository are rejected before process creation. A write-capable
+command temporarily owns the same safety boundary as a writer and is refused if
+a writer is active or queued. Every invocation writes combined stdout/stderr to
+a unique mode-0600 file under the session's temporary directory; the tool result
+is bounded and points to the full file when truncated. Timeout or shutdown sends
+TERM then KILL to the whole detached process group and waits until it is gone.
 
 The socket door is authorized per role, by token. Each worker's requests carry
-its own per-worker token, and a worker can only report progress, ask, post to
-its room, or run `neta status --writers`; it holds no leader token, and the
+its own per-worker token, and a worker can only report progress, report a blocker,
+use its team transcript when it has one, or run `neta status --writers`; it holds no leader token, and the
 CLI refuses leader commands inside a worker. The leader token — the one that
-authorizes spawning and killing — goes to the leader's process and to the
+authorizes terminal control commands — goes to the leader's process and to the
 session file in `~/.neta/sessions/`, which is readable only by you. That file
 is how `neta workers` or `neta status` in a second terminal finds the session
 you are running.
@@ -266,9 +275,10 @@ when it chooses, and nothing they say interrupts anyone. Two things block instea
 - the leader's `neta_wait` blocks until the workers it named are finished —
   all of them, or the first one with `first: true` — and returns their
   summaries; this is how an idle leader wakes up with results. A watched
-  worker blocking on `ask` wakes the wait immediately, and `roomEvents` opts
+  worker reporting `blocked` wakes the wait immediately, and `roomEvents` opts
   a wait into waking on new room posts, so a debate can be refereed live;
-- a worker's `neta_ask` blocks until the leader answers.
+- a worker's `neta_blocked` ends that exact turn and stops the worker; the
+  leader's `neta_send` resumes the exact ACP conversation with the answer.
 
 Blocking tool calls are the only cross-agent channel. Neta never types into
 another agent's terminal.
@@ -365,10 +375,10 @@ uses the same manager path as `neta send` and `neta_send`: Neta cancels the
 exact active ACP turn, waits until that session-wide cancel is dispatched,
 then sends the text as the immediate next prompt in the same worker session.
 A delayed cancel is held ahead of its replacement prompt, so it cannot stop
-the later turn. Text entered while no turn is active becomes the next turn;
-text entered while the worker is blocked on `neta ask` stays queued until
-`neta answer` unblocks it. The pane is a window onto the worker, not the worker
-itself — the agent process stays under Neta's control. Panes read the log
+the later turn. Text entered while no turn is active becomes the next turn. A
+worker that calls `neta blocked` stops; `neta send` resumes its exact ACP
+conversation and delivers the answer. The pane is a window onto the worker,
+not the worker itself — the agent process stays under Neta's control. Panes read the log
 without consuming it, so nothing a pane shows is stolen from the leader, and
 `neta watch <id> --plain` prints the same stream as bare lines for piping.
 

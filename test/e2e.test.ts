@@ -101,8 +101,11 @@ describe("a leader session, end to end", () => {
 		rmSync(repo, { recursive: true, force: true });
 	});
 
-	const call = async (name: string, args: Record<string, unknown> = {}) =>
-		(await client.callTool({ name, arguments: args })) as CallToolResult;
+	const call = async (name: string, args: Record<string, unknown> = {}) => {
+		const mappedName = name === "neta_spawn" ? "neta_delegate" : name === "neta_log" ? "neta_inspect" : name;
+		const mappedArgs = name === "neta_spawn" ? { workers: [args] } : args;
+		return (await client.callTool({ name: mappedName, arguments: mappedArgs })) as CallToolResult;
+	};
 
 	it("spawns a real worker process and returns what it said", async () => {
 		const spawned = await call("neta_spawn", { role: "scout", tier: "apprentice", task: "map the auth flow" });

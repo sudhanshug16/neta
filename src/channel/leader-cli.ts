@@ -1,5 +1,5 @@
 /**
- * Leader side of the channel: the `neta spawn|workers|status|log|wait|send|answer|kill`
+ * Leader side of the channel: the `neta workers|status|inspect|wait|send|kill`
  * subcommands.
  *
  * The leader normally drives workers through MCP tools, which run in its own
@@ -13,31 +13,17 @@ import { findSession, listSessions } from "../session.ts";
 import { sendChannelRequest } from "./client.ts";
 import { type LeaderChannelRequest, NETA_LEADER_ENV, NETA_SOCKET_ENV, NETA_WORKER_ENV } from "./protocol.ts";
 
-export const LEADER_COMMANDS = new Set([
-	"spawn",
-	"workers",
-	"status",
-	"log",
-	"inspect",
-	"wait",
-	"send",
-	"answer",
-	"kill",
-]);
+export const LEADER_COMMANDS = new Set(["workers", "status", "inspect", "wait", "send", "kill"]);
 
 const LEADER_HELP = `Leader channel commands (available where the leader token is set):
 
-  ${APP_NAME} spawn --role <role> --tier <tier> [--writer] [--name <label>] [--note <id>] [--room <name>] [--backend <name>] <task>
-      Start a worker. Roles: scout, worker, reviewer, debater. Tiers: apprentice, journeyman, expert, architect.
   ${APP_NAME} workers               List every worker and its state.
   ${APP_NAME} status                Show the writer slot, worker states and open notes.
-  ${APP_NAME} log <id>              Read a worker's new log lines since you last looked.
   ${APP_NAME} inspect <id>          Expand a worker's recent input and output, bounded and
                                     non-consuming. Works for headless workers with no tab.
   ${APP_NAME} wait <id> [<id>...] [--timeout <seconds>]
       Block until the listed workers finish (default timeout 600s).
   ${APP_NAME} send <id> <message>   Interrupt a running worker's turn and make this its next prompt.
-  ${APP_NAME} answer <id> <text>    Answer a worker's pending question.
   ${APP_NAME} kill <id>             Stop a worker.
 `;
 
@@ -68,40 +54,10 @@ function parseFlags(args: string[], booleanFlags: Set<string>): ParsedFlags {
 
 function buildRequest(command: string, token: string, rest: string[]): LeaderChannelRequest | string {
 	switch (command) {
-		case "spawn": {
-			const { flags, positional } = parseFlags(rest, new Set(["writer"]));
-			const role = flags.get("role");
-			const tier = flags.get("tier");
-			const task = positional.join(" ").trim();
-			if (typeof role !== "string" || !role) return `Usage: ${APP_NAME} spawn --role <role> --tier <tier> <task>`;
-			if (typeof tier !== "string" || !tier) return `Usage: ${APP_NAME} spawn --role <role> --tier <tier> <task>`;
-			if (!task) return "The task is missing. Describe what the worker should do after the flags.";
-			const name = flags.get("name");
-			const room = flags.get("room");
-			const backend = flags.get("backend");
-			const note = flags.get("note");
-			return {
-				type: "spawn",
-				token,
-				role,
-				tier,
-				task,
-				name: typeof name === "string" && name ? name : undefined,
-				writer: flags.get("writer") === true,
-				room: typeof room === "string" && room ? room : undefined,
-				backend: typeof backend === "string" && backend ? backend : undefined,
-				note: typeof note === "string" && note ? note : undefined,
-			};
-		}
 		case "workers":
 			return { type: "workers", token };
 		case "status":
 			return { type: "status", token };
-		case "log": {
-			const workerId = rest[0];
-			if (!workerId) return `Usage: ${APP_NAME} log <worker-id>`;
-			return { type: "log", token, workerId };
-		}
 		case "inspect": {
 			const workerId = rest[0];
 			if (!workerId) return `Usage: ${APP_NAME} inspect <worker-id>`;
@@ -120,8 +76,7 @@ function buildRequest(command: string, token: string, rest: string[]): LeaderCha
 				timeoutMs: Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : undefined,
 			};
 		}
-		case "send":
-		case "answer": {
+		case "send": {
 			const workerId = rest[0];
 			const text = rest.slice(1).join(" ").trim();
 			if (!workerId || !text) return `Usage: ${APP_NAME} ${command} <worker-id> <text>`;
@@ -172,7 +127,7 @@ function resolveTarget(args: string[]): Target | undefined {
 export async function handleLeaderChannelCommand(args: string[]): Promise<boolean> {
 	const command = args[0];
 	if (!command || !LEADER_COMMANDS.has(command)) return false;
-	// Help works without a session, so `neta spawn --help` answers anywhere.
+	// Help for a retained leader command works without a live session.
 	if (args.includes("--help") || args.includes("-h")) {
 		console.log(LEADER_HELP);
 		return true;

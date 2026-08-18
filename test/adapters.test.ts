@@ -205,6 +205,7 @@ describe("Codex adapter", () => {
 			NETA_SOCKET: "/tmp/neta-s1.sock",
 			NETA_LEADER_TOKEN: "tok",
 			NETA_SESSION_ID: "s1",
+			NETA_SESSION_TEMP_DIR: ctx.sessionDir,
 			NETA_CHECKPOINT_ID: "s1",
 			NETA_LEADER_BACKEND: "codex",
 			NETA_MUX: "tmux",

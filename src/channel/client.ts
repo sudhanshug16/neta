@@ -15,13 +15,13 @@ import {
 	NETA_WORKER_TOKEN_ENV,
 } from "./protocol.ts";
 
-const CHANNEL_COMMANDS = new Set(["progress", "ask", "say", "room", "status"]);
+const CHANNEL_COMMANDS = new Set(["progress", "blocked", "room-post", "room", "status"]);
 
 const CHANNEL_HELP = `Worker channel commands (available inside a Neta worker):
 
   ${APP_NAME} progress <message> Records a progress milestone in your log. Use it when you start, when a major step completes, and when something surprising changes your plan — one line each, not a running commentary. The leader and the user read these at a glance; frequent trivial calls bury the signal.
-  ${APP_NAME} ask <question>     Ask the leader and wait for the answer. Not available to journeyman workers.
-  ${APP_NAME} say <message>      Post to your room, visible to the other members.
+  ${APP_NAME} blocked <question> Stop this turn with a blocker; the leader resumes it with send.
+  ${APP_NAME} room-post <message> Post to your team transcript.
   ${APP_NAME} room [--tail N]    Read your room transcript.
   ${APP_NAME} status --writers   Show active, queued and finished writers.
 `;
@@ -117,14 +117,14 @@ export async function handleWorkerChannelCommand(args: string[]): Promise<boolea
 			process.exitCode = 1;
 			return true;
 		}
-		request = { type: command as "progress" | "ask" | "say", workerId, token, text };
+		request = { type: command as "progress" | "blocked" | "room-post", workerId, token, text };
 	}
 
 	try {
 		const response = await sendChannelRequest(address, request);
 		if (response.ok) {
 			if (response.text) console.log(response.text);
-			else if (command === "progress" || command === "say") console.log("ok");
+			else if (command === "progress" || command === "room-post") console.log("ok");
 		} else {
 			console.error(response.error);
 			process.exitCode = 1;

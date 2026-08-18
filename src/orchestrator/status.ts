@@ -227,7 +227,7 @@ export function formatStatusSnapshot(snapshot: WorkerStatusSnapshot): string {
 		...section("Writer queue:", snapshot.writerQueue),
 		...section("Running:", snapshot.workers.running),
 		...section("Queued:", snapshot.workers.queued),
-		...section("Waiting (blocked on leader answer):", snapshot.workers.waiting),
+		...section("Waiting (legacy active state):", snapshot.workers.waiting),
 		...section("Terminal:", snapshot.workers.terminal),
 		"Open notes:",
 		...formatNotes(snapshot.openNotes),

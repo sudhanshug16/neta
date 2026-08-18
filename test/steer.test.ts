@@ -198,22 +198,6 @@ describe("steering a worker", () => {
 		expect(transports).toHaveLength(1);
 	});
 
-	// The turn is technically in flight, but the worker is waiting on Neta rather
-	// than thinking. Cancelling would throw away the turn that asked.
-	it("queues rather than interrupts a worker blocked on a question", async () => {
-		const { transport } = await runningWorker();
-		const asking = manager.ask("ro1", "which store?", new AbortController().signal);
-		await waitFor(() => expect(manager.get("ro1").state).toBe("waiting"));
-
-		const result = await manager.steer("ro1", "the session store");
-		expect(result.delivery).toBe("next-turn");
-		expect(result.note).toContain("neta answer ro1 <answer>");
-		expect(transport.cancels).toBe(0);
-
-		manager.answer("ro1", "the session store");
-		await asking;
-	});
-
 	it("reports honestly when the transport has no session left to cancel", async () => {
 		const { transport } = await runningWorker();
 		transport.liveSession = false;
@@ -315,18 +299,18 @@ describe("steering a worker", () => {
 		expect(transport.prompts).toEqual(["read the auth flow", "inspect the session store"]);
 	});
 
-	it("refuses a finished worker", async () => {
+	it("requires a recorded vendor session to revive a finished worker", async () => {
 		const { transport } = await runningWorker();
 		transport.finish({ ok: true, summary: "done reading" });
 		await waitFor(() => expect(manager.get("ro1").state).toBe("done"));
 
-		await expect(manager.steer("ro1", "one more thing")).rejects.toThrow(/already finished \(done\)/);
+		await expect(manager.steer("ro1", "one more thing")).rejects.toThrow(/no recorded vendor session id/);
 	});
 
 	it("refuses a killed worker", async () => {
 		await runningWorker();
 		await manager.kill("ro1");
-		await expect(manager.steer("ro1", "one more thing")).rejects.toThrow(/already finished \(killed\)/);
+		await expect(manager.steer("ro1", "one more thing")).rejects.toThrow(/conversation cannot be resumed safely/);
 	});
 
 	it("refuses an unknown worker", async () => {

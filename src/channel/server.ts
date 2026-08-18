@@ -1,9 +1,7 @@
 /**
  * Orchestrator side of the worker channel.
  *
- * Accepts one request per connection and answers it. `ask` connections stay
- * open until the leader answers, which is what makes a worker block; every
- * other request answers immediately.
+ * Accepts one request per connection and answers it.
  */
 
 import { unlinkSync } from "node:fs";
@@ -20,12 +18,12 @@ export interface ChannelHandler {
 	/** Reject a caller that does not hold the capability issued for this worker. */
 	authenticateWorker(workerId: string, token: string | undefined): ChannelResponse;
 	progress(workerId: string, text: string): ChannelResponse;
-	ask(workerId: string, text: string, signal: AbortSignal): Promise<ChannelResponse>;
+	blocked(workerId: string, text: string): ChannelResponse;
 	say(workerId: string, text: string): ChannelResponse;
 	room(workerId: string, tail: number | undefined): ChannelResponse;
 	/** Read-only writer status, available to every worker without a leader token. */
 	writerStatus(workerId: string): ChannelResponse;
-	/** Token-authorized leader operations. `wait` may block on the signal like `ask`. */
+	/** Token-authorized leader operations. `wait` may block on the signal. */
 	leader(request: LeaderChannelRequest, signal: AbortSignal): Promise<ChannelResponse>;
 }
 
@@ -118,7 +116,7 @@ export class ChannelServer {
 						if (!this.authenticateWorker(request, handler, respond)) return;
 						respond(handler.progress(request.workerId, request.text));
 						break;
-					case "say":
+					case "room-post":
 						if (!this.authenticateWorker(request, handler, respond)) return;
 						respond(handler.say(request.workerId, request.text));
 						break;
@@ -130,9 +128,9 @@ export class ChannelServer {
 						if (!this.authenticateWorker(request, handler, respond)) return;
 						respond(handler.writerStatus(request.workerId));
 						break;
-					case "ask":
+					case "blocked":
 						if (!this.authenticateWorker(request, handler, respond)) return;
-						respond(await handler.ask(request.workerId, request.text, abort.signal));
+						respond(handler.blocked(request.workerId, request.text));
 						break;
 					default:
 						if (LEADER_REQUEST_TYPES.has(request.type)) {

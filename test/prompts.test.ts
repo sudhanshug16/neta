@@ -44,7 +44,8 @@ describe("leader prompt", () => {
 	it("names the MCP tools when the leader manages workers with tools", () => {
 		const prompt = buildLeaderPrompt({ tiers: DEFAULT_TIERS, control: "mcp" });
 
-		expect(prompt).toContain("neta_spawn");
+		expect(prompt).toContain("neta_delegate");
+		expect(prompt).toContain("neta_exec");
 		expect(prompt).toContain("neta_wait");
 		expect(prompt).not.toContain("neta spawn --role");
 	});
@@ -59,21 +60,20 @@ describe("leader prompt", () => {
 		});
 
 		for (const tool of [
-			"neta_spawn",
+			"neta_delegate",
+			"neta_exec",
 			"neta_wait",
 			"neta_workers",
 			"neta_status",
-			"neta_log",
-			"neta_answer",
 			"neta_attach",
-			"neta_plan",
-			"neta_remember",
+			"neta_inspect",
+			"neta_send",
 			"neta_note",
 		]) {
 			expect(prompt).toContain(`mcp__neta__${tool}`);
 		}
 		// No bare name survives to be copied by mistake.
-		expect(prompt).not.toMatch(/`neta_(spawn|wait|workers|log|answer|attach|plan|remember|note)`/);
+		expect(prompt).not.toMatch(/`neta_(delegate|wait|workers|status|inspect|send|attach|note)`/);
 	});
 
 	// If a host renames tools again, the leader should look before giving up.
@@ -84,7 +84,7 @@ describe("leader prompt", () => {
 	it("names the CLI commands when the leader has no tools", () => {
 		const prompt = buildLeaderPrompt({ tiers: DEFAULT_TIERS, control: "cli" });
 
-		expect(prompt).toContain("neta spawn --role");
+		expect(prompt).toContain("no CLI delegation alias");
 		expect(prompt).toContain("takes over the caller's terminal");
 		expect(prompt).not.toContain("`neta_spawn`");
 		expect(prompt).not.toContain("neta attach <id>` opens");
@@ -168,15 +168,11 @@ describe("leader prompt", () => {
 		expect(prompt).toContain("(none — all tiers use spread policy)");
 	});
 
-	// Defaults the user never chose have to be announced, or the first session
-	// silently runs on a policy they do not know exists.
-	it("tells the leader to disclose the policy when nothing is configured", () => {
+	it("does not require staffing-plan ceremony when nothing is configured", () => {
 		const prompt = buildLeaderPrompt({ tiers: DEFAULT_TIERS });
 
-		expect(prompt).toContain("first staffing plan of the session must state");
-		expect(prompt).toContain("round-robin across\ninstalled backends; reviewer/debater diversity rule on");
-		expect(prompt).toContain("a CHARTER.md in this repo or in ~/.neta/");
-		expect(prompt).toContain(".neta/settings.json via neta_remember");
+		expect(prompt).toContain("Do not present staffing-plan ceremony");
+		expect(prompt).not.toContain("neta_remember");
 	});
 
 	it("skips the policy disclosure when a charter exists", () => {

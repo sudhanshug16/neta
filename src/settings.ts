@@ -603,7 +603,7 @@ export async function persistTierOverride(
 	};
 	// Runtime resolution merges user settings with this project file. Validate
 	// that same prospective result before touching disk, so a user-only Claude
-	// alias cannot make neta_remember report success for a model startup rejects.
+	// alias cannot make persisted settings accept a model startup rejects.
 	const effective = loadNetaSettings(cwd, agentDir);
 	new NetaConfig({
 		...effective,

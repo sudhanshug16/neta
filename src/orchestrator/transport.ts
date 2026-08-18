@@ -63,6 +63,10 @@ export interface TransportOptions {
 	scratchDir: string;
 	/** MCP servers the backend should start for this worker. */
 	mcpServers: WorkerMcpServer[];
+	/** Resume this exact persisted ACP conversation instead of creating one. */
+	resumeSessionId?: string;
+	/** Usage accumulated before a resumed ACP process started. */
+	initialUsage?: WorkerUsage;
 	events: TransportEvents;
 }
 

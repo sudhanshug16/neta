@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,10 +26,12 @@ describe("AcpWorkerTransport", () => {
 		for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 		usageReports.length = 0;
 		sessionReports.length = 0;
+		vendorSessions.length = 0;
 	});
 
 	const usageReports: WorkerUsage[] = [];
 	const sessionReports: NegotiatedSession[] = [];
+	const vendorSessions: string[] = [];
 
 	function createTransport(
 		writer: boolean,
@@ -39,6 +41,7 @@ describe("AcpWorkerTransport", () => {
 		env: Record<string, string> = {},
 		model: string | undefined = undefined,
 		requireExactModel = false,
+		resumeSessionId?: string,
 	): AcpWorkerTransport {
 		const scratchDir = mkdtempSync(join(tmpdir(), "neta-acp-"));
 		tempDirs.push(scratchDir);
@@ -54,10 +57,11 @@ describe("AcpWorkerTransport", () => {
 			systemPrompt: "You are a test worker.",
 			scratchDir,
 			mcpServers,
+			resumeSessionId,
 			events: {
 				log: (kind, text) => log.push({ at: 0, kind, text }),
 				usage: (usage) => usageReports.push(usage),
-				vendorSession: () => {},
+				vendorSession: (sessionId) => vendorSessions.push(sessionId),
 				session: (session) => sessionReports.push(session),
 			},
 		};
@@ -77,6 +81,77 @@ describe("AcpWorkerTransport", () => {
 		// prompt echoes the message itself.
 		const second = await transport.prompt("again");
 		expect(second).toEqual({ ok: true, summary: "echo:again" });
+	});
+
+	it("resumes the exact session across processes without replaying or duplicating the role prompt", async () => {
+		const storeDir = mkdtempSync(join(tmpdir(), "neta-acp-store-"));
+		tempDirs.push(storeDir);
+		const store = join(storeDir, "sessions.json");
+		const server = { name: "neta", command: "/usr/bin/neta", args: ["mcp", "--worker"], env: { TOKEN: "exact" } };
+		const first = createTransport(
+			false,
+			[],
+			[server],
+			["--config-options", "--session-store", store],
+			{},
+			"fixture-fast",
+		);
+		await first.start();
+		await first.prompt("first turn");
+		const sessionId = vendorSessions.at(-1);
+		expect(sessionId).toBeTruthy();
+		await first.kill();
+
+		const second = createTransport(
+			false,
+			[],
+			[server],
+			["--config-options", "--session-store", store],
+			{},
+			"fixture-fast",
+			false,
+			sessionId,
+		);
+		await second.start();
+		const history = await second.prompt("HISTORY");
+		expect(vendorSessions.at(-1)).toBe(sessionId);
+		expect(history.summary).toContain("You are a test worker.");
+		expect(history.summary.match(/You are a test worker\./g)).toHaveLength(1);
+		const resumedMcp = await second.prompt("MCP");
+		expect(resumedMcp.summary).toContain('"name":"TOKEN","value":"exact"');
+		expect(resumedMcp.summary).toContain('"args":["mcp","--worker"]');
+		expect(sessionReports.at(-1)).toMatchObject({ modelId: "fixture-fast[medium]", mode: "Always Ask" });
+	});
+
+	it("refuses unsupported resume without falling back to session/new", async () => {
+		const transport = createTransport(false, [], [], ["--unsupported-resume"], {}, undefined, false, "missing");
+		await expect(transport.start()).rejects.toThrow("does not advertise ACP session/resume");
+		expect(vendorSessions).not.toContain("missing");
+	});
+
+	it("refuses a rejected resume without opening a replacement session", async () => {
+		const storeDir = mkdtempSync(join(tmpdir(), "neta-acp-reject-store-"));
+		tempDirs.push(storeDir);
+		const store = join(storeDir, "sessions.json");
+		const first = createTransport(false, [], [], ["--session-store", store]);
+		await first.start();
+		const sessionId = vendorSessions.at(-1) as string;
+		await first.kill();
+
+		const rejected = createTransport(
+			false,
+			[],
+			[],
+			["--session-store", store, "--reject-resume"],
+			{},
+			undefined,
+			false,
+			sessionId,
+		);
+		await expect(rejected.start()).rejects.toThrow("failed to start an ACP session");
+		const saved = JSON.parse(readFileSync(store, "utf-8")) as { counter: number; sessions: Record<string, unknown> };
+		expect(saved.counter).toBe(1);
+		expect(Object.keys(saved.sessions)).toEqual([sessionId]);
 	});
 
 	it("rejects file-mutating tool calls for a read-only worker", async () => {

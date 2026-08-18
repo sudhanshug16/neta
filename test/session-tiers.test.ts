@@ -90,25 +90,6 @@ describe("session tier enforcement", () => {
 		expect((await manager.spawn({ role: "scout", tier: "expert", task })).id).toBe("ro1");
 	});
 
-	// The socket never sees a tool schema, so this is the door a narrowed schema
-	// could not protect on its own.
-	it("refuses over the worker socket too", async () => {
-		const response = await manager.leader(
-			{ type: "spawn", token: "leader-token", role: "scout", tier: "architect", task },
-			new AbortController().signal,
-		);
-		expect(response).toEqual({ ok: false, error: expect.stringContaining('Tier "architect" is not available') });
-		expect(manager.list()).toEqual([]);
-	});
-
-	it("still rejects a tier that is not a tier at all", async () => {
-		const response = await manager.leader(
-			{ type: "spawn", token: "leader-token", role: "scout", tier: "wizard", task },
-			new AbortController().signal,
-		);
-		expect(response).toEqual({ ok: false, error: expect.stringContaining('Unknown tier "wizard"') });
-	});
-
 	it("refuses to plan work it could not staff", () => {
 		expect(() =>
 			manager.planAssignments([
@@ -120,29 +101,29 @@ describe("session tier enforcement", () => {
 
 	// A group is one call. Refusing member three after starting members one and
 	// two would leave the leader a half-built room to clean up.
-	it("spawns no member of a group when one names an unavailable tier", async () => {
+	it("delegates no worker when one member names an unavailable tier", async () => {
 		const tools = leaderTools(manager);
-		const group = tools.find((tool) => tool.name === "neta_spawn_group");
+		const delegate = tools.find((tool) => tool.name === "neta_delegate");
 		await expect(
-			group?.run({
-				room: "debate",
+			delegate?.run({
+				team: "debate",
 				seed: "argue about the cache",
-				members: [
+				workers: [
 					{ role: "debater", tier: "expert", task },
 					{ role: "debater", tier: "architect", task },
 				],
 			}),
-		).rejects.toThrow(/Tier "architect" is not available/);
+		).rejects.toThrow(/Tier "architect" is unavailable/);
 		expect(manager.list()).toEqual([]);
 		// Not even the seed was posted: the room does not exist.
 		expect(() => manager.tailRoom("debate")).toThrow(/Unknown room/);
 	});
 
-	it("spawns the whole group when every tier is available", async () => {
-		const group = leaderTools(manager).find((tool) => tool.name === "neta_spawn_group");
-		await group?.run({
-			room: "debate",
-			members: [
+	it("delegates the whole batch when every tier is available", async () => {
+		const delegate = leaderTools(manager).find((tool) => tool.name === "neta_delegate");
+		await delegate?.run({
+			team: "debate",
+			workers: [
 				{ role: "debater", tier: "expert", task },
 				{ role: "debater", tier: "journeyman", task },
 			],
@@ -150,20 +131,18 @@ describe("session tier enforcement", () => {
 		expect(manager.list().map((worker) => worker.tier)).toEqual(["expert", "journeyman"]);
 	});
 
-	it("offers only the available tiers in the spawn schemas", () => {
+	it("offers only the available tiers in the delegate schema", () => {
 		const tools = leaderTools(manager);
-		for (const name of ["neta_spawn", "neta_plan", "neta_spawn_group"]) {
-			const schema = JSON.stringify(tools.find((tool) => tool.name === name)?.inputSchema);
-			expect(schema).toContain('"expert"');
-			expect(schema).not.toContain('"architect"');
-		}
+		const schema = JSON.stringify(tools.find((tool) => tool.name === "neta_delegate")?.inputSchema);
+		expect(schema).toContain('"expert"');
+		expect(schema).not.toContain('"architect"');
 	});
 
-	// Settings outlive the session, so configuring a tier this session cannot
-	// staff is a legitimate thing to want.
-	it("still lets every tier be configured for future sessions", () => {
-		const remember = leaderTools(manager).find((tool) => tool.name === "neta_remember");
-		expect(JSON.stringify(remember?.inputSchema)).toContain('"architect"');
+	it("does not expose the removed planning and settings tools", () => {
+		const names = leaderTools(manager).map((tool) => tool.name);
+		for (const name of ["neta_spawn", "neta_spawn_group", "neta_plan", "neta_remember"]) {
+			expect(names).not.toContain(name);
+		}
 	});
 
 	it("describes only the available rungs in the leader's instructions", () => {

@@ -1,16 +1,3 @@
-/**
- * The leader's tools.
- *
- * Everything the leader can do to a worker goes through here: spawn, look,
- * wait, talk, answer, kill. Anything cleverer belongs in a flavor, where the
- * user can read and change it.
- *
- * `neta_wait` is the one that matters for how a leader behaves. It blocks until
- * something needs the leader — workers finishing (all, or the first with
- * `first`), a worker blocking on a question, opted-in room activity — which is
- * how an idle leader wakes up with real results instead of polling.
- */
-
 import type { WorkerManager } from "../orchestrator/manager.ts";
 import {
 	formatInspection,
@@ -19,17 +6,7 @@ import {
 	formatWorkerSummary,
 } from "../orchestrator/status.ts";
 import { roleNames } from "../prompts/roles.ts";
-import { persistTierOverride } from "../settings.ts";
-import {
-	isTerminalState,
-	isTier,
-	type Note,
-	TIERS,
-	type Tier,
-	type WaitResult,
-	type WorkerLogEntry,
-	type WorkerSummary,
-} from "../types.ts";
+import { isTerminalState, isTier, type Note, TIERS, type Tier, type WaitResult, type WorkerSummary } from "../types.ts";
 import {
 	type McpTool,
 	optionalBoolean,
@@ -41,379 +18,205 @@ import {
 } from "./serve.ts";
 
 const DEFAULT_WAIT_SECONDS = 240;
-/** Vendor hosts time long tool calls out; staying under that is better than being killed mid-wait. */
 const MAX_WAIT_SECONDS = 900;
-
-/**
- * Tool results land in the leader's context, and five chatty workers can bury
- * it: one observed `neta_workers` call returned 120,000 characters and the
- * leader had to go read a file to find out what its own workers were doing.
- * Status views stay small; logs are read deliberately, through `neta_log`.
- */
 const MAX_RESULT_CHARS = 3000;
-const MAX_LOG_ENTRIES = 60;
-const MAX_LOG_CHARS = 8000;
-/** A room wake carries a pointer plus a short tail, not the whole transcript. */
 const ROOM_WAKE_TAIL = 5;
 
-function clip(text: string, limit: number): string {
-	return text.length <= limit ? text : `${text.slice(0, limit)}\n… ${text.length - limit} more characters`;
+function formatExecResult(result: Awaited<ReturnType<WorkerManager["exec"]>>): string {
+	const header = [
+		`Exit code: ${result.exitCode}${result.timedOut ? " (timed out)" : ""}`,
+		`Duration: ${result.durationMs} ms`,
+		`Cwd: ${result.cwd}`,
+		`Output file: ${result.outputPath}`,
+		"Output:",
+	].join("\n");
+	const output = result.output || "(no output)";
+	if (result.truncated) return `${header}\n${output}\nRead the entire response here: ${result.outputPath}`;
+	return `${header}\n${output}`;
+}
+
+function clip(value: string, limit: number): string {
+	return value.length <= limit ? value : `${value.slice(0, limit)}\n… ${value.length - limit} more characters`;
 }
 
 function describe(summary: WorkerSummary): string {
 	return formatWorkerSummary(summary);
 }
 
-function formatLog(entries: WorkerLogEntry[], full: boolean): string {
-	if (entries.length === 0) return "(no new output)";
-	const filtered = full ? entries : entries.filter((entry) => !["tool", "diff", "thought"].includes(entry.kind));
-	const shown = filtered.slice(-MAX_LOG_ENTRIES);
-	const dropped = filtered.length - shown.length;
-	const body = clip(shown.map((entry) => `[${entry.kind}] ${entry.text}`).join("\n"), MAX_LOG_CHARS);
-	return dropped > 0 ? `… ${dropped} earlier lines not shown\n${body}` : body;
-}
-
-/**
- * What a worker is and what it has said so far — deliberately without its log.
- * A worker's final message is the handoff, so that is worth carrying; its
- * running commentary is not, and `neta_log` exists for when it is.
- */
 function statusReport(summaries: WorkerSummary[], maxResultChars = MAX_RESULT_CHARS): string {
 	return summaries
 		.map((summary) => {
 			const lines = [describe(summary)];
-			const lastProgress = formatLastProgress(summary);
-			if (lastProgress) lines.push(`  ${lastProgress}`);
+			const progress = formatLastProgress(summary);
+			if (progress) lines.push(`  ${progress}`);
 			if (summary.result) lines.push(`  result: ${clip(summary.result, maxResultChars)}`);
-			// Kept out of `result` on purpose: the report is what the leader acts on,
-			// and this is the caveat attached to it.
 			if (summary.laterFailure) lines.push(`  after its report: ${clip(summary.laterFailure, maxResultChars)}`);
 			return lines.join("\n");
 		})
 		.join("\n\n");
 }
 
-/** One line per worker, for the workers a wait is not reporting in full. */
-function oneLiners(summaries: WorkerSummary[]): string {
-	return summaries.map((summary) => describe(summary)).join("\n");
-}
-
-/** Render a wait's outcome by what woke it. */
 function formatWaitResult(result: WaitResult, seconds: number): string {
-	const stillRunning = result.workers.filter((summary) => !isTerminalState(summary.state));
-	switch (result.reason) {
-		case "completed":
-			return statusReport(result.workers);
-		case "first": {
-			const finished = result.workers.filter((summary) => isTerminalState(summary.state));
-			const rest = stillRunning.length
-				? `\n\nStill running (call neta_wait again to collect them):\n${oneLiners(stillRunning)}`
-				: "";
-			return statusReport(finished) + rest;
-		}
-		case "ask": {
-			const asking = result.wokeBy;
-			if (!asking) return statusReport(result.workers);
-			const others = result.workers.filter((summary) => summary.id !== asking.id);
-			const rest = others.length ? `\n\nOthers:\n${oneLiners(others)}` : "";
-			return (
-				`${asking.id} is blocked on a question; answer it with neta_answer, then wait again.\n` +
-				statusReport([asking]) +
-				rest
-			);
-		}
-		case "room": {
-			const activity = result.roomActivity;
-			if (!activity) return statusReport(result.workers);
-			const shown = activity.posts.slice(-ROOM_WAKE_TAIL);
-			const dropped = activity.posts.length - shown.length;
-			const tail = shown.map((post) => `[${post.label}] ${post.text}`).join("\n");
-			return (
-				`New activity in room "${activity.room}"; read the full transcript with neta_room.\n` +
-				(dropped > 0 ? `… ${dropped} earlier new posts not shown\n` : "") +
-				clip(tail, MAX_LOG_CHARS) +
-				`\n\nWatched workers:\n${oneLiners(result.workers)}`
-			);
-		}
-		case "timeout": {
-			const note = stillRunning.length
-				? `\n\nStill running after ${seconds}s: ${stillRunning.map((summary) => summary.id).join(", ")}. ` +
-					"Call neta_wait again to keep waiting; they are not lost."
-				: "";
-			return statusReport(result.workers) + note;
-		}
+	const active = result.workers.filter((worker) => !isTerminalState(worker.state));
+	if (result.reason === "blocked" && result.wokeBy) {
+		return `${result.wokeBy.id} blocked and stopped: ${result.wokeBy.pendingQuestion ?? "(no question)"}\nAnswer with neta_send to resume this exact conversation.\n${statusReport(result.workers)}`;
 	}
+	if (result.reason === "room" && result.roomActivity) {
+		const posts = result.roomActivity.posts.slice(-ROOM_WAKE_TAIL);
+		return `New team activity in "${result.roomActivity.room}":\n${posts.map((post) => `[${post.label}] ${post.text}`).join("\n")}\n\n${statusReport(result.workers)}`;
+	}
+	if (result.reason === "first") {
+		const terminal = result.workers.filter((worker) => isTerminalState(worker.state));
+		return `${statusReport(terminal)}${active.length ? `\n\nStill running: ${active.map((worker) => worker.id).join(", ")}. Call neta_wait again.` : ""}`;
+	}
+	if (result.reason === "timeout") {
+		return `${statusReport(result.workers)}${active.length ? `\n\nStill running after ${seconds}s: ${active.map((worker) => worker.id).join(", ")}. Call neta_wait again.` : ""}`;
+	}
+	return statusReport(result.workers);
 }
 
-/** "(unworked)", or the linked workers with their progress: "(rw7 in progress, rw8 queued)". */
-function noteWorkersLabel(note: Note): string {
-	if (note.workers.length === 0) return " (unworked)";
-	return ` (${note.workers.map((w) => `${w.workerId} ${w.state === "running" ? "in progress" : w.state}`).join(", ")})`;
-}
-
-function formatOpenNotes(manager: WorkerManager): string {
-	const openNotes = manager.getOpenNotes();
-	if (openNotes.length === 0) return "";
-	const lines = openNotes.map((note) => {
-		const textClipped = note.text.length > 80 ? `${note.text.slice(0, 77)}...` : note.text;
-		return `${note.id} "${textClipped}"${noteWorkersLabel(note)}`;
-	});
-	return `\n\nOpen notes: ${lines.join(" | ")}`;
-}
-
-/**
- * Read a tier argument.
- *
- * `available` is what this session may staff, so an unavailable tier is named
- * for what it is rather than reported as unknown. The refusal itself belongs to
- * the WorkerManager, which every door goes through; this only makes the message
- * useful at the door the leader actually used.
- */
-function tier(args: Record<string, unknown>, available: readonly Tier[], name = "tier"): Tier {
-	const value = requireString(args, name);
+function tier(args: Record<string, unknown>, available: readonly Tier[]): Tier {
+	const value = requireString(args, "tier");
 	if (!isTier(value)) throw new Error(`Unknown tier "${value}". Tiers: ${TIERS.join(", ")}.`);
-	if (!available.includes(value)) {
-		throw new Error(
-			`Tier "${value}" is not available in this session. Available: ${available.join(", ")}. ` +
-				`Restaff this work on an available tier, or ask the user to start a session with it.`,
-		);
-	}
+	if (!available.includes(value))
+		throw new Error(`Tier "${value}" is unavailable. Available: ${available.join(", ")}.`);
 	return value;
 }
 
-function spawnWaitReminder(summaries: WorkerSummary[]): string {
-	const object = summaries.length === 1 ? "it" : "them";
-	if (summaries.some((summary) => summary.state === "running")) {
-		return `Running — collect ${object} with neta_wait before ending your turn; a worker that finishes after your turn ends reaches nobody.`;
-	}
-	const subject = summaries.length === 1 ? "it" : "they";
-	return `Queued — when ${subject} start${summaries.length === 1 ? "s" : ""}, collect ${object} with neta_wait before ending your turn; a worker that finishes after your turn ends reaches nobody.`;
+function noteWorkersLabel(note: Note): string {
+	return note.workers.length
+		? ` (${note.workers.map((worker) => `${worker.workerId} ${worker.state}`).join(", ")})`
+		: " (unworked)";
+}
+
+function formatOpenNotes(manager: WorkerManager): string {
+	const notes = manager.getOpenNotes();
+	return notes.length
+		? `\n\nOpen notes: ${notes.map((note) => `${note.id} "${clip(note.text, 80)}"${noteWorkersLabel(note)}`).join(" | ")}`
+		: "";
 }
 
 export function leaderTools(manager: WorkerManager): McpTool[] {
-	const roles = roleNames().join(", ");
-	// The session's ladder, fixed at startup. It narrows the tool schemas so the
-	// leader is never offered a tier the control plane will refuse — the refusal
-	// still lives in the manager, because a schema is advice and the socket door
-	// never sees one.
 	const available = manager.sessionTiers;
-	const tierEnum = [...available];
-	const tierNote = manager.allTiersAvailable
-		? ""
-		: ` Only ${available.join(", ")} were selected for this session; the others are refused.`;
-
-	const memberSchema = {
+	const roles = roleNames().join(", ");
+	const workerSchema = {
 		type: "object",
 		properties: {
-			role: { type: "string", description: `Role prompt to run. Built-in: ${roles}.` },
-			tier: { type: "string", enum: tierEnum, description: `One of: ${available.join(", ")}.` },
-			task: { type: "string", description: "Self-contained instructions for this member." },
-			name: { type: "string", description: "Two or three words naming this member's job, for its tab." },
-			writer: { type: "boolean", description: "Grant this member the writer slot." },
-			backend: {
-				type: "string",
-				description:
-					"Explicit backend for this member. Use it to apply the user's staffing-plan tweaks; otherwise omit " +
-					"and the assignment policy decides.",
-			},
-			note: { type: "string", description: "Link this member to a note (note id, e.g. n1)." },
+			role: { type: "string", description: `Role prompt. Built-in: ${roles}.` },
+			tier: { type: "string", enum: [...available] },
+			task: { type: "string", description: "Self-contained instructions and acceptance criteria." },
+			name: { type: "string", description: "Two or three words naming the job." },
+			writer: { type: "boolean", description: "Grant the serialized writer slot." },
+			backend: { type: "string", description: "Optional explicit backend override." },
+			note: { type: "string", description: "Optional open-note id." },
 		},
 		required: ["role", "tier", "task"],
 	};
 
 	return [
 		{
-			name: "neta_spawn",
+			name: "neta_delegate",
 			description:
-				"Spawn a worker agent to do a piece of work. Give it everything it needs in the task: it cannot see this " +
-				`conversation. Roles: ${roles}. Tiers: apprentice (mechanical), journeyman (exact spec), expert (scoped work), architect (ambiguity).${tierNote} ` +
-				"Returns immediately; use neta_wait to collect the result. If a writer is already active, the new writer " +
-				"is queued and starts automatically when the slot frees.",
+				"Delegate one or more workers. Without team they are independent; team gives every worker one shared transcript. Returns the actual backend and access assignments. Always collect workers with neta_wait.",
 			inputSchema: {
 				type: "object",
 				properties: {
-					role: { type: "string", description: `Role prompt to run. Built-in: ${roles}.` },
-					tier: { type: "string", enum: tierEnum, description: "How much judgement the task needs." },
-					task: {
-						type: "string",
-						description: "Self-contained instructions: files, acceptance criteria, what done means.",
-					},
-					name: {
-						type: "string",
-						description:
-							"Two or three words naming this worker's job, e.g. 'auth flow' or 'rails cable'. It labels the " +
-							"worker's tab, so five scouts are told apart at a glance. Defaults to the role.",
-					},
-					writer: {
-						type: "boolean",
-						description: "Grant the writer slot (edit/write access). Queued if a writer is already active.",
-					},
-					backend: {
-						type: "string",
-						description:
-							"Explicit backend for this worker. Use it to apply the user's staffing-plan tweaks; otherwise omit " +
-							"and the assignment policy decides.",
-					},
-					room: { type: "string", description: "Join a room and share its transcript with the other members." },
-					note: { type: "string", description: "Link this worker to a note (note id, e.g. n1)." },
-				},
-				required: ["role", "tier", "task"],
-			},
-			async run(args) {
-				const summary = await manager.spawn({
-					role: requireString(args, "role"),
-					tier: tier(args, available),
-					task: requireString(args, "task"),
-					name: optionalString(args, "name"),
-					writer: optionalBoolean(args, "writer"),
-					backend: optionalString(args, "backend"),
-					room: optionalString(args, "room"),
-					note: optionalString(args, "note"),
-				});
-				const headline =
-					summary.state === "queued"
-						? `Queued behind ${summary.queuedBehind}; starts automatically when the writer slot frees.`
-						: "Spawned";
-				return text(
-					`${headline}\n${describe(summary)}\nScratch: ${summary.scratchDir}\n${spawnWaitReminder([summary])}`,
-				);
-			},
-		},
-		{
-			name: "neta_plan",
-			description:
-				"Compute backend assignments for proposed workers without spawning them. Returns a numbered staffing " +
-				"plan showing which backend each worker would run on, given current tier mappings and the spread/diversity " +
-				"policy. Debaters in the same room are automatically spread across different vendors. Use this to present " +
-				"the plan to the user before spawning.",
-			inputSchema: {
-				type: "object",
-				properties: {
-					workers: {
-						type: "array",
-						items: {
-							type: "object",
-							properties: {
-								role: { type: "string", description: `Role prompt to run. Built-in: ${roles}.` },
-								tier: { type: "string", enum: tierEnum, description: "How much judgement the task needs." },
-								writer: { type: "boolean", description: "Whether this worker needs the writer slot." },
-								backend: { type: "string", description: "Override the backend for this worker." },
-								room: { type: "string", description: "Room name for workers that will share a room." },
-							},
-							required: ["role", "tier"],
-						},
-						description: "Proposed workers to plan assignments for.",
-					},
+					workers: { type: "array", items: workerSchema, minItems: 1 },
+					team: { type: "string", description: "Optional shared transcript name for every worker." },
+					seed: { type: "string", description: "Opening team post; requires team." },
 				},
 				required: ["workers"],
 			},
 			async run(args) {
-				const workers = args.workers;
-				if (!Array.isArray(workers) || workers.length === 0) {
-					throw new Error('"workers" must be a non-empty list.');
-				}
-
-				const requests = workers.map((w: Record<string, unknown>) => ({
-					role: requireString(w, "role"),
-					tier: tier(w, available),
-					writer: optionalBoolean(w, "writer"),
-					backend: optionalString(w, "backend"),
-					room: optionalString(w, "room"),
+				if (!Array.isArray(args.workers) || args.workers.length === 0)
+					throw new Error('"workers" must be a non-empty array.');
+				const team = optionalString(args, "team");
+				const seed = optionalString(args, "seed");
+				if (seed && !team) throw new Error('"seed" requires "team".');
+				const requests = (args.workers as Record<string, unknown>[]).map((raw) => ({
+					role: requireString(raw, "role"),
+					tier: tier(raw, available),
+					task: requireString(raw, "task"),
+					name: optionalString(raw, "name"),
+					writer: optionalBoolean(raw, "writer"),
+					backend: optionalString(raw, "backend"),
+					note: optionalString(raw, "note"),
+					room: team,
 				}));
-
-				const assignments = manager.planAssignments(requests);
-				const lines = assignments.map((assignment, index) => {
-					const access = assignment.writer ? "writer" : "read-only";
-					return `${index + 1}. ${assignment.role}/${assignment.tier} -> ${assignment.backend} (${access})`;
-				});
-
-				return text(lines.join("\n"));
+				// Resolve the complete batch before the seed or first process: invalid input has no partial side effects.
+				manager.validateDelegation(requests);
+				if (seed && team) manager.postToRoom(team, "leader", "leader", seed);
+				const summaries: WorkerSummary[] = [];
+				for (const request of requests) summaries.push(await manager.spawn(request));
+				const assignments = summaries.map(
+					(summary) =>
+						`${summary.id}: ${summary.role}/${summary.tier} -> ${summary.backend} (${summary.writer ? "writer" : "read-only"}, ${summary.state})${summary.state === "queued" ? " — Queued" : ""}${summary.headlessReason ? `\n  Worker view: headless — ${summary.headlessReason}` : ""}`,
+				);
+				return text(
+					`${team ? `Team "${team}"\n` : ""}${assignments.join("\n")}\nCollect with neta_wait before ending your turn.`,
+				);
 			},
 		},
 		{
-			name: "neta_spawn_group",
+			name: "neta_exec",
 			description:
-				"Spawn several workers into one room. Members read and post to a shared transcript, so they can argue " +
-				"with each other without routing every message through you. Use it for debates and for scouts that must " +
-				"not duplicate work.",
+				"Run one small, fully understood mechanical repository command without a worker: Git inspection, a targeted Bun test, or an explicitly user-approved git push. Uses an argv array with no shell and a strict executable/subcommand allowlist. Never use for source/code edits, arbitrary scripts, interpreters, or ambiguous implementation. Outward or destructive work still requires explicit user authority. Write-capable commands refuse while any worker owns or is queued for the writer slot.",
 			inputSchema: {
 				type: "object",
 				properties: {
-					room: { type: "string", description: "Room name, e.g. 'auth-debate'." },
-					members: { type: "array", items: memberSchema, description: "Workers to spawn into the room." },
-					seed: { type: "string", description: "Opening message posted before the members start." },
+					argv: {
+						type: "array",
+						items: { type: "string" },
+						minItems: 1,
+						description: 'Argument vector, for example ["git", "status", "--short"]. No shell string.',
+					},
+					cwd: { type: "string", description: "Optional existing directory within the session repository." },
+					timeoutSeconds: { type: "number", description: "Timeout from 0.001 to 600 seconds; default 60." },
+					userApproved: {
+						type: "boolean",
+						description: "Set only when the user explicitly authorized an outward command such as git push.",
+					},
 				},
-				required: ["room", "members"],
+				required: ["argv"],
 			},
 			async run(args) {
-				const room = requireString(args, "room");
-				const members = args.members;
-				if (!Array.isArray(members) || members.length === 0) throw new Error('"members" must be a non-empty list.');
-				// Every member's tier is checked before the room is seeded and before
-				// the first member starts. Validating inside the loop would leave a
-				// half-built room and a posted seed behind when member three names an
-				// unavailable tier — a side effect of a call that failed.
-				const tiers = (members as Record<string, unknown>[]).map((raw) => tier(raw, available));
-				manager.assertTiersAvailable(tiers);
-				const seed = optionalString(args, "seed");
-				if (seed) manager.postToRoom(room, "leader", "leader", seed);
-
-				const spawned: WorkerSummary[] = [];
-				const failures: string[] = [];
-				for (const [index, raw] of (members as Record<string, unknown>[]).entries()) {
-					try {
-						spawned.push(
-							await manager.spawn({
-								role: requireString(raw, "role"),
-								tier: tiers[index],
-								task: requireString(raw, "task"),
-								name: optionalString(raw, "name"),
-								writer: optionalBoolean(raw, "writer"),
-								backend: optionalString(raw, "backend"),
-								room,
-								note: optionalString(raw, "note"),
-							}),
-						);
-					} catch (error) {
-						failures.push(`${raw.role}: ${error instanceof Error ? error.message : String(error)}`);
-					}
+				if (
+					!Array.isArray(args.argv) ||
+					args.argv.length === 0 ||
+					args.argv.some((item) => typeof item !== "string")
+				) {
+					throw new Error('"argv" must be a non-empty list of strings.');
 				}
-				const lines = spawned.map(describe);
-				if (failures.length > 0) lines.push(`Failed to spawn: ${failures.join("; ")}`);
-				if (spawned.length > 0) lines.push(spawnWaitReminder(spawned));
-				return text(`Room "${room}"\n${lines.join("\n")}`, spawned.length === 0);
+				const timeoutSeconds = optionalNumber(args, "timeoutSeconds");
+				return text(
+					formatExecResult(
+						await manager.exec({
+							argv: args.argv as string[],
+							cwd: optionalString(args, "cwd"),
+							timeoutMs: timeoutSeconds === undefined ? undefined : Math.round(timeoutSeconds * 1000),
+							userApproved: optionalBoolean(args, "userApproved"),
+						}),
+					),
+				);
 			},
 		},
 		{
 			name: "neta_workers",
-			description:
-				"List workers with their state, token usage and final results. Cheap and safe to call whenever you want " +
-				"to know what is happening; it does not interrupt the workers. Each worker's most recent progress milestone shows " +
-				"as a last: line. For a worker's running commentary, use neta_log. When called with a specific workerId, " +
-				"the result is returned up to 20,000 characters; when listing all workers, results are clipped to 3000 " +
-				"characters. Shows open notes at the end.",
-			inputSchema: {
-				type: "object",
-				properties: {
-					workerId: { type: "string", description: "Only this worker (for example, rw1 or ro2). Omit for all." },
-				},
-			},
+			description: "List workers, latest milestone, usage and results. Safe and non-interrupting.",
+			inputSchema: { type: "object", properties: { workerId: { type: "string" } } },
 			async run(args) {
-				const workerId = optionalString(args, "workerId");
-				const summaries = workerId ? [manager.get(workerId)] : manager.list();
-				if (summaries.length === 0) return text("No workers have been spawned.");
-				const maxChars = workerId ? 20000 : MAX_RESULT_CHARS;
-				// Bridge identity only in the single-worker view; list lines stay compact.
-				const bridge = workerId && summaries[0].agentInfo ? `\nBridge: ${summaries[0].agentInfo}` : "";
-				return text(statusReport(summaries, maxChars) + bridge + formatOpenNotes(manager));
+				const id = optionalString(args, "workerId");
+				const workers = id ? [manager.get(id)] : manager.list();
+				return text(
+					workers.length
+						? statusReport(workers, id ? 20_000 : MAX_RESULT_CHARS) + formatOpenNotes(manager)
+						: "No workers have been delegated.",
+				);
 			},
 		},
 		{
 			name: "neta_status",
-			description:
-				"Show one consolidated snapshot: the current writer slot, the writer queue in start order, workers grouped " +
-				"by state, and open notes with linked-worker progress. Safe to call whenever you need the complete current " +
-				"picture; it does not interrupt workers.",
+			description: "Show writer slot, queue, grouped worker states and open notes.",
 			inputSchema: { type: "object" },
 			async run() {
 				return text(manager.status());
@@ -422,50 +225,18 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 		{
 			name: "neta_attach",
 			description:
-				"Open a fresh multiplexer tab with a terminal worker's native backend TUI, resuming its exact recorded " +
-				"vendor session. Refuses active or unstarted workers and headless sessions. It sends no prompt and does not " +
-				"change worker state; call it again if the user closes the tab.",
-			inputSchema: {
-				type: "object",
-				properties: { workerId: { type: "string", description: "Terminal worker id, such as rw1 or ro2." } },
-				required: ["workerId"],
-			},
+				"Open a terminal worker's exact native vendor session in a fresh multiplexer tab. Refuses active, queued, headless, or concurrently owned sessions.",
+			inputSchema: { type: "object", properties: { workerId: { type: "string" } }, required: ["workerId"] },
 			async run(args) {
 				const summary = manager.reopenWorkerTui(requireString(args, "workerId"));
-				return text(`Opened ${summary.id} "${summary.name}" in a new ${summary.backend} TUI tab.`);
-			},
-		},
-		{
-			name: "neta_log",
-			description:
-				"Read a worker's new log lines since you last looked. Each line is shown once. By default, omits " +
-				"low-level details (tool calls, diffs, thoughts) to reduce context waste; use full=true to see everything.",
-			inputSchema: {
-				type: "object",
-				properties: {
-					workerId: { type: "string", description: "Worker id, such as rw1 or ro2." },
-					full: { type: "boolean", description: "Include all entries (tool, diff, thought). Default false." },
-				},
-				required: ["workerId"],
-			},
-			async run(args) {
-				const entries = manager.drainLog(requireString(args, "workerId"));
-				const full = optionalBoolean(args, "full") ?? false;
-				return text(entries.length === 0 ? "(no new log entries)" : formatLog(entries, full));
+				return text(`Opened ${summary.id} in a new ${summary.backend} TUI tab.`);
 			},
 		},
 		{
 			name: "neta_inspect",
 			description:
-				"Expand one worker in place: what was sent to it and what it has said back, most recent last. Bounded " +
-				"hard and marked where it was cut, so it is safe to call on a chatty worker. Unlike neta_log it does not " +
-				"move your read cursor, so you can look without consuming lines. This is also the way to see a worker " +
-				"that has no multiplexer tab — a headless session, or one whose tab could not be created.",
-			inputSchema: {
-				type: "object",
-				properties: { workerId: { type: "string", description: "Worker id, such as rw1 or ro2." } },
-				required: ["workerId"],
-			},
+				"Read one worker's bounded recent input/output without consuming a cursor. Works for headless workers.",
+			inputSchema: { type: "object", properties: { workerId: { type: "string" } }, required: ["workerId"] },
 			async run(args) {
 				return text(formatInspection(manager.inspect(requireString(args, "workerId"))).join("\n"));
 			},
@@ -473,37 +244,14 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 		{
 			name: "neta_wait",
 			description:
-				"Block until the named workers need you, then return what woke you. This is how you collect work: end " +
-				"your turn with it rather than polling. Wakes on: every named worker finishing (the default); the first " +
-				"one finishing, with first=true, to act on results as they land; any watched worker blocking on a " +
-				"question (always on — answer it with neta_answer and wait again); a new post in a room, with " +
-				"roomEvents, to referee a debate live. Returns early with current state if the timeout expires. Results " +
-				"are clipped to 3000 characters; use neta_workers with a specific workerId to retrieve the result " +
-				"(up to 20,000 characters). Shows open notes at the end.",
+				"Block until workers finish, the first finishes, one blocks, a watched team posts, or timeout. Call again while work remains.",
 			inputSchema: {
 				type: "object",
 				properties: {
-					workerIds: {
-						type: "array",
-						items: { type: "string" },
-						description: "Worker ids such as rw1 or ro2. Omit to wait for all running.",
-					},
-					timeoutSeconds: {
-						type: "number",
-						description: `Default ${DEFAULT_WAIT_SECONDS}, max ${MAX_WAIT_SECONDS}.`,
-					},
-					first: {
-						type: "boolean",
-						description:
-							"Return as soon as any watched worker finishes, with its result and one-line states of the rest. " +
-							"Default: wait for all of them.",
-					},
-					roomEvents: {
-						type: ["boolean", "string"],
-						description:
-							"Also wake when a new post lands in a room: true watches the watched workers' rooms, a room name " +
-							"watches that room.",
-					},
+					workerIds: { type: "array", items: { type: "string" } },
+					timeoutSeconds: { type: "number" },
+					first: { type: "boolean" },
+					roomEvents: { type: ["boolean", "string"] },
 				},
 			},
 			async run(args) {
@@ -511,43 +259,28 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 					optionalStringArray(args, "workerIds") ??
 					manager
 						.list()
-						.filter((summary) => !isTerminalState(summary.state))
-						.map((summary) => summary.id);
-				if (ids.length === 0) return text("Nothing to wait for.");
+						.filter((worker) => !isTerminalState(worker.state))
+						.map((worker) => worker.id);
+				if (!ids.length) return text("Nothing to wait for.");
 				const seconds = Math.min(optionalNumber(args, "timeoutSeconds") ?? DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS);
-				const first = optionalBoolean(args, "first") ?? false;
 				const roomEvents = args.roomEvents;
-				let rooms: string[] | undefined;
-				if (typeof roomEvents === "string" && roomEvents.trim() !== "") {
-					rooms = [roomEvents];
-				} else if (roomEvents === true) {
-					rooms = ids.flatMap((id) => {
-						const room = manager.get(id).room;
-						return room ? [room] : [];
-					});
-				} else if (roomEvents !== undefined && roomEvents !== null && roomEvents !== false && roomEvents !== "") {
-					throw new Error('"roomEvents" must be true or a room name.');
-				}
-				const result = await manager.wait(ids, seconds * 1000, { first, rooms });
+				const rooms =
+					typeof roomEvents === "string"
+						? [roomEvents]
+						: roomEvents === true
+							? ids.flatMap((id) => (manager.get(id).room ? [manager.get(id).room as string] : []))
+							: undefined;
+				const result = await manager.wait(ids, seconds * 1000, { first: optionalBoolean(args, "first"), rooms });
 				return text(formatWaitResult(result, seconds) + formatOpenNotes(manager));
 			},
 		},
 		{
 			name: "neta_send",
 			description:
-				"Steer a worker: interrupt the turn it is running and make your message its next prompt, in the same " +
-				"session. Use it to redirect work that is going the wrong way, rather than waiting for the turn to end " +
-				"or killing the worker. A worker that has not started yet gets the message appended to its brief; a " +
-				"worker blocked on a question keeps waiting until you answer it with neta_answer. A finished worker " +
-				"errors; spawn a new worker instead. The result says exactly what happened — interrupted, delivered " +
-				"after the turn ended on its own, or queued and not yet read — and work the worker had already " +
-				"completed is never undone.",
+				"Steer a running worker, append to a queued brief, or resume a done/failed/blocked worker in its exact ACP conversation. Killed/interrupted workers refuse.",
 			inputSchema: {
 				type: "object",
-				properties: {
-					workerId: { type: "string", description: "Worker id, such as rw1 or ro2." },
-					message: { type: "string" },
-				},
+				properties: { workerId: { type: "string" }, message: { type: "string" } },
 				required: ["workerId", "message"],
 			},
 			async run(args) {
@@ -556,124 +289,32 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 			},
 		},
 		{
-			name: "neta_answer",
-			description: "Answer a worker that is blocked on a question, unblocking it.",
-			inputSchema: {
-				type: "object",
-				properties: {
-					workerId: { type: "string", description: "Worker id, such as rw1 or ro2." },
-					answer: { type: "string", description: "Be specific; the worker acts on it directly." },
-				},
-				required: ["workerId", "answer"],
-			},
-			async run(args) {
-				const summary = manager.answer(requireString(args, "workerId"), requireString(args, "answer"));
-				return text(`Answered ${describe(summary)}`);
-			},
-		},
-		{
 			name: "neta_kill",
-			description:
-				"Terminate a worker. Use it when the task changed or the worker is stuck; it releases the writer slot.",
-			inputSchema: {
-				type: "object",
-				properties: { workerId: { type: "string", description: "Worker id, such as rw1 or ro2." } },
-				required: ["workerId"],
-			},
+			description: "Terminate a worker and release its writer slot.",
+			inputSchema: { type: "object", properties: { workerId: { type: "string" } }, required: ["workerId"] },
 			async run(args) {
 				return text(`Killed ${describe(await manager.kill(requireString(args, "workerId")))}`);
 			},
 		},
 		{
-			name: "neta_room",
-			description: "Read a room's transcript, and optionally post to it yourself.",
-			inputSchema: {
-				type: "object",
-				properties: {
-					room: { type: "string" },
-					post: { type: "string", description: "Message to post before reading." },
-					tail: { type: "number", description: "Only the last N posts." },
-				},
-				required: ["room"],
-			},
-			async run(args) {
-				const room = requireString(args, "room");
-				const post = optionalString(args, "post");
-				if (post) manager.postToRoom(room, "leader", "leader", post);
-				const posts = manager.roomTranscript(room, optionalNumber(args, "tail"));
-				if (posts.length === 0) return text(`Room "${room}" is empty.`);
-				return text(posts.map((entry) => `[${entry.label}] ${entry.text}`).join("\n"));
-			},
-		},
-		{
 			name: "neta_note",
-			description:
-				"Record parked work, pending decisions, or promised follow-ups in the open-notes ledger. " +
-				"Create a note with {text}, close it with {close: noteId}. Call with no args to list all open notes. " +
-				"Link workers to notes via the note param on spawn; each linked worker's state is tracked on the " +
-				"note from spawn to finish. Notes are session-scoped and in-memory.",
-			inputSchema: {
-				type: "object",
-				properties: {
-					text: { type: "string", description: "Create a new open note with this text." },
-					close: { type: "string", description: "Close this note id (e.g. n1)." },
-				},
-			},
+			description: "Create, close, or list session-scoped open notes.",
+			inputSchema: { type: "object", properties: { text: { type: "string" }, close: { type: "string" } } },
 			async run(args) {
-				const textArg = optionalString(args, "text");
-				const closeArg = optionalString(args, "close");
-
-				if (textArg && closeArg) {
-					throw new Error("Provide either text (create) or close (close one), not both.");
-				}
-
-				if (textArg) {
-					const note = manager.createNote(textArg);
+				const value = optionalString(args, "text");
+				const close = optionalString(args, "close");
+				if (value && close) throw new Error("Provide either text or close, not both.");
+				if (value) {
+					const note = manager.createNote(value);
 					return text(`Created ${note.id}: ${note.text}`);
 				}
-
-				if (closeArg) {
-					const note = manager.closeNote(closeArg);
-					return text(`Closed ${note.id}`);
-				}
-
-				// List all open notes
-				const openNotes = manager.getOpenNotes();
-				if (openNotes.length === 0) return text("No open notes.");
-				return text(openNotes.map((note) => `${note.id} "${note.text}"${noteWorkersLabel(note)}`).join("\n"));
-			},
-		},
-		{
-			name: "neta_remember",
-			description:
-				"Persist a tier's backend assignment to the project's .neta/settings.json file. Use this when the user " +
-				'says "remember" after a backend override. This writes to the project settings file and does not ' +
-				"preserve JSON comments. The setting will apply to future sessions in this project.",
-			inputSchema: {
-				type: "object",
-				properties: {
-					tier: {
-						type: "string",
-						enum: [...TIERS],
-						// Settings outlive this session, so any tier may be configured —
-						// including one this session was not started with.
-						description: "The tier to configure, for this and future sessions.",
-					},
-					backend: { type: "string", description: "The backend name to assign to this tier." },
-					model: { type: "string", description: "Optional model override for this tier and backend." },
-				},
-				required: ["tier", "backend"],
-			},
-			async run(args) {
-				const tierValue = tier(args, TIERS);
-				const backendValue = requireString(args, "backend");
-				const modelValue = optionalString(args, "model");
-
-				const override = modelValue ? { backend: backendValue, model: modelValue } : { backend: backendValue };
-				await persistTierOverride(manager.cwd, tierValue, override, manager.agentDir);
-
-				const modelText = modelValue ? ` (model: ${modelValue})` : "";
-				return text(`Persisted: ${tierValue} -> ${backendValue}${modelText}\nWritten to .neta/settings.json`);
+				if (close) return text(`Closed ${manager.closeNote(close).id}`);
+				const notes = manager.getOpenNotes();
+				return text(
+					notes.length
+						? notes.map((note) => `${note.id} "${note.text}"${noteWorkersLabel(note)}`).join("\n")
+						: "No open notes.",
+				);
 			},
 		},
 	];
