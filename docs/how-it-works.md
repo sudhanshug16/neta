@@ -275,21 +275,31 @@ for the writer slot. A `git push` issued this way runs the repository's normal
 
 Output is the boundary that is left. Every invocation streams combined
 stdout/stderr directly to a unique mode-0600 file under the session's
-temporary directory (audit directory mode 0700). The tool result never holds
-more than 12,000 bytes of it in memory: under that cap it carries everything;
-over it, it keeps the head and the tail of the capture — a failing command's
-actual error usually lands at the end — states plainly that the output was too
-large to return in full, names the exact temp file path, and tells the leader
-to delegate reading that file to an apprentice or scout rather than trying to
-read around the cut itself. Timeout or shutdown sends TERM then KILL to the
-whole detached process group and waits until it is gone, unchanged from
+temporary directory (audit directory mode 0700). The command's own output
+excerpt inside the tool result — not the tool result as a whole, which also
+carries a header, the temp file path and any warnings below — never exceeds
+12,000 UTF-8 bytes: under that cap the excerpt carries everything; over it,
+the excerpt keeps the head and the tail of the capture — a failing command's
+actual error usually lands at the end — and the result states plainly, outside
+that excerpt, that the output was too large to return in full, names the exact
+temp file path, and tells the leader to delegate reading that file to an
+apprentice or scout rather than trying to read around the cut itself. A
+command that cannot even be launched (bad executable, a process group that
+cannot be proven stopped) does not raise a tool error either: it comes back as
+a completed result with a distinct exit code and the launch failure folded
+into that same bounded excerpt, so it still carries its call number and
+warning like any other accepted call. Timeout or shutdown sends TERM then KILL
+to the whole detached process group and waits until it is gone, unchanged from
 before.
 
 Each session counts its own accepted `neta_exec` calls — accepted meaning
-argv, cwd and timeout all passed structural validation, whether or not the
-command itself then exited nonzero. The counter lives only in the running
-manager, not the checkpoint, so a resumed process legitimately restarts it at
-one. The first call in a session carries no warning; every call from the
+argv, cwd and timeout all passed structural validation (including the MCP
+layer's own bound on `timeoutSeconds`, checked before it is rounded into
+milliseconds, so an out-of-range value cannot round into a valid one),
+whether or not the command itself then exited nonzero or failed to launch.
+The counter lives only in the running manager, not the checkpoint, so a
+resumed process legitimately restarts it at one. The first call in a session
+carries no warning; every call from the
 second on returns with its exact call number and a line telling the leader
 that repeated discovery belongs to a delegated worker, not to another
 `neta_exec` call. The warning never rejects or delays the command — it is

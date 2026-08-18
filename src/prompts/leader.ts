@@ -230,10 +230,13 @@ inline shell source, and Git or Bun with any options, in any existing
 directory. It does not disable Git hooks, does not sandbox \`git push\`, and
 does not gate push or any other command on user approval — \`userApproved\` is
 accepted for compatibility but ignored. Full combined stdout+stderr always
-lands in a session-owned mode-0600 file; the text you get back is capped, and
-when a command's output was too large to return in full the result says so and
-names that file — delegate reading it to an apprentice or scout rather than
-picking through the truncation yourself. From the second call in a session on,
+lands in a session-owned mode-0600 file; the command's own output excerpt in
+the result is capped — the header, path and any warnings around it are not
+counted against that cap — and when a command's output was too large to
+return in full the result says so and names that file — delegate reading it
+to an apprentice or scout rather than picking through the truncation
+yourself. A command that cannot even be launched still comes back as a
+completed result, not a tool error. From the second call in a session on,
 the result also names its call number and tells you to delegate repeated
 discovery to a worker instead of calling it again yourself; treat that as a
 real instruction, not noise.

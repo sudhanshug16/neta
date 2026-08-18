@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -219,5 +222,73 @@ describe("leader MCP redesign", () => {
 		expect(body(await call("neta_status"))).toContain("ro1");
 		expect(body(await call("neta_workers", { workerId: "ro1" }))).toContain("scout/expert");
 		expect(body(await call("neta_inspect", { workerId: "ro1" }))).toContain("map");
+	});
+});
+
+describe("neta_exec through the real MCP client/server boundary", () => {
+	let manager: WorkerManager;
+	let client: Client;
+	let execDir: string;
+
+	beforeEach(async () => {
+		execDir = mkdtempSync(join(tmpdir(), "neta-mcp-exec-"));
+		manager = new WorkerManager({
+			cwd: process.cwd(),
+			agentDir: "/nonexistent-agent-dir",
+			config: fixtureBackendConfig(),
+			channelAddress: "/tmp/neta-mcp-exec-test.sock",
+			execOutputDir: execDir,
+			onEvent: () => {},
+		});
+		const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+		await createMcpServer("neta", leaderTools(manager)).connect(serverSide);
+		client = new Client({ name: "test", version: "0" });
+		await client.connect(clientSide);
+	});
+
+	afterEach(async () => {
+		await client.close();
+		await manager.dispose();
+		rmSync(execDir, { recursive: true, force: true });
+	});
+
+	const call = async (name: string, args: Record<string, unknown> = {}) =>
+		(await client.callTool({ name, arguments: args })) as CallToolResult;
+
+	it("runs a real command through the MCP client and returns its completed, non-error result", async () => {
+		const result = await call("neta_exec", { argv: ["true"] });
+		expect(result.isError).toBeFalsy();
+		expect(body(result)).toMatch(/Exit code: 0/);
+		expect(body(result)).not.toContain("call #");
+	});
+
+	it("warns with the exact call number from the second MCP call on, in the same completed response", async () => {
+		await call("neta_exec", { argv: ["true"] });
+		const second = await call("neta_exec", { argv: ["true"] });
+		expect(second.isError).toBeFalsy();
+		expect(body(second)).toContain("call #2");
+		expect(body(second).toLowerCase()).toContain("delegate");
+	});
+
+	it("returns a completed result carrying the call number when the command cannot be spawned, not an MCP tool error", async () => {
+		const missing = "neta-exec-mcp-test-missing-binary-xyz";
+		const first = await call("neta_exec", { argv: [missing] });
+		expect(first.isError).toBeFalsy();
+		expect(body(first)).not.toContain("call #");
+		expect(body(first).toLowerCase()).toMatch(/enoent|not found/);
+
+		const second = await call("neta_exec", { argv: [missing] });
+		expect(second.isError).toBeFalsy();
+		expect(body(second)).toContain("call #2");
+		expect(body(second).toLowerCase()).toContain("delegate");
+	});
+
+	it("rejects an out-of-range timeoutSeconds as an MCP tool error before it can round into a valid value, and does not count it", async () => {
+		const rejected = await call("neta_exec", { argv: ["true"], timeoutSeconds: 600.0004 });
+		expect(rejected.isError).toBe(true);
+
+		const first = await call("neta_exec", { argv: ["true"] });
+		expect(first.isError).toBeFalsy();
+		expect(body(first)).not.toContain("call #");
 	});
 });

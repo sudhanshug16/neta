@@ -125,7 +125,7 @@ host process, outside any sandbox:
 | Tool | What it does |
 | --- | --- |
 | `neta_delegate` | Start one or more independent workers, or a team sharing one transcript; input errors are atomic, while runtime startup failures are returned per worker and later workers are still attempted. |
-| `neta_exec` | Run any argv command directly — any executable, any arguments, Git or Bun with any options, in any existing directory. No command allowlist; output is the only bound: it's capped in the response, with the full capture always on disk and named when truncated, and the response flags repeated calls from the second one on. |
+| `neta_exec` | Run any argv command directly — any executable, any arguments, Git or Bun with any options, in any existing directory. No command allowlist; output is the only bound: the command's own output excerpt in the response is capped, with the full capture always on disk and named when that excerpt is truncated, and the response flags repeated calls from the second one on. A command that fails to launch still comes back as a completed result, not a tool error. |
 | `neta_workers` | List workers with state, token usage and results. |
 | `neta_status` | One snapshot: writer slot, queue, workers by state, open notes. |
 | `neta_attach` | Reopen a terminal worker's exact native backend session in a new tab. |

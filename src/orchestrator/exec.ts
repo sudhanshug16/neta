@@ -5,11 +5,13 @@ import { isAbsolute, join, resolve } from "node:path";
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const MAX_TIMEOUT_MS = 600_000;
+/** Cap on the command-output excerpt alone (`RepoExecResult.output`) — not on the MCP tool text built around it. */
 export const OUTPUT_LIMIT_BYTES = 12_000;
-const OUTPUT_HEAD_BYTES = 8_000;
-const OUTPUT_TAIL_BYTES = OUTPUT_LIMIT_BYTES - OUTPUT_HEAD_BYTES;
+const TRUNCATION_MARKER = "\n… output truncated …\n";
 const TERM_GRACE_MS = 1_000;
 const KILL_GRACE_MS = 3_000;
+/** Exit code is always 0-255 (plus the synthetic 124/130 below); -1 can only mean the command never ran. */
+export const SPAWN_FAILURE_EXIT_CODE = -1;
 
 export interface RepoExecRequest {
 	argv: string[];
@@ -116,8 +118,16 @@ async function terminateGroup(childPid: number, childExited: () => boolean): Pro
 	}
 }
 
+/** Drops trailing characters until the UTF-8 encoding fits, guarding the boundary case where a split multi-byte sequence decodes to a longer replacement character. */
+function capUtf8Bytes(text: string, maxBytes: number): string {
+	let result = text;
+	while (Buffer.byteLength(result, "utf-8") > maxBytes) result = result.slice(0, -1);
+	return result;
+}
+
 /**
- * Reads at most OUTPUT_LIMIT_BYTES from the full-output file. A command that
+ * Reads from the full-output file so the returned excerpt's own UTF-8 byte
+ * length — marker included — never exceeds OUTPUT_LIMIT_BYTES. A command that
  * overflows the budget loses its middle, not its ending: the tail is where a
  * failing build's actual error usually lands, so a head-only cap would hide it.
  */
@@ -130,14 +140,16 @@ function readBoundedOutput(path: string): { output: string; truncated: boolean }
 			readSync(fd, buffer, 0, size, 0);
 			return { output: buffer.toString("utf-8"), truncated: false };
 		}
-		const head = Buffer.alloc(OUTPUT_HEAD_BYTES);
-		readSync(fd, head, 0, OUTPUT_HEAD_BYTES, 0);
-		const tail = Buffer.alloc(OUTPUT_TAIL_BYTES);
-		readSync(fd, tail, 0, OUTPUT_TAIL_BYTES, size - OUTPUT_TAIL_BYTES);
-		return {
-			output: `${head.toString("utf-8")}\n… output truncated …\n${tail.toString("utf-8")}`,
-			truncated: true,
-		};
+		const markerBytes = Buffer.byteLength(TRUNCATION_MARKER, "utf-8");
+		const excerptBudget = Math.max(0, OUTPUT_LIMIT_BYTES - markerBytes);
+		const headBudget = Math.ceil((excerptBudget * 2) / 3);
+		const tailBudget = excerptBudget - headBudget;
+		const head = Buffer.alloc(headBudget);
+		readSync(fd, head, 0, headBudget, 0);
+		const tail = Buffer.alloc(tailBudget);
+		readSync(fd, tail, 0, tailBudget, size - tailBudget);
+		const assembled = `${head.toString("utf-8")}${TRUNCATION_MARKER}${tail.toString("utf-8")}`;
+		return { output: capUtf8Bytes(assembled, OUTPUT_LIMIT_BYTES), truncated: true };
 	} finally {
 		closeSync(fd);
 	}
@@ -170,67 +182,86 @@ export async function executeRepoCommand(
 	const startedAt = Date.now();
 
 	try {
-		const child = spawn(request.argv[0], request.argv.slice(1), {
-			cwd,
-			env: process.env,
-			detached: true,
-			// One shared file descriptor preserves stdout/stderr write order. Two
-			// pipes only preserve order within each stream and cannot be merged later.
-			stdio: ["ignore", outputFd, outputFd],
-		});
-
-		const closed = new Promise<{ code: number | null; spawnError?: Error }>((resolveClosed) => {
-			child.once("error", (error) => resolveClosed({ code: null, spawnError: error }));
-			child.once("close", (code) => {
-				childExited = true;
-				resolveClosed({ code });
+		try {
+			const child = spawn(request.argv[0], request.argv.slice(1), {
+				cwd,
+				env: process.env,
+				detached: true,
+				// One shared file descriptor preserves stdout/stderr write order. Two
+				// pipes only preserve order within each stream and cannot be merged later.
+				stdio: ["ignore", outputFd, outputFd],
 			});
-		});
-		let timer: ReturnType<typeof setTimeout> | undefined;
-		let abortListener: (() => void) | undefined;
-		const stopped = new Promise<"timeout" | "aborted">((resolveStopped) => {
-			timer = setTimeout(() => resolveStopped("timeout"), timeoutMs);
-			if (signal) {
-				abortListener = () => resolveStopped("aborted");
-				if (signal.aborted) abortListener();
-				else signal.addEventListener("abort", abortListener, { once: true });
-			}
-		});
 
-		const winner = await Promise.race([
-			closed.then((outcome) => ({ type: "closed" as const, outcome })),
-			stopped.then((reason) => ({ type: "stopped" as const, reason })),
-		]);
-		if (timer) clearTimeout(timer);
-		if (signal && abortListener) signal.removeEventListener("abort", abortListener);
+			const closed = new Promise<{ code: number | null; spawnError?: Error }>((resolveClosed) => {
+				child.once("error", (error) => resolveClosed({ code: null, spawnError: error }));
+				child.once("close", (code) => {
+					childExited = true;
+					resolveClosed({ code });
+				});
+			});
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			let abortListener: (() => void) | undefined;
+			const stopped = new Promise<"timeout" | "aborted">((resolveStopped) => {
+				timer = setTimeout(() => resolveStopped("timeout"), timeoutMs);
+				if (signal) {
+					abortListener = () => resolveStopped("aborted");
+					if (signal.aborted) abortListener();
+					else signal.addEventListener("abort", abortListener, { once: true });
+				}
+			});
 
-		let exitCode: number;
-		let timedOut = false;
-		if (winner.type === "stopped") {
-			timedOut = winner.reason === "timeout";
-			if (!child.pid) throw new Error("neta_exec process did not provide a pid for cleanup.");
-			await terminateGroup(child.pid, () => childExited);
-			await closed;
-			exitCode = timedOut ? 124 : 130;
-		} else {
-			if (winner.outcome.spawnError) throw winner.outcome.spawnError;
-			exitCode = winner.outcome.code ?? 1;
-			if (child.pid && groupAlive(child.pid, childExited)) {
+			const winner = await Promise.race([
+				closed.then((outcome) => ({ type: "closed" as const, outcome })),
+				stopped.then((reason) => ({ type: "stopped" as const, reason })),
+			]);
+			if (timer) clearTimeout(timer);
+			if (signal && abortListener) signal.removeEventListener("abort", abortListener);
+
+			let exitCode: number;
+			let timedOut = false;
+			if (winner.type === "stopped") {
+				timedOut = winner.reason === "timeout";
+				if (!child.pid) throw new Error("neta_exec process did not provide a pid for cleanup.");
 				await terminateGroup(child.pid, () => childExited);
+				await closed;
+				exitCode = timedOut ? 124 : 130;
+			} else {
+				if (winner.outcome.spawnError) throw winner.outcome.spawnError;
+				exitCode = winner.outcome.code ?? 1;
+				if (child.pid && groupAlive(child.pid, childExited)) {
+					await terminateGroup(child.pid, () => childExited);
+				}
 			}
-		}
-		const bounded = readBoundedOutput(outputPath);
+			const bounded = readBoundedOutput(outputPath);
 
-		return {
-			exitCode,
-			durationMs: Date.now() - startedAt,
-			cwd,
-			outputPath,
-			output: bounded.output,
-			truncated: bounded.truncated,
-			timedOut,
-			callNumber,
-		};
+			return {
+				exitCode,
+				durationMs: Date.now() - startedAt,
+				cwd,
+				outputPath,
+				output: bounded.output,
+				truncated: bounded.truncated,
+				timedOut,
+				callNumber,
+			};
+		} catch (error) {
+			// Accepted means counted: a command that could not even be launched (bad
+			// executable, group cleanup that cannot be proven) still consumed this
+			// call's slot, so it gets a completed result carrying callNumber — never
+			// an uncaught rejection that would strand the frequency warning.
+			const bounded = readBoundedOutput(outputPath);
+			const message = error instanceof Error ? error.message : String(error);
+			return {
+				exitCode: SPAWN_FAILURE_EXIT_CODE,
+				durationMs: Date.now() - startedAt,
+				cwd,
+				outputPath,
+				output: bounded.output ? `${bounded.output}\n${message}` : message,
+				truncated: bounded.truncated,
+				timedOut: false,
+				callNumber,
+			};
+		}
 	} finally {
 		closeSync(outputFd);
 	}

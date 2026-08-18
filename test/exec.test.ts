@@ -15,6 +15,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { leaderTools } from "../src/mcp/leader.ts";
+import { OUTPUT_LIMIT_BYTES, SPAWN_FAILURE_EXIT_CODE } from "../src/orchestrator/exec.ts";
 import { WorkerManager } from "../src/orchestrator/manager.ts";
 import type { PromptOutcome, TransportOptions, WorkerTransportDriver } from "../src/orchestrator/transport.ts";
 import { buildLeaderPrompt } from "../src/prompts/leader.ts";
@@ -207,6 +208,39 @@ describe("neta_exec", () => {
 		expect(body(stillFirst)).not.toContain("call #");
 	});
 
+	it("rejects an out-of-range timeoutSeconds structurally at the MCP boundary before it can round into a valid millisecond value, and never counts it", async () => {
+		const repo = repository();
+		const value = manager(repo);
+
+		await expect(tool(value).run({ argv: ["true"], timeoutSeconds: 600.0004 })).rejects.toThrow();
+		await expect(tool(value).run({ argv: ["true"], timeoutSeconds: 0 })).rejects.toThrow();
+		await expect(tool(value).run({ argv: ["true"], timeoutSeconds: -1 })).rejects.toThrow();
+		await expect(tool(value).run({ argv: ["true"], timeoutSeconds: Number.POSITIVE_INFINITY })).rejects.toThrow();
+		await expect(tool(value).run({ argv: ["true"], timeoutSeconds: Number.NaN })).rejects.toThrow();
+
+		const stillFirst = body(await tool(value).run({ argv: ["true"] }));
+		expect(stillFirst).not.toContain("call #");
+	});
+
+	it("returns a completed result instead of throwing when the command cannot be spawned, and still carries its call number", async () => {
+		const repo = repository();
+		const missing = "neta-exec-test-missing-binary-xyz";
+
+		const raw = await manager(repo).exec({ argv: [missing] });
+		expect(raw.exitCode).toBe(SPAWN_FAILURE_EXIT_CODE);
+		expect(raw.output.toLowerCase()).toMatch(/enoent|not found/);
+		expect(raw.callNumber).toBe(1);
+
+		const value = manager(repo);
+		const first = body(await tool(value).run({ argv: [missing] }));
+		expect(first).not.toContain("call #");
+		expect(first.toLowerCase()).toMatch(/enoent|not found/);
+
+		const second = body(await tool(value).run({ argv: [missing] }));
+		expect(second).toContain("call #2");
+		expect(second.toLowerCase()).toContain("delegate");
+	});
+
 	it("returns nonzero exits with cwd, duration, and a full audit path", async () => {
 		const repo = repository();
 		const result = await tool(manager(repo)).run({ argv: ["git", "rev-parse", "--verify", "missing-ref"] });
@@ -233,13 +267,23 @@ describe("neta_exec", () => {
 
 	it("bounds displayed output to head and tail, states the output was too large to inspect, and names the exact full-output path", async () => {
 		const repo = repository();
+		const value = manager(repo);
 		const script = [
 			"printf 'HEAD_MARKER\\n'",
 			"i=0",
 			"while [ $i -lt 2000 ]; do printf 'line-%04d-filler-filler-filler\\n' $i; i=$((i+1)); done",
 			"printf 'TAIL_MARKER\\n'",
 		].join("; ");
-		const result = await tool(manager(repo)).run({ argv: ["sh", "-c", script] });
+		const argv = ["sh", "-c", script];
+
+		const raw = await value.exec({ argv });
+		expect(raw.truncated).toBe(true);
+		expect(Buffer.byteLength(raw.output, "utf-8")).toBeLessThanOrEqual(OUTPUT_LIMIT_BYTES);
+		expect(raw.output).toContain("HEAD_MARKER");
+		expect(raw.output).toContain("TAIL_MARKER");
+		expect(raw.output).not.toContain("line-1000-filler");
+
+		const result = await tool(value).run({ argv });
 		const text = body(result);
 
 		expect(text).toContain("too large");

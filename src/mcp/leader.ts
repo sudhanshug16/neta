@@ -1,4 +1,4 @@
-import { OUTPUT_LIMIT_BYTES } from "../orchestrator/exec.ts";
+import { OUTPUT_LIMIT_BYTES, SPAWN_FAILURE_EXIT_CODE } from "../orchestrator/exec.ts";
 import type { WorkerManager } from "../orchestrator/manager.ts";
 import {
 	formatInspection,
@@ -22,10 +22,14 @@ const DEFAULT_WAIT_SECONDS = 240;
 const MAX_WAIT_SECONDS = 900;
 const MAX_RESULT_CHARS = 3000;
 const ROOM_WAKE_TAIL = 5;
+const MIN_TIMEOUT_SECONDS = 0.001;
+const MAX_TIMEOUT_SECONDS = 600;
 
 function formatExecResult(result: Awaited<ReturnType<WorkerManager["exec"]>>): string {
+	const exitNote =
+		result.exitCode === SPAWN_FAILURE_EXIT_CODE ? " (failed to launch)" : result.timedOut ? " (timed out)" : "";
 	const header = [
-		`Exit code: ${result.exitCode}${result.timedOut ? " (timed out)" : ""}`,
+		`Exit code: ${result.exitCode}${exitNote}`,
 		`Duration: ${result.durationMs} ms`,
 		`Cwd: ${result.cwd}`,
 		`Output file: ${result.outputPath}`,
@@ -35,7 +39,7 @@ function formatExecResult(result: Awaited<ReturnType<WorkerManager["exec"]>>): s
 	const sections = [`${header}\n${output}`];
 	if (result.truncated) {
 		sections.push(
-			`This output was too large for you to inspect here: it exceeded the ${OUTPUT_LIMIT_BYTES}-byte cap on what neta_exec returns, so only its head and tail are shown above. Do not try to read around this truncation yourself — delegate inspecting the full output to an apprentice or scout. Full output: ${result.outputPath}`,
+			`The command's own output was too large for you to inspect here: it exceeded the ${OUTPUT_LIMIT_BYTES}-byte cap neta_exec keeps on that excerpt (this header and this note are not counted against it), so only its head and tail are shown above. Do not try to read around this truncation yourself — delegate inspecting the full output to an apprentice or scout. Full output: ${result.outputPath}`,
 		);
 	}
 	if (result.callNumber > 1) {
@@ -192,7 +196,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 		{
 			name: "neta_exec",
 			description:
-				'Run any command directly, without a worker: any executable name or absolute/relative path, any arguments — including shell or interpreter flags and inline shell source strings such as ["sh","-c","..."] — and Git or Bun with any options. There is no command allowlist and the working directory may be any existing directory, not only the session repository. Full combined stdout+stderr is always captured to a session-owned mode-0600 file; the text this tool returns is capped and, when the command\'s output was too large to return in full, the result says so and names that file so you can delegate reading it. From the second call in a session onward, the result also names the call number and says to delegate repeated discovery to workers instead of calling this again yourself.',
+				'Run any command directly, without a worker: any executable name or absolute/relative path, any arguments — including shell or interpreter flags and inline shell source strings such as ["sh","-c","..."] — and Git or Bun with any options. There is no command allowlist and the working directory may be any existing directory, not only the session repository. Full combined stdout+stderr is always captured to a session-owned mode-0600 file; the command\'s own output excerpt in the result is capped (the surrounding header, path and warnings are not counted against that cap), and when the command\'s output was too large to return in full, the result says so and names that file so you can delegate reading it. From the second call in a session onward, the result also names the call number and says to delegate repeated discovery to workers instead of calling this again yourself. A command that cannot even be launched still comes back as a completed result, not a tool error.',
 			inputSchema: {
 				type: "object",
 				properties: {
@@ -226,6 +230,16 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 					throw new Error('"argv" must be a non-empty list of strings.');
 				}
 				const timeoutSeconds = optionalNumber(args, "timeoutSeconds");
+				if (
+					timeoutSeconds !== undefined &&
+					(!Number.isFinite(timeoutSeconds) ||
+						timeoutSeconds < MIN_TIMEOUT_SECONDS ||
+						timeoutSeconds > MAX_TIMEOUT_SECONDS)
+				) {
+					throw new Error(
+						`"timeoutSeconds" must be a finite number from ${MIN_TIMEOUT_SECONDS} to ${MAX_TIMEOUT_SECONDS} inclusive.`,
+					);
+				}
 				return text(
 					formatExecResult(
 						await manager.exec({
