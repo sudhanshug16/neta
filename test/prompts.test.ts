@@ -4,7 +4,7 @@
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadCharter } from "../src/prompts/charter.ts";
@@ -232,6 +232,25 @@ describe("flavors", () => {
 
 		expect(refs.map((ref) => ref.name)).toEqual(["implement", "decide", "investigate"]);
 		expect(refs[0].path).toBe(join(agentDir, "skills", "implement", "SKILL.md"));
+	});
+
+	it("guides decide debates to use the lowest fitting tier and available apprentice teams", async () => {
+		const refs = await materializeFlavors(scratch());
+		const decide = refs.find((ref) => ref.name === "decide");
+		if (!decide) throw new Error("The shipped decide flavor was not materialized.");
+
+		const body = readFileSync(decide.path, "utf8");
+		expect(body).toContain("Choose the lowest tier that fits each debate position");
+		expect(body).toContain(
+			"An apprentice is valid for a\nbounded, evidence-gathering, or narrowly specified debate position",
+		);
+		expect(body).toContain("prefer a mix including at least one non-apprentice\ndebater for judgment");
+		expect(body).toContain(
+			"If only apprentice tiers are available, use the available\napprentices rather than blocking the debate",
+		);
+		expect(body).toContain("Use architect only for an ambiguous or\nopen-ended position");
+		expect(body).toContain("do not staff every debater as architect by default");
+		expect(body).toContain("Room\nbackend diversity still spreads debaters across distinct providers");
 	});
 
 	// Overwriting an edited playbook would silently undo the user's work.

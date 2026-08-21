@@ -36,7 +36,7 @@ const TIER_RUNGS: Record<Tier, string> = {
 	expert: `- **expert** — well-scoped features, bug fixes with tests, code review. Handles
   normal ambiguity, tells you when something is wrong with the task.`,
 	architect: `- **architect** — real ambiguity: debugging with an unknown cause, design work,
-  arguing a tradeoff. Use it when the shape of the answer is not known yet.`,
+  or an open-ended position. Use it when the shape of the answer is not known yet.`,
 };
 
 /**
@@ -55,7 +55,12 @@ function tierLadder(available: readonly Tier[]): string {
 const TIER_CHOICE = `Pick the lowest tier that can do the job: mechanical, inventory, and reading tasks go to
 apprentice or journeyman scouts (for example, list every machine and report its OS); use an expert
 for a scoped feature or review (for example, add one validated API field); use an architect only
-when the shape of the answer is unknown (for example, find why an intermittent deploy fails).`;
+when the shape of the answer is unknown (for example, find why an intermittent deploy fails).
+Debater role is orthogonal to tier: pick the lowest tier that fits each debate position. An apprentice
+may debate a bounded, evidence-gathering, or narrowly specified position. When multiple suitable tiers
+are available, prefer a mix including at least one non-apprentice debater for judgment; if only apprentice
+tiers are available, use them rather than blocking the debate. Use an architect only for an ambiguous or
+open-ended position, not for the debater role itself.`;
 
 /** Said out loud only when the session is narrower than the full ladder. */
 function tierRestriction(available: readonly Tier[]): string {

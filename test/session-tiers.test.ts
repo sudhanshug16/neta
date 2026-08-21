@@ -35,12 +35,17 @@ class FakeTransport implements WorkerTransportDriver {
 	markTerminal(): void {}
 }
 
-function managerWith(sessionTiers?: Tier[]): { manager: WorkerManager; transports: FakeTransport[] } {
+function managerWith(
+	sessionTiers?: Tier[],
+	installedBackends?: string[],
+): { manager: WorkerManager; transports: FakeTransport[] } {
 	const transports: FakeTransport[] = [];
+	const config = fixtureBackendConfig();
+	if (installedBackends) config.installedBackends = () => installedBackends;
 	const manager = new WorkerManager({
 		cwd: process.cwd(),
 		agentDir: "/nonexistent-agent-dir",
-		config: fixtureBackendConfig(),
+		config,
 		sessionTiers,
 		channelAddress: "/tmp/neta-tiers-test.sock",
 		leaderToken: "leader-token",
@@ -129,6 +134,22 @@ describe("session tier enforcement", () => {
 			],
 		});
 		expect(manager.list().map((worker) => worker.tier)).toEqual(["expert", "journeyman"]);
+	});
+
+	it("accepts two apprentice debaters and spreads them across available backends", async () => {
+		const { manager: apprenticeManager } = managerWith(["apprentice"], ["claude", "codex"]);
+		const delegate = leaderTools(apprenticeManager).find((tool) => tool.name === "neta_delegate");
+		if (!delegate) throw new Error("neta_delegate was not registered.");
+
+		await delegate.run({
+			team: "debate",
+			workers: [
+				{ role: "debater", tier: "apprentice", task: "gather evidence for option A" },
+				{ role: "debater", tier: "apprentice", task: "gather evidence for option B" },
+			],
+		});
+		expect(apprenticeManager.list().map((worker) => worker.tier)).toEqual(["apprentice", "apprentice"]);
+		expect(new Set(apprenticeManager.list().map((worker) => worker.backend))).toEqual(new Set(["claude", "codex"]));
 	});
 
 	it("offers only the available tiers in the delegate schema", () => {

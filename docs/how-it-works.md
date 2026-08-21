@@ -39,6 +39,20 @@ and Git worktrees have different real paths, so each can run its own session.
 That normally means one writer slot per directory; separate subdirectories of
 one repository still have separate sessions and writer slots.
 
+## Roles and tiers
+
+A worker's role and tier are separate parts of a spawn. The role supplies the
+prompt — scout, worker, reviewer, or debater — while the tier says how much
+ambiguity the worker can handle. They are orthogonal: a debater is not required
+to be an architect. For each debate position, the leader selects the lowest tier
+that fits. An apprentice may take a bounded, evidence-gathering, or narrowly
+specified position. When multiple suitable tiers are available, prefer a mix with
+at least one non-apprentice debater for judgment; if only apprentice tiers are
+available, use the available apprentices rather than blocking the debate. Room
+diversity still spreads debaters across distinct providers when multiple backends
+are available. Architect is for ambiguous or open-ended positions, not for the
+debate role itself.
+
 ## Durable checkpoints
 
 The live registry and the recovery checkpoint have different jobs:

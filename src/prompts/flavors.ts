@@ -79,10 +79,10 @@ finish the work and report it as ready.
 
 const DECIDE: FlavorSkill = {
 	name: "decide",
-	description: "resolve a real tradeoff by staging a debate between architect workers, then judging it",
+	description: "resolve a real tradeoff by staging a debate at the lowest fitting tiers, then judging it",
 	body: `---
 name: decide
-description: Resolve a real tradeoff by running a debate between architect workers in a room, then judging it.
+description: Resolve a real tradeoff by running a debate at the lowest fitting tiers in a room, then judging it.
 ---
 
 # decide
@@ -99,9 +99,17 @@ the constraints that actually bind: deadlines, data volume, who maintains it.
 
 ## 2. Stage the debate
 
-Spawn one debater per position, architect tier, all into the same room, and seed the
-room with the framed question and the constraints. Give each debater its
-position and tell it to argue from this codebase, not from general principle.
+Choose the lowest tier that fits each debate position. An apprentice is valid for a
+bounded, evidence-gathering, or narrowly specified debate position. When multiple
+suitable tiers are available, prefer a mix including at least one non-apprentice
+debater for judgment. If only apprentice tiers are available, use the available
+apprentices rather than blocking the debate. Use architect only for an ambiguous or
+open-ended position; do not staff every debater as architect by default. Room
+backend diversity still spreads debaters across distinct providers when multiple
+backends are available. Spawn one debater per position at its selected tier, all
+into the same room, and seed the room with the framed question and the constraints.
+Give each debater its position and tell it to argue from this codebase, not from
+general principle.
 
 ## 3. Run fixed rounds
 

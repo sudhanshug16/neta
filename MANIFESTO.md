@@ -92,7 +92,8 @@ The descriptions go in the leader's prompt verbatim:
 - **journeyman** — mechanical work with a precise spec: renames, applying a
   reviewed diff, running tests and reporting output. Fails on ambiguity.
 - **expert** — well-scoped features, bug fixes with tests, code review.
-- **architect** — ambiguity: unknown-cause debugging, design work, debates.
+- **architect** — ambiguity: unknown-cause debugging, design work, or open-ended
+  positions. Debate is a role, not an architect-only tier.
 
 The tier-to-backend mapping lives in settings and may be left unconfigured.
 Unconfigured tiers are assigned deterministically: spread round-robin across
@@ -106,7 +107,12 @@ returns the actual computed assignments after validating the full batch.
 
 A role is a prompt: scout, worker, reviewer, debater. Shipped as markdown role
 definitions; users add their own. Role and tier are orthogonal — a journeyman
-reviewer and an architect reviewer run the same prompt on different models.
+reviewer and an architect reviewer run the same prompt on different models, and a
+debater may be an apprentice for a bounded, evidence-gathering, or narrowly
+specified position. When multiple suitable tiers are available, prefer a mix with
+at least one journeyman, expert, or architect debater for judgment; if only the
+apprentice tier is available, use it rather than blocking the debate. Architect is
+for ambiguity, not the debate role itself.
 
 ## Communication
 
