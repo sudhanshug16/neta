@@ -8,6 +8,7 @@ import socket
 import subprocess
 import tempfile
 import time
+import tomllib
 import unittest
 import warnings
 from pathlib import Path
@@ -40,6 +41,36 @@ from monitor import (
     get_herdr_panes,
     MAX_RESPONSE_SIZE,
 )
+
+
+class TestHerdrManifest(unittest.TestCase):
+    """Test that Herdr resolves every monitor command from its plugin root."""
+
+    def test_monitor_commands_use_quoted_plugin_root(self):
+        """Startup, pane, and action commands use the runtime plugin root."""
+        manifest_path = Path(__file__).parent.parent / "herdr-plugin.toml"
+        with manifest_path.open("rb") as manifest_file:
+            manifest = tomllib.load(manifest_file)
+
+        commands = [
+            manifest["startup"][0]["command"],
+            manifest["panes"][0]["command"],
+            manifest["actions"][0]["command"],
+        ]
+        expected_startup = [True, False, True]
+
+        for command, starts_up in zip(commands, expected_startup):
+            self.assertEqual(command[:2], ["bash", "-c"])
+            self.assertEqual(len(command), 3)
+            shell_argv = command[2]
+            self.assertIn('"$HERDR_PLUGIN_ROOT/scripts/monitor.py"', shell_argv)
+            self.assertNotIn("scripts/monitor.py", command)
+            self.assertNotIn("personal-plugins", shell_argv)
+            self.assertNotIn("/Users/", shell_argv)
+            self.assertEqual(
+                shell_argv.endswith(" --startup"),
+                starts_up,
+            )
 
 
 class TestHeaderEscaping(unittest.TestCase):
