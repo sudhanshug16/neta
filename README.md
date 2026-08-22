@@ -56,6 +56,19 @@ does not install or change it. Neta's own expansion is `neta inspect <id>` (or
 `neta_inspect`): a bounded recent input/output window with an explicit marker
 when content was truncated, including for headless workers.
 
+## Herdr integration
+
+The repository ships the canonical Herdr Neta Status plugin at
+`plugins/herdr/neta-status/`. From a checkout, link it with:
+
+```
+herdr plugin link "$PWD/plugins/herdr/neta-status"
+```
+
+Its monitor shows live Neta session IDs, worker state, working directory, and
+leader backend. Herdr plugin v1 cannot create native per-worker Agent sidebar
+rows; use `neta inspect <worker-id>` for those details.
+
 Then delegate:
 
 > Find out why the release workflow is flaky, and fix it.

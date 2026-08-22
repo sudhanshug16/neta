@@ -24,6 +24,7 @@ jobs:
       - run: bun run typecheck
       - run: bunx biome check --error-on-warnings .
       - run: bun test
+      - run: python3 -W error plugins/herdr/neta-status/tests/test_monitor.py
       - run: bun run build
       # What ships is the bundle, so prove the bundle runs before publishing it.
       - run: node dist/cli.js --version

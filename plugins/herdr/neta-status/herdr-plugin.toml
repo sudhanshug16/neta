@@ -1,0 +1,21 @@
+id = "personal.neta-status"
+name = "Neta Status"
+version = "0.1.0"
+min_herdr_version = "0.8.2"
+description = "Monitor live Neta sessions with persistent pane display"
+platforms = ["macos"]
+
+[[startup]]
+command = ["python3", "scripts/monitor.py", "--startup"]
+
+[[panes]]
+id = "monitor"
+title = "Neta Monitor"
+placement = "tab"
+command = ["python3", "scripts/monitor.py"]
+
+[[actions]]
+id = "open-monitor"
+title = "Open Neta Monitor"
+contexts = ["workspace", "global"]
+command = ["python3", "scripts/monitor.py", "--startup"]

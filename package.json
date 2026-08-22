@@ -31,7 +31,8 @@
 		"LICENSE",
 		"MANIFESTO.md",
 		"CHARTER.example.md",
-		"docs"
+		"docs",
+		"plugins"
 	],
 	"engines": {
 		"node": ">=22.19.0"
@@ -45,7 +46,7 @@
 		"typecheck": "tsc --noEmit",
 		"check": "biome check --write --error-on-warnings . && bun run typecheck",
 		"test": "bun test",
-		"prepublishOnly": "bun run clean && bun run check && bun test && bun run build",
+		"prepublishOnly": "bun run clean && bun run check && bun test && python3 -W error plugins/herdr/neta-status/tests/test_monitor.py && bun run build",
 		"refresh-pricing": "bun run scripts/refresh-pricing.ts"
 	},
 	"devDependencies": {
