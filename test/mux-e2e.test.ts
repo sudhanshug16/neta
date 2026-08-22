@@ -1,11 +1,14 @@
 /**
  * Real tmux uses one server process and captures that server's environment at
  * its first session. Run against a private server so this never touches a
- * developer's existing tmux session.
+ * developer's existing tmux session. Every command is bounded, and cleanup
+ * records the exact random socket and server pid. A SIGKILL of this parent can
+ * still preempt macOS exit handlers; the bounded residual is that one owned
+ * server. The next harness load retries only its dead-owner ledger entries,
+ * never a broad sweep or a user's tmux/Zellij/Neta session.
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,11 +16,20 @@ import { fileURLToPath } from "node:url";
 import { newSessionArgs, newWindowArgs } from "../src/mux/tmux.ts";
 import type { ProcessSpec } from "../src/mux/types.ts";
 import { waitFor } from "./helpers.ts";
+import { reapOrphanedTmuxTestRuns, runBoundedCommand, TmuxTestRun, uniqueTmuxSocket } from "./tmux-harness.ts";
 
 const FAKE_LEADER = fileURLToPath(new URL("./fixtures/fake-leader.mjs", import.meta.url));
 const dirs: string[] = [];
-const tmuxAvailable = spawnSync("tmux", ["-V"], { stdio: "ignore" }).status === 0;
+const runs: TmuxTestRun[] = [];
+await reapOrphanedTmuxTestRuns();
+const tmuxAvailable = (await runBoundedCommand("tmux", ["-V"])).status === 0;
 const tmuxIt = tmuxAvailable ? it : it.skip;
+
+function ownedRun(): TmuxTestRun {
+	const run = new TmuxTestRun();
+	runs.push(run);
+	return run;
+}
 
 function scratch(prefix: string): string {
 	const dir = mkdtempSync(join(tmpdir(), prefix));
@@ -33,56 +45,52 @@ function leader(record: string, env: Record<string, string>): ProcessSpec {
 	};
 }
 
-function start(tmuxSocket: string, name: string, spec: ProcessSpec): void {
+async function start(run: TmuxTestRun, tmuxSocket: string, name: string, spec: ProcessSpec): Promise<void> {
 	const args = newSessionArgs(name, spec);
 	args.splice(1, 0, "-d");
-	const result = spawnSync("tmux", ["-L", tmuxSocket, ...args], { encoding: "utf-8" });
-	if (result.status !== 0) throw new Error(result.stderr || `tmux exited ${result.status}`);
+	const result = await run.invoke(["-L", tmuxSocket, ...args]);
+	if (result.status !== 0 || result.timedOut) throw new Error(result.stderr || `tmux exited ${result.status}`);
+	await run.recordServer(tmuxSocket);
 }
 
 function readEnv(record: string): Record<string, string | null> {
 	return (JSON.parse(readFileSync(record, "utf-8")) as { env: Record<string, string | null> }).env;
 }
 
-afterEach(() => {
+afterEach(async () => {
+	await Promise.all(runs.splice(0).map((run) => run.cleanup()));
 	for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
 describe("tmux leader environment isolation", () => {
-	tmuxIt("opens a worker window in the explicit session on a custom tmux server", () => {
-		const socket = `neta-pane-${process.pid}-${Date.now()}`;
+	tmuxIt("opens a worker window in the explicit session on a custom tmux server", async () => {
+		const run = ownedRun();
+		const socket = run.ownSocket(uniqueTmuxSocket("neta-pane"));
 		const name = `neta-pane-${process.pid}`;
 		try {
-			const started = spawnSync("tmux", ["-L", socket, "new-session", "-d", "-s", name, "sleep", "30"], {
-				encoding: "utf-8",
-			});
-			if (started.status !== 0) throw new Error(started.stderr || "Could not start tmux test session.");
-			const locator = spawnSync(
-				"tmux",
-				["-L", socket, "display-message", "-p", "#{socket_path},#{pid},#{window_index}"],
-				{
-					encoding: "utf-8",
-				},
-			).stdout.trim();
-			const opened = spawnSync(
-				"tmux",
+			const started = await run.invoke(["-L", socket, "new-session", "-d", "-s", name, "sleep", "30"]);
+			if (started.status !== 0 || started.timedOut)
+				throw new Error(started.stderr || "Could not start tmux test session.");
+			const locator = (await run.recordServer(socket)).locator;
+			const opened = await run.invoke(
 				newWindowArgs("worker", { command: "sleep", args: ["30"] }, process.cwd(), name),
-				{ env: { ...process.env, TMUX: locator }, encoding: "utf-8" },
+				{
+					env: { ...process.env, TMUX: locator },
+				},
 			);
 
 			expect(opened.status).toBe(0);
-			expect(
-				spawnSync("tmux", ["-L", socket, "list-windows", "-t", name, "-F", "#W"], { encoding: "utf-8" }).stdout,
-			).toContain("worker");
+			expect((await run.invoke(["-L", socket, "list-windows", "-t", name, "-F", "#W"])).stdout).toContain("worker");
 		} finally {
-			spawnSync("tmux", ["-L", socket, "kill-server"], { stdio: "ignore" });
+			await run.cleanup();
 		}
 	});
 
 	tmuxIt(
 		"gives two different NETA_DIR launches and two shared-dir launches their own socket and id",
 		async () => {
-			const socket = `neta-test-${process.pid}-${Date.now()}`;
+			const run = ownedRun();
+			const socket = run.ownSocket(uniqueTmuxSocket("neta-test"));
 			const records = scratch("neta-tmux-records-");
 			const firstDir = scratch("neta-tmux-home-a-");
 			const secondDir = scratch("neta-tmux-home-b-");
@@ -96,7 +104,8 @@ describe("tmux leader environment isolation", () => {
 
 			try {
 				for (const [name, agentDir, channel, sessionId] of specs) {
-					start(
+					await start(
+						run,
 						socket,
 						`neta-${name}`,
 						leader(join(records, `${name}.json`), {
@@ -116,7 +125,7 @@ describe("tmux leader environment isolation", () => {
 					expect(env.NETA_SESSION_ID).toBe(sessionId);
 				}
 			} finally {
-				spawnSync("tmux", ["-L", socket, "kill-server"], { stdio: "ignore" });
+				await run.cleanup();
 			}
 		},
 		15000,
