@@ -483,6 +483,31 @@ zellij` or `--mux tmux` picks that multiplexer regardless. If you are not
 inside a session, Neta starts one around the leader; with no multiplexer
 available, workers run headless and nothing else changes.
 
+## Terminal handoffs and worker observability
+
+A terminal worker — one driven with `neta attach` in the vendor's native TUI
+— reports back to Neta through a persistent wire, so its final state (whether
+it committed, its exit status, whether there are uncommitted changes) is
+authoritative. That state lands in the worker row and carries through to
+recovery when the session is resumed later: `neta workers` and the leader's
+`neta_status` always show the worker's true final state.
+
+Worker panes and `neta_inspect` are designed for observability without
+intervention. A pane reading the worker's log does not consume it — the leader
+pulls the same log independently, and nothing shown in a pane is taken away
+from the leader. `neta_inspect` provides a fixed-size recent window that is
+never altered by pane activity, so you can verify a worker's behavior from
+another terminal without scrolling an open pane. This makes it safe to run
+`neta inspect <id>` at any time to see a worker's last activity, including for
+headless workers with no pane.
+
+Worker view continuity is maintained through leader restarts and session
+recovery: watch panes continue streaming even when the leader reconnects, and
+the pane input line keeps working. If a pane's terminal multiplexer is killed
+or the pane itself is closed, `neta watch <id>` reopens it in the same or a
+different terminal. This is supported by the worker view layer retrying its
+stream connection and reconnecting to the multiplexer when needed.
+
 ## Worker cost estimation
 
 Worker usage (tokens and cost) appears in the pane footer, the `neta workers`

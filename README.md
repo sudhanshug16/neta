@@ -130,6 +130,39 @@ selection. `neta models [backend]` lists the ids, straight from the backend.
 Claude listings omit Fable because Neta does not allow selecting it; old Fable
 usage remains cost-estimable for historical reports.
 
+## Session goals
+
+A session optionally carries a mutable goal: the working objective the leader is
+delegating toward. The goal starts uninitialized. When set, it holds an
+immutable original intent, a revisioned working objective, and a discovery
+policy:
+
+- **original intent** — what the user asked for. Never changed.
+- **working objective** — the current understanding of the task, revised as
+  discoveries land. The worker's prompt includes this snapshot and must not
+  silently expand it; if the work reveals the goal should change, the worker
+  reports it as a discovery.
+- **revision** — incremented each time the working objective changes, so
+  handoff messages can cite which version they acted on.
+- **discovery policy** — `allowed` (default) or `locked`. When `locked`, workers
+  are told that goal-impact discoveries are rejected and must use `blocked`
+  instead if they hit an actual blocker. Use this late in execution when the
+  scope is firm and you want to prevent scope creep.
+- **status** — `active`, `complete`, or `stopped`. The leader sets this; workers
+  see it but do not change it.
+
+A worker reports a discovery with `neta discover --impact local|goal --finding
+<text> [--suggest <text>]`. Local discoveries are findings that do not require
+the goal to change (informational, a suggestion for later work, or something the
+worker can work around). Goal-impact discoveries stop the turn and hand back to
+the leader with evidence; it is the leader's call whether the goal should change.
+When discovery policy is `locked`, goal-impact reports are rejected and the worker
+is told to use `blocked` instead if they are stuck.
+
+`neta status --goal` shows the compact current goal; it says no goal when none is
+initialized. Workers can also ask for goal status from inside a turn with `neta
+status --goal` or, if delegated into a room, `neta room` includes goal context.
+
 ## The leader's tools
 
 Inside the session, worker control is MCP tools — they run in the vendor's
@@ -139,30 +172,30 @@ host process, outside any sandbox:
 | --- | --- |
 | `neta_delegate` | Start one or more independent workers, or a team sharing one transcript; input errors are atomic, while runtime startup failures are returned per worker and later workers are still attempted. |
 | `neta_exec` | Run any argv command directly — any executable, any arguments, Git or Bun with any options, in any existing directory. No command allowlist; output is the only bound: the command's own output excerpt in the response is capped, with the full capture always on disk and named when that excerpt is truncated, and the response flags repeated calls from the second one on. A command that fails to launch still comes back as a completed result, not a tool error. |
-| `neta_workers` | List workers with state, token usage and results. |
-| `neta_status` | One snapshot: writer slot, queue, workers by state, open notes. |
+| `neta_status` | One snapshot: goal (when set), writer slot, queue, workers by state, and open notes. Pass `view="workers"` for worker detail. |
 | `neta_attach` | Reopen a terminal worker's exact native backend session in a new tab. |
 | `neta_wait` | Block until watched workers finish, report a blocker, or a team posts. |
 | `neta_send` | Steer a live worker or resume a done, failed, or blocked worker in its exact ACP conversation. |
-| `neta_inspect` | Expand one worker's recent input and output, bounded, without consuming lines. |
+| `neta_inspect` | Expand one worker's recent input and output, bounded, without consuming lines. The returned window is fixed-size and independent of worker pane activity; use it for exceptional detail on a worker row that has no tab, or to verify a worker's activity without scrolling a live pane. |
 | `neta_kill` | Terminate a worker, releasing the writer slot. |
 | `neta_note` | Open-notes ledger: parked work, pending decisions, follow-ups. |
 
 ## The worker channel
 
-Workers report back through their own MCP tools — `neta_progress`,
-`neta_blocked`, and `neta_status` — or the same commands in
-their shell; both doors reach the same socket, and every request carries that
-worker's own token. Team workers additionally receive `neta_room` and
-`neta_room_post`; independent workers do not see either. Workers hold no leader token and cannot run leader
-commands:
+Workers report back through their own MCP tools or shell commands; both doors
+reach the same socket, and every request carries that worker's own token. Team
+workers additionally receive room commands; independent workers do not see
+either. Workers hold no leader token and cannot run leader commands:
 
 ```
-neta progress <message>    record a progress milestone; the leader pulls it
-neta blocked <question>    stop this turn with a blocker; the leader resumes it with send
-neta room-post <message>   post to your team transcript
-neta room [--tail N]       read your room's transcript
-neta status --writers      show active, queued and finished writers
+neta progress <message>                   record a progress milestone; the leader pulls it
+neta blocked <question>                   stop this turn with a blocker; the leader resumes it with send
+neta discover --impact local|goal \       report a finding; local discoveries inform the leader; goal-impact discoveries pause execution for the leader's judgment
+  --finding <text> [--suggest <text>]
+neta status --writers                     show active, queued and finished writers
+neta status --goal                        show the current goal (immutable intent, revision, working objective, discovery policy)
+neta room-post <message>                  post to your team transcript
+neta room [--tail N]                      read your room's transcript
 ```
 
 Writes serialize. There is one writer slot per session: a worker spawned with
