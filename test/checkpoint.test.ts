@@ -139,6 +139,7 @@ describe("durable session checkpoints", () => {
 
 		const read = readCheckpoint("old-schema", agentDir);
 		expect(read.schemaVersion).toBe(CHECKPOINT_SCHEMA_VERSION);
+		expect(read.goal).toBeUndefined();
 		expect(read.appVersion).toBe("1.1.0");
 		expect(read.leader.vendorConversationId).toBe("22222222-2222-4222-8222-222222222222");
 		expect(read.notes[0]).toMatchObject({ id: "n1", open: true });
@@ -171,6 +172,7 @@ describe("durable session checkpoints", () => {
 			},
 		});
 
+		manager.initGoal("ship the release");
 		const note = manager.createNote("review rollout");
 		const completed = await manager.spawn({
 			role: "scout",
@@ -201,6 +203,7 @@ describe("durable session checkpoints", () => {
 		expect(saved.canonicalCwd).toBe(realpathSync(cwd));
 		expect(saved.id).toBe("stable-session");
 		expect(saved.leader).toEqual({ backend: "codex", vendorConversationId: "leader-vendor-42" });
+		expect(saved.goal).toMatchObject({ originalIntent: "ship the release", revision: 0, status: "active" });
 		expect(saved.workers.find((worker) => worker.id === completed.id)?.finalResult).toBe("Substantive auth handoff");
 		expect(saved.workers.find((worker) => worker.id === completed.id)?.vendorSessionId).toBe("worker-vendor-1");
 		expect(saved.workers.find((worker) => worker.id === waiting.id)?.pendingQuestion).toBe("Ship now?");
@@ -267,6 +270,7 @@ describe("durable session checkpoints", () => {
 		expect(prepared).toBe(0);
 		expect(openedPanes).toBe(0);
 		expect(hydrated.get(completed.id).state).toBe("done");
+		expect(hydrated.goalSnapshot()).toMatchObject({ originalIntent: "ship the release", revision: 0 });
 		expect(hydrated.get(completed.id).result).toBe("Substantive auth handoff");
 		expect(hydrated.get(waiting.id)).toMatchObject({ state: "blocked", pendingQuestion: "Ship now?" });
 		expect(hydrated.get(activeWriter.id)).toMatchObject({ state: "interrupted", stateBeforeStop: "running" });
@@ -279,6 +283,13 @@ describe("durable session checkpoints", () => {
 		await hydrated.flushCheckpoint();
 		await manager.dispose();
 		await hydrated.dispose();
+	});
+
+	it("fails closed on malformed nested goal data", () => {
+		const checkpoint = emptyCheckpoint("bad-goal", process.cwd());
+		expect(() => validateCheckpoint({ ...checkpoint, goal: { originalIntent: "x" } })).toThrow(
+			"checkpoint.goal.workingObjective",
+		);
 	});
 
 	it("persists native TUI ownership and fails closed after manager restart", async () => {

@@ -9,6 +9,7 @@ import {
 	displayModel,
 	formatUsage,
 	type Note,
+	type SessionGoal,
 	type SteerResult,
 	type WorkerInspection,
 	type WorkerStatusSnapshot,
@@ -136,6 +137,20 @@ function formatNotes(notes: Note[]): string[] {
 	});
 }
 
+function formatGoal(goal: SessionGoal | undefined): string[] {
+	if (!goal) return [];
+	const pending = goal.discoveries.filter(
+		(discovery) => discovery.impact === "goal" && discovery.status === "pending",
+	);
+	return [
+		"Goal:",
+		`  status=${goal.status} | revision=${goal.revision} | discovery policy=${goal.discoveryPolicy}`,
+		`  original intent: ${goal.originalIntent}`,
+		`  working objective: ${goal.workingObjective}`,
+		`  pending goal discoveries: ${pending.length ? pending.map((discovery) => discovery.id).join(", ") : "none"}`,
+	];
+}
+
 /**
  * One status section. Every worker row names its own expand command, so a reader
  * who wants to see what a worker actually said does not have to know that
@@ -229,6 +244,7 @@ export function formatStatusSnapshot(snapshot: WorkerStatusSnapshot): string {
 		...section("Queued:", snapshot.workers.queued),
 		...section("Waiting (legacy active state):", snapshot.workers.waiting),
 		...section("Terminal:", snapshot.workers.terminal),
+		...formatGoal(snapshot.goal),
 		"Open notes:",
 		...formatNotes(snapshot.openNotes),
 	].join("\n");

@@ -20,6 +20,7 @@ import { isSessionLeaseAlive } from "./session.ts";
 import {
 	type Note,
 	type RoomPost,
+	type SessionGoal,
 	TIERS,
 	type Tier,
 	type WorkerLogEntry,
@@ -27,10 +28,10 @@ import {
 	type WorkerUsage,
 } from "./types.ts";
 
-export const CHECKPOINT_SCHEMA_VERSION = 4;
+export const CHECKPOINT_SCHEMA_VERSION = 5;
 
 /** Schemas this build understands. Anything else is a future file and is never rewritten. */
-const READABLE_SCHEMA_VERSIONS = [1, 2, 3, CHECKPOINT_SCHEMA_VERSION];
+const READABLE_SCHEMA_VERSIONS = [1, 2, 3, 4, CHECKPOINT_SCHEMA_VERSION];
 
 export interface CheckpointLiveLease {
 	managerId: string;
@@ -104,7 +105,7 @@ export interface CheckpointWorker {
 }
 
 export interface SessionCheckpoint {
-	schemaVersion: 4;
+	schemaVersion: 5;
 	appVersion: string;
 	id: string;
 	canonicalCwd: string;
@@ -131,6 +132,7 @@ export interface SessionCheckpoint {
 	spreadCursors: Array<{ tier: Tier; cursor: number }>;
 	lastWriterBackend?: string;
 	roomDebaterBackends: Array<{ room: string; backends: string[] }>;
+	goal?: SessionGoal;
 }
 
 declare const hydrationChecked: unique symbol;
@@ -174,6 +176,11 @@ function number(value: unknown, path: string): asserts value is number {
 	if (typeof value !== "number" || !Number.isFinite(value)) {
 		throw new CheckpointError(`Corrupt checkpoint: ${path} must be a finite number.`);
 	}
+}
+
+function integer(value: unknown, path: string): asserts value is number {
+	number(value, path);
+	if (!Number.isInteger(value)) throw new CheckpointError(`Corrupt checkpoint: ${path} must be an integer.`);
 }
 
 function boolean(value: unknown, path: string): asserts value is boolean {
@@ -354,6 +361,87 @@ function validatePost(value: unknown, path: string): void {
 	string(post.text, `${path}.text`);
 }
 
+function validateEvidenceRefs(value: unknown, path: string): void {
+	strings(value, path);
+}
+
+function validateGoal(value: unknown, path: string): void {
+	const goal = object(value, path);
+	exact(
+		goal,
+		["originalIntent", "workingObjective", "revision", "discoveryPolicy", "status", "revisions", "discoveries"],
+		path,
+	);
+	string(goal.originalIntent, `${path}.originalIntent`);
+	string(goal.workingObjective, `${path}.workingObjective`);
+	integer(goal.revision, `${path}.revision`);
+	if (goal.revision < 0) throw new CheckpointError(`Corrupt checkpoint: ${path}.revision must not be negative.`);
+	string(goal.discoveryPolicy, `${path}.discoveryPolicy`);
+	if (goal.discoveryPolicy !== "allowed" && goal.discoveryPolicy !== "locked")
+		throw new CheckpointError(`Corrupt checkpoint: ${path}.discoveryPolicy is unknown.`);
+	string(goal.status, `${path}.status`);
+	if (goal.status !== "active" && goal.status !== "complete" && goal.status !== "stopped")
+		throw new CheckpointError(`Corrupt checkpoint: ${path}.status is unknown.`);
+	if (!Array.isArray(goal.revisions))
+		throw new CheckpointError(`Corrupt checkpoint: ${path}.revisions must be an array.`);
+	for (const [index, value] of goal.revisions.entries()) {
+		const revision = object(value, `${path}.revisions[${index}]`);
+		exact(
+			revision,
+			["revision", "workingObjective", "reason", "evidenceRefs", "timestamp"],
+			`${path}.revisions[${index}]`,
+		);
+		integer(revision.revision, `${path}.revisions[${index}].revision`);
+		if (revision.revision < 0)
+			throw new CheckpointError(`Corrupt checkpoint: ${path}.revisions[${index}].revision must not be negative.`);
+		string(revision.workingObjective, `${path}.revisions[${index}].workingObjective`);
+		string(revision.reason, `${path}.revisions[${index}].reason`);
+		validateEvidenceRefs(revision.evidenceRefs, `${path}.revisions[${index}].evidenceRefs`);
+		number(revision.timestamp, `${path}.revisions[${index}].timestamp`);
+	}
+	if (!Array.isArray(goal.discoveries))
+		throw new CheckpointError(`Corrupt checkpoint: ${path}.discoveries must be an array.`);
+	for (const [index, value] of goal.discoveries.entries()) {
+		const discovery = object(value, `${path}.discoveries[${index}]`);
+		exact(
+			discovery,
+			[
+				"id",
+				"workerId",
+				"finding",
+				"impact",
+				"suggestion",
+				"evidenceRefs",
+				"status",
+				"createdAt",
+				"createdBy",
+				"resolvedAt",
+				"resolvedBy",
+				"resolutionReason",
+			],
+			`${path}.discoveries[${index}]`,
+		);
+		string(discovery.id, `${path}.discoveries[${index}].id`);
+		optional(discovery.workerId, (item) => string(item, `${path}.discoveries[${index}].workerId`));
+		string(discovery.finding, `${path}.discoveries[${index}].finding`);
+		string(discovery.impact, `${path}.discoveries[${index}].impact`);
+		if (discovery.impact !== "local" && discovery.impact !== "goal")
+			throw new CheckpointError(`Corrupt checkpoint: ${path}.discoveries[${index}].impact is unknown.`);
+		optional(discovery.suggestion, (item) => string(item, `${path}.discoveries[${index}].suggestion`));
+		optional(discovery.evidenceRefs, (item) =>
+			validateEvidenceRefs(item, `${path}.discoveries[${index}].evidenceRefs`),
+		);
+		string(discovery.status, `${path}.discoveries[${index}].status`);
+		if (!["pending", "accepted", "rejected"].includes(discovery.status))
+			throw new CheckpointError(`Corrupt checkpoint: ${path}.discoveries[${index}].status is unknown.`);
+		number(discovery.createdAt, `${path}.discoveries[${index}].createdAt`);
+		optional(discovery.createdBy, (item) => string(item, `${path}.discoveries[${index}].createdBy`));
+		optional(discovery.resolvedAt, (item) => number(item, `${path}.discoveries[${index}].resolvedAt`));
+		optional(discovery.resolvedBy, (item) => string(item, `${path}.discoveries[${index}].resolvedBy`));
+		optional(discovery.resolutionReason, (item) => string(item, `${path}.discoveries[${index}].resolutionReason`));
+	}
+}
+
 export function validateCheckpoint(value: unknown): SessionCheckpoint {
 	const root = object(value, "checkpoint");
 	exact(
@@ -380,12 +468,13 @@ export function validateCheckpoint(value: unknown): SessionCheckpoint {
 			"spreadCursors",
 			"lastWriterBackend",
 			"roomDebaterBackends",
+			"goal",
 		],
 		"checkpoint",
 	);
 	if (typeof root.schemaVersion !== "number" || !READABLE_SCHEMA_VERSIONS.includes(root.schemaVersion)) {
 		throw new CheckpointError(
-			`Checkpoint schema version ${String(root.schemaVersion)} is not supported by this Neta version (supported versions: 1, 2, 3, or 4). The original file was preserved.`,
+			`Checkpoint schema version ${String(root.schemaVersion)} is not supported by this Neta version (supported versions: 1, 2, 3, 4, or 5). The original file was preserved.`,
 		);
 	}
 	for (const key of ["appVersion", "id", "canonicalCwd"]) string(root[key], `checkpoint.${key}`);
@@ -471,12 +560,14 @@ export function validateCheckpoint(value: unknown): SessionCheckpoint {
 		string(room.room, `checkpoint.roomDebaterBackends[${index}].room`);
 		strings(room.backends, `checkpoint.roomDebaterBackends[${index}].backends`);
 	}
+	optional(root.goal, (item) => validateGoal(item, "checkpoint.goal"));
 	// Schema 1 predates shutdown proof, and schemas 1 and 2 both predate startup
 	// tier selection. A short-lived build accidentally wrote sessionTiers while
 	// still claiming schema 2; accepting but ignoring that field keeps every v1/v2
 	// checkpoint compatible with the full ladder and makes the v3 boundary honest.
 	const sourceSchema = root.schemaVersion;
 	const sessionTiers = sourceSchema >= 3 ? (root.sessionTiers as string[] | undefined) : undefined;
+	const goal = sourceSchema >= 5 ? (root.goal as SessionGoal | undefined) : undefined;
 	const workers = (root.workers as CheckpointWorker[]).map((worker) => ({
 		...worker,
 		// Schema 4 is the first version whose runtime understands that opening a
@@ -489,6 +580,7 @@ export function validateCheckpoint(value: unknown): SessionCheckpoint {
 		workers,
 		// Stored order is not trusted; readers get the canonical ladder order.
 		sessionTiers: sessionTiers ? TIERS.filter((tier) => sessionTiers.includes(tier)) : undefined,
+		goal,
 	} as unknown as SessionCheckpoint;
 }
 
@@ -701,6 +793,7 @@ export function emptySessionCheckpoint(options: {
 		rooms: [],
 		spreadCursors: [],
 		roomDebaterBackends: [],
+		goal: undefined,
 	};
 }
 

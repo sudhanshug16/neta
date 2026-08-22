@@ -31,6 +31,44 @@ export function isTier(value: string): value is Tier {
 	return (TIERS as readonly string[]).includes(value);
 }
 
+export type DiscoveryPolicy = "allowed" | "locked";
+export type GoalStatus = "active" | "complete" | "stopped";
+export type GoalDiscoveryImpact = "local" | "goal";
+export type GoalDiscoveryStatus = "pending" | "accepted" | "rejected";
+
+export interface GoalRevision {
+	revision: number;
+	workingObjective: string;
+	reason: string;
+	evidenceRefs: string[];
+	timestamp: number;
+}
+
+export interface GoalDiscovery {
+	id: string;
+	workerId?: string;
+	finding: string;
+	impact: GoalDiscoveryImpact;
+	suggestion?: string;
+	evidenceRefs?: string[];
+	status: GoalDiscoveryStatus;
+	createdAt: number;
+	createdBy?: string;
+	resolvedAt?: number;
+	resolvedBy?: string;
+	resolutionReason?: string;
+}
+
+export interface SessionGoal {
+	originalIntent: string;
+	workingObjective: string;
+	revision: number;
+	discoveryPolicy: DiscoveryPolicy;
+	status: GoalStatus;
+	revisions: GoalRevision[];
+	discoveries: GoalDiscovery[];
+}
+
 /** Lifecycle of a spawned worker. */
 export type WorkerState =
 	/** Process is being launched and the session negotiated. */
@@ -325,6 +363,8 @@ export interface WorkerStatusSnapshot {
 	};
 	/** Notes that still need follow-through, including each linked worker's state. */
 	openNotes: Note[];
+	/** Current mutable session goal, when the leader has initialized one. */
+	goal?: SessionGoal;
 }
 
 /** Human-readable token and cost line, or undefined when the backend reported nothing. */

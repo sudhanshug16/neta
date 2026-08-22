@@ -36,10 +36,12 @@ import { assertClaudeModelAllowed, type NetaConfig, type ResolvedBackend } from 
 import {
 	displayModel,
 	formatUsage,
+	type GoalDiscovery,
 	isTerminalState,
 	type Note,
 	type RoomLogPage,
 	type RoomPost,
+	type SessionGoal,
 	type SpawnRequest,
 	type SteerResult,
 	TIERS,
@@ -69,6 +71,64 @@ import type { PromptOutcome, TransportOptions, WorkerMcpServer, WorkerTransportD
 
 const MAX_LOG_ENTRIES = 500;
 type ActiveWorkerState = "starting" | "running" | "waiting" | "queued";
+
+interface GoalMutationInput {
+	expectedRevision: number;
+	reason?: string;
+	evidenceRefs?: readonly string[];
+}
+
+interface GoalRevisionInput extends GoalMutationInput {
+	workingObjective: string;
+}
+
+interface GoalDiscoveryInput {
+	id: string;
+	workerId?: string;
+	finding: string;
+	impact: "local" | "goal";
+	suggestion?: string;
+	evidenceRefs?: readonly string[];
+	createdBy?: string;
+	expectedRevision?: number;
+}
+
+interface GoalResolutionInput extends GoalMutationInput {
+	discoveryId: string;
+	resolution: "accept" | "reject";
+}
+
+interface GoalCompletionInput extends GoalMutationInput {
+	override?: boolean;
+}
+
+function cloneGoal(goal: SessionGoal | undefined): SessionGoal | undefined {
+	if (!goal) return undefined;
+	return {
+		...goal,
+		revisions: goal.revisions.map((revision) => ({ ...revision, evidenceRefs: [...revision.evidenceRefs] })),
+		discoveries: goal.discoveries.map((discovery) => ({
+			...discovery,
+			evidenceRefs: discovery.evidenceRefs ? [...discovery.evidenceRefs] : undefined,
+		})),
+	};
+}
+
+function requireGoalText(value: string, name: string): string {
+	if (typeof value !== "string" || value.trim() === "") throw new Error(`${name} must be non-empty text.`);
+	return value;
+}
+
+function requireExpectedRevision(value: number): void {
+	if (!Number.isInteger(value) || value < 0) throw new Error("expectedRevision must be a non-negative integer.");
+}
+
+function copyEvidenceRefs(value: readonly string[] | undefined): string[] {
+	if (value === undefined) return [];
+	if (!Array.isArray(value) || value.some((reference) => typeof reference !== "string" || reference.trim() === ""))
+		throw new Error("evidenceRefs must be a list of non-empty text.");
+	return [...value];
+}
 
 interface WorkerRecord {
 	id: string;
@@ -314,6 +374,7 @@ export class WorkerManager implements ChannelHandler {
 	private checkpointCwd: string;
 	/** Tiers this session may staff, in canonical order. Fixed for the session's life. */
 	private readonly tiers: Tier[];
+	private goal: SessionGoal | undefined;
 
 	constructor(options: WorkerManagerOptions) {
 		this.options = options;
@@ -351,6 +412,7 @@ export class WorkerManager implements ChannelHandler {
 					}
 				: undefined,
 		});
+		manager.goal = cloneGoal(checkpoint.goal);
 		manager.counter = checkpoint.counter;
 		manager.noteCounter = checkpoint.noteCounter;
 		manager.activeWriter = checkpoint.activeWriter;
@@ -535,6 +597,7 @@ export class WorkerManager implements ChannelHandler {
 				room,
 				backends: [...backends],
 			})),
+			goal: cloneGoal(this.goal),
 		};
 	}
 
@@ -568,6 +631,153 @@ export class WorkerManager implements ChannelHandler {
 	/** True when this session was started with the full ladder. */
 	get allTiersAvailable(): boolean {
 		return this.tiers.length === TIERS.length;
+	}
+
+	/** Return a defensive copy of the current session goal. */
+	goalSnapshot(): SessionGoal | undefined {
+		return cloneGoal(this.goal);
+	}
+
+	/** Initialize the write-once session intent. */
+	initGoal(originalIntent: string): SessionGoal {
+		if (this.goal) throw new Error("Session goal is already initialized; originalIntent is write-once.");
+		const intent = requireGoalText(originalIntent, "originalIntent");
+		const timestamp = Date.now();
+		this.goal = {
+			originalIntent: intent,
+			workingObjective: intent,
+			revision: 0,
+			discoveryPolicy: "allowed",
+			status: "active",
+			revisions: [{ revision: 0, workingObjective: intent, reason: "initialized", evidenceRefs: [], timestamp }],
+			discoveries: [],
+		};
+		this.checkpointChanged();
+		return this.goalSnapshot() as SessionGoal;
+	}
+
+	private mutateGoal(
+		input: GoalMutationInput | { expectedRevision?: number; reason?: string; evidenceRefs?: readonly string[] },
+		reasonFallback: string,
+		change: (goal: SessionGoal) => void,
+	): SessionGoal {
+		if (!this.goal) throw new Error("Session goal is not initialized.");
+		if (this.goal.status !== "active")
+			throw new Error(`Session goal is terminal (${this.goal.status}) and cannot be mutated.`);
+		if (input.expectedRevision === undefined) throw new Error("expectedRevision is required.");
+		requireExpectedRevision(input.expectedRevision);
+		if (input.expectedRevision !== this.goal.revision)
+			throw new Error(`Stale goal revision: expected ${input.expectedRevision}, current ${this.goal.revision}.`);
+		const next = cloneGoal(this.goal) as SessionGoal;
+		change(next);
+		next.revision += 1;
+		next.revisions.push({
+			revision: next.revision,
+			workingObjective: next.workingObjective,
+			reason: input.reason?.trim() || reasonFallback,
+			evidenceRefs: copyEvidenceRefs(input.evidenceRefs),
+			timestamp: Date.now(),
+		});
+		this.goal = next;
+		this.checkpointChanged();
+		return this.goalSnapshot() as SessionGoal;
+	}
+
+	reviseGoal(input: GoalRevisionInput): SessionGoal {
+		const objective = requireGoalText(input.workingObjective, "workingObjective");
+		return this.mutateGoal(input, "objective revised", (goal) => {
+			goal.workingObjective = objective;
+		});
+	}
+
+	setDiscoveryPolicy(input: {
+		expectedRevision: number;
+		discoveryPolicy: "allowed" | "locked";
+		reason?: string;
+		evidenceRefs?: readonly string[];
+	}): SessionGoal {
+		return this.mutateGoal(input, `discovery policy set to ${input.discoveryPolicy}`, (goal) => {
+			if (input.discoveryPolicy !== "allowed" && input.discoveryPolicy !== "locked")
+				throw new Error("discoveryPolicy must be allowed or locked.");
+			goal.discoveryPolicy = input.discoveryPolicy;
+		});
+	}
+
+	recordDiscovery(input: GoalDiscoveryInput): SessionGoal {
+		if (!this.goal) throw new Error("Session goal is not initialized.");
+		if (this.goal.status !== "active")
+			throw new Error(`Session goal is terminal (${this.goal.status}) and cannot be mutated.`);
+		if (input.expectedRevision !== undefined) {
+			requireExpectedRevision(input.expectedRevision);
+			if (input.expectedRevision !== this.goal.revision)
+				throw new Error(`Stale goal revision: expected ${input.expectedRevision}, current ${this.goal.revision}.`);
+		}
+		const id = requireGoalText(input.id, "discovery id");
+		const finding = requireGoalText(input.finding, "finding");
+		if (this.goal.discoveries.some((discovery) => discovery.id === id))
+			throw new Error(`Discovery "${id}" already exists.`);
+		if (input.impact !== "local" && input.impact !== "goal") throw new Error("impact must be local or goal.");
+		const evidenceRefs = input.evidenceRefs === undefined ? undefined : copyEvidenceRefs(input.evidenceRefs);
+		const next = cloneGoal(this.goal) as SessionGoal;
+		const discovery: GoalDiscovery = {
+			id,
+			workerId: input.workerId,
+			finding,
+			impact: input.impact,
+			suggestion: input.suggestion,
+			evidenceRefs,
+			status: input.impact === "local" ? "accepted" : "pending",
+			createdAt: Date.now(),
+			createdBy: input.createdBy,
+		};
+		next.discoveries.push(discovery);
+		next.revision += 1;
+		next.revisions.push({
+			revision: next.revision,
+			workingObjective: next.workingObjective,
+			reason: `discovery recorded: ${id}`,
+			evidenceRefs: evidenceRefs ? [...evidenceRefs] : [],
+			timestamp: Date.now(),
+		});
+		this.goal = next;
+		this.checkpointChanged();
+		return this.goalSnapshot() as SessionGoal;
+	}
+
+	resolveDiscovery(input: GoalResolutionInput): SessionGoal {
+		if (input.resolution !== "accept" && input.resolution !== "reject")
+			throw new Error("resolution must be accept or reject.");
+		return this.mutateGoal(input, `discovery ${input.resolution}ed`, (goal) => {
+			const discovery = goal.discoveries.find((candidate) => candidate.id === input.discoveryId);
+			if (!discovery) throw new Error(`Discovery "${input.discoveryId}" does not exist.`);
+			if (discovery.status !== "pending")
+				throw new Error(`Discovery "${input.discoveryId}" is already ${discovery.status}.`);
+			discovery.status = input.resolution === "accept" ? "accepted" : "rejected";
+			discovery.resolvedAt = Date.now();
+			discovery.resolvedBy = "leader";
+			discovery.resolutionReason = input.reason?.trim() || undefined;
+		});
+	}
+
+	completeGoal(input: GoalCompletionInput): SessionGoal {
+		const pending =
+			this.goal?.discoveries.filter((discovery) => discovery.impact === "goal" && discovery.status === "pending") ??
+			[];
+		if (pending.length > 0 && input.override !== true)
+			throw new Error(
+				`Cannot complete session goal with pending goal discoveries: ${pending.map((discovery) => discovery.id).join(", ")}.`,
+			);
+		if (pending.length > 0 && !input.reason?.trim())
+			throw new Error("Completing with pending goal discoveries requires a non-empty reason and override=true.");
+		return this.mutateGoal(input, "goal completed", (goal) => {
+			goal.status = "complete";
+		});
+	}
+
+	stopGoal(input: GoalMutationInput): SessionGoal {
+		return this.mutateGoal(input, "goal stopped", (goal) => {
+			goal.status = "stopped";
+		});
 	}
 
 	/**
@@ -1252,6 +1462,7 @@ export class WorkerManager implements ChannelHandler {
 				terminal: summaries.filter((summary) => isTerminalState(summary.state)),
 			},
 			openNotes: this.getOpenNotes(),
+			goal: cloneGoal(this.goal),
 		};
 	}
 

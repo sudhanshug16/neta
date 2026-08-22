@@ -59,6 +59,7 @@ describe("settled tool surface and revival", () => {
 			"neta_attach",
 			"neta_delegate",
 			"neta_exec",
+			"neta_goal",
 			"neta_inspect",
 			"neta_kill",
 			"neta_note",

@@ -49,9 +49,9 @@ describe("neta mcp", () => {
 		const tools = await client.listTools();
 
 		expect(tools.tools.map((tool) => tool.name)).toEqual([
+			"neta_goal",
 			"neta_delegate",
 			"neta_exec",
-			"neta_workers",
 			"neta_status",
 			"neta_attach",
 			"neta_inspect",

@@ -94,14 +94,25 @@ describe("leader MCP redesign", () => {
 			"neta_attach",
 			"neta_delegate",
 			"neta_exec",
+			"neta_goal",
 			"neta_inspect",
 			"neta_kill",
 			"neta_note",
 			"neta_send",
 			"neta_status",
 			"neta_wait",
-			"neta_workers",
 		]);
+	});
+
+	it("hides but still routes deprecated neta_workers and exposes goal/status views", async () => {
+		const listed = (await client.listTools()).tools.map((tool) => tool.name);
+		expect(listed).not.toContain("neta_workers");
+		expect(body(await call("neta_workers"))).toContain('Deprecated: use neta_status with view="workers"');
+		expect(body(await call("neta_goal", { op: "init", originalIntent: "ship the release" }))).toContain(
+			"Goal revision=0 status=active policy=allowed",
+		);
+		expect(body(await call("neta_status", { view: "summary" }))).toContain("working objective: ship the release");
+		expect(body(await call("neta_status", { view: "workers" }))).toContain("No workers");
 	});
 
 	it("delegates one or many workers and returns real assignments", async () => {

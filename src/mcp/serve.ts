@@ -26,6 +26,8 @@ export interface McpTool {
 	name: string;
 	description: string;
 	inputSchema: JsonSchema;
+	/** Routable compatibility tools may be hidden from MCP discovery. */
+	advertise?: boolean;
 	run(args: Record<string, unknown>): Promise<CallToolResult>;
 }
 
@@ -82,11 +84,13 @@ export function createMcpServer(name: string, tools: McpTool[], instructions?: s
 	const byName = new Map(tools.map((tool) => [tool.name, tool]));
 
 	server.setRequestHandler(ListToolsRequestSchema, () => ({
-		tools: tools.map((tool) => ({
-			name: tool.name,
-			description: tool.description,
-			inputSchema: tool.inputSchema,
-		})),
+		tools: tools
+			.filter((tool) => tool.advertise !== false)
+			.map((tool) => ({
+				name: tool.name,
+				description: tool.description,
+				inputSchema: tool.inputSchema,
+			})),
 	}));
 
 	server.setRequestHandler(CallToolRequestSchema, async (request) => {

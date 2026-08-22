@@ -7,7 +7,16 @@ import {
 	formatWorkerSummary,
 } from "../orchestrator/status.ts";
 import { roleNames } from "../prompts/roles.ts";
-import { isTerminalState, isTier, type Note, TIERS, type Tier, type WaitResult, type WorkerSummary } from "../types.ts";
+import {
+	isTerminalState,
+	isTier,
+	type Note,
+	type SessionGoal,
+	TIERS,
+	type Tier,
+	type WaitResult,
+	type WorkerSummary,
+} from "../types.ts";
 import {
 	type McpTool,
 	optionalBoolean,
@@ -129,6 +138,87 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 	};
 
 	return [
+		{
+			name: "neta_goal",
+			description:
+				"Initialize or mutate the session goal with optimistic concurrency. Goal-impact discoveries remain pending until explicitly resolved; workers never revise the goal automatically.",
+			inputSchema: {
+				type: "object",
+				properties: {
+					op: {
+						type: "string",
+						enum: ["init", "revise", "resolve-discovery", "set-discovery-policy", "complete", "stop"],
+					},
+					originalIntent: { type: "string" },
+					workingObjective: { type: "string" },
+					expectedRevision: { type: "number" },
+					discoveryPolicy: { type: "string", enum: ["allowed", "locked"] },
+					discoveryId: { type: "string" },
+					resolution: { type: "string", enum: ["accept", "reject"] },
+					reason: { type: "string" },
+					override: { type: "boolean" },
+					evidenceRefs: { type: "array", items: { type: "string" } },
+				},
+				required: ["op"],
+			},
+			async run(args) {
+				const op = requireString(args, "op");
+				let goal: SessionGoal;
+				switch (op) {
+					case "init":
+						goal = manager.initGoal(requireString(args, "originalIntent"));
+						break;
+					case "revise":
+						goal = manager.reviseGoal({
+							workingObjective: requireString(args, "workingObjective"),
+							expectedRevision: optionalNumber(args, "expectedRevision") as number,
+							reason: optionalString(args, "reason"),
+							evidenceRefs: optionalStringArray(args, "evidenceRefs"),
+						});
+						break;
+					case "set-discovery-policy":
+						goal = manager.setDiscoveryPolicy({
+							discoveryPolicy: requireString(args, "discoveryPolicy") as "allowed" | "locked",
+							expectedRevision: optionalNumber(args, "expectedRevision") as number,
+							reason: optionalString(args, "reason"),
+							evidenceRefs: optionalStringArray(args, "evidenceRefs"),
+						});
+						break;
+					case "resolve-discovery":
+						goal = manager.resolveDiscovery({
+							discoveryId: requireString(args, "discoveryId"),
+							resolution: requireString(args, "resolution") as "accept" | "reject",
+							expectedRevision: optionalNumber(args, "expectedRevision") as number,
+							reason: optionalString(args, "reason"),
+							evidenceRefs: optionalStringArray(args, "evidenceRefs"),
+						});
+						break;
+					case "complete":
+						goal = manager.completeGoal({
+							expectedRevision: optionalNumber(args, "expectedRevision") as number,
+							override: optionalBoolean(args, "override"),
+							reason: optionalString(args, "reason"),
+							evidenceRefs: optionalStringArray(args, "evidenceRefs"),
+						});
+						break;
+					case "stop":
+						goal = manager.stopGoal({
+							expectedRevision: optionalNumber(args, "expectedRevision") as number,
+							reason: optionalString(args, "reason"),
+							evidenceRefs: optionalStringArray(args, "evidenceRefs"),
+						});
+						break;
+					default:
+						throw new Error(`Unknown goal op "${op}".`);
+				}
+				const pending = goal.discoveries.filter(
+					(discovery) => discovery.impact === "goal" && discovery.status === "pending",
+				);
+				return text(
+					`Goal revision=${goal.revision} status=${goal.status} policy=${goal.discoveryPolicy}; pending discoveries=${pending.length ? pending.map((discovery) => discovery.id).join(",") : "none"}`,
+				);
+			},
+		},
 		{
 			name: "neta_delegate",
 			description:
@@ -261,23 +351,40 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 		{
 			name: "neta_workers",
 			description: "List workers, latest milestone, usage and results. Safe and non-interrupting.",
+			advertise: false,
 			inputSchema: { type: "object", properties: { workerId: { type: "string" } } },
 			async run(args) {
 				const id = optionalString(args, "workerId");
 				const workers = id ? [manager.get(id)] : manager.list();
 				return text(
-					workers.length
-						? statusReport(workers, id ? 20_000 : MAX_RESULT_CHARS) + formatOpenNotes(manager)
-						: "No workers have been delegated.",
+					`Deprecated: use neta_status with view="workers"${id ? ` and workerId="${id}"` : ""}.\n` +
+						(workers.length
+							? statusReport(workers, id ? 20_000 : MAX_RESULT_CHARS) + formatOpenNotes(manager)
+							: "No workers have been delegated."),
 				);
 			},
 		},
 		{
 			name: "neta_status",
-			description: "Show writer slot, queue, grouped worker states and open notes.",
-			inputSchema: { type: "object" },
-			async run() {
-				return text(manager.status());
+			description:
+				"Show the session goal and writer/worker status. Use view=workers for the former neta_workers result.",
+			inputSchema: {
+				type: "object",
+				properties: { view: { type: "string", enum: ["summary", "workers"] }, workerId: { type: "string" } },
+			},
+			async run(args) {
+				const view = optionalString(args, "view") ?? (args.workerId !== undefined ? "workers" : "summary");
+				if (view !== "summary" && view !== "workers") throw new Error('"view" must be summary or workers.');
+				const id = optionalString(args, "workerId");
+				if (view === "summary" && id) throw new Error('"workerId" requires view="workers".');
+				const workers = id ? [manager.get(id)] : manager.list();
+				return text(
+					view === "summary"
+						? manager.status()
+						: workers.length
+							? statusReport(workers, id ? 20_000 : MAX_RESULT_CHARS) + formatOpenNotes(manager)
+							: "No workers have been delegated.",
+				);
 			},
 		},
 		{

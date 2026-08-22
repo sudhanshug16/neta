@@ -2228,5 +2228,51 @@ describe("WorkerManager", () => {
 			await multiManager.dispose();
 			rmSync("/tmp/neta-test-room-idempotent.sock", { force: true });
 		});
+
+		it("enforces mutable session goal revisions, discovery resolution, and terminal guards", () => {
+			const goal = manager.initGoal("ship the release");
+			expect(goal).toMatchObject({
+				originalIntent: "ship the release",
+				workingObjective: "ship the release",
+				revision: 0,
+				status: "active",
+				discoveryPolicy: "allowed",
+			});
+			const revised = manager.reviseGoal({
+				workingObjective: "ship with verified artifacts",
+				expectedRevision: 0,
+				reason: "new evidence",
+			});
+			expect(revised).toMatchObject({
+				originalIntent: "ship the release",
+				workingObjective: "ship with verified artifacts",
+				revision: 1,
+			});
+			expect(() => manager.reviseGoal({ workingObjective: "stale", expectedRevision: 0 })).toThrow(
+				"Stale goal revision",
+			);
+			const discovered = manager.recordDiscovery({
+				id: "d1",
+				finding: "artifact is missing",
+				impact: "goal",
+				workerId: "ro1",
+			});
+			expect(discovered.discoveries[0]).toMatchObject({ id: "d1", status: "pending", impact: "goal" });
+			expect(() => manager.completeGoal({ expectedRevision: discovered.revision })).toThrow(
+				"pending goal discoveries",
+			);
+			const resolved = manager.resolveDiscovery({
+				discoveryId: "d1",
+				resolution: "accept",
+				expectedRevision: discovered.revision,
+				reason: "verified",
+			});
+			expect(resolved.discoveries[0]).toMatchObject({ status: "accepted", resolutionReason: "verified" });
+			const complete = manager.completeGoal({ expectedRevision: resolved.revision });
+			expect(complete.status).toBe("complete");
+			expect(() =>
+				manager.setDiscoveryPolicy({ discoveryPolicy: "locked", expectedRevision: complete.revision }),
+			).toThrow("terminal");
+		});
 	});
 });
