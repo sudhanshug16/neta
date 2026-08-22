@@ -219,6 +219,8 @@ interface WorkerRecord {
 	nativeAttached?: boolean;
 	/** Exact turn which invoked neta_blocked. */
 	blockedTurn?: number;
+	/** Goal-impact discovery that stopped the current turn and wakes neta_wait. */
+	pendingDiscoveryId?: string;
 	revivalFromState?: "blocked" | "done" | "failed";
 	revivalPreviousQueuedBehind?: string;
 	reviving?: Promise<SteerResult>;
@@ -638,6 +640,35 @@ export class WorkerManager implements ChannelHandler {
 		return cloneGoal(this.goal);
 	}
 
+	private nextDiscoveryId(): string {
+		const discoveries = this.goal?.discoveries ?? [];
+		let number = discoveries.length + 1;
+		while (discoveries.some((discovery) => discovery.id === `d${number}`)) number += 1;
+		return `d${number}`;
+	}
+
+	private formatCompactGoal(goal: SessionGoal): string {
+		const pending = goal.discoveries
+			.filter((discovery) => discovery.impact === "goal" && discovery.status === "pending")
+			.map((discovery) => discovery.id);
+		return [
+			"Current session goal:",
+			`  immutable intent: ${goal.originalIntent}`,
+			`  working objective: ${goal.workingObjective}`,
+			`  revision: ${goal.revision} | discovery policy: ${goal.discoveryPolicy} | status: ${goal.status}`,
+			`  pending goal discoveries: ${pending.length ? pending.join(", ") : "none"}`,
+		].join("\n");
+	}
+
+	private goalPromptContext(): string | undefined {
+		return this.goal ? this.formatCompactGoal(this.goal) : undefined;
+	}
+
+	private withGoalContext(message: string): string {
+		const context = this.goalPromptContext();
+		return context ? `${context}\n\n---\n\n# Leader instruction\n\n${message}` : message;
+	}
+
 	/** Initialize the write-once session intent. */
 	initGoal(originalIntent: string): SessionGoal {
 		if (this.goal) throw new Error("Session goal is already initialized; originalIntent is write-once.");
@@ -707,6 +738,8 @@ export class WorkerManager implements ChannelHandler {
 		if (!this.goal) throw new Error("Session goal is not initialized.");
 		if (this.goal.status !== "active")
 			throw new Error(`Session goal is terminal (${this.goal.status}) and cannot be mutated.`);
+		if (input.impact === "goal" && this.goal.discoveryPolicy === "locked")
+			throw new Error("Discovery policy is locked; goal-impact discoveries are not accepted.");
 		if (input.expectedRevision !== undefined) {
 			requireExpectedRevision(input.expectedRevision);
 			if (input.expectedRevision !== this.goal.revision)
@@ -1000,7 +1033,9 @@ export class WorkerManager implements ChannelHandler {
 						return queued ? [this.summarize(queued)] : [];
 					}),
 				);
-		const task = writerContext ? `${writerContext}\n\n---\n\n# Task\n\n${request.task}` : request.task;
+		const goalContext = this.goalPromptContext();
+		const assignedTask = goalContext ? `${goalContext}\n\n---\n\n# Assigned task\n\n${request.task}` : request.task;
+		const task = writerContext ? `${writerContext}\n\n---\n\n${assignedTask}` : assignedTask;
 		const firstPrompt = this.withPendingBrief(record, task);
 		this.enqueue(record, firstPrompt.message, false, firstPrompt.leaderMessages);
 		this.openWorkerView(record);
@@ -1028,6 +1063,7 @@ export class WorkerManager implements ChannelHandler {
 	 */
 	async steer(workerId: string, message: string, options: { timeoutMs?: number } = {}): Promise<SteerResult> {
 		const record = this.require(workerId);
+		message = this.withGoalContext(message);
 		if (record.state === "killed" || record.state === "interrupted") {
 			throw new Error(
 				`Worker ${workerId} is ${record.state}; its conversation cannot be resumed safely. Inspect/attach it or delegate a fresh worker.`,
@@ -1260,6 +1296,7 @@ export class WorkerManager implements ChannelHandler {
 		record.archived = false;
 		record.unsafeToPrompt = undefined;
 		record.pendingQuestion = undefined;
+		record.pendingDiscoveryId = undefined;
 		record.blockedTurn = undefined;
 		record.revivalFromState = undefined;
 		record.revivalPreviousQueuedBehind = undefined;
@@ -1477,6 +1514,82 @@ export class WorkerManager implements ChannelHandler {
 		return { ok: true, text: formatWriterStatus(this.statusSnapshot()) };
 	}
 
+	/** Compact goal status available to workers without exposing goal history. */
+	goalStatus(workerId: string): ChannelResponse {
+		this.require(workerId);
+		const goal = this.goal;
+		if (!goal) return { ok: true, text: "No session goal initialized." };
+		return { ok: true, text: this.formatCompactGoal(goal) };
+	}
+
+	/** Record a worker discovery and, for goal impact, stop the active ACP turn. */
+	discover(
+		workerId: string,
+		impact: "local" | "goal",
+		finding: string,
+		suggestion: string | undefined,
+	): ChannelResponse {
+		const record = this.workers.get(workerId);
+		if (!record) return { ok: false, error: `Unknown worker ${workerId}.` };
+		if (!this.goal) return { ok: false, error: "No session goal initialized; initialize one with neta_goal first." };
+		if (impact === "goal" && this.goal.discoveryPolicy === "locked") {
+			return { ok: false, error: "Discovery policy is locked; goal-impact discoveries are not accepted." };
+		}
+		if (!record.promptInFlight || record.currentTurn === undefined) {
+			return { ok: false, error: "neta_discover must be called from the worker's active ACP turn." };
+		}
+		const goal = this.recordDiscovery({
+			id: this.nextDiscoveryId(),
+			workerId,
+			finding,
+			impact,
+			suggestion,
+			createdBy: workerId,
+		});
+		const discovery = goal.discoveries[goal.discoveries.length - 1];
+		if (!discovery) return { ok: false, error: "Discovery was not recorded." };
+		if (impact === "local") {
+			return {
+				ok: true,
+				text: `Discovery ${discovery.id} recorded at goal revision ${goal.revision}; continue this turn.`,
+				data: { discoveryId: discovery.id, revision: goal.revision },
+			};
+		}
+
+		const turn = record.currentTurn;
+		record.pendingDiscoveryId = discovery.id;
+		record.pendingQuestion = `Goal-impact discovery ${discovery.id} requires leader resolution: ${discovery.finding}`;
+		record.blockedTurn = turn;
+		this.appendLog(record, "status", `Discovery ${discovery.id} requires leader resolution: ${discovery.finding}`);
+		this.checkpointChanged(record);
+		queueMicrotask(() => {
+			void (async () => {
+				try {
+					await this.cancelTurn(record, turn);
+				} catch (error) {
+					this.appendLog(
+						record,
+						"error",
+						`Could not cancel discovery turn: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				}
+				await this.settle(record.queue, 1_000);
+				if (record.blockedTurn === turn && !isTerminalState(record.state) && !record.finishing) {
+					await this.finish(
+						record,
+						"blocked",
+						record.pendingQuestion ?? "Goal-impact discovery needs resolution.",
+					);
+				}
+			})();
+		});
+		return {
+			ok: true,
+			text: `Discovery ${discovery.id} recorded at goal revision ${goal.revision}; this turn will stop for leader resolution.`,
+			data: { discoveryId: discovery.id, revision: goal.revision },
+		};
+	}
+
 	/** New log lines since the last drain, oldest first. */
 	drainLog(workerId: string): WorkerLogEntry[] {
 		const record = this.require(workerId);
@@ -1613,14 +1726,25 @@ export class WorkerManager implements ChannelHandler {
 			reason: WaitResult["reason"],
 			wokeBy?: WorkerRecord,
 			roomActivity?: WaitResult["roomActivity"],
+			discovery?: GoalDiscovery,
 		): WaitResult => ({
 			reason,
 			workers: records.map((record) => this.summarize(record)),
 			wokeBy: wokeBy ? this.summarize(wokeBy) : undefined,
 			roomActivity,
+			discovery,
 		});
 
 		const evaluate = (): WaitResult | undefined => {
+			const discoveryWorker = records.find(
+				(record) => record.state === "blocked" && record.pendingDiscoveryId !== undefined,
+			);
+			if (discoveryWorker) {
+				const discovery = this.goal?.discoveries.find(
+					(candidate) => candidate.id === discoveryWorker.pendingDiscoveryId,
+				);
+				if (discovery) return snapshot("discovery", discoveryWorker, undefined, discovery);
+			}
 			const blocked = records.find((record) => record.state === "blocked" && record.pendingQuestion);
 			if (blocked) return snapshot("blocked", blocked);
 			const terminal = records.filter((record) => isTerminalState(record.state));
@@ -1855,6 +1979,7 @@ export class WorkerManager implements ChannelHandler {
 		}
 		if (record.blockedTurn !== undefined) return { ok: false, error: "This worker already reported a blocker." };
 		record.pendingQuestion = text;
+		record.pendingDiscoveryId = undefined;
 		record.blockedTurn = record.currentTurn;
 		this.appendLog(record, "status", `Blocked: ${text}`);
 		this.checkpointChanged(record);
@@ -2407,7 +2532,16 @@ export class WorkerManager implements ChannelHandler {
 			} else if (state === "failed") {
 				this.options.onEvent({ type: "failed", workerId: record.id, error: options.failure ?? result });
 			} else if (state === "blocked") {
-				this.options.onEvent({ type: "blocked", workerId: record.id, question: record.pendingQuestion ?? result });
+				const discovery = record.pendingDiscoveryId
+					? this.goal?.discoveries.find((candidate) => candidate.id === record.pendingDiscoveryId)
+					: undefined;
+				if (discovery) this.options.onEvent({ type: "discovery", workerId: record.id, discovery });
+				else
+					this.options.onEvent({
+						type: "blocked",
+						workerId: record.id,
+						question: record.pendingQuestion ?? result,
+					});
 			}
 
 			const wasActiveWriter = this.activeWriter === record.id;
@@ -2497,7 +2631,11 @@ export class WorkerManager implements ChannelHandler {
 		// Prepend staleness guard to task
 		const stalenessGuard =
 			"Note: you were queued behind another writer that has since finished. Check `git log` and `git status` for the repo's current state before starting.";
-		const fullTask = `${stalenessGuard}\n\n---\n\n# Task\n\n${record.task}`;
+		const goalContext = this.goalPromptContext();
+		const assignedTask = goalContext
+			? `${goalContext}\n\n---\n\n# Task\n\n${record.task}`
+			: `# Task\n\n${record.task}`;
+		const fullTask = `${stalenessGuard}\n\n---\n\n${assignedTask}`;
 
 		try {
 			// Resolve again at dequeue: settings may have changed while this writer

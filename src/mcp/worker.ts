@@ -12,7 +12,12 @@
 
 import { sendChannelRequest } from "../channel/client.ts";
 import type { ChannelRequest } from "../channel/protocol.ts";
-import { type McpTool, optionalNumber, requireString, text } from "./serve.ts";
+import { type McpTool, optionalNumber, optionalString, requireString, text } from "./serve.ts";
+
+function discoveryImpact(value: string): "local" | "goal" {
+	if (value !== "local" && value !== "goal") throw new Error('"impact" must be local or goal.');
+	return value;
+}
 
 async function send(address: string, request: ChannelRequest, okText: string) {
 	const response = await sendChannelRequest(address, request);
@@ -49,6 +54,33 @@ export function workerTools(address: string, workerId: string, token: string, te
 			run: (args) =>
 				send(address, { type: "blocked", workerId, token, text: requireString(args, "question") }, "blocked"),
 		},
+		{
+			name: "neta_discover",
+			description:
+				"Report a finding. Local findings are recorded and the worker continues; goal-impact findings stop this turn for leader resolution.",
+			inputSchema: {
+				type: "object",
+				properties: {
+					impact: { type: "string", enum: ["local", "goal"] },
+					finding: { type: "string" },
+					suggestion: { type: "string" },
+				},
+				required: ["impact", "finding"],
+			},
+			run: (args) =>
+				send(
+					address,
+					{
+						type: "discover",
+						workerId,
+						token,
+						impact: discoveryImpact(requireString(args, "impact")),
+						finding: requireString(args, "finding"),
+						suggestion: optionalString(args, "suggestion"),
+					},
+					"discovery recorded",
+				),
+		},
 	];
 	if (team)
 		tools.push(
@@ -76,11 +108,18 @@ export function workerTools(address: string, workerId: string, token: string, te
 		);
 	tools.push({
 		name: "neta_status",
-		description:
-			"Show only active, queued and finished writers. Use this before inspecting files while another worker may " +
-			"have uncommitted changes in the shared checkout.",
-		inputSchema: { type: "object" },
-		run: () => send(address, { type: "writer-status", workerId, token }, "(no writers)"),
+		description: "Show writer status or the compact current goal. Writers remains the default for compatibility.",
+		inputSchema: {
+			type: "object",
+			properties: { view: { type: "string", enum: ["writers", "goal"] } },
+		},
+		run: (args) => {
+			const view = optionalString(args, "view") ?? "writers";
+			if (view !== "writers" && view !== "goal") throw new Error('"view" must be writers or goal.');
+			return view === "writers"
+				? send(address, { type: "writer-status", workerId, token }, "(no writers)")
+				: send(address, { type: "goal-status", workerId, token }, "No session goal initialized.");
+		},
 	});
 	return tools;
 }

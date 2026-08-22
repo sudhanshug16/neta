@@ -169,7 +169,8 @@ export interface WorkerLogPage {
 export type WorkerEvent =
 	| { type: "done"; workerId: string; summary: string; dirtyFiles?: string[] }
 	| { type: "failed"; workerId: string; error: string }
-	| { type: "blocked"; workerId: string; question: string };
+	| { type: "blocked"; workerId: string; question: string }
+	| { type: "discovery"; workerId: string; discovery: GoalDiscovery };
 
 export interface SpawnRequest {
 	role: string;
@@ -307,7 +308,7 @@ export interface SteerResult {
 }
 
 /** What can end a leader's wait. */
-export type WaitWakeReason = "completed" | "first" | "blocked" | "room" | "timeout";
+export type WaitWakeReason = "completed" | "first" | "blocked" | "discovery" | "room" | "timeout";
 
 /** Options for WorkerManager.wait. */
 export interface WaitOptions {
@@ -324,6 +325,8 @@ export interface WaitResult {
 	workers: WorkerSummary[];
 	/** The worker whose completion ("first") or question ("blocked") woke the wait. */
 	wokeBy?: WorkerSummary;
+	/** The goal-impact discovery that stopped a worker and woke the wait. */
+	discovery?: GoalDiscovery;
 	/** The new posts that woke the wait ("room"), and the room they landed in. */
 	roomActivity?: { room: string; posts: RoomPost[] };
 }

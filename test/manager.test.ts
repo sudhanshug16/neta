@@ -2268,11 +2268,61 @@ describe("WorkerManager", () => {
 				reason: "verified",
 			});
 			expect(resolved.discoveries[0]).toMatchObject({ status: "accepted", resolutionReason: "verified" });
-			const complete = manager.completeGoal({ expectedRevision: resolved.revision });
+			const locked = manager.setDiscoveryPolicy({ discoveryPolicy: "locked", expectedRevision: resolved.revision });
+			expect(() => manager.recordDiscovery({ id: "d2", finding: "would broaden work", impact: "goal" })).toThrow(
+				"Discovery policy is locked",
+			);
+			const complete = manager.completeGoal({ expectedRevision: locked.revision });
 			expect(complete.status).toBe("complete");
 			expect(() =>
 				manager.setDiscoveryPolicy({ discoveryPolicy: "locked", expectedRevision: complete.revision }),
 			).toThrow("terminal");
+		});
+
+		it("injects the current goal into worker turns and stops goal-impact discovery for resolution", async () => {
+			const noGoal = await manager.spawn({ role: "worker", tier: "expert", task: "bounded task" });
+			expect(manager.discover(noGoal.id, "local", "without a goal", undefined)).toMatchObject({
+				ok: false,
+				error: expect.stringContaining("No session goal initialized"),
+			});
+			transports[0].finish({ ok: true, summary: "done" });
+			await manager.waitFor([noGoal.id], 5_000);
+
+			manager.initGoal("ship the release");
+			const worker = await manager.spawn({ role: "worker", tier: "expert", task: "verify artifacts", writer: true });
+			transports[1].options.events.vendorSession("goal-session");
+			expect(transports[1].prompts[0]).toContain("immutable intent: ship the release");
+			expect(transports[1].prompts[0]).toContain("working objective: ship the release");
+			expect(transports[1].prompts[0]).toContain("revision: 0 | discovery policy: allowed");
+			expect(transports[1].prompts[0]).toContain("# Assigned task\n\nverify artifacts");
+
+			const local = manager.discover(worker.id, "local", "artifact count is stable", "continue");
+			expect(local).toMatchObject({ ok: true, data: { discoveryId: "d1", revision: 1 } });
+			expect(manager.statusSnapshot().writerSlot?.id).toBe(worker.id);
+
+			const goalWait = manager.wait([worker.id], 5_000);
+			const goal = manager.discover(
+				worker.id,
+				"goal",
+				"release target conflicts with artifact policy",
+				"ask leader",
+			);
+			expect(goal).toMatchObject({ ok: true, data: { discoveryId: "d2", revision: 2 } });
+			const wake = await goalWait;
+			expect(wake).toMatchObject({ reason: "discovery", discovery: { id: "d2", status: "pending" } });
+			expect(manager.statusSnapshot().writerSlot).toBeUndefined();
+
+			manager.resolveDiscovery({
+				discoveryId: "d2",
+				resolution: "reject",
+				expectedRevision: 2,
+				reason: "stay bounded",
+			});
+			await manager.steer(worker.id, "continue with the accepted objective");
+			transports[2].finish({ ok: true, summary: "resumed" });
+			await manager.waitFor([worker.id], 5_000);
+			expect(transports[2].prompts[0]).toContain("revision: 3 | discovery policy: allowed");
+			expect(transports[2].prompts[0]).not.toContain("release target conflicts with artifact policy");
 		});
 	});
 });

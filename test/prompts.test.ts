@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { loadCharter } from "../src/prompts/charter.ts";
 import { materializeFlavors } from "../src/prompts/flavors.ts";
 import { buildLeaderPrompt } from "../src/prompts/leader.ts";
+import { BUILT_IN_ROLES, workingAgreement } from "../src/prompts/roles.ts";
 import { DEFAULT_TIERS } from "../src/settings.ts";
 
 const dirs: string[] = [];
@@ -48,6 +49,10 @@ describe("leader prompt", () => {
 		expect(prompt).toContain("neta_exec");
 		expect(prompt).toContain("neta_wait");
 		expect(prompt).not.toContain("neta spawn --role");
+		expect(prompt).toContain("immutable user intent distinct from the mutable working objective");
+		expect(prompt).toContain("neta_discover");
+		expect(prompt).toContain("Teams recommend only");
+		expect(prompt).not.toContain("neta_workers");
 	});
 
 	// The leader can only call what its host calls the tool. Naming the bare tool
@@ -63,8 +68,9 @@ describe("leader prompt", () => {
 			"neta_delegate",
 			"neta_exec",
 			"neta_wait",
-			"neta_workers",
 			"neta_status",
+			"neta_goal",
+			"neta_discover",
 			"neta_attach",
 			"neta_inspect",
 			"neta_send",
@@ -191,6 +197,26 @@ describe("leader prompt", () => {
 	});
 });
 
+describe("worker role and agreement prompts", () => {
+	it("keeps every built-in role within the accepted goal and discovery contract", () => {
+		for (const role of Object.keys(BUILT_IN_ROLES)) {
+			const prompt = BUILT_IN_ROLES[role];
+			expect(prompt).toContain("goal");
+			expect(prompt).not.toContain("neta_workers");
+		}
+	});
+
+	it("centralizes non-team and team worker rules", () => {
+		const solo = workingAgreement({ tier: "expert", writer: false, room: undefined, binary: "neta" });
+		const team = workingAgreement({ tier: "expert", writer: false, room: "review", binary: "neta" });
+		expect(solo).toContain("status --goal");
+		expect(solo).toContain("discover --impact local|goal");
+		expect(solo).not.toContain('team "review"');
+		expect(team).toContain('team "review"');
+		expect(team).toContain("Room");
+	});
+});
+
 describe("charter loading", () => {
 	it("appends the user's default after the project charter with both paths attributed", () => {
 		const cwd = scratch();
@@ -251,6 +277,16 @@ describe("flavors", () => {
 		expect(body).toContain("Use architect only for an ambiguous or\nopen-ended position");
 		expect(body).toContain("do not staff every debater as architect by default");
 		expect(body).toContain("Room\nbackend diversity still spreads debaters across distinct providers");
+		expect(body).toContain("winner never changes the goal\nautomatically");
+	});
+
+	it("keeps all three flavors on accepted revisions and explicit discovery", async () => {
+		const refs = await materializeFlavors(scratch());
+		for (const ref of refs) {
+			const body = readFileSync(ref.path, "utf8");
+			expect(body).not.toContain("neta_workers");
+			expect(body).toContain("accepted working objective");
+		}
 	});
 
 	// Overwriting an edited playbook would silently undo the user's work.

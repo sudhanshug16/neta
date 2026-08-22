@@ -31,6 +31,10 @@ description: Build something end to end with workers - decompose, delegate by ti
 
 # implement
 
+Work against the accepted working objective and revision in your current goal
+snapshot. Do not silently broaden it. A worker uses discovery to report a local
+finding or a goal-impact proposal; only the leader accepts a revised objective.
+
 Use this when the user wants something built or fixed and the shape of the
 solution is already clear enough to start.
 
@@ -87,6 +91,10 @@ description: Resolve a real tradeoff by running a debate at the lowest fitting t
 
 # decide
 
+Judge every option against the accepted working objective and revision. Debate
+participants may recommend or concede, but a winner never changes the goal
+automatically; the leader decides whether to revise it.
+
 Use this when there is a genuine tradeoff - two defensible options, different
 failure modes - and picking wrong is expensive. Architecture questions are
 usually this, often with an \`investigate\` in front to get the facts first.
@@ -113,7 +121,7 @@ general principle.
 
 ## 3. Run fixed rounds
 
-Two or three rounds. Between rounds, read the room transcript and send each
+Run exactly two or three rounds, as chosen before the debate. Between rounds, read the room transcript and send each
 debater the one thing it has not answered. Stop when arguments start repeating -
 that is the signal you have the real disagreement, not more of it.
 
@@ -140,6 +148,10 @@ description: Map unfamiliar code or reproduce a bug with parallel scouts, then s
 ---
 
 # investigate
+
+Investigate against the accepted working objective and revision. Separate
+findings from proposals: when evidence suggests a changed objective, report a
+goal-impact discovery for the leader to judge rather than changing scope.
 
 Use this when you do not yet know enough: unfamiliar subsystem, bug with an
 unknown cause, "how does this work" questions. Feeds \`implement\` and

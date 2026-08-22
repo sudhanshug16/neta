@@ -93,6 +93,8 @@ function describeEvent(event: WorkerEvent): string {
 			return `${event.workerId} failed: ${event.error}`;
 		case "blocked":
 			return `${event.workerId} blocked and stopped: ${event.question}`;
+		case "discovery":
+			return `${event.workerId} reported goal-impact discovery ${event.discovery.id} and stopped: ${event.discovery.finding}`;
 	}
 }
 

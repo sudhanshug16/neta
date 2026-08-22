@@ -117,7 +117,7 @@ edit files through your shell either (no \`>\`, \`sed -i\`, \`tee\`, \`patch\`,
 inspecting git is your job.`,
 			delegate: "the neta_delegate MCP tool (there is no CLI delegation alias)",
 			writerQueue: `additional writers queue automatically; the delegate result says queued vs running`,
-			status: `\`${APP_NAME} status\` shows the writer slot, queue, grouped worker states and open notes; \`${APP_NAME} workers\` lists workers; \`${APP_NAME} inspect <id>\` prints one worker's bounded recent input and output; \`${APP_NAME} attach <id>\` takes over the caller's terminal with that worker's native backend TUI`,
+			status: `\`${APP_NAME} status\` shows the goal, writer slot, queue, grouped worker states, latest milestones and open notes; \`${APP_NAME} inspect <id>\` prints one worker's bounded recent input and output; \`${APP_NAME} attach <id>\` takes over the caller's terminal with that worker's native backend TUI`,
 			wait: `\`${APP_NAME} wait <id> [<id>...]\``,
 			send: `\`${APP_NAME} send <id> <message>\``,
 			closing: `Use the MCP control plane for delegation. The CLI remains available for status, wait, send, inspect, attach, and kill.`,
@@ -130,7 +130,7 @@ attempting one wastes a turn. You must not edit files through bash either (no
 searching, running tests, and inspecting git is your job.`,
 		delegate: `\`${tool("neta_delegate")}\``,
 		writerQueue: `additional writers queue automatically; the delegate result says queued vs running`,
-		status: `\`${tool("neta_status")}\` shows the writer slot, queue, grouped worker states and open notes; \`${tool("neta_workers")}\` lists workers; \`${tool("neta_inspect")}\` expands one worker's bounded recent input and output; \`${tool("neta_attach")}\` reopens a terminal worker's native backend TUI in a new tab`,
+		status: `\`${tool("neta_status")}\` shows the goal, writer slot, queue, grouped worker states, latest milestones and open notes; use view="workers" for worker detail; \`${tool("neta_inspect")}\` expands one worker's bounded recent input and output; \`${tool("neta_attach")}\` reopens a terminal worker's native backend TUI in a new tab`,
 		wait: `\`${tool("neta_wait")}\``,
 		send: `\`${tool("neta_send")}\``,
 		closing: `The worker CLI is \`${APP_NAME}\`; workers already know how to use it.`,
@@ -298,14 +298,28 @@ Rules that matter in practice:
   to a scout, even mid-flow. If you are on your third file for one purpose,
   stop and spawn a scout.
 
+## Goal and discovery
+
+- Keep immutable user intent distinct from the mutable working objective. The
+  default discovery policy is allowed; only you call ${toolName("neta_goal")} to
+  initialize, revise, lock, resolve, or complete the goal.
+- Workers report findings with ${control === "mcp" ? toolName("neta_discover") : `\`${APP_NAME} discover\``}: use local for a bounded finding that does not broaden work, and goal when the finding may require a working-objective change. A goal-impact discovery wakes ${s.wait} and stops that worker; resolve it with ${toolName("neta_goal")} before ${toolName("neta_send")} resumes the exact conversation.
+- Do not complete a goal while a goal-impact discovery is pending unless you
+  deliberately record the required override and reason. A locked policy rejects
+  active goal-impact discovery; an incidental contradiction that prevents
+  execution still uses ${control === "mcp" ? toolName("neta_blocked") : `\`${APP_NAME} blocked\``}.
+- Teams recommend only. Room consensus never mutates the goal, and a debate
+  winner never changes it automatically; judge the recommendation yourself.
+
 ## Staying informed without interrupting anyone
 
 - Workers record progress milestones when they start, complete a major step, or
-  encounter a surprise that changes their plan. ${s.status} shows their latest
-  milestone; use the log only when you need more detail.
-- ${s.wait} blocks you until the workers you name are finished, and returns
-  what they reported. It wakes you early when a watched worker blocks on a
-  question, so waiting never hides a stuck worker.
+  encounter a surprise that changes their plan. ${s.status}; use the log only
+  when you need more detail.
+- ${s.wait} is the normal handoff: it blocks you until the workers you name are
+  finished, returns what they reported, and wakes early on a blocker or
+  goal-impact discovery. Use ${toolName("neta_inspect")} only when a report is
+  missing or contradictory; inspection is exceptional, not the handoff path.
 - Never end your turn while workers you spawned are still running, unless
   the user explicitly asked you to fire and forget. Ending your turn abandons
   them: nothing wakes you when they finish, and the user sees only silence.

@@ -85,6 +85,9 @@ function formatWaitResult(result: WaitResult, seconds: number): string {
 	if (result.reason === "blocked" && result.wokeBy) {
 		return `${result.wokeBy.id} blocked and stopped: ${result.wokeBy.pendingQuestion ?? "(no question)"}\nAnswer with neta_send to resume this exact conversation.\n${statusReport(result.workers)}`;
 	}
+	if (result.reason === "discovery" && result.wokeBy && result.discovery) {
+		return `${result.wokeBy.id} reported goal-impact discovery ${result.discovery.id} and stopped: ${result.discovery.finding}${result.discovery.suggestion ? `\nSuggestion: ${result.discovery.suggestion}` : ""}\nResolve it with neta_goal, then use neta_send to resume this exact conversation.\n${statusReport(result.workers)}`;
+	}
 	if (result.reason === "room" && result.roomActivity) {
 		const posts = result.roomActivity.posts.slice(-ROOM_WAKE_TAIL);
 		return `New team activity in "${result.roomActivity.room}":\n${posts.map((post) => `[${post.label}] ${post.text}`).join("\n")}\n\n${statusReport(result.workers)}`;
@@ -409,7 +412,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 		{
 			name: "neta_wait",
 			description:
-				"Block until workers finish, the first finishes, one blocks, a watched team posts, or timeout. Call again while work remains.",
+				"Block until workers finish, the first finishes, one blocks, a goal-impact discovery stops, a watched team posts, or timeout. Resolve discoveries before resuming with neta_send.",
 			inputSchema: {
 				type: "object",
 				properties: {

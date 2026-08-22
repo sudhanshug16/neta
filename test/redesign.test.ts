@@ -72,12 +72,12 @@ describe("settled tool surface and revival", () => {
 			workerTools("socket", "ro1", "token")
 				.map((tool) => tool.name)
 				.sort(),
-		).toEqual(["neta_blocked", "neta_progress", "neta_status"]);
+		).toEqual(["neta_blocked", "neta_discover", "neta_progress", "neta_status"]);
 		expect(
 			workerTools("socket", "ro1", "token", "review")
 				.map((tool) => tool.name)
 				.sort(),
-		).toEqual(["neta_blocked", "neta_progress", "neta_room", "neta_room_post", "neta_status"]);
+		).toEqual(["neta_blocked", "neta_discover", "neta_progress", "neta_room", "neta_room_post", "neta_status"]);
 	});
 
 	it("delegates independent and team batches with actual assignments and prevalidates before seeding", async () => {

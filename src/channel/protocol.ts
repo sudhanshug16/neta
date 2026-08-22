@@ -39,7 +39,16 @@ export type WorkerChannelRequest =
 	/** Read the worker's room transcript. */
 	| { type: "room"; workerId: string; token: string; tail?: number }
 	/** Read only active, queued and finished writers. */
-	| { type: "writer-status"; workerId: string; token: string };
+	| { type: "writer-status"; workerId: string; token: string }
+	| { type: "goal-status"; workerId: string; token: string }
+	| {
+			type: "discover";
+			workerId: string;
+			token: string;
+			impact: "local" | "goal";
+			finding: string;
+			suggestion?: string;
+	  };
 
 /**
  * Requests only a token holder may make. These mirror the leader's MCP tools,

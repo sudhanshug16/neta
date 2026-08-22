@@ -23,6 +23,15 @@ export interface ChannelHandler {
 	room(workerId: string, tail: number | undefined): ChannelResponse;
 	/** Read-only writer status, available to every worker without a leader token. */
 	writerStatus(workerId: string): ChannelResponse;
+	/** Read-only compact goal status, available to every worker without a leader token. */
+	goalStatus?(workerId: string): ChannelResponse;
+	/** Record a worker discovery; goal-impact discoveries stop the active turn. */
+	discover?(
+		workerId: string,
+		impact: "local" | "goal",
+		finding: string,
+		suggestion: string | undefined,
+	): ChannelResponse;
 	/** Token-authorized leader operations. `wait` may block on the signal. */
 	leader(request: LeaderChannelRequest, signal: AbortSignal): Promise<ChannelResponse>;
 }
@@ -127,6 +136,21 @@ export class ChannelServer {
 					case "writer-status":
 						if (!this.authenticateWorker(request, handler, respond)) return;
 						respond(handler.writerStatus(request.workerId));
+						break;
+					case "goal-status":
+						if (!this.authenticateWorker(request, handler, respond)) return;
+						respond(
+							handler.goalStatus?.(request.workerId) ?? { ok: false, error: "Goal status is unavailable." },
+						);
+						break;
+					case "discover":
+						if (!this.authenticateWorker(request, handler, respond)) return;
+						respond(
+							handler.discover?.(request.workerId, request.impact, request.finding, request.suggestion) ?? {
+								ok: false,
+								error: "Discovery is unavailable.",
+							},
+						);
 						break;
 					case "blocked":
 						if (!this.authenticateWorker(request, handler, respond)) return;

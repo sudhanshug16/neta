@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { handleWorkerChannelCommand, sendChannelRequest } from "../src/channel/client.ts";
+import { handleWorkerChannelCommand, parseDiscoveryArgs, sendChannelRequest } from "../src/channel/client.ts";
 import { LEADER_COMMANDS } from "../src/channel/leader-cli.ts";
 import {
 	type ChannelRequest,
@@ -43,6 +43,11 @@ describe("settled channel surface", () => {
 			},
 			room: () => ({ ok: true, text: "room" }),
 			writerStatus: () => ({ ok: true, text: "writers" }),
+			goalStatus: () => ({ ok: true, text: "goal" }),
+			discover: (_id, impact, finding, suggestion) => {
+				calls.push(`discover:${impact}:${finding}:${suggestion ?? ""}`);
+				return { ok: true, text: "discovery" };
+			},
 			leader: async (request) => ({ ok: true, text: request.type }),
 		};
 		server = new ChannelServer(address, handler);
@@ -110,5 +115,42 @@ describe("settled channel surface", () => {
 		env.set(NETA_WORKER_TOKEN_ENV, "token");
 		expect(await handleWorkerChannelCommand(["blocked", "need", "owner"])).toBe(true);
 		expect(calls).toEqual(["blocked:need owner"]);
+	});
+
+	it("parses discovery flags strictly and routes explicit worker requests", async () => {
+		expect(parseDiscoveryArgs(["--impact", "goal", "--finding", "conflict", "--suggest", "ask"])).toEqual({
+			impact: "goal",
+			finding: "conflict",
+			suggestion: "ask",
+		});
+		for (const args of [
+			[],
+			["--impact", "local"],
+			["--impact", "local", "--finding", "x", "--unknown", "y"],
+			["--impact", "local", "--impact", "goal", "--finding", "x"],
+			["--impact", "other", "--finding", "x"],
+		])
+			expect(parseDiscoveryArgs(args)).toBeString();
+
+		expect(
+			await sendChannelRequest(address, {
+				type: "discover",
+				workerId: "ro1",
+				token: "token",
+				impact: "local",
+				finding: "evidence",
+				suggestion: "continue",
+			}),
+		).toEqual({ ok: true, text: "discovery" });
+		expect(await sendChannelRequest(address, { type: "goal-status", workerId: "ro1", token: "token" })).toEqual({
+			ok: true,
+			text: "goal",
+		});
+		env.set(NETA_SOCKET_ENV, address);
+		env.set(NETA_WORKER_ENV, "ro1");
+		env.set(NETA_WORKER_TOKEN_ENV, "token");
+		expect(await handleWorkerChannelCommand(["status", "--writers"])).toBe(true);
+		expect(await handleWorkerChannelCommand(["status", "--goal"])).toBe(true);
+		expect(calls).toEqual(["discover:local:evidence:continue"]);
 	});
 });

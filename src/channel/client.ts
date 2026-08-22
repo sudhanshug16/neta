@@ -15,7 +15,7 @@ import {
 	NETA_WORKER_TOKEN_ENV,
 } from "./protocol.ts";
 
-const CHANNEL_COMMANDS = new Set(["progress", "blocked", "room-post", "room", "status"]);
+const CHANNEL_COMMANDS = new Set(["progress", "blocked", "room-post", "room", "discover", "status"]);
 
 const CHANNEL_HELP = `Worker channel commands (available inside a Neta worker):
 
@@ -23,7 +23,9 @@ const CHANNEL_HELP = `Worker channel commands (available inside a Neta worker):
   ${APP_NAME} blocked <question> Stop this turn with a blocker; the leader resumes it with send.
   ${APP_NAME} room-post <message> Post to your team transcript.
   ${APP_NAME} room [--tail N]    Read your room transcript.
+  ${APP_NAME} discover --impact local|goal --finding <text> [--suggest <text>] Report a finding.
   ${APP_NAME} status --writers   Show active, queued and finished writers.
+  ${APP_NAME} status --goal      Show the compact current goal.
 `;
 
 /**
@@ -78,6 +80,31 @@ function parseTail(args: string[]): number | undefined {
 	return Number.isFinite(value) ? value : undefined;
 }
 
+export function parseDiscoveryArgs(
+	args: string[],
+): { impact: "local" | "goal"; finding: string; suggestion?: string } | string {
+	const values = new Map<string, string>();
+	for (let index = 0; index < args.length; index += 1) {
+		const flag = args[index];
+		if (flag !== "--impact" && flag !== "--finding" && flag !== "--suggest")
+			return `Usage: ${APP_NAME} discover --impact local|goal --finding <text> [--suggest <text>]`;
+		if (values.has(flag))
+			return `Usage: ${APP_NAME} discover --impact local|goal --finding <text> [--suggest <text>] (duplicate ${flag})`;
+		const value = args[index + 1];
+		if (!value || value.startsWith("--"))
+			return `Usage: ${APP_NAME} discover --impact local|goal --finding <text> [--suggest <text>] (missing ${flag} value)`;
+		values.set(flag, value);
+		index += 1;
+	}
+	const impact = values.get("--impact");
+	const finding = values.get("--finding");
+	if (impact !== "local" && impact !== "goal")
+		return `Usage: ${APP_NAME} discover --impact local|goal --finding <text> [--suggest <text>]`;
+	if (!finding?.trim()) return `Usage: ${APP_NAME} discover --impact local|goal --finding <text> [--suggest <text>]`;
+	const suggestion = values.get("--suggest");
+	return { impact, finding, ...(suggestion ? { suggestion } : {}) };
+}
+
 /**
  * Handle a worker channel subcommand. Returns false when the arguments are not
  * a channel command, so the caller continues with normal startup.
@@ -103,13 +130,24 @@ export async function handleWorkerChannelCommand(args: string[]): Promise<boolea
 	let request: ChannelRequest;
 	if (command === "room") {
 		request = { type: "room", workerId, token, tail: parseTail(rest) };
-	} else if (command === "status") {
-		if (rest.length !== 1 || rest[0] !== "--writers") {
-			console.error(`Usage: ${APP_NAME} status --writers`);
+	} else if (command === "discover") {
+		const discovery = parseDiscoveryArgs(rest);
+		if (typeof discovery === "string") {
+			console.error(discovery);
 			process.exitCode = 1;
 			return true;
 		}
-		request = { type: "writer-status", workerId, token };
+		request = { type: "discover", workerId, token, ...discovery };
+	} else if (command === "status") {
+		if (rest.length !== 1 || (rest[0] !== "--writers" && rest[0] !== "--goal")) {
+			console.error(`Usage: ${APP_NAME} status --writers|--goal`);
+			process.exitCode = 1;
+			return true;
+		}
+		request =
+			rest[0] === "--writers"
+				? { type: "writer-status", workerId, token }
+				: { type: "goal-status", workerId, token };
 	} else {
 		const text = rest.join(" ").trim();
 		if (!text) {
@@ -124,7 +162,7 @@ export async function handleWorkerChannelCommand(args: string[]): Promise<boolea
 		const response = await sendChannelRequest(address, request);
 		if (response.ok) {
 			if (response.text) console.log(response.text);
-			else if (command === "progress" || command === "room-post") console.log("ok");
+			else if (command === "progress" || command === "room-post" || command === "discover") console.log("ok");
 		} else {
 			console.error(response.error);
 			process.exitCode = 1;
