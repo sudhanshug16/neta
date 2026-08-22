@@ -64,6 +64,37 @@ describe("formatStatusSnapshot", () => {
 		expect(status).toContain('Open notes:\n  n1 "finish the auth rollout" (rw2 queued)');
 	});
 
+	it("keeps every unresolved worker and open note visible", () => {
+		const running = Array.from({ length: 7 }, (_, index) => worker({ id: `run${index}`, name: `run ${index}` }));
+		const queued = Array.from({ length: 7 }, (_, index) =>
+			worker({ id: `queue${index}`, name: `queue ${index}`, state: "queued" }),
+		);
+		const waiting = Array.from({ length: 7 }, (_, index) =>
+			worker({ id: `wait${index}`, name: `wait ${index}`, state: "waiting" }),
+		);
+		const blocked = Array.from({ length: 7 }, (_, index) =>
+			worker({ id: `blocked${index}`, name: `blocked ${index}`, state: "blocked" }),
+		);
+		const notes = Array.from({ length: 7 }, (_, index) => ({
+			id: `n${index}`,
+			text: `note ${index}`,
+			open: true,
+			createdAt: index,
+			workers: [],
+		}));
+		const status = formatStatusSnapshot({
+			writerSlot: running[0],
+			writerQueue: queued,
+			workers: { running, queued, waiting, terminal: blocked },
+			openNotes: notes,
+		});
+
+		for (const item of [...running, ...queued, ...waiting, ...blocked]) expect(status).toContain(item.id);
+		for (const note of notes) expect(status).toContain(`${note.id} "${note.text}"`);
+		expect(status).not.toContain("worker rows omitted");
+		expect(status).not.toContain("note previews omitted");
+	});
+
 	it("flattens and clips the latest progress milestone to one last: line", () => {
 		expect(formatLastProgress(worker())).toBeUndefined();
 		expect(formatLastProgress(worker({ lastProgress: { text: "line one\nline two", at: 1 } }))).toBe(
@@ -164,19 +195,20 @@ describe("formatStatusSnapshot", () => {
 		const status = formatStatusSnapshot(snapshot);
 		for (const id of ["ro-running", "ro-queued", "ro-waiting"])
 			expect(status).toContain(`expand: neta inspect ${id}`);
-		for (const id of ["ro-blocked", "ro-failed", "ro-interrupted", "ro-later-failure"])
-			expect(status).toContain(`inspect: neta inspect ${id}`);
+		expect(status).toContain("ro-blocked");
+		expect(status).toContain("ro-later-failure");
+		for (const id of ["ro-failed", "ro-interrupted"]) expect(status).not.toContain(`inspect: neta inspect ${id}`);
+		for (const id of ["ro-blocked", "ro-later-failure"]) expect(status).toContain(`inspect: neta inspect ${id}`);
 		for (const id of ["ro-done", "ro-killed"]) expect(status).not.toContain(`inspect ${id}`);
 	});
 
-	it("keeps a 557-worker, 150-note summary bounded", () => {
+	it("shows closed-worker counts and every open note with bounded fields", () => {
 		const terminal = Array.from({ length: 557 }, (_, index) =>
 			worker({
 				id: `ro${index + 1}`,
-				name: `diagnostic ${index}`,
-				state: "failed",
+				name: `closed ${index}`,
+				state: index % 2 === 0 ? "done" : index % 4 === 1 ? "killed" : "failed",
 				result: "result ".repeat(1_000),
-				laterFailure: "later failure ".repeat(1_000),
 			}),
 		);
 		const openNotes = Array.from({ length: 150 }, (_, index) => ({
@@ -195,12 +227,14 @@ describe("formatStatusSnapshot", () => {
 			openNotes,
 		});
 
-		expect(rendered.length).toBeLessThan(10_000);
-		expect(rendered).toContain("counts: blocked=0 | failed=557 | interrupted=0 | done=0 | killed=0");
-		expect(rendered).toContain("... 552 diagnostic rows omitted");
+		expect(rendered).toContain("counts: blocked=0 | failed=139 | interrupted=0 | done=279 | killed=139");
+		for (const id of terminal.map((item) => item.id)) expect(rendered).not.toContain(`  ${id} `);
 		expect(rendered).toContain("total: 150");
-		expect(rendered).toContain("... 145 note previews omitted");
-		expect(rendered).toContain("... 5 linked workers omitted");
-		expect((rendered.match(/^ {2}ro\d+ /gm) ?? []).length).toBe(5);
+		expect(rendered).not.toContain("note previews omitted");
+		expect(rendered).not.toContain("linked workers omitted");
+		for (const note of openNotes) expect(rendered).toContain(`${note.id} "`);
+		const noteLines = rendered.split("\n").filter((line) => /^ {2}n\d+ "/.test(line));
+		expect(noteLines).toHaveLength(150);
+		expect(noteLines.every((line) => line.length <= 520)).toBe(true);
 	});
 });

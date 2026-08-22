@@ -172,7 +172,7 @@ host process, outside any sandbox:
 | --- | --- |
 | `neta_delegate` | Start one or more independent workers, or a team sharing one transcript; input errors are atomic, while runtime startup failures are returned per worker and later workers are still attempted. |
 | `neta_exec` | Run any argv command directly — any executable, any arguments, Git or Bun with any options, in any existing directory. No command allowlist; output is the only bound: the command's own output excerpt in the response is capped, with the full capture always on disk and named when that excerpt is truncated, and the response flags repeated calls from the second one on. A command that fails to launch still comes back as a completed result, not a tool error. |
-| `neta_status` | Bounded summary: goal (when set), writer slot, grouped workers, and open-note previews. Use `view="workers"` or `view="notes"` with `limit` (default 20, maximum 100), opaque `cursor`, and worker `state` filtering; `workerId`/`noteId` fetch one exact record. |
+| `neta_status` | Live summary with bounded fields: goal (when set), writer slot, unresolved workers, and all open notes. Use `view="workers"` or `view="notes"` with `limit` (default 20, maximum 100), opaque `cursor`, and worker `state` filtering; `workerId`/`noteId` fetch one exact record. |
 | `neta_attach` | Reopen a terminal worker's exact native backend session in a new tab. |
 | `neta_wait` | Block until watched workers finish, report a blocker, or a team posts. |
 | `neta_send` | Steer a live worker or resume a done, failed, or blocked worker in its exact ACP conversation. |
@@ -180,12 +180,14 @@ host process, outside any sandbox:
 | `neta_kill` | Terminate a worker, releasing the writer slot. |
 | `neta_note` | Open-notes ledger: parked work, pending decisions, follow-ups. |
 
-Status summaries always show the writer slot, counts, and bounded previews. Each
-worker group shows at most five rows; terminal status shows counts plus
-diagnostic rows, and ordinary done/killed history stays out of the summary.
-Open notes show five newest previews. For more rows, continue the `workers` or
-`notes` view with its returned cursor. The deprecated hidden `neta_workers`
-route uses the same worker paging defaults.
+Status summaries always show the writer slot, every queued or active worker, and
+every blocked worker that needs leader action. Every open note is shown, with
+fixed per-field clipping for worker details, progress, diagnostics, and note
+text. Closed history is represented by terminal counts; ordinary done, killed,
+failed, and interrupted rows stay out of the summary unless they carry a
+later-failure diagnostic. For history, continue the `workers` or `notes` view
+with its returned cursor. The deprecated hidden `neta_workers` route uses the
+same worker paging defaults.
 
 ## The worker channel
 

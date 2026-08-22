@@ -19,8 +19,8 @@ import {
 const OBJECTIVE_LIMIT = 100;
 const LAST_PROGRESS_LIMIT = 80;
 const SUMMARY_FIELD_LIMIT = 240;
-const SUMMARY_ROW_LIMIT = 5;
-const NOTE_WORKER_ROW_LIMIT = 5;
+const NOTE_PREVIEW_LIMIT = 5;
+const DETAIL_ROW_LIMIT = 5;
 /** Total rendered size of `neta inspect`, including metadata and footer. */
 export const INSPECT_RENDER_MAX_CHARS = 6000;
 
@@ -162,12 +162,10 @@ export function formatSteerResult(result: SteerResult): string {
 
 function formatNoteWorkers(note: Note): string {
 	if (note.workers.length === 0) return "unworked";
-	const shown = note.workers
-		.slice(0, NOTE_WORKER_ROW_LIMIT)
-		.map((worker) => `${worker.workerId} ${worker.state}`)
-		.join(", ");
-	const omitted = note.workers.length - NOTE_WORKER_ROW_LIMIT;
-	return omitted > 0 ? `${shown}; ... ${omitted} linked workers omitted` : shown;
+	return clipDisplay(
+		note.workers.map((worker) => `${worker.workerId} ${worker.state}`).join(", "),
+		SUMMARY_FIELD_LIMIT,
+	);
 }
 
 export function formatNotePreview(note: Note): string {
@@ -185,12 +183,22 @@ export function formatOpenNotesLines(notes: Note[], heading = "Open notes:"): st
 	const newest = newestNotes(notes);
 	const lines = [heading];
 	if (newest.length === 0) lines.push("  (none)");
-	else lines.push(...newest.slice(0, SUMMARY_ROW_LIMIT).map((note) => `  ${formatNotePreview(note)}`));
+	else lines.push(...newest.slice(0, NOTE_PREVIEW_LIMIT).map((note) => `  ${formatNotePreview(note)}`));
 	lines.push(`  total: ${notes.length}`);
-	const omitted = notes.length - SUMMARY_ROW_LIMIT;
+	const omitted = notes.length - NOTE_PREVIEW_LIMIT;
 	const omittedLineText = omittedLine(omitted, "note previews");
 	if (omittedLineText) lines.push(omittedLineText);
 	return lines;
+}
+
+/** All unresolved notes belong in the default summary; fields remain bounded per row. */
+function formatAllOpenNotesLines(notes: Note[], heading = "Open notes:"): string[] {
+	const newest = newestNotes(notes);
+	return [
+		heading,
+		...(newest.length === 0 ? ["  (none)"] : newest.map((note) => `  ${formatNotePreview(note)}`)),
+		`  total: ${notes.length}`,
+	];
 }
 
 function formatGoal(goal: SessionGoal | undefined): string[] {
@@ -206,58 +214,45 @@ function formatGoal(goal: SessionGoal | undefined): string[] {
 		`  pending goal discoveries: ${
 			pending.length
 				? pending
-						.slice(0, SUMMARY_ROW_LIMIT)
+						.slice(0, DETAIL_ROW_LIMIT)
 						.map((discovery) => discovery.id)
 						.join(", ")
 				: "none"
-		}${pending.length > SUMMARY_ROW_LIMIT ? ` ... ${pending.length - SUMMARY_ROW_LIMIT} omitted` : ""}`,
+		}${pending.length > DETAIL_ROW_LIMIT ? ` ... ${pending.length - DETAIL_ROW_LIMIT} omitted` : ""}`,
 	];
 }
 
 /** One status section, with an action hint only where it is useful. */
 
 function section(label: string, workers: WorkerSummary[]): string[] {
-	const shown = workers.slice(0, SUMMARY_ROW_LIMIT);
 	return [
 		label,
 		...(workers.length === 0
 			? ["  (none)"]
-			: shown.flatMap((worker) => {
+			: workers.flatMap((worker) => {
 					const lastProgress = formatLastProgress(worker);
 					const line = `  ${formatWorkerSummary(worker)}`;
 					const hint = statusHint(worker);
 					return [...(lastProgress ? [line, `    ${lastProgress}`] : [line]), ...(hint ? [`    ${hint}`] : [])];
 				})),
 		`  total: ${workers.length}`,
-		...(omittedLine(workers.length - shown.length, "worker rows")
-			? [omittedLine(workers.length - shown.length, "worker rows") as string]
-			: []),
 	];
 }
 
 function terminalSection(workers: WorkerSummary[]): string[] {
 	const states = ["blocked", "failed", "interrupted", "done", "killed"] as const;
 	const counts = states.map((state) => `${state}=${workers.filter((worker) => worker.state === state).length}`);
-	const diagnostic = workers.filter(
-		(worker) =>
-			worker.state === "blocked" ||
-			worker.state === "failed" ||
-			worker.state === "interrupted" ||
-			worker.laterFailure,
-	);
+	const diagnostic = workers.filter((worker) => worker.state === "blocked" || worker.laterFailure);
 	return [
 		"Terminal:",
 		`  counts: ${counts.join(" | ")}`,
 		...(diagnostic.length === 0
 			? ["  (no diagnostic rows; ordinary done/killed rows omitted)"]
-			: diagnostic.slice(0, SUMMARY_ROW_LIMIT).flatMap((worker) => {
+			: diagnostic.flatMap((worker) => {
 					const line = `  ${formatWorkerSummary(worker)}`;
 					const hint = statusHint(worker);
 					return [line, ...(hint ? [`    ${hint}`] : [])];
 				})),
-		...(diagnostic.length > SUMMARY_ROW_LIMIT
-			? [`  ... ${diagnostic.length - SUMMARY_ROW_LIMIT} diagnostic rows omitted`]
-			: []),
 	];
 }
 
@@ -323,7 +318,7 @@ export function formatWriterStatus(snapshot: WorkerStatusSnapshot): string {
 	const recent = [...finished].reverse();
 	const previews = [...diagnostic, ...recent.filter((worker) => !diagnostic.includes(worker))].slice(
 		0,
-		SUMMARY_ROW_LIMIT,
+		DETAIL_ROW_LIMIT,
 	);
 	const writerSection = (label: string, writers: WorkerSummary[]): string[] => [
 		label,
@@ -356,6 +351,6 @@ export function formatStatusSnapshot(snapshot: WorkerStatusSnapshot): string {
 		...section("Waiting (legacy active state):", snapshot.workers.waiting),
 		...terminalSection(snapshot.workers.terminal),
 		...formatGoal(snapshot.goal),
-		...formatOpenNotesLines(snapshot.openNotes),
+		...formatAllOpenNotesLines(snapshot.openNotes),
 	].join("\n");
 }

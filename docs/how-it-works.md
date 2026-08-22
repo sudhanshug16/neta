@@ -334,16 +334,20 @@ session file in `~/.neta/sessions/`, which is readable only by you. That file
 is how `neta workers` or `neta status` in a second terminal finds the session
 you are running.
 
-Leader status is bounded for large sessions. The default `neta_status` summary
-always includes the writer slot, totals, at most five rows per active group,
-terminal counts with diagnostic previews, and five newest open-note previews.
-Use `view="workers"` or `view="notes"` with `limit` (20 by default, 100 max),
-the returned opaque `cursor`, and (for workers) `state` to page stable
-insertion/created order. `workerId` and `noteId` select one exact record;
-invalid or stale cursors are rejected. The no-argument `neta_note` listing and
-wait results use bounded previews and point back to the notes view for more.
-The hidden deprecated `neta_workers` MCP route keeps its prefix and exact-id
-behavior while using the bounded worker page.
+Leader status keeps the default `neta_status` summary live and useful in large
+sessions: it includes the writer slot, every queued or active worker, every
+blocked worker requiring leader action, and every open note. Individual task,
+progress, diagnostic, linked-worker, goal, and note-text fields are clipped to
+fixed bounds, while closed history is represented by terminal counts only;
+ordinary done, killed, failed, and interrupted rows stay hidden unless a
+later-failure diagnostic makes them actionable. Use `view="workers"` or
+`view="notes"` with `limit` (20 by default, 100 max), the returned opaque
+`cursor`, and (for workers) `state` to page stable insertion/created order.
+`workerId` and `noteId` select one exact record; invalid or stale cursors are
+rejected. The no-argument `neta_note` listing and wait results use bounded
+previews and point back to the notes view for more. The hidden deprecated
+`neta_workers` MCP route keeps its prefix and exact-id behavior while using the
+bounded worker page.
 
 ## Waking the leader
 
