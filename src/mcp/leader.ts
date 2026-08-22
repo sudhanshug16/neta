@@ -1,8 +1,11 @@
+import { createHash } from "node:crypto";
 import { MAX_SAFE_TIMEOUT_MS, OUTPUT_LIMIT_BYTES, SPAWN_FAILURE_EXIT_CODE } from "../orchestrator/exec.ts";
 import type { WorkerManager } from "../orchestrator/manager.ts";
 import {
 	formatInspection,
 	formatLastProgress,
+	formatNotePreview,
+	formatOpenNotesLines,
 	formatSteerResult,
 	formatWorkerSummary,
 } from "../orchestrator/status.ts";
@@ -15,6 +18,7 @@ import {
 	TIERS,
 	type Tier,
 	type WaitResult,
+	type WorkerState,
 	type WorkerSummary,
 } from "../types.ts";
 import {
@@ -31,6 +35,20 @@ const DEFAULT_WAIT_SECONDS = 240;
 const MAX_WAIT_SECONDS = 900;
 const MAX_RESULT_CHARS = 3000;
 const ROOM_WAKE_TAIL = 5;
+const DEFAULT_PAGE_LIMIT = 20;
+const MAX_PAGE_LIMIT = 100;
+const PAGE_ROW_LIMIT = 5;
+const WORKER_STATES: readonly WorkerState[] = [
+	"starting",
+	"running",
+	"waiting",
+	"queued",
+	"blocked",
+	"done",
+	"failed",
+	"killed",
+	"interrupted",
+];
 /** The largest timeoutSeconds that still rounds to a millisecond value Node's timer can hold. */
 const MAX_TIMEOUT_SECONDS = MAX_SAFE_TIMEOUT_MS / 1000;
 
@@ -63,12 +81,23 @@ function clip(value: string, limit: number): string {
 	return value.length <= limit ? value : `${value.slice(0, limit)}\n… ${value.length - limit} more characters`;
 }
 
+function clipLine(value: string, limit: number): string {
+	return clip(value.replace(/\s+/g, " ").trim(), limit);
+}
+
+function boundedIds(ids: string[], limit = PAGE_ROW_LIMIT): string {
+	const shown = ids.slice(0, limit).join(", ");
+	const omitted = ids.length - limit;
+	return omitted > 0 ? `${shown}, ... ${omitted} worker ids omitted` : shown;
+}
+
 function describe(summary: WorkerSummary): string {
 	return formatWorkerSummary(summary);
 }
 
-function statusReport(summaries: WorkerSummary[], maxResultChars = MAX_RESULT_CHARS): string {
-	return summaries
+function statusReport(summaries: WorkerSummary[], maxResultChars = MAX_RESULT_CHARS, maxRows = PAGE_ROW_LIMIT): string {
+	const shown = summaries.slice(0, maxRows);
+	const report = shown
 		.map((summary) => {
 			const lines = [describe(summary)];
 			const progress = formatLastProgress(summary);
@@ -89,26 +118,30 @@ function statusReport(summaries: WorkerSummary[], maxResultChars = MAX_RESULT_CH
 			return lines.join("\n");
 		})
 		.join("\n\n");
+	const omitted = summaries.length - shown.length;
+	return omitted > 0
+		? `${report}${report ? "\n\n" : ""}... ${omitted} worker rows omitted; use neta_status with view="workers" for more.`
+		: report;
 }
 
 function formatWaitResult(result: WaitResult, seconds: number): string {
 	const active = result.workers.filter((worker) => !isTerminalState(worker.state));
 	if (result.reason === "blocked" && result.wokeBy) {
-		return `${result.wokeBy.id} blocked and stopped: ${result.wokeBy.pendingQuestion ?? "(no question)"}\nAnswer with neta_send to resume this exact conversation.\n${statusReport(result.workers)}`;
+		return `${result.wokeBy.id} blocked and stopped: ${clipLine(result.wokeBy.pendingQuestion ?? "(no question)", MAX_RESULT_CHARS)}\nAnswer with neta_send to resume this exact conversation.\n${statusReport(result.workers)}`;
 	}
 	if (result.reason === "discovery" && result.wokeBy && result.discovery) {
-		return `${result.wokeBy.id} reported goal-impact discovery ${result.discovery.id} and stopped: ${result.discovery.finding}${result.discovery.suggestion ? `\nSuggestion: ${result.discovery.suggestion}` : ""}\nResolve it with neta_goal, then use neta_send to resume this exact conversation.\n${statusReport(result.workers)}`;
+		return `${result.wokeBy.id} reported goal-impact discovery ${result.discovery.id} and stopped: ${clipLine(result.discovery.finding, MAX_RESULT_CHARS)}${result.discovery.suggestion ? `\nSuggestion: ${clipLine(result.discovery.suggestion, MAX_RESULT_CHARS)}` : ""}\nResolve it with neta_goal, then use neta_send to resume this exact conversation.\n${statusReport(result.workers)}`;
 	}
 	if (result.reason === "room" && result.roomActivity) {
 		const posts = result.roomActivity.posts.slice(-ROOM_WAKE_TAIL);
-		return `New team activity in "${result.roomActivity.room}":\n${posts.map((post) => `[${post.label}] ${post.text}`).join("\n")}\n\n${statusReport(result.workers)}`;
+		return `New team activity in "${clipLine(result.roomActivity.room, 240)}":\n${posts.map((post) => `[${clipLine(post.label, 240)}] ${clipLine(post.text, MAX_RESULT_CHARS)}`).join("\n")}\n\n${statusReport(result.workers)}`;
 	}
 	if (result.reason === "first") {
 		const terminal = result.workers.filter((worker) => isTerminalState(worker.state));
-		return `${statusReport(terminal)}${active.length ? `\n\nStill running: ${active.map((worker) => worker.id).join(", ")}. Call neta_wait again.` : ""}`;
+		return `${statusReport(terminal)}${active.length ? `\n\nStill running: ${boundedIds(active.map((worker) => worker.id))}. Call neta_wait again.` : ""}`;
 	}
 	if (result.reason === "timeout") {
-		return `${statusReport(result.workers)}${active.length ? `\n\nStill running after ${seconds}s: ${active.map((worker) => worker.id).join(", ")}. Call neta_wait again.` : ""}`;
+		return `${statusReport(result.workers)}${active.length ? `\n\nStill running after ${seconds}s: ${boundedIds(active.map((worker) => worker.id))}. Call neta_wait again.` : ""}`;
 	}
 	return statusReport(result.workers);
 }
@@ -121,17 +154,133 @@ function tier(args: Record<string, unknown>, available: readonly Tier[]): Tier {
 	return value;
 }
 
-function noteWorkersLabel(note: Note): string {
-	return note.workers.length
-		? ` (${note.workers.map((worker) => `${worker.workerId} ${worker.state}`).join(", ")})`
-		: " (unworked)";
-}
-
 function formatOpenNotes(manager: WorkerManager): string {
 	const notes = manager.getOpenNotes();
-	return notes.length
-		? `\n\nOpen notes: ${notes.map((note) => `${note.id} "${clip(note.text, 80)}"${noteWorkersLabel(note)}`).join(" | ")}`
-		: "";
+	if (notes.length === 0) return "";
+	return `\n\n${formatOpenNotesLines(notes).join("\n")}\nFor more open notes, call neta_status with view="notes".`;
+}
+
+interface PageCursor {
+	view: "workers" | "notes";
+	state?: WorkerState;
+	offset: number;
+	fingerprint: string;
+}
+
+function fingerprint(ids: string[]): string {
+	return createHash("sha256").update(ids.join("\u0000")).digest("hex");
+}
+
+function encodeCursor(cursor: PageCursor): string {
+	return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
+}
+
+function decodeCursor(value: string, view: PageCursor["view"], state: WorkerState | undefined): PageCursor {
+	try {
+		const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as Partial<PageCursor>;
+		if (
+			parsed.view !== view ||
+			(parsed.state ?? undefined) !== state ||
+			!Number.isInteger(parsed.offset) ||
+			(parsed.offset as number) < 0 ||
+			typeof parsed.fingerprint !== "string"
+		) {
+			throw new Error("shape");
+		}
+		return parsed as PageCursor;
+	} catch {
+		throw new Error(`Invalid ${view} cursor.`);
+	}
+}
+
+function pageLimit(args: Record<string, unknown>): number {
+	const value = optionalNumber(args, "limit");
+	if (value === undefined) return DEFAULT_PAGE_LIMIT;
+	if (!Number.isInteger(value) || value < 1 || value > MAX_PAGE_LIMIT) {
+		throw new Error(`"limit" must be an integer between 1 and ${MAX_PAGE_LIMIT}.`);
+	}
+	return value;
+}
+
+function workerState(args: Record<string, unknown>): WorkerState | undefined {
+	const value = optionalString(args, "state");
+	if (value === undefined) return undefined;
+	if (!(WORKER_STATES as readonly string[]).includes(value)) {
+		throw new Error(`"state" must be one of: ${WORKER_STATES.join(", ")}.`);
+	}
+	return value as WorkerState;
+}
+
+function workerPage(
+	manager: WorkerManager,
+	workerId: string | undefined,
+	state: WorkerState | undefined,
+	limit: number,
+	cursorValue: string | undefined,
+): string {
+	const all = workerId ? [manager.get(workerId)] : manager.list();
+	const filtered = state ? all.filter((worker) => worker.state === state) : all;
+	const ids = filtered.map((worker) => worker.id);
+	const cursor = cursorValue ? decodeCursor(cursorValue, "workers", state) : undefined;
+	if (cursor && cursor.fingerprint !== fingerprint(ids))
+		throw new Error("Stale workers cursor; request the first page again.");
+	const offset = cursor?.offset ?? 0;
+	if (offset > filtered.length) throw new Error("Stale workers cursor; request the first page again.");
+	const rows = filtered.slice(offset, offset + limit);
+	const nextOffset = offset + rows.length;
+	const next =
+		nextOffset < filtered.length
+			? encodeCursor({
+					view: "workers",
+					...(state ? { state } : {}),
+					offset: nextOffset,
+					fingerprint: fingerprint(ids),
+				})
+			: undefined;
+	const header = `Workers: ${filtered.length} total; showing ${rows.length}${state ? `; state=${state}` : ""}`;
+	const body = rows.length
+		? statusReport(rows, MAX_RESULT_CHARS, limit)
+		: workerId
+			? "No matching workers."
+			: "No workers have been delegated.";
+	return `${header}\n${body}${next ? `\n\nNext cursor: ${next}` : ""}`;
+}
+
+function orderedOpenNotes(manager: WorkerManager): Note[] {
+	return manager
+		.getOpenNotes()
+		.map((note, index) => ({ note, index }))
+		.sort((left, right) => right.note.createdAt - left.note.createdAt || right.index - left.index)
+		.map(({ note }) => note);
+}
+
+function notePage(
+	manager: WorkerManager,
+	noteId: string | undefined,
+	limit: number,
+	cursorValue: string | undefined,
+): string {
+	if (noteId) {
+		const note = manager.listNotes().find((candidate) => candidate.id === noteId);
+		if (!note) throw new Error(`Unknown note id "${noteId}".`);
+		return `Note: ${formatNotePreview(note)}${note.open ? "" : " (closed)"}`;
+	}
+	const notes = orderedOpenNotes(manager);
+	const ids = notes.map((note) => note.id);
+	const cursor = cursorValue ? decodeCursor(cursorValue, "notes", undefined) : undefined;
+	if (cursor && cursor.fingerprint !== fingerprint(ids))
+		throw new Error("Stale notes cursor; request the first page again.");
+	const offset = cursor?.offset ?? 0;
+	if (offset > notes.length) throw new Error("Stale notes cursor; request the first page again.");
+	const rows = notes.slice(offset, offset + limit);
+	const nextOffset = offset + rows.length;
+	const next =
+		nextOffset < notes.length
+			? encodeCursor({ view: "notes", offset: nextOffset, fingerprint: fingerprint(ids) })
+			: undefined;
+	const header = `Notes: ${notes.length} total; showing ${rows.length}`;
+	const body = rows.length ? rows.map((note) => `  ${formatNotePreview(note)}`).join("\n") : "No open notes.";
+	return `${header}\n${body}${next ? `\n\nNext cursor: ${next}` : ""}`;
 }
 
 export function leaderTools(manager: WorkerManager): McpTool[] {
@@ -366,38 +515,67 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 			name: "neta_workers",
 			description: "List workers, latest milestone, usage and results. Safe and non-interrupting.",
 			advertise: false,
-			inputSchema: { type: "object", properties: { workerId: { type: "string" } } },
+			inputSchema: {
+				type: "object",
+				properties: {
+					workerId: { type: "string" },
+					limit: { type: "number" },
+					cursor: { type: "string" },
+					state: { type: "string", enum: [...WORKER_STATES] },
+				},
+			},
 			async run(args) {
 				const id = optionalString(args, "workerId");
-				const workers = id ? [manager.get(id)] : manager.list();
+				const state = workerState(args);
+				const limit = pageLimit(args);
+				const cursor = optionalString(args, "cursor");
 				return text(
 					`Deprecated: use neta_status with view="workers"${id ? ` and workerId="${id}"` : ""}.\n` +
-						(workers.length
-							? statusReport(workers, id ? 20_000 : MAX_RESULT_CHARS) + formatOpenNotes(manager)
-							: "No workers have been delegated."),
+						workerPage(manager, id, state, limit, cursor) +
+						formatOpenNotes(manager),
 				);
 			},
 		},
 		{
 			name: "neta_status",
 			description:
-				"Show the session goal and writer/worker status. Use view=workers for the former neta_workers result.",
+				"Show the bounded session summary by default. Use view=workers or view=notes for bounded pages; workerId or noteId fetches one exact record.",
 			inputSchema: {
 				type: "object",
-				properties: { view: { type: "string", enum: ["summary", "workers"] }, workerId: { type: "string" } },
+				properties: {
+					view: { type: "string", enum: ["summary", "workers", "notes"] },
+					workerId: { type: "string" },
+					noteId: { type: "string" },
+					limit: { type: "number" },
+					cursor: { type: "string" },
+					state: { type: "string", enum: [...WORKER_STATES] },
+				},
+				additionalProperties: false,
 			},
 			async run(args) {
-				const view = optionalString(args, "view") ?? (args.workerId !== undefined ? "workers" : "summary");
-				if (view !== "summary" && view !== "workers") throw new Error('"view" must be summary or workers.');
+				const view =
+					optionalString(args, "view") ??
+					(args.workerId !== undefined ? "workers" : args.noteId !== undefined ? "notes" : "summary");
+				if (view !== "summary" && view !== "workers" && view !== "notes")
+					throw new Error('"view" must be summary, workers or notes.');
 				const id = optionalString(args, "workerId");
-				if (view === "summary" && id) throw new Error('"workerId" requires view="workers".');
-				const workers = id ? [manager.get(id)] : manager.list();
+				const noteId = optionalString(args, "noteId");
+				const cursor = optionalString(args, "cursor");
+				const state = workerState(args);
+				const hasLimit = args.limit !== undefined && args.limit !== null;
+				if (view === "summary" && (id || noteId || cursor || state || hasLimit))
+					throw new Error(
+						'"workerId", "noteId", "limit", "cursor" and "state" require view="workers" or view="notes".',
+					);
+				if (view === "workers" && noteId) throw new Error('"noteId" requires view="notes".');
+				if (view === "notes" && (id || state)) throw new Error('"workerId" and "state" require view="workers".');
+				const limit = view === "summary" ? DEFAULT_PAGE_LIMIT : pageLimit(args);
 				return text(
 					view === "summary"
 						? manager.status()
-						: workers.length
-							? statusReport(workers, id ? 20_000 : MAX_RESULT_CHARS) + formatOpenNotes(manager)
-							: "No workers have been delegated.",
+						: view === "workers"
+							? workerPage(manager, id, state, limit, cursor) + formatOpenNotes(manager)
+							: notePage(manager, noteId, limit, cursor),
 				);
 			},
 		},
@@ -477,7 +655,8 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 		},
 		{
 			name: "neta_note",
-			description: "Create, close, or list session-scoped open notes.",
+			description:
+				"Create, close, or list a bounded preview of session-scoped open notes; use neta_status with view=notes for more.",
 			inputSchema: { type: "object", properties: { text: { type: "string" }, close: { type: "string" } } },
 			async run(args) {
 				const value = optionalString(args, "text");
@@ -489,10 +668,9 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 				}
 				if (close) return text(`Closed ${manager.closeNote(close).id}`);
 				const notes = manager.getOpenNotes();
+				if (!notes.length) return text("No open notes.");
 				return text(
-					notes.length
-						? notes.map((note) => `${note.id} "${note.text}"${noteWorkersLabel(note)}`).join("\n")
-						: "No open notes.",
+					`${formatOpenNotesLines(notes).join("\n")}\nFor more open notes, call neta_status with view="notes".`,
 				);
 			},
 		},

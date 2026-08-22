@@ -275,6 +275,68 @@ describe("leader MCP redesign", () => {
 		expect(body(await call("neta_workers", { workerId: "ro1" }))).toContain("scout/expert");
 		expect(body(await call("neta_inspect", { workerId: "ro1" }))).toContain("map");
 	});
+
+	it("pages workers and notes with filters, exact ids, and stale cursor errors", async () => {
+		await call("neta_delegate", {
+			workers: Array.from({ length: 25 }, (_, index) => ({
+				role: "scout",
+				tier: "expert",
+				task: `map ${index + 1}`,
+			})),
+		});
+		const firstWorkers = body(await call("neta_status", { view: "workers", limit: 5 }));
+		expect(firstWorkers).toContain("Workers: 25 total; showing 5");
+		expect((firstWorkers.match(/^ro\d+ /gm) ?? []).length).toBe(5);
+		const workerCursor = firstWorkers.match(/Next cursor: (\S+)/)?.[1];
+		expect(workerCursor).toBeDefined();
+		const secondWorkers = body(await call("neta_status", { view: "workers", limit: 5, cursor: workerCursor }));
+		expect(secondWorkers).toContain("ro6");
+		expect(secondWorkers).not.toContain("ro1 scout");
+		expect(body(await call("neta_status", { view: "workers", workerId: "ro10" }))).toContain("ro10");
+		expect(body(await call("neta_status", { view: "workers", state: "running", limit: 100 }))).toContain(
+			"Workers: 25 total; showing 25; state=running",
+		);
+
+		await call("neta_note", { text: "first note" });
+		for (let index = 0; index < 24; index += 1) await call("neta_note", { text: `note ${index + 2}` });
+		const firstNotes = body(await call("neta_status", { view: "notes", limit: 5 }));
+		expect(firstNotes).toContain("Notes: 25 total; showing 5");
+		expect(firstNotes).toContain('n25 "note 25"');
+		const noteListing = body(await call("neta_note"));
+		expect(noteListing).toContain("total: 25");
+		expect(noteListing).toContain('For more open notes, call neta_status with view="notes".');
+		expect((noteListing.match(/^ {2}n\d+ /gm) ?? []).length).toBe(5);
+		const noteCursor = firstNotes.match(/Next cursor: (\S+)/)?.[1];
+		expect(noteCursor).toBeDefined();
+		expect(body(await call("neta_status", { view: "notes", noteId: "n1" }))).toContain('Note: n1 "first note"');
+
+		const deprecated = body(await call("neta_workers", { limit: 5 }));
+		expect(deprecated).toContain('Deprecated: use neta_status with view="workers"');
+		expect((deprecated.match(/^ro\d+ /gm) ?? []).length).toBe(5);
+
+		await call("neta_delegate", { workers: [{ role: "scout", tier: "expert", task: "new worker" }] });
+		const staleWorker = await call("neta_status", { view: "workers", limit: 5, cursor: workerCursor });
+		expect(staleWorker.isError).toBe(true);
+		expect(body(staleWorker)).toContain("Stale workers cursor");
+		await call("neta_note", { text: "newer note" });
+		const staleNote = await call("neta_status", { view: "notes", limit: 5, cursor: noteCursor });
+		expect(staleNote.isError).toBe(true);
+		expect(body(staleNote)).toContain("Stale notes cursor");
+	});
+
+	it("rejects oversized and invalid status paging arguments", async () => {
+		for (const args of [
+			{ view: "workers", limit: 101 },
+			{ view: "workers", limit: 0 },
+			{ view: "workers", limit: 1.5 },
+			{ view: "workers", state: "all" },
+			{ view: "workers", cursor: "not-a-cursor" },
+			{ view: "all" },
+		]) {
+			const result = await call("neta_status", args);
+			expect(result.isError).toBe(true);
+		}
+	});
 });
 
 describe("neta_exec through the real MCP client/server boundary", () => {

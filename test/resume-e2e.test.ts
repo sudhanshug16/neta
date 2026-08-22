@@ -276,7 +276,8 @@ describe("closing and reopening a session", () => {
 		expect(prompt).toContain("neta_status");
 
 		const status = await neta(["status", "--session", resumedSession.id], agentDir, repo);
-		expect(status.stdout).toContain("ro1");
+		expect(status.stdout).toContain("done=2");
+		expect(status.stdout).not.toContain("ro1");
 		// The substantive handoff survives both the automatic writer notice and the
 		// restart, and comes back from wait and workers without draining the log.
 		const waited = await neta(["wait", "ro1", "--timeout", "10", "--session", resumedSession.id], agentDir, repo);

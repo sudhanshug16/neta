@@ -59,9 +59,8 @@ describe("formatStatusSnapshot", () => {
 			'Waiting (legacy active state):\n  ro3 "db decision" worker/expert | backend=codex | waiting | ' +
 				"model unknown — backend default | asking: Use Postgres?",
 		);
-		expect(status).toContain(
-			"Terminal:\n  ro4 scout/expert | backend=codex | done | model unknown — backend default",
-		);
+		expect(status).toContain("Terminal:\n  counts: blocked=0 | failed=0 | interrupted=0 | done=1 | killed=0");
+		expect(status).not.toContain("ro4 scout/expert");
 		expect(status).toContain('Open notes:\n  n1 "finish the auth rollout" (rw2 queued)');
 	});
 
@@ -116,6 +115,33 @@ describe("formatStatusSnapshot", () => {
 		expect(status).not.toContain("Open notes");
 	});
 
+	it("bounds finished writer history while keeping active and queued writers visible", () => {
+		const finished = Array.from({ length: 12 }, (_, index) =>
+			worker({
+				id: `rw${index + 1}`,
+				writer: true,
+				state: index === 0 ? "failed" : "done",
+				name: `writer ${index + 1}`,
+			}),
+		);
+		const active = worker({ id: "rw-active", writer: true, name: "active writer" });
+		const queued = Array.from({ length: 7 }, (_, index) =>
+			worker({ id: `rw-queued-${index + 1}`, writer: true, state: "queued", name: `queued ${index + 1}` }),
+		);
+		const status = formatWriterStatus({
+			writerSlot: active,
+			writerQueue: queued,
+			workers: { running: [active], queued, waiting: [], terminal: finished },
+			openNotes: [],
+		});
+
+		expect(status).toContain("total: 12 (blocked=0 | failed=1 | interrupted=0 | done=11 | killed=0)");
+		expect(status).toContain("... 7 finished writer previews omitted");
+		expect((status.match(/^ {2}rw\d+ /gm) ?? []).length).toBe(5);
+		expect(status).toContain("rw-active");
+		for (const writer of queued) expect(status).toContain(writer.id);
+	});
+
 	it("suggests inspection only for active or diagnostic worker states", () => {
 		const snapshot: WorkerStatusSnapshot = {
 			writerQueue: [],
@@ -141,5 +167,40 @@ describe("formatStatusSnapshot", () => {
 		for (const id of ["ro-blocked", "ro-failed", "ro-interrupted", "ro-later-failure"])
 			expect(status).toContain(`inspect: neta inspect ${id}`);
 		for (const id of ["ro-done", "ro-killed"]) expect(status).not.toContain(`inspect ${id}`);
+	});
+
+	it("keeps a 557-worker, 150-note summary bounded", () => {
+		const terminal = Array.from({ length: 557 }, (_, index) =>
+			worker({
+				id: `ro${index + 1}`,
+				name: `diagnostic ${index}`,
+				state: "failed",
+				result: "result ".repeat(1_000),
+				laterFailure: "later failure ".repeat(1_000),
+			}),
+		);
+		const openNotes = Array.from({ length: 150 }, (_, index) => ({
+			id: `n${index + 1}`,
+			text: "note ".repeat(500),
+			open: true,
+			createdAt: index + 1,
+			workers: Array.from({ length: 10 }, (__unused, workerIndex) => ({
+				workerId: `ro${workerIndex + 1}`,
+				state: "failed" as const,
+			})),
+		}));
+		const rendered = formatStatusSnapshot({
+			writerQueue: [],
+			workers: { running: [], queued: [], waiting: [], terminal },
+			openNotes,
+		});
+
+		expect(rendered.length).toBeLessThan(10_000);
+		expect(rendered).toContain("counts: blocked=0 | failed=557 | interrupted=0 | done=0 | killed=0");
+		expect(rendered).toContain("... 552 diagnostic rows omitted");
+		expect(rendered).toContain("total: 150");
+		expect(rendered).toContain("... 145 note previews omitted");
+		expect(rendered).toContain("... 5 linked workers omitted");
+		expect((rendered.match(/^ {2}ro\d+ /gm) ?? []).length).toBe(5);
 	});
 });

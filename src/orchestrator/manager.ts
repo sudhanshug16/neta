@@ -70,7 +70,15 @@ import {
 import type { PromptOutcome, TransportOptions, WorkerMcpServer, WorkerTransportDriver } from "./transport.ts";
 
 const MAX_LOG_ENTRIES = 500;
+const CHANNEL_FIELD_LIMIT = 240;
+const CHANNEL_RESULT_LIMIT = 3000;
+const CHANNEL_ROW_LIMIT = 5;
 type ActiveWorkerState = "starting" | "running" | "waiting" | "queued";
+
+function clipChannel(value: string, limit = CHANNEL_FIELD_LIMIT): string {
+	const flat = value.replace(/\s+/g, " ").trim();
+	return flat.length <= limit ? flat : `${flat.slice(0, limit - 3).trimEnd()}...`;
+}
 
 interface GoalMutationInput {
 	expectedRevision: number;
@@ -2057,7 +2065,16 @@ export class WorkerManager implements ChannelHandler {
 				}
 				case "wait": {
 					const summaries = await this.waitFor(request.workerIds, request.timeoutMs ?? 600_000);
-					return { ok: true, text: summaries.map((summary) => this.statusLine(summary)).join("\n\n") };
+					const shown = summaries.slice(0, CHANNEL_ROW_LIMIT);
+					const omitted = summaries.length - shown.length;
+					return {
+						ok: true,
+						text:
+							shown.map((summary) => this.statusLine(summary, CHANNEL_RESULT_LIMIT, true)).join("\n\n") +
+							(omitted > 0
+								? `\n\n... ${omitted} worker rows omitted; use neta_status with view="workers" for more.`
+								: ""),
+					};
 				}
 				case "send":
 				case "pane-input": {
@@ -2067,12 +2084,15 @@ export class WorkerManager implements ChannelHandler {
 					const steered = await this.steer(request.workerId, request.text);
 					return {
 						ok: true,
-						text: `${formatSteerResult(steered)}\n${this.statusLine(steered.worker, 200)}`,
+						text: `${formatSteerResult(steered)}\n${this.statusLine(steered.worker, CHANNEL_RESULT_LIMIT, true)}`,
 						data: { delivery: steered.delivery, note: steered.note },
 					};
 				}
 				case "kill":
-					return { ok: true, text: this.statusLine(await this.kill(request.workerId), 200) };
+					return {
+						ok: true,
+						text: this.statusLine(await this.kill(request.workerId), CHANNEL_RESULT_LIMIT, true),
+					};
 			}
 		} catch (error) {
 			return { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -2170,27 +2190,35 @@ export class WorkerManager implements ChannelHandler {
 		return backend;
 	}
 
-	private statusLine(summary: WorkerSummary, resultLimit?: number): string {
+	private statusLine(summary: WorkerSummary, resultLimit?: number, boundedFields = false): string {
 		const access = summary.writer ? "writer" : "read-only";
-		const room = summary.room ? `, room ${summary.room}` : "";
+		const room = summary.room ? `, room ${boundedFields ? clipChannel(summary.room) : summary.room}` : "";
 		const model = displayModel(summary);
-		const session = model || summary.mode ? `, ${[model, summary.mode].filter(Boolean).join("/")}` : "";
-		let line = `${summary.id} [${summary.role}/${summary.tier}, ${access}${room}${session}] ${summary.state} — ${summary.task}`;
+		const session =
+			model || summary.mode
+				? `, ${[model ? (boundedFields ? clipChannel(model) : model) : undefined, summary.mode ? (boundedFields ? clipChannel(summary.mode) : summary.mode) : undefined].filter(Boolean).join("/")}`
+				: "";
+		const task = boundedFields ? clipChannel(summary.task) : summary.task;
+		let line = `${summary.id} [${boundedFields ? clipChannel(summary.role) : summary.role}/${summary.tier}, ${access}${room}${session}] ${summary.state} — ${task}`;
 		const usage = formatUsage(summary.usage, summary.modelId ?? summary.model);
-		if (usage) line += `\n  usage: ${usage}`;
+		if (usage) line += `\n  usage: ${boundedFields ? clipChannel(usage) : usage}`;
 		const lastProgress = formatLastProgress(summary);
 		if (lastProgress) line += `\n  ${lastProgress}`;
-		if (summary.pendingQuestion) line += `\n  asks: ${summary.pendingQuestion}`;
+		if (summary.pendingQuestion)
+			line += `\n  asks: ${boundedFields ? clipChannel(summary.pendingQuestion) : summary.pendingQuestion}`;
 		if (summary.result) {
-			const result =
-				resultLimit && summary.result.length > resultLimit
-					? `${summary.result.slice(0, resultLimit)}…`
+			const limit = boundedFields ? CHANNEL_RESULT_LIMIT : resultLimit;
+			const result = boundedFields
+				? clipChannel(summary.result, CHANNEL_RESULT_LIMIT)
+				: limit && summary.result.length > limit
+					? `${summary.result.slice(0, limit)}…`
 					: summary.result;
 			line += `\n  ${result}`;
 		}
 		// After the result, because the result is the worker's answer and this is a
 		// caveat on it: reading them the other way round buries the handoff.
-		if (summary.laterFailure) line += `\n  after its report: ${summary.laterFailure}`;
+		if (summary.laterFailure)
+			line += `\n  after its report: ${boundedFields ? clipChannel(summary.laterFailure, CHANNEL_RESULT_LIMIT) : summary.laterFailure}`;
 		return line;
 	}
 

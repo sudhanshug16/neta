@@ -18,8 +18,20 @@ import {
 
 const OBJECTIVE_LIMIT = 100;
 const LAST_PROGRESS_LIMIT = 80;
+const SUMMARY_FIELD_LIMIT = 240;
+const SUMMARY_ROW_LIMIT = 5;
+const NOTE_WORKER_ROW_LIMIT = 5;
 /** Total rendered size of `neta inspect`, including metadata and footer. */
 export const INSPECT_RENDER_MAX_CHARS = 6000;
+
+function clipDisplay(value: string, limit = SUMMARY_FIELD_LIMIT): string {
+	const flat = value.replace(/\s+/g, " ").trim();
+	return flat.length <= limit ? flat : `${flat.slice(0, limit - 3).trimEnd()}...`;
+}
+
+function omittedLine(omitted: number, noun: string): string | undefined {
+	return omitted > 0 ? `  ... ${omitted} ${noun} omitted` : undefined;
+}
 
 /** The most recent `neta progress` as a "last:" line, or undefined before any progress. */
 export function formatLastProgress(summary: WorkerSummary): string | undefined {
@@ -107,21 +119,23 @@ export function formatInspection(inspection: WorkerInspection): string[] {
 }
 
 export function formatWorkerSummary(summary: WorkerSummary): string {
-	const named = summary.name === summary.role ? summary.id : `${summary.id} "${summary.name}"`;
-	const parts = [`${named} ${summary.role}/${summary.tier}`, `backend=${summary.backend}`, summary.state];
+	const name = clipDisplay(summary.name);
+	const role = clipDisplay(summary.role);
+	const named = name === role ? summary.id : `${summary.id} "${name}"`;
+	const parts = [`${named} ${role}/${summary.tier}`, `backend=${clipDisplay(summary.backend)}`, summary.state];
 	if (summary.writer) parts.push("writer");
-	if (summary.room) parts.push(`room=${summary.room}`);
+	if (summary.room) parts.push(`room=${clipDisplay(summary.room)}`);
 	const model = displayModel(summary);
-	if (model) parts.push(summary.model ? `model=${summary.model}` : model);
-	if (summary.mode) parts.push(`mode=${summary.mode}`);
+	if (model) parts.push(summary.model ? `model=${clipDisplay(summary.model)}` : model);
+	if (summary.mode) parts.push(`mode=${clipDisplay(summary.mode)}`);
 	const usage = formatUsage(summary.usage, summary.modelId ?? summary.model);
-	if (usage) parts.push(usage);
-	if (summary.pendingQuestion) parts.push(`asking: ${summary.pendingQuestion}`);
-	if (summary.promptBlockedReason) parts.push(`steering blocked: ${summary.promptBlockedReason}`);
+	if (usage) parts.push(clipDisplay(usage));
+	if (summary.pendingQuestion) parts.push(`asking: ${clipDisplay(summary.pendingQuestion)}`);
+	if (summary.promptBlockedReason) parts.push(`steering blocked: ${clipDisplay(summary.promptBlockedReason)}`);
 	return [
 		parts.join(" | "),
-		...(summary.laterFailure ? [`After its report: ${summary.laterFailure}`] : []),
-		...(summary.headlessReason ? [`Worker view: headless — ${summary.headlessReason}`] : []),
+		...(summary.laterFailure ? [`After its report: ${clipDisplay(summary.laterFailure)}`] : []),
+		...(summary.headlessReason ? [`Worker view: headless — ${clipDisplay(summary.headlessReason)}`] : []),
 	].join("\n");
 }
 
@@ -146,15 +160,37 @@ export function formatSteerResult(result: SteerResult): string {
 	return result.note ? `${headline[result.delivery]} ${result.note}` : headline[result.delivery];
 }
 
-function formatNotes(notes: Note[]): string[] {
-	if (notes.length === 0) return ["  (none)"];
-	return notes.map((note) => {
-		const workers =
-			note.workers.length === 0
-				? "unworked"
-				: note.workers.map((worker) => `${worker.workerId} ${worker.state}`).join(", ");
-		return `  ${note.id} "${note.text}" (${workers})`;
-	});
+function formatNoteWorkers(note: Note): string {
+	if (note.workers.length === 0) return "unworked";
+	const shown = note.workers
+		.slice(0, NOTE_WORKER_ROW_LIMIT)
+		.map((worker) => `${worker.workerId} ${worker.state}`)
+		.join(", ");
+	const omitted = note.workers.length - NOTE_WORKER_ROW_LIMIT;
+	return omitted > 0 ? `${shown}; ... ${omitted} linked workers omitted` : shown;
+}
+
+export function formatNotePreview(note: Note): string {
+	return `${note.id} "${clipDisplay(note.text, 120)}" (${formatNoteWorkers(note)}) [linked workers: ${note.workers.length}]`;
+}
+
+function newestNotes(notes: Note[]): Note[] {
+	return notes
+		.map((note, index) => ({ note, index }))
+		.sort((left, right) => right.note.createdAt - left.note.createdAt || right.index - left.index)
+		.map(({ note }) => note);
+}
+
+export function formatOpenNotesLines(notes: Note[], heading = "Open notes:"): string[] {
+	const newest = newestNotes(notes);
+	const lines = [heading];
+	if (newest.length === 0) lines.push("  (none)");
+	else lines.push(...newest.slice(0, SUMMARY_ROW_LIMIT).map((note) => `  ${formatNotePreview(note)}`));
+	lines.push(`  total: ${notes.length}`);
+	const omitted = notes.length - SUMMARY_ROW_LIMIT;
+	const omittedLineText = omittedLine(omitted, "note previews");
+	if (omittedLineText) lines.push(omittedLineText);
+	return lines;
 }
 
 function formatGoal(goal: SessionGoal | undefined): string[] {
@@ -165,24 +201,63 @@ function formatGoal(goal: SessionGoal | undefined): string[] {
 	return [
 		"Goal:",
 		`  status=${goal.status} | revision=${goal.revision} | discovery policy=${goal.discoveryPolicy}`,
-		`  original intent: ${goal.originalIntent}`,
-		`  working objective: ${goal.workingObjective}`,
-		`  pending goal discoveries: ${pending.length ? pending.map((discovery) => discovery.id).join(", ") : "none"}`,
+		`  original intent: ${clipDisplay(goal.originalIntent)}`,
+		`  working objective: ${clipDisplay(goal.workingObjective)}`,
+		`  pending goal discoveries: ${
+			pending.length
+				? pending
+						.slice(0, SUMMARY_ROW_LIMIT)
+						.map((discovery) => discovery.id)
+						.join(", ")
+				: "none"
+		}${pending.length > SUMMARY_ROW_LIMIT ? ` ... ${pending.length - SUMMARY_ROW_LIMIT} omitted` : ""}`,
 	];
 }
 
 /** One status section, with an action hint only where it is useful. */
+
 function section(label: string, workers: WorkerSummary[]): string[] {
+	const shown = workers.slice(0, SUMMARY_ROW_LIMIT);
 	return [
 		label,
 		...(workers.length === 0
 			? ["  (none)"]
-			: workers.flatMap((worker) => {
+			: shown.flatMap((worker) => {
 					const lastProgress = formatLastProgress(worker);
 					const line = `  ${formatWorkerSummary(worker)}`;
 					const hint = statusHint(worker);
 					return [...(lastProgress ? [line, `    ${lastProgress}`] : [line]), ...(hint ? [`    ${hint}`] : [])];
 				})),
+		`  total: ${workers.length}`,
+		...(omittedLine(workers.length - shown.length, "worker rows")
+			? [omittedLine(workers.length - shown.length, "worker rows") as string]
+			: []),
+	];
+}
+
+function terminalSection(workers: WorkerSummary[]): string[] {
+	const states = ["blocked", "failed", "interrupted", "done", "killed"] as const;
+	const counts = states.map((state) => `${state}=${workers.filter((worker) => worker.state === state).length}`);
+	const diagnostic = workers.filter(
+		(worker) =>
+			worker.state === "blocked" ||
+			worker.state === "failed" ||
+			worker.state === "interrupted" ||
+			worker.laterFailure,
+	);
+	return [
+		"Terminal:",
+		`  counts: ${counts.join(" | ")}`,
+		...(diagnostic.length === 0
+			? ["  (no diagnostic rows; ordinary done/killed rows omitted)"]
+			: diagnostic.slice(0, SUMMARY_ROW_LIMIT).flatMap((worker) => {
+					const line = `  ${formatWorkerSummary(worker)}`;
+					const hint = statusHint(worker);
+					return [line, ...(hint ? [`    ${hint}`] : [])];
+				})),
+		...(diagnostic.length > SUMMARY_ROW_LIMIT
+			? [`  ... ${diagnostic.length - SUMMARY_ROW_LIMIT} diagnostic rows omitted`]
+			: []),
 	];
 }
 
@@ -212,8 +287,9 @@ export function formatWriterActivityNotice(
 }
 
 function formatWriter(summary: WorkerSummary): string {
-	const name = summary.name === summary.role ? summary.name : `"${summary.name}"`;
-	return `${summary.id} ${name} | ${formatWriterObjective(summary)}`;
+	const name = clipDisplay(summary.name);
+	const displayName = name === clipDisplay(summary.role) ? name : `"${name}"`;
+	return `${summary.id} ${displayName} | ${formatWriterObjective(summary)}`;
 }
 
 /** Context prepended to a read-only task while writers may change the checkout. */
@@ -237,14 +313,33 @@ export function formatWriterStatus(snapshot: WorkerStatusSnapshot): string {
 	const active = [...snapshot.workers.running, ...snapshot.workers.waiting].filter((worker) => worker.writer);
 	const finished = snapshot.workers.terminal.filter((worker) => worker.writer);
 	const queued = snapshot.writerQueue.filter((worker) => worker.writer);
+	const diagnostic = finished.filter(
+		(worker) =>
+			worker.state === "blocked" ||
+			worker.state === "failed" ||
+			worker.state === "interrupted" ||
+			worker.laterFailure,
+	);
+	const recent = [...finished].reverse();
+	const previews = [...diagnostic, ...recent.filter((worker) => !diagnostic.includes(worker))].slice(
+		0,
+		SUMMARY_ROW_LIMIT,
+	);
 	const writerSection = (label: string, writers: WorkerSummary[]): string[] => [
 		label,
 		...(writers.length === 0 ? ["  (none)"] : writers.map((writer) => `  ${formatWriter(writer)}`)),
 	];
+	const counts = ["blocked", "failed", "interrupted", "done", "killed"].map(
+		(state) => `${state}=${finished.filter((writer) => writer.state === state).length}`,
+	);
 
 	return [
 		"Neta writers",
-		...writerSection("Finished:", finished),
+		...writerSection("Finished:", previews),
+		`  total: ${finished.length} (${counts.join(" | ")})`,
+		...(finished.length > previews.length
+			? [`  ... ${finished.length - previews.length} finished writer previews omitted`]
+			: []),
 		...writerSection("Active:", active),
 		...writerSection("Queued:", queued),
 	].join("\n");
@@ -259,9 +354,8 @@ export function formatStatusSnapshot(snapshot: WorkerStatusSnapshot): string {
 		...section("Running:", snapshot.workers.running),
 		...section("Queued:", snapshot.workers.queued),
 		...section("Waiting (legacy active state):", snapshot.workers.waiting),
-		...section("Terminal:", snapshot.workers.terminal),
+		...terminalSection(snapshot.workers.terminal),
 		...formatGoal(snapshot.goal),
-		"Open notes:",
-		...formatNotes(snapshot.openNotes),
+		...formatOpenNotesLines(snapshot.openNotes),
 	].join("\n");
 }

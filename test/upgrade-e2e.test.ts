@@ -416,7 +416,8 @@ describe("a session saved by an older Neta, reopened by the current build", () =
 				const neta = (args: string[]) =>
 					run(nodePath, [bundle, ...args, "--session", session.id], { cwd: entry.repo, env: baseEnv });
 				const status = await neta(["status"]);
-				expect(status.stdout).toContain("ro1");
+				expect(status.stdout).toContain("done=2");
+				expect(status.stdout).not.toContain("ro1");
 				expect(status.stdout).toContain("decide on the rollout window");
 				const workers = await neta(["workers"]);
 				expect(workers.stdout).toContain("Substantive report");
