@@ -1,0 +1,32 @@
+flowchart TB
+    F1["User / Leader Intent<br/>treated as a hypothesis"] --> F2["Durable Goal Graph"]
+
+    F2 --- F2A["Parent and Dependencies"]
+    F2 --- F2B["Acceptance Contract"]
+    F2 --- F2C["Evidence, Unknowns, Contradictions"]
+    F2 --- F2D["Token, Worker, Fan-out and Retry Envelope"]
+    F2 --- F2E["Explicit Goal State"]
+
+    F2 --> F3["Scheduler Control Loop"]
+    F3 --> F4["Bounded Worker Wave"]
+    F4 --> F5["Artifacts / Typed Evidence"]
+    F5 --> F6["Acceptance Decision"]
+
+    F6 -->|"Accept / unlock"| F7["Accept node and unlock dependants"]
+    F6 -->|"No"| F8["Budgeted Targeted Follow-up"]
+    F8 --> F9["Open one targeted child goal"]
+    F9 --> F3
+
+    F6 -->|"No useful follow-up"| F10["Boundary Actions"]
+    F10 --> F11["Synthesize partial result"]
+    F10 --> F12["Challenge leader with evidence"]
+    F10 --> F13["Ask"]
+    F10 --> F14["Stop"]
+
+    F7 --> F3
+
+    classDef future fill:#ecfdf5,stroke:#059669,color:#022c22
+    classDef control fill:#e0e7ff,stroke:#4f46e5,color:#1e1b4b
+
+    class F1,F2,F2A,F2B,F2C,F2D,F2E,F4,F5,F7,F9,F11,F12,F13,F14 future
+    class F3,F6,F8,F10 control
