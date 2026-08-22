@@ -87,16 +87,16 @@ export function createPaneHost(
 	if (mux.id === "none" || (!sessionName && !mux.inSession())) return undefined;
 
 	// `neta watch` takes a worker id or a room name; the pane command is the same.
-	const open = (title: string, spec: ProcessSpec): PaneOpenOutcome => {
+	const open = async (title: string, spec: ProcessSpec): Promise<PaneOpenOutcome> => {
 		try {
-			const opened = mux.openPane(title, spec, cwd, sessionName);
+			const opened = await mux.openPane(title, spec, cwd, sessionName);
 			if (opened) return { opened: true };
 			return { opened: false, reason: `could not open a ${mux.id} view` };
 		} catch (error) {
 			return { opened: false, reason: error instanceof Error ? error.message : String(error) };
 		}
 	};
-	const openView = (title: string, target: string): PaneOpenOutcome =>
+	const openView = (title: string, target: string): Promise<PaneOpenOutcome> =>
 		open(title, {
 			command: invocation.command,
 			args: [...invocation.prefixArgs, "watch", target, "--session", sessionId, "--dir", agentDir],

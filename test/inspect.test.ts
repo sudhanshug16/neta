@@ -229,8 +229,8 @@ describe("a worker whose tab was never created", () => {
 		await waitFor(() => manager.get("ro1").state === "done");
 
 		// This pane host cannot attach at all, which is the headless case.
-		expect(() => manager.reopenWorkerTui("ro1")).toThrow(/neta inspect ro1/);
-		expect(() => manager.reopenWorkerTui("ro1")).toThrow(/neta attach ro1/);
+		await expect(manager.reopenWorkerTui("ro1")).rejects.toThrow(/neta inspect ro1/);
+		await expect(manager.reopenWorkerTui("ro1")).rejects.toThrow(/neta attach ro1/);
 	});
 
 	// The other shape of the same problem: the worker never got far enough to
@@ -239,7 +239,7 @@ describe("a worker whose tab was never created", () => {
 		const { manager } = build({ panes: refusingPanes });
 		await manager.spawn({ role: "scout", tier: "expert", task: "read" });
 		await manager.kill("ro1");
-		expect(() => manager.reopenWorkerTui("ro1")).toThrow(/neta inspect ro1/);
+		await expect(manager.reopenWorkerTui("ro1")).rejects.toThrow(/neta inspect ro1/);
 	});
 });
 

@@ -271,6 +271,34 @@ function openedZellijTab(before: string, after: string, title: string): boolean 
 	return added.length === 1 && added[0][1] === title;
 }
 
+const ZELLIJ_TAB_POLL_ATTEMPTS = 2;
+const ZELLIJ_TAB_POLL_MS = 25;
+
+async function waitForOpenedZellijTab(
+	before: string,
+	initialAfter: string,
+	title: string,
+	targetSession: string,
+	run: ZellijCommandRunner,
+): Promise<boolean> {
+	let after = initialAfter;
+	for (let attempt = 0; attempt < ZELLIJ_TAB_POLL_ATTEMPTS; attempt += 1) {
+		if (openedZellijTab(before, after, title)) return true;
+		if (attempt === ZELLIJ_TAB_POLL_ATTEMPTS - 1) break;
+		await new Promise((resolve) => setTimeout(resolve, ZELLIJ_TAB_POLL_MS));
+		let listed: CommandResult;
+		try {
+			listed = run("zellij", listTabPanesArgs(targetSession));
+		} catch (error) {
+			throw new Error(`zellij: ${error instanceof Error ? error.message : String(error)}`);
+		}
+		const listedError = zellijCommandError(listed);
+		if (listedError) throw listedError;
+		after = listed.stdout;
+	}
+	return false;
+}
+
 /**
  * A session may have no attached clients, or several clients each focused on a
  * different tab. In both cases `active` is client-local rather than a unique
@@ -382,7 +410,7 @@ export class ZellijAdapter implements MuxAdapter {
 		return { command: "zellij", args: newSessionArgs(sessionName, layoutPath), env: leader.env };
 	}
 
-	openPane(title: string, spec: ProcessSpec, cwd: string, sessionName?: string): boolean {
+	async openPane(title: string, spec: ProcessSpec, cwd: string, sessionName?: string): Promise<boolean> {
 		const targetSession = sessionName ?? this.sessionName();
 		const paneId = this.env.ZELLIJ_PANE_ID;
 		if (!targetSession || !paneId || (!sessionName && !this.inSession())) return false;
@@ -412,7 +440,7 @@ export class ZellijAdapter implements MuxAdapter {
 		if (createdError) throw createdError;
 		const afterError = zellijCommandError(after);
 		if (afterError) throw afterError;
-		const opened = openedZellijTab(before.stdout, after.stdout, title);
+		const opened = await waitForOpenedZellijTab(before.stdout, after.stdout, title, targetSession, this.run);
 
 		// new-tab always focuses the new tab. Restore the exact stable id belonging
 		// to the calling pane, then verify active state because actions can report

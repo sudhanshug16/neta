@@ -318,7 +318,7 @@ describe("durable session checkpoints", () => {
 		transports[0].options.events.vendorSession("vendor-native");
 		transports[0].finish({ ok: true, summary: "done" });
 		await waitFor(() => manager.get(worker.id).state === "done");
-		manager.reopenWorkerTui(worker.id);
+		await manager.reopenWorkerTui(worker.id);
 		await manager.flushCheckpoint();
 		const current = readCheckpoint("native-owner", agentDir);
 		expect(current.workers[0].nativeAttached).toBe(true);

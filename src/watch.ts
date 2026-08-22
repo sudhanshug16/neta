@@ -12,12 +12,12 @@
  */
 
 import { sendChannelRequest } from "./channel/client.ts";
-import { NETA_LEADER_ENV, NETA_SOCKET_ENV } from "./channel/protocol.ts";
+import { type ChannelRequest, type ChannelResponse, NETA_LEADER_ENV, NETA_SOCKET_ENV } from "./channel/protocol.ts";
 import { getAgentDir } from "./config.ts";
 import { markWorkerPaneTerminal } from "./mux/panes.ts";
 import { formatLastProgress } from "./orchestrator/status.ts";
 import { estimateCost } from "./pricing.ts";
-import { findSession, listSessions } from "./session.ts";
+import { findSession, listSessions, readSessionRecord } from "./session.ts";
 import {
 	displayModel,
 	isTerminalState,
@@ -31,6 +31,8 @@ import {
 
 const POLL_MS = 400;
 const ARCHIVE_POLL_MS = 2000;
+const CONTROL_PLANE_RETRY_MS = 100;
+const CONTROL_PLANE_RETRY_WINDOW_MS = 30_000;
 
 /** Worker ids are minted as ro<N>/rw<N>; anything else `watch` takes as a room name. */
 export function isWorkerId(target: string): boolean {
@@ -199,6 +201,9 @@ export function metadataCandidates(worker: WorkerSummary, state: WorkerState): s
 export interface WatchTarget {
 	address: string;
 	token: string;
+	/** A registry-backed id lets a watcher stop when its manager is gone. */
+	sessionId?: string;
+	agentDir?: string;
 }
 
 /** Env first (we are inside the session), then the registry (we are not). */
@@ -209,20 +214,53 @@ export function resolveTarget(
 ): WatchTarget | undefined {
 	const address = process.env[NETA_SOCKET_ENV];
 	const token = process.env[NETA_LEADER_ENV];
-	if (!sessionId && address && token) return { address, token };
+	const environmentSessionId = process.env.NETA_SESSION_ID || undefined;
+	if (!sessionId && address && token) return { address, token, sessionId: environmentSessionId, agentDir };
 	const record = sessionId
 		? listSessions(agentDir).find((entry) => entry.id === sessionId)
 		: findSession(cwd, agentDir);
-	return record ? { address: record.socket, token: record.token } : undefined;
+	return record ? { address: record.socket, token: record.token, sessionId: record.id, agentDir } : undefined;
+}
+
+function isTransientChannelError(error: unknown): boolean {
+	const code = (error as NodeJS.ErrnoException).code;
+	return code === "ENOENT" || code === "ECONNREFUSED" || code === "ECONNRESET" || code === "EPIPE";
+}
+
+function sessionStillRegistered(target: WatchTarget): boolean {
+	return target.sessionId === undefined || readSessionRecord(target.sessionId, target.agentDir) !== undefined;
+}
+
+/**
+ * A pane can start during the control-plane handoff: the socket path exists in
+ * the session record, but the listener is not accepting yet. Retry only those
+ * transport-level failures. A registry-backed watcher has no reason to outlive
+ * the manager; an environment-only watcher gets a finite recovery window.
+ */
+export async function sendWatchRequest(
+	target: WatchTarget,
+	request: ChannelRequest,
+): Promise<ChannelResponse | undefined> {
+	const deadline = target.sessionId === undefined ? Date.now() + CONTROL_PLANE_RETRY_WINDOW_MS : undefined;
+	for (;;) {
+		try {
+			return await sendChannelRequest(target.address, request);
+		} catch (error) {
+			if (!isTransientChannelError(error)) throw error;
+			if (!sessionStillRegistered(target)) return undefined;
+			if (deadline !== undefined && Date.now() >= deadline) throw error;
+			await new Promise((resolve) => setTimeout(resolve, CONTROL_PLANE_RETRY_MS));
+		}
+	}
 }
 
 /** Resolves when the leader has moved on, or when the session goes away. */
 async function waitForArchive(target: WatchTarget, workerId: string): Promise<void> {
 	for (;;) {
 		await new Promise((resolve) => setTimeout(resolve, ARCHIVE_POLL_MS));
-		let response: Awaited<ReturnType<typeof sendChannelRequest>>;
+		let response: ChannelResponse | undefined;
 		try {
-			response = await sendChannelRequest(target.address, {
+			response = await sendWatchRequest(target, {
 				type: "tail",
 				token: target.token,
 				workerId,
@@ -232,6 +270,7 @@ async function waitForArchive(target: WatchTarget, workerId: string): Promise<vo
 			// The leader is gone; nothing left to watch.
 			return;
 		}
+		if (!response) return;
 		if (!response.ok) return;
 		if ((response.data as WorkerLogPage | undefined)?.archived) return;
 	}
@@ -262,12 +301,19 @@ export async function watchWorker(options: WatchOptions): Promise<number> {
 	let introduced = false;
 	let shownState: WorkerState | undefined;
 	for (;;) {
-		const response = await sendChannelRequest(target.address, {
-			type: "tail",
-			token: target.token,
-			workerId: options.workerId,
-			since,
-		});
+		let response: ChannelResponse | undefined;
+		try {
+			response = await sendWatchRequest(target, {
+				type: "tail",
+				token: target.token,
+				workerId: options.workerId,
+				since,
+			});
+		} catch (error) {
+			write(`Could not reach the leader on ${target.address}: ${error instanceof Error ? error.message : error}`);
+			return 1;
+		}
+		if (!response) return 0;
 		if (!response.ok) {
 			write(response.error);
 			return 1;
@@ -333,9 +379,9 @@ function roomHeader(room: string, page: RoomLogPage): string[] {
 async function waitForRoomArchive(target: WatchTarget, room: string): Promise<void> {
 	for (;;) {
 		await new Promise((resolve) => setTimeout(resolve, ARCHIVE_POLL_MS));
-		let response: Awaited<ReturnType<typeof sendChannelRequest>>;
+		let response: ChannelResponse | undefined;
 		try {
-			response = await sendChannelRequest(target.address, {
+			response = await sendWatchRequest(target, {
 				type: "room-tail",
 				token: target.token,
 				room,
@@ -345,6 +391,7 @@ async function waitForRoomArchive(target: WatchTarget, room: string): Promise<vo
 			// The leader is gone; nothing left to watch.
 			return;
 		}
+		if (!response) return;
 		if (!response.ok) return;
 		if ((response.data as RoomLogPage | undefined)?.archived) return;
 	}
@@ -379,12 +426,19 @@ export async function watchRoom(options: WatchRoomOptions): Promise<number> {
 	let since = 0;
 	let introduced = false;
 	for (;;) {
-		const response = await sendChannelRequest(target.address, {
-			type: "room-tail",
-			token: target.token,
-			room: options.room,
-			since,
-		});
+		let response: ChannelResponse | undefined;
+		try {
+			response = await sendWatchRequest(target, {
+				type: "room-tail",
+				token: target.token,
+				room: options.room,
+				since,
+			});
+		} catch (error) {
+			write(`Could not reach the leader on ${target.address}: ${error instanceof Error ? error.message : error}`);
+			return 1;
+		}
+		if (!response) return 0;
 		if (!response.ok) {
 			write(response.error);
 			return 1;

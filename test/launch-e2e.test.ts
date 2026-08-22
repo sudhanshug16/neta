@@ -241,9 +241,9 @@ describe("neta (launching a leader)", () => {
 			calls += 1;
 			return { status: 0, stdout: "[]" };
 		}, managerEnv);
-		expect(adapter.openPane("ro1 scout", { command: "neta", args: ["watch", "ro1"] }, cwd, "user-session")).toBe(
-			false,
-		);
+		expect(
+			await adapter.openPane("ro1 scout", { command: "neta", args: ["watch", "ro1"] }, cwd, "user-session"),
+		).toBe(false);
 		expect(calls).toBe(0);
 	});
 

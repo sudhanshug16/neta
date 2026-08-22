@@ -407,7 +407,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 				"Open a terminal worker's exact native vendor session in a fresh multiplexer tab. Refuses active, queued, headless, or concurrently owned sessions.",
 			inputSchema: { type: "object", properties: { workerId: { type: "string" } }, required: ["workerId"] },
 			async run(args) {
-				const summary = manager.reopenWorkerTui(requireString(args, "workerId"));
+				const summary = await manager.reopenWorkerTui(requireString(args, "workerId"));
 				return text(`Opened ${summary.id} in a new ${summary.backend} TUI tab.`);
 			},
 		},

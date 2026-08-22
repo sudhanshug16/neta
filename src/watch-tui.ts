@@ -48,7 +48,7 @@ import {
 	type WorkerState,
 	type WorkerSummary,
 } from "./types.ts";
-import { metadataCandidates, resolveTarget, sayAuthor, sayEntry, sentMessage } from "./watch.ts";
+import { metadataCandidates, resolveTarget, sayAuthor, sayEntry, sendWatchRequest, sentMessage } from "./watch.ts";
 
 const POLL_MS = 400;
 
@@ -428,9 +428,9 @@ export async function watchWorkerTui(options: WatchTuiOptions): Promise<number> 
 	const poll = async () => {
 		let since = 0;
 		while (!closed) {
-			let response: Awaited<ReturnType<typeof sendChannelRequest>>;
+			let response: Awaited<ReturnType<typeof sendWatchRequest>>;
 			try {
-				response = await sendChannelRequest(target.address, {
+				response = await sendWatchRequest(target, {
 					type: "tail",
 					token: target.token,
 					workerId: options.workerId,
@@ -439,6 +439,10 @@ export async function watchWorkerTui(options: WatchTuiOptions): Promise<number> 
 			} catch {
 				// The leader is gone; a finished transcript was still worth reading.
 				close(finished ? 0 : 1);
+				return;
+			}
+			if (!response) {
+				close(0);
 				return;
 			}
 			if (!response.ok) {
@@ -567,9 +571,9 @@ export async function watchRoomTui(options: WatchRoomTuiOptions): Promise<number
 	const poll = async () => {
 		let since = 0;
 		while (!closed) {
-			let response: Awaited<ReturnType<typeof sendChannelRequest>>;
+			let response: Awaited<ReturnType<typeof sendWatchRequest>>;
 			try {
-				response = await sendChannelRequest(target.address, {
+				response = await sendWatchRequest(target, {
 					type: "room-tail",
 					token: target.token,
 					room: options.room,
@@ -578,6 +582,10 @@ export async function watchRoomTui(options: WatchRoomTuiOptions): Promise<number
 			} catch {
 				// The leader is gone; a finished exchange was still worth reading.
 				close(finished ? 0 : 1);
+				return;
+			}
+			if (!response) {
+				close(0);
 				return;
 			}
 			if (!response.ok) {

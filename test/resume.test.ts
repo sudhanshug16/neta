@@ -912,7 +912,7 @@ describe("a recovered worker", () => {
 		);
 
 		expect(manager.get("ro1")).toMatchObject({ state: "interrupted", stateBeforeStop: "running" });
-		const summary = manager.reopenWorkerTui("ro1");
+		const summary = await manager.reopenWorkerTui("ro1");
 		expect(summary.state).toBe("interrupted");
 		expect(attached).toEqual([{ command: "claude", args: ["--resume", "88888888-8888-4888-8888-888888888888"] }]);
 		expect(manager.get("ro1").state).toBe("interrupted");

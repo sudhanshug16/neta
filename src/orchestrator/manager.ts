@@ -228,9 +228,19 @@ interface WorkerRecord {
 
 /** Opens a pane per worker, when a multiplexer is running. */
 export interface WorkerPaneHost {
-	open(worker: WorkerSummary): { opened: true } | { opened: false; reason: string };
+	open(
+		worker: WorkerSummary,
+	):
+		| { opened: true }
+		| { opened: false; reason: string }
+		| Promise<{ opened: true } | { opened: false; reason: string }>;
 	/** Opens the room's merged view; one pane per room, beside its members'. */
-	openRoom(room: string): { opened: true } | { opened: false; reason: string };
+	openRoom(
+		room: string,
+	):
+		| { opened: true }
+		| { opened: false; reason: string }
+		| Promise<{ opened: true } | { opened: false; reason: string }>;
 	/** Opens a fresh native backend TUI for an already-terminal worker. */
 	attach?(
 		worker: WorkerSummary,
@@ -239,7 +249,8 @@ export interface WorkerPaneHost {
 		| {
 				opened: true;
 		  }
-		| { opened: false; reason: string };
+		| { opened: false; reason: string }
+		| Promise<{ opened: true } | { opened: false; reason: string }>;
 }
 
 export type TransportFactory = (options: TransportOptions) => WorkerTransportDriver;
@@ -1038,7 +1049,7 @@ export class WorkerManager implements ChannelHandler {
 		const task = writerContext ? `${writerContext}\n\n---\n\n${assignedTask}` : assignedTask;
 		const firstPrompt = this.withPendingBrief(record, task);
 		this.enqueue(record, firstPrompt.message, false, firstPrompt.leaderMessages);
-		this.openWorkerView(record);
+		await this.openWorkerView(record);
 		this.checkpointChanged();
 		return this.summarize(record);
 	}
@@ -1433,7 +1444,7 @@ export class WorkerManager implements ChannelHandler {
 	}
 
 	/** Open a fresh native backend TUI without changing any worker lifecycle state. */
-	reopenWorkerTui(workerId: string): WorkerSummary {
+	async reopenWorkerTui(workerId: string): Promise<WorkerSummary> {
 		const record = this.require(workerId);
 		if (record.state === "queued") {
 			throw new Error(`Worker ${workerId} is queued and has not started; there is no backend session to attach.`);
@@ -1463,7 +1474,7 @@ export class WorkerManager implements ChannelHandler {
 					`${this.headlessAlternatives(workerId)}`,
 			);
 		}
-		const outcome = this.options.panes.attach(summary, resume);
+		const outcome = await this.options.panes.attach(summary, resume);
 		if (!outcome.opened) {
 			throw new Error(
 				`Could not open ${workerId}'s native TUI: ${outcome.reason}. ${this.headlessAlternatives(workerId)}`,
@@ -2671,13 +2682,13 @@ export class WorkerManager implements ChannelHandler {
 		const firstPrompt = this.withPendingBrief(record, fullTask);
 		this.enqueue(record, firstPrompt.message, false, firstPrompt.leaderMessages);
 
-		this.openWorkerView(record);
+		await this.openWorkerView(record);
 	}
 
 	/** A missing pane is visible in the delegate result; it never blocks the worker. */
-	private openWorkerView(record: WorkerRecord): void {
-		const outcome = this.options.panes?.open(this.summarize(record));
-		const reason = outcome && !outcome.opened ? outcome.reason : this.options.headlessReason;
+	private async openWorkerView(record: WorkerRecord): Promise<void> {
+		const outcome = await this.options.panes?.open(this.summarize(record));
+		const reason = outcome ? (outcome.opened ? undefined : outcome.reason) : this.options.headlessReason;
 		if (reason) {
 			record.headlessReason = reason;
 			this.appendLog(record, "status", `Worker view: headless — ${reason}`);
@@ -2687,7 +2698,7 @@ export class WorkerManager implements ChannelHandler {
 		// after the last member finishes and exits when the batch is archived.
 		if (record.room && this.options.panes && !this.roomPanesOpened.has(record.room)) {
 			this.roomPanesOpened.add(record.room);
-			const roomOutcome = this.options.panes.openRoom(record.room);
+			const roomOutcome = await this.options.panes.openRoom(record.room);
 			if (!roomOutcome.opened) {
 				this.appendLog(record, "status", `Room view: headless — ${roomOutcome.reason}`);
 			}

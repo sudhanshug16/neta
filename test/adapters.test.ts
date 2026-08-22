@@ -229,7 +229,7 @@ describe("Codex adapter", () => {
 				return true;
 			},
 		};
-		const outcome = createPaneHost(
+		const outcome = await createPaneHost(
 			mux,
 			{ command: "neta", prefixArgs: [] },
 			declared.NETA_SESSION_ID,

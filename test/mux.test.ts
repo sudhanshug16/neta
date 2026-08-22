@@ -282,9 +282,13 @@ describe("zellij", () => {
 		]);
 	});
 
-	it.each(["leader", "user-work"])("opens behind and restores the exact %s tab by stable id", (originalName) => {
+	it.each(["leader", "user-work"])("opens behind and restores the exact %s tab by stable id", async (originalName) => {
 		const calls: Array<{ command: string; args: string[] }> = [];
 		const before = JSON.stringify([
+			{ id: 41, is_plugin: false, tab_id: 7, tab_name: originalName },
+			{ id: 42, is_plugin: false, tab_id: 9, tab_name: "ro1 duplicate" },
+		]);
+		const staleAfter = JSON.stringify([
 			{ id: 41, is_plugin: false, tab_id: 7, tab_name: originalName },
 			{ id: 42, is_plugin: false, tab_id: 9, tab_name: "ro1 duplicate" },
 		]);
@@ -296,6 +300,7 @@ describe("zellij", () => {
 		const responses = [
 			{ status: 0, stdout: before },
 			{ status: 0, stdout: "12\n" },
+			{ status: 0, stdout: staleAfter },
 			{ status: 0, stdout: after },
 			{ status: 0, stdout: "" },
 			{
@@ -314,10 +319,11 @@ describe("zellij", () => {
 			{ ZELLIJ: "0", ZELLIJ_SESSION_NAME: "user-session", ZELLIJ_PANE_ID: "41" },
 		);
 
-		expect(adapter.openPane("ro1 duplicate", { command: "neta", args: ["watch", "ro1"] }, "/repo")).toBe(true);
+		expect(await adapter.openPane("ro1 duplicate", { command: "neta", args: ["watch", "ro1"] }, "/repo")).toBe(true);
 		expect(calls.map((call) => call.args)).toEqual([
 			listTabPanesArgs("user-session"),
 			newTabArgs("ro1 duplicate", { command: "neta", args: ["watch", "ro1"] }, "/repo", "user-session"),
+			listTabPanesArgs("user-session"),
 			listTabPanesArgs("user-session"),
 			goToTabByIdArgs("user-session", 7),
 			listTabsArgs("user-session"),
@@ -351,7 +357,7 @@ describe("zellij", () => {
 				{ tab_id: 8, active: true },
 			],
 		],
-	])("reports an opened tab end to end when the session is %s", (_caseName, activeRows) => {
+	])("reports an opened tab end to end when the session is %s", async (_caseName, activeRows) => {
 		const before = JSON.stringify([{ id: 41, is_plugin: false, tab_id: 7, tab_name: "user-work" }]);
 		const after = JSON.stringify([
 			{ id: 41, is_plugin: false, tab_id: 7, tab_name: "user-work" },
@@ -371,11 +377,11 @@ describe("zellij", () => {
 			ZELLIJ_PANE_ID: "41",
 		});
 
-		expect(adapter.openPane("ro1 auth", { command: "neta", args: [] }, "/repo")).toBe(true);
+		expect(await adapter.openPane("ro1 auth", { command: "neta", args: [] }, "/repo")).toBe(true);
 		expect(call).toBe(5);
 	});
 
-	it("fails after opening when attached clients do not include the original tab", () => {
+	it("fails after opening when attached clients do not include the original tab", async () => {
 		const before = JSON.stringify([{ id: 41, is_plugin: false, tab_id: 7, tab_name: "user-work" }]);
 		const after = JSON.stringify([
 			{ id: 41, is_plugin: false, tab_id: 7, tab_name: "user-work" },
@@ -395,24 +401,24 @@ describe("zellij", () => {
 			ZELLIJ_PANE_ID: "41",
 		});
 
-		expect(() => adapter.openPane("ro1 auth", { command: "neta", args: [] }, "/repo")).toThrow(
+		expect(adapter.openPane("ro1 auth", { command: "neta", args: [] }, "/repo")).rejects.toThrow(
 			"opened tab but could not restore focus to user-work",
 		);
 	});
 
-	it("surfaces false-zero missing-session diagnostics from Zellij", () => {
+	it("surfaces false-zero missing-session diagnostics from Zellij", async () => {
 		const adapter = new ZellijAdapter(() => ({ status: 0, stdout: "[]", stderr: "Session 'gone' not found" }), {
 			ZELLIJ: "0",
 			ZELLIJ_SESSION_NAME: "gone",
 			ZELLIJ_PANE_ID: "41",
 		});
 
-		expect(() => adapter.openPane("ro1 auth", { command: "neta", args: [] }, "/repo")).toThrow(
+		expect(adapter.openPane("ro1 auth", { command: "neta", args: [] }, "/repo")).rejects.toThrow(
 			"zellij: Session 'gone' not found",
 		);
 	});
 
-	it("surfaces thrown Zellij command errors", () => {
+	it("surfaces thrown Zellij command errors", async () => {
 		const adapter = new ZellijAdapter(
 			() => {
 				throw new Error("spawn zellij ENOENT");
@@ -420,16 +426,17 @@ describe("zellij", () => {
 			{ ZELLIJ: "0", ZELLIJ_SESSION_NAME: "s1", ZELLIJ_PANE_ID: "41" },
 		);
 
-		expect(() => adapter.openPane("ro1 auth", { command: "neta", args: [] }, "/repo")).toThrow(
+		expect(adapter.openPane("ro1 auth", { command: "neta", args: [] }, "/repo")).rejects.toThrow(
 			"zellij: spawn zellij ENOENT",
 		);
 	});
 
-	it("returns false when Zellij reports success but no stable tab was added", () => {
+	it("returns false when Zellij reports success but no stable tab was added", async () => {
 		const before = JSON.stringify([{ id: 41, is_plugin: false, tab_id: 7, tab_name: "user-work" }]);
 		const responses = [
 			{ status: 0, stdout: before },
 			{ status: 0, stdout: "8\n" },
+			{ status: 0, stdout: before },
 			{ status: 0, stdout: before },
 			{ status: 0, stdout: "" },
 			{ status: 0, stdout: JSON.stringify([{ tab_id: 7, active: true }]) },
@@ -441,11 +448,11 @@ describe("zellij", () => {
 			ZELLIJ_PANE_ID: "41",
 		});
 
-		expect(adapter.openPane("ro1 auth", { command: "neta", args: [] }, "/repo")).toBe(false);
-		expect(call).toBe(5);
+		expect(await adapter.openPane("ro1 auth", { command: "neta", args: [] }, "/repo")).toBe(false);
+		expect(call).toBe(6);
 	});
 
-	it("reports an opened Zellij tab when targeted focus restoration cannot be verified", () => {
+	it("reports an opened Zellij tab when targeted focus restoration cannot be verified", async () => {
 		const before = JSON.stringify([{ id: 41, is_plugin: false, tab_id: 7, tab_name: "user-work" }]);
 		const after = JSON.stringify([
 			{ id: 41, is_plugin: false, tab_id: 7, tab_name: "user-work" },
@@ -465,13 +472,13 @@ describe("zellij", () => {
 			ZELLIJ_PANE_ID: "41",
 		});
 
-		expect(() => adapter.openPane("ro1 auth", { command: "neta", args: [] }, "/repo")).toThrow(
+		expect(adapter.openPane("ro1 auth", { command: "neta", args: [] }, "/repo")).rejects.toThrow(
 			"opened tab but could not restore focus to user-work",
 		);
 		expect(call).toBe(5);
 	});
 
-	it("does not open when original Zellij pane output is malformed or ambiguous", () => {
+	it("does not open when original Zellij pane output is malformed or ambiguous", async () => {
 		for (const stdout of [
 			"session not found",
 			"[]",
@@ -488,7 +495,7 @@ describe("zellij", () => {
 				},
 				{ ZELLIJ: "0", ZELLIJ_SESSION_NAME: "s1", ZELLIJ_PANE_ID: "41" },
 			);
-			expect(adapter.openPane("ro1 auth", { command: "neta", args: [] }, "/repo")).toBe(false);
+			expect(await adapter.openPane("ro1 auth", { command: "neta", args: [] }, "/repo")).toBe(false);
 			expect(calls).toBe(1);
 		}
 	});
@@ -770,7 +777,7 @@ describe("worker views", () => {
 	// Multiplexers start these from their own server process, which does not have
 	// Neta's environment: a pane that cannot find the session dies instantly and
 	// the tab disappears before anyone sees it.
-	it("tells the watcher where to find the session, without relying on env", () => {
+	it("tells the watcher where to find the session, without relying on env", async () => {
 		const { mux, calls } = recordingMux();
 		const host = createPaneHost(
 			mux,
@@ -781,7 +788,7 @@ describe("worker views", () => {
 			"neta-s7",
 		);
 
-		host?.open(worker);
+		await host?.open(worker);
 
 		expect(calls[0].title).toBe("ro1 auth flow");
 		expect(calls[0].args).toEqual(["/opt/cli.js", "watch", "ro1", "--session", "s7", "--dir", "/home/u/.neta"]);
@@ -790,7 +797,7 @@ describe("worker views", () => {
 
 	// The room's own view runs the same watch command; the tab is titled with
 	// the room's name, clamped like every tab title.
-	it("opens the room view with the room's name as the tab title", () => {
+	it("opens the room view with the room's name as the tab title", async () => {
 		const { mux, calls } = recordingMux();
 		const host = createPaneHost(
 			mux,
@@ -801,8 +808,8 @@ describe("worker views", () => {
 			"neta-s7",
 		);
 
-		host?.openRoom("auth-debate");
-		host?.openRoom("a-room-name-far-too-long-for-a-tab");
+		await host?.openRoom("auth-debate");
+		await host?.openRoom("a-room-name-far-too-long-for-a-tab");
 
 		expect(calls[0].title).toBe("auth-debate");
 		expect(calls[0].args).toEqual([
@@ -819,7 +826,7 @@ describe("worker views", () => {
 		expect(calls[1].title).toEndWith("…");
 	});
 
-	it("opens an exact resume command in a fresh native TUI tab", () => {
+	it("opens an exact resume command in a fresh native TUI tab", async () => {
 		const { mux, calls } = recordingMux();
 		const host = createPaneHost(
 			mux,
@@ -830,7 +837,7 @@ describe("worker views", () => {
 			"neta-s7",
 		);
 
-		const outcome = host?.attach?.(
+		const outcome = await host?.attach?.(
 			{ ...worker, state: "done", vendorSessionId: "vendor-exact" },
 			{ command: "claude", args: ["--resume", "vendor-exact"] },
 		);
@@ -854,7 +861,7 @@ describe("worker views", () => {
 		expect(tui).toEndWith(" tui");
 	});
 
-	it("reports why a view could not open rather than losing it", () => {
+	it("reports why a view could not open rather than losing it", async () => {
 		const mux: MuxAdapter = {
 			id: "tmux",
 			available: () => true,
@@ -866,9 +873,14 @@ describe("worker views", () => {
 			},
 		};
 
-		const outcome = createPaneHost(mux, { command: "neta", prefixArgs: [] }, "s1", "/repo", "/n", "neta-s1")?.open(
-			worker,
-		);
+		const outcome = await createPaneHost(
+			mux,
+			{ command: "neta", prefixArgs: [] },
+			"s1",
+			"/repo",
+			"/n",
+			"neta-s1",
+		)?.open(worker);
 
 		expect(outcome).toEqual({ opened: false, reason: "tmux: no server running" });
 	});

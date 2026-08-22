@@ -132,6 +132,30 @@ describe("watch", () => {
 		expect(lines.at(-1)).toBe(`── ${worker.id} done ──`);
 	});
 
+	it("reconnects when the control plane is briefly unavailable at startup", async () => {
+		const worker = await manager.spawn({ role: "scout", tier: "expert", task: "recover the view" });
+		await server.stop();
+		const restart = setTimeout(() => void server.start(), 120);
+
+		const code = await watchWorker({ workerId: worker.id, once: true, hold: false, write });
+
+		clearTimeout(restart);
+		expect(code).toBe(0);
+		expect(lines).toContain("task: recover the view");
+	});
+
+	it("exits normally when a finished worker has been archived", async () => {
+		const worker = await manager.spawn({ role: "scout", tier: "expert", task: "finish before archive" });
+		transports[0].finish({ ok: true, summary: "done" });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		await manager.spawn({ role: "scout", tier: "expert", task: "start the next batch" });
+
+		const code = await watchWorker({ workerId: worker.id, hold: false, write });
+
+		expect(code).toBe(0);
+		expect(lines.at(-1)).toBe(`── ${worker.id} done ──`);
+	});
+
 	// A headless reader scrolls too: the metadata reprints on every state change,
 	// current as of the newest model and usage reports from the backend.
 	it("reprints current metadata when the state changes", async () => {
