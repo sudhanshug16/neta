@@ -115,4 +115,31 @@ describe("formatStatusSnapshot", () => {
 		expect(status).not.toContain("ro4");
 		expect(status).not.toContain("Open notes");
 	});
+
+	it("suggests inspection only for active or diagnostic worker states", () => {
+		const snapshot: WorkerStatusSnapshot = {
+			writerQueue: [],
+			workers: {
+				running: [worker({ id: "ro-running", state: "running" })],
+				queued: [worker({ id: "ro-queued", state: "queued" })],
+				waiting: [worker({ id: "ro-waiting", state: "waiting" })],
+				terminal: [
+					worker({ id: "ro-blocked", state: "blocked" }),
+					worker({ id: "ro-failed", state: "failed" }),
+					worker({ id: "ro-interrupted", state: "interrupted" }),
+					worker({ id: "ro-done", state: "done" }),
+					worker({ id: "ro-killed", state: "killed" }),
+					worker({ id: "ro-later-failure", state: "done", laterFailure: "notice failed" }),
+				],
+			},
+			openNotes: [],
+		};
+
+		const status = formatStatusSnapshot(snapshot);
+		for (const id of ["ro-running", "ro-queued", "ro-waiting"])
+			expect(status).toContain(`expand: neta inspect ${id}`);
+		for (const id of ["ro-blocked", "ro-failed", "ro-interrupted", "ro-later-failure"])
+			expect(status).toContain(`inspect: neta inspect ${id}`);
+		for (const id of ["ro-done", "ro-killed"]) expect(status).not.toContain(`inspect ${id}`);
+	});
 });

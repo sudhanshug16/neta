@@ -73,7 +73,18 @@ function statusReport(summaries: WorkerSummary[], maxResultChars = MAX_RESULT_CH
 			const lines = [describe(summary)];
 			const progress = formatLastProgress(summary);
 			if (progress) lines.push(`  ${progress}`);
-			if (summary.result) lines.push(`  result: ${clip(summary.result, maxResultChars)}`);
+			if (isTerminalState(summary.state)) {
+				const result = summary.result;
+				const hasResult = result !== undefined && result.length > 0;
+				const clipped = hasResult && result.length > MAX_RESULT_CHARS;
+				const handoff = [hasResult ? (clipped ? "clipped" : "complete") : "missing"];
+				if (summary.laterFailure) handoff.push("later failure detected", "inspect recommended");
+				else if (clipped) handoff.push("inspect available");
+				else if (!hasResult) handoff.push("inspect recommended");
+				lines.push(`  handoff: ${handoff.join("; ")}`);
+			}
+			if (summary.result)
+				lines.push(`  result: ${clip(summary.result, Math.min(maxResultChars, MAX_RESULT_CHARS))}`);
 			if (summary.laterFailure) lines.push(`  after its report: ${clip(summary.laterFailure, maxResultChars)}`);
 			return lines.join("\n");
 		})

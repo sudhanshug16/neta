@@ -25,13 +25,22 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { execFile, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import type { SessionCheckpoint } from "../src/checkpoint.ts";
-import { CHECKPOINT_SCHEMA_VERSION, emptySessionCheckpoint, writeCheckpointAtomic } from "../src/checkpoint.ts";
+import { CHECKPOINT_SCHEMA_VERSION, checkpointPath, emptySessionCheckpoint } from "../src/checkpoint.ts";
 import { VERSION } from "../src/config.ts";
 import type { SessionRecord } from "../src/session.ts";
 import { processGone, waitFor } from "./helpers.ts";
@@ -195,10 +204,15 @@ describe("the pinned old Neta runtime", () => {
 	it("fails closed on the current schema-4 checkpoint", async () => {
 		const agentDir = scratch("neta-old-schema-");
 		const repo = scratch("neta-old-schema-repo-");
-		writeCheckpointAtomic(
-			emptySessionCheckpoint({ id: "schema-four", canonicalCwd: repo, leaderBackend: "claude" }),
-			agentDir,
-		);
+		// writeCheckpointAtomic intentionally normalizes every readable input to the
+		// current schema, so write this compatibility fixture at its intended v4
+		// boundary instead of accidentally testing a v5 file.
+		mkdirSync(join(agentDir, "checkpoints"), { recursive: true });
+		const schemaFour = {
+			...emptySessionCheckpoint({ id: "schema-four", canonicalCwd: repo, leaderBackend: "claude" }),
+			schemaVersion: 4,
+		};
+		writeFileSync(checkpointPath("schema-four", agentDir), `${JSON.stringify(schemaFour)}\n`);
 		const result = await run(nodePath, [OLD_RUNTIME, "sessions", "--all"], {
 			env: { ...process.env, NETA_DIR: agentDir },
 		});

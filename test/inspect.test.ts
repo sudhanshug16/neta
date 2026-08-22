@@ -245,7 +245,7 @@ describe("a worker whose tab was never created", () => {
 
 describe("worker rows", () => {
 	// The row is where a reader decides they want more, so the row says how.
-	it("name their own expand command, in every state", async () => {
+	it("name an expand command while active but stay quiet after a clean handoff", async () => {
 		const { manager, transports } = build({ panes: refusingPanes });
 		await manager.spawn({ role: "scout", tier: "expert", task: "read" });
 		await waitFor(() => transports[0].prompts.length === 1);
@@ -255,6 +255,6 @@ describe("worker rows", () => {
 		await waitFor(() => manager.get("ro1").state === "done");
 		const terminal = formatStatusSnapshot(manager.statusSnapshot());
 		expect(terminal).toContain("Terminal:");
-		expect(terminal).toContain(inspectHint("ro1"));
+		expect(terminal).not.toContain(inspectHint("ro1"));
 	});
 });

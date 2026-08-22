@@ -55,6 +55,14 @@ describe("leader prompt", () => {
 		expect(prompt).not.toContain("neta_workers");
 	});
 
+	it("makes wait the normal terminal handoff and inspect exceptional", () => {
+		const prompt = buildLeaderPrompt({ tiers: DEFAULT_TIERS, control: "mcp" });
+
+		expect(prompt).toContain("returns an explicit handoff for each terminal worker");
+		expect(prompt).toContain("Treat a complete handoff as the\n  worker's authoritative report");
+		expect(prompt).toContain("inspection is\n  exceptional, not the handoff path");
+	});
+
 	// The leader can only call what its host calls the tool. Naming the bare tool
 	// to a host that namespaces it cost a whole session's delegation.
 	it("uses the host's own tool names, everywhere it names one", () => {

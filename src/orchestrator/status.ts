@@ -30,14 +30,34 @@ export function formatLastProgress(summary: WorkerSummary): string | undefined {
 	return `last: ${clipped}`;
 }
 
-/**
- * How to expand this worker's recent input and output where you are standing.
- *
- * Every worker row carries it, because the row is where a reader decides they
- * want more, and a headless worker has no tab to open instead.
- */
+/** How to expand this worker's recent input and output where you are standing. */
 export function inspectHint(workerId: string): string {
 	return `expand: ${APP_NAME} inspect ${workerId}`;
+}
+
+/**
+ * The next action a status row should suggest. A live worker can be expanded
+ * for context; a problematic terminal needs inspection for diagnosis. Clean
+ * terminal outcomes already have their handoff and should stay quiet.
+ */
+export function statusHint(summary: Pick<WorkerSummary, "id" | "state" | "laterFailure">): string | undefined {
+	if (
+		summary.state === "starting" ||
+		summary.state === "running" ||
+		summary.state === "waiting" ||
+		summary.state === "queued"
+	) {
+		return inspectHint(summary.id);
+	}
+	if (
+		summary.state === "blocked" ||
+		summary.state === "failed" ||
+		summary.state === "interrupted" ||
+		summary.laterFailure
+	) {
+		return `inspect: ${APP_NAME} inspect ${summary.id}`;
+	}
+	return undefined;
 }
 
 /**
@@ -151,12 +171,7 @@ function formatGoal(goal: SessionGoal | undefined): string[] {
 	];
 }
 
-/**
- * One status section. Every worker row names its own expand command, so a reader
- * who wants to see what a worker actually said does not have to know that
- * `neta inspect` exists — the row says so, including for workers whose
- * multiplexer tab was never created.
- */
+/** One status section, with an action hint only where it is useful. */
 function section(label: string, workers: WorkerSummary[]): string[] {
 	return [
 		label,
@@ -165,7 +180,8 @@ function section(label: string, workers: WorkerSummary[]): string[] {
 			: workers.flatMap((worker) => {
 					const lastProgress = formatLastProgress(worker);
 					const line = `  ${formatWorkerSummary(worker)}`;
-					return [...(lastProgress ? [line, `    ${lastProgress}`] : [line]), `    ${inspectHint(worker.id)}`];
+					const hint = statusHint(worker);
+					return [...(lastProgress ? [line, `    ${lastProgress}`] : [line]), ...(hint ? [`    ${hint}`] : [])];
 				})),
 	];
 }

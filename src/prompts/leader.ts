@@ -317,9 +317,11 @@ Rules that matter in practice:
   encounter a surprise that changes their plan. ${s.status}; use the log only
   when you need more detail.
 - ${s.wait} is the normal handoff: it blocks you until the workers you name are
-  finished, returns what they reported, and wakes early on a blocker or
-  goal-impact discovery. Use ${toolName("neta_inspect")} only when a report is
-  missing or contradictory; inspection is exceptional, not the handoff path.
+  finished, returns an explicit handoff for each terminal worker, and wakes
+  early on a blocker or goal-impact discovery. Treat a complete handoff as the
+  worker's authoritative report. Use ${toolName("neta_inspect")} only when the
+  handoff says it is missing, clipped, or needs diagnosis; inspection is
+  exceptional, not the handoff path.
 - Never end your turn while workers you spawned are still running, unless
   the user explicitly asked you to fire and forget. Ending your turn abandons
   them: nothing wakes you when they finish, and the user sees only silence.

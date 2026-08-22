@@ -9,7 +9,7 @@ import { leaderTools } from "../src/mcp/leader.ts";
 import { createMcpServer } from "../src/mcp/serve.ts";
 import { WorkerManager } from "../src/orchestrator/manager.ts";
 import type { PromptOutcome, TransportOptions, WorkerTransportDriver } from "../src/orchestrator/transport.ts";
-import { fixtureBackendConfig } from "./helpers.ts";
+import { fixtureBackendConfig, waitFor } from "./helpers.ts";
 
 class FakeTransport implements WorkerTransportDriver {
 	readonly options: TransportOptions;
@@ -20,6 +20,7 @@ class FakeTransport implements WorkerTransportDriver {
 		this.startFailure = startFailure;
 	}
 	start(): Promise<void> {
+		this.options.events.vendorSession("vendor-session-1");
 		return this.startFailure ? Promise.reject(new Error(this.startFailure)) : Promise.resolve();
 	}
 	prompt(): Promise<PromptOutcome> {
@@ -218,7 +219,47 @@ describe("leader MCP redesign", () => {
 		await call("neta_delegate", { workers: [{ role: "scout", tier: "expert", task: "map" }] });
 		const waiting = call("neta_wait", { workerIds: ["ro1"], timeoutSeconds: 5 });
 		transports[0].finish({ ok: true, summary: "auth is in src/auth.ts" });
-		expect(body(await waiting)).toContain("auth is in src/auth.ts");
+		const rendered = body(await waiting);
+		expect(rendered).toContain("handoff: complete");
+		expect(rendered).toContain("auth is in src/auth.ts");
+	});
+
+	it("marks a clipped handoff and leaves inspection separate from the wait result", async () => {
+		await call("neta_delegate", { workers: [{ role: "scout", tier: "expert", task: "map" }] });
+		transports[0].options.events.log("text", "transcript output is not the handoff");
+		const waiting = call("neta_wait", { workerIds: ["ro1"], timeoutSeconds: 5 });
+		transports[0].finish({ ok: true, summary: "x".repeat(3_001) });
+
+		const rendered = body(await waiting);
+		expect(rendered).toContain("handoff: clipped; inspect available");
+		expect(rendered).toContain("… 1 more characters");
+		expect(rendered).not.toContain("transcript output is not the handoff");
+	});
+
+	it("marks a missing terminal handoff and recommends inspection", async () => {
+		await call("neta_delegate", { workers: [{ role: "scout", tier: "expert", task: "map" }] });
+		const waiting = call("neta_wait", { workerIds: ["ro1"], timeoutSeconds: 5 });
+		transports[0].finish({ ok: true, summary: "" });
+
+		expect(body(await waiting)).toContain("handoff: missing; inspect recommended");
+	});
+
+	it("preserves a successful report when a later turn fails", async () => {
+		await call("neta_delegate", { workers: [{ role: "scout", tier: "expert", task: "map" }] });
+		transports[0].finish({ ok: true, summary: "successful report" });
+		await waitFor(() => manager.get("ro1").state === "done");
+
+		await manager.steer("ro1", "follow up");
+		await waitFor(() => transports.length === 2);
+		transports[1].finish({ ok: false, summary: "follow-up backend failure" });
+		await waitFor(() => manager.get("ro1").state === "failed");
+
+		const rendered = body(await call("neta_wait", { workerIds: ["ro1"] }));
+		expect(rendered).toContain("handoff: complete; later failure detected; inspect recommended");
+		expect(rendered).toContain("result: successful report");
+		expect(rendered).toContain(
+			"after its report: follow-up failed after the report above: follow-up backend failure",
+		);
 	});
 
 	it("surfaces a blocked worker and its question when neta_wait has no ids", async () => {
