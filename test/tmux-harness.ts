@@ -1,8 +1,21 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmodSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	closeSync,
+	fsyncSync,
+	mkdirSync,
+	openSync,
+	readdirSync,
+	readFileSync,
+	renameSync,
+	rmSync,
+	unlinkSync,
+	writeSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
+import { processStartTime } from "../src/session.ts";
 
 const TMUX_TIMEOUT_MS = 5_000;
 const TERM_GRACE_MS = 250;
@@ -11,9 +24,22 @@ const POLL_MS = 10;
 const OWNERSHIP_DIR = join(tmpdir(), "neta-mux-e2e-owned");
 const OWNERSHIP_FILE_PREFIX = "neta-mux-run-";
 
-interface OwnershipRecord {
-	ownerPid: number;
-	sockets: string[];
+export interface ProcessIdentity {
+	pid: number;
+	startedAt: string;
+}
+
+export type ProcessIdentityReader = (pid: number) => string | undefined;
+export type ProcessAliveReader = (pid: number) => boolean;
+
+export interface OwnedSocketRecord {
+	socket: string;
+	server?: ProcessIdentity;
+}
+
+export interface OwnershipRecord {
+	owner: ProcessIdentity;
+	sockets: OwnedSocketRecord[];
 }
 
 export interface TmuxCommandResult {
@@ -33,19 +59,25 @@ interface TerminationOptions {
 	killGraceMs?: number;
 	pollMs?: number;
 	control?: ProcessControl;
+	identify?: ProcessIdentityReader;
 }
+
+export interface RunCommandOptions extends TerminationOptions {
+	env?: NodeJS.ProcessEnv;
+	timeoutMs?: number;
+}
+
+export type CommandRunner = (args: string[], options?: RunCommandOptions) => Promise<TmuxCommandResult>;
+type ProcessTerminator = (identity: ProcessIdentity) => Promise<boolean>;
 
 const realProcessControl: ProcessControl = {
 	signal(pid, signal) {
 		try {
 			process.kill(-pid, signal);
 		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code === "ESRCH") return;
-			try {
-				process.kill(pid, signal);
-			} catch (fallbackError) {
-				if ((fallbackError as NodeJS.ErrnoException).code !== "ESRCH") throw fallbackError;
-			}
+			// ESRCH means the exact process group is already gone. Never fall back to
+			// the bare pid: that number may already belong to an unrelated process.
+			if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
 		}
 	},
 	alive(pid) {
@@ -61,44 +93,81 @@ const realProcessControl: ProcessControl = {
 	},
 };
 
+const realProcessAlive: ProcessAliveReader = (pid) => {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code !== "ESRCH";
+	}
+};
+
 function wait(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function identityMatches(identity: ProcessIdentity, identify: ProcessIdentityReader): boolean {
+	return identify(identity.pid) === identity.startedAt;
+}
+
 async function waitForProcessGone(
-	pid: number,
+	identity: ProcessIdentity,
 	graceMs: number,
 	pollMs: number,
 	control: ProcessControl,
+	identify: ProcessIdentityReader,
 ): Promise<boolean> {
 	const deadline = Date.now() + graceMs;
-	while (control.alive(pid) && Date.now() < deadline) await wait(pollMs);
-	return !control.alive(pid);
+	while (identityMatches(identity, identify) && control.alive(identity.pid) && Date.now() < deadline) {
+		await wait(pollMs);
+	}
+	return !identityMatches(identity, identify) || !control.alive(identity.pid);
 }
 
-/** Terminate only the detached process group rooted at the exact recorded pid. */
-export async function terminateOwnedProcess(pid: number, options: TerminationOptions = {}): Promise<boolean> {
+/** Terminate only the detached process group rooted at the exact recorded identity. */
+export async function terminateOwnedProcess(
+	identity: ProcessIdentity,
+	options: TerminationOptions = {},
+): Promise<boolean> {
 	const termGraceMs = options.termGraceMs ?? TERM_GRACE_MS;
 	const killGraceMs = options.killGraceMs ?? KILL_GRACE_MS;
 	const pollMs = options.pollMs ?? POLL_MS;
 	const control = options.control ?? realProcessControl;
-	if (!control.alive(pid)) return false;
-	control.signal(pid, "SIGTERM");
-	if (await waitForProcessGone(pid, termGraceMs, pollMs, control)) return false;
-	control.signal(pid, "SIGKILL");
-	if (!(await waitForProcessGone(pid, killGraceMs, pollMs, control))) {
-		throw new Error(`tmux test process group ${pid} did not stop after SIGKILL.`);
+	const identify = options.identify ?? processStartTime;
+	if (!identityMatches(identity, identify) || !control.alive(identity.pid)) return false;
+	if (!identityMatches(identity, identify)) return false;
+	control.signal(identity.pid, "SIGTERM");
+	if (await waitForProcessGone(identity, termGraceMs, pollMs, control, identify)) return false;
+	if (!identityMatches(identity, identify)) return false;
+	control.signal(identity.pid, "SIGKILL");
+	if (!(await waitForProcessGone(identity, killGraceMs, pollMs, control, identify))) {
+		throw new Error(`tmux test process group ${identity.pid} did not stop after SIGKILL.`);
 	}
 	return true;
 }
 
-interface RunCommandOptions extends TerminationOptions {
-	env?: NodeJS.ProcessEnv;
-	timeoutMs?: number;
-}
-
 function outputText(chunks: Buffer[]): string {
 	return Buffer.concat(chunks).toString("utf8");
+}
+
+function requireIdentity(pid: number, identify: ProcessIdentityReader): ProcessIdentity {
+	const startedAt = identify(pid);
+	if (!startedAt) throw new Error(`Could not record process start identity for pid ${pid}.`);
+	return { pid, startedAt };
+}
+
+async function waitForIdentity(
+	pid: number,
+	identify: ProcessIdentityReader,
+	timeoutMs = 250,
+): Promise<ProcessIdentity | undefined> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		const startedAt = identify(pid);
+		if (startedAt) return { pid, startedAt };
+		await wait(POLL_MS);
+	}
+	return undefined;
 }
 
 /** Run one command with a mandatory timeout and bounded TERM->KILL cleanup. */
@@ -108,6 +177,7 @@ export async function runBoundedCommand(
 	options: RunCommandOptions = {},
 ): Promise<TmuxCommandResult> {
 	const timeoutMs = options.timeoutMs ?? TMUX_TIMEOUT_MS;
+	const identify = options.identify ?? processStartTime;
 	const child = spawn(command, args, {
 		env: options.env,
 		stdio: ["ignore", "pipe", "pipe"],
@@ -117,6 +187,7 @@ export async function runBoundedCommand(
 	const stderr: Buffer[] = [];
 	child.stdout?.on("data", (chunk: Buffer | string) => stdout.push(Buffer.from(chunk)));
 	child.stderr?.on("data", (chunk: Buffer | string) => stderr.push(Buffer.from(chunk)));
+	let childIdentity: ProcessIdentity | undefined;
 	const closed = new Promise<{ status: number | null; error?: Error }>((resolve) => {
 		child.once("error", (error) => resolve({ status: null, error }));
 		child.once("close", (status) => resolve({ status }));
@@ -131,16 +202,17 @@ export async function runBoundedCommand(
 	]);
 	if (stopTimer) clearTimeout(stopTimer);
 	if (winner.type === "stopped") {
-		if (child.pid === undefined) throw new Error("tmux test process did not provide a pid for cleanup.");
-		await terminateOwnedProcess(child.pid, options);
+		if (child.pid !== undefined) childIdentity = await waitForIdentity(child.pid, identify);
+		if (!childIdentity) throw new Error("tmux test process did not provide a verifiable pid for cleanup.");
+		await terminateOwnedProcess(childIdentity, options);
 		await Promise.race([closed, wait(options.killGraceMs ?? KILL_GRACE_MS)]);
 		return { status: 124, stdout: outputText(stdout), stderr: outputText(stderr), timedOut: true };
 	}
 	if (winner.result.error) {
 		return { status: null, stdout: outputText(stdout), stderr: winner.result.error.message, timedOut: false };
 	}
-	if (child.pid !== undefined && (options.control ?? realProcessControl).alive(child.pid)) {
-		await terminateOwnedProcess(child.pid, options);
+	if (childIdentity && (options.control ?? realProcessControl).alive(childIdentity.pid)) {
+		await terminateOwnedProcess(childIdentity, options);
 	}
 	return { status: winner.result.status, stdout: outputText(stdout), stderr: outputText(stderr), timedOut: false };
 }
@@ -149,49 +221,157 @@ export function uniqueTmuxSocket(prefix: string): string {
 	return `${prefix}-${process.pid}-${Date.now()}-${randomBytes(6).toString("hex")}`;
 }
 
-function ownerAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch {
+function isSafeSocketName(socket: string): boolean {
+	return /^neta-[A-Za-z0-9_.-]+$/.test(socket);
+}
+
+function processIdentity(pid: number, identify: ProcessIdentityReader): ProcessIdentity {
+	return requireIdentity(pid, identify);
+}
+
+function processOwnerState(
+	identity: ProcessIdentity,
+	identify: ProcessIdentityReader,
+	pidAlive: ProcessAliveReader,
+): "alive" | "dead" | "unknown" {
+	if (!pidAlive(identity.pid)) return "dead";
+	const actual = identify(identity.pid);
+	if (actual === undefined) return "unknown";
+	return actual === identity.startedAt ? "alive" : "dead";
+}
+
+function recordIsValid(value: unknown): value is OwnershipRecord {
+	if (!value || typeof value !== "object") return false;
+	const record = value as Partial<OwnershipRecord>;
+	if (!record.owner || typeof record.owner !== "object") return false;
+	if (!Number.isSafeInteger(record.owner.pid) || typeof record.owner.startedAt !== "string" || !record.owner.startedAt)
 		return false;
+	if (!Array.isArray(record.sockets)) return false;
+	return record.sockets.every((entry) => {
+		if (!entry || typeof entry !== "object") return false;
+		const socket = entry as Partial<OwnedSocketRecord>;
+		if (typeof socket.socket !== "string" || !isSafeSocketName(socket.socket)) return false;
+		if (socket.server === undefined) return true;
+		return (
+			typeof socket.server === "object" &&
+			Number.isSafeInteger(socket.server.pid) &&
+			typeof socket.server.startedAt === "string" &&
+			socket.server.startedAt.length > 0
+		);
+	});
+}
+
+/** Write a ledger record atomically, preserving the last complete record on interruption. */
+export function writeOwnershipRecordAtomic(path: string, record: OwnershipRecord): void {
+	const directory = dirname(path);
+	mkdirSync(directory, { recursive: true, mode: 0o700 });
+	chmodSync(directory, 0o700);
+	const temporary = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+	let handle: number | undefined;
+	try {
+		handle = openSync(temporary, "wx", 0o600);
+		writeSync(handle, `${JSON.stringify(record)}\n`, undefined, "utf8");
+		fsyncSync(handle);
+		closeSync(handle);
+		handle = undefined;
+		renameSync(temporary, path);
+		chmodSync(path, 0o600);
+		const directoryHandle = openSync(directory, "r");
+		try {
+			fsyncSync(directoryHandle);
+		} finally {
+			closeSync(directoryHandle);
+		}
+	} finally {
+		if (handle !== undefined) closeSync(handle);
+		rmSync(temporary, { force: true });
 	}
 }
 
-function writeOwnershipRecord(path: string, record: OwnershipRecord): void {
-	mkdirSync(OWNERSHIP_DIR, { recursive: true, mode: 0o700 });
-	chmodSync(OWNERSHIP_DIR, 0o700);
-	writeFileSync(path, JSON.stringify(record), { encoding: "utf8", mode: 0o600 });
-	chmodSync(path, 0o600);
+function socketPathBelongsTo(socketPath: string, socket: string): boolean {
+	return basename(socketPath) === socket;
+}
+
+function missingServer(result: TmuxCommandResult): boolean {
+	return result.status !== 0 && /(no such file|no server|error connecting)/i.test(result.stderr);
+}
+
+async function inspectOwnedServer(
+	socket: string,
+	expected: ProcessIdentity,
+	command: CommandRunner,
+	identify: ProcessIdentityReader,
+	pidAlive: ProcessAliveReader,
+): Promise<"owned" | "gone" | "mismatch" | "unknown"> {
+	const result = await command(["-L", socket, "display-message", "-p", "#{socket_path}\t#{pid}"]);
+	if (result.status !== 0 || result.timedOut) return missingServer(result) ? "gone" : "unknown";
+	const [socketPath, pidText] = result.stdout.trim().split("\t");
+	const pid = Number(pidText);
+	if (!socketPathBelongsTo(socketPath ?? "", socket) || pid !== expected.pid) return "mismatch";
+	if (!pidAlive(expected.pid)) return "gone";
+	const startedAt = identify(expected.pid);
+	if (startedAt === undefined) return "unknown";
+	return startedAt === expected.startedAt ? "owned" : "mismatch";
+}
+
+export interface ReapOptions {
+	ownershipDirectory?: string;
+	command?: CommandRunner;
+	identify?: ProcessIdentityReader;
+	pidAlive?: ProcessAliveReader;
+	terminate?: ProcessTerminator;
 }
 
 /** Reap only exact records left by a dead test parent; live parallel owners are never touched. */
-export async function reapOrphanedTmuxTestRuns(): Promise<void> {
+export async function reapOrphanedTmuxTestRuns(options: ReapOptions = {}): Promise<void> {
+	const ownershipDirectory = options.ownershipDirectory ?? OWNERSHIP_DIR;
+	const command = options.command ?? ((args, commandOptions) => runBoundedCommand("tmux", args, commandOptions));
+	const identify = options.identify ?? processStartTime;
+	const pidAlive = options.pidAlive ?? realProcessAlive;
+	const terminate = options.terminate ?? ((identity) => terminateOwnedProcess(identity, { identify }));
 	let files: string[];
 	try {
-		files = readdirSync(OWNERSHIP_DIR).filter((file) => file.startsWith(OWNERSHIP_FILE_PREFIX));
+		files = readdirSync(ownershipDirectory).filter(
+			(file) => file.startsWith(OWNERSHIP_FILE_PREFIX) && file.endsWith(".json"),
+		);
 	} catch {
 		return;
 	}
 	for (const file of files) {
-		const path = join(OWNERSHIP_DIR, file);
+		const path = join(ownershipDirectory, file);
 		let record: OwnershipRecord;
 		try {
-			record = JSON.parse(readFileSync(path, "utf8")) as OwnershipRecord;
+			const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+			if (!recordIsValid(parsed)) continue;
+			record = parsed;
 		} catch {
+			// A malformed ledger is evidence to preserve, never a reason to guess a
+			// socket or PID and never a reason to run a broad cleanup sweep.
 			continue;
 		}
-		if (!Number.isSafeInteger(record.ownerPid) || ownerAlive(record.ownerPid) || !Array.isArray(record.sockets))
-			continue;
+		if (processOwnerState(record.owner, identify, pidAlive) !== "dead") continue;
 		let complete = true;
-		for (const socket of record.sockets) {
-			if (typeof socket !== "string" || socket.length === 0) {
+		for (const artifact of record.sockets) {
+			if (!artifact.server) {
 				complete = false;
 				continue;
 			}
+			let ownership: "owned" | "gone" | "mismatch" | "unknown";
 			try {
-				const result = await runBoundedCommand("tmux", ["-L", socket, "kill-server"]);
-				if (result.timedOut) complete = false;
+				ownership = await inspectOwnedServer(artifact.socket, artifact.server, command, identify, pidAlive);
+			} catch {
+				complete = false;
+				continue;
+			}
+			if (ownership === "unknown") {
+				complete = false;
+				continue;
+			}
+			if (ownership !== "owned") continue;
+			try {
+				const result = await command(["-L", artifact.socket, "kill-server"], { timeoutMs: TMUX_TIMEOUT_MS });
+				if (result.timedOut) await terminate(artifact.server);
+				else if (result.status !== 0 && !missingServer(result)) complete = false;
 			} catch {
 				complete = false;
 			}
@@ -204,9 +384,6 @@ export async function reapOrphanedTmuxTestRuns(): Promise<void> {
 	}
 }
 
-type CommandRunner = (args: string[], options?: RunCommandOptions) => Promise<TmuxCommandResult>;
-type ProcessTerminator = (pid: number) => Promise<boolean>;
-
 const activeRuns = new Set<TmuxTestRun>();
 let signalCleanup: Promise<void> | undefined;
 
@@ -215,45 +392,72 @@ function signalNumber(signal: NodeJS.Signals): number {
 	return signals[signal] ?? 1;
 }
 
-function installProcessCleanup(): void {
-	if (activeRuns.size === 0) return;
-	for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
-		process.once(signal, () => {
-			if (signalCleanup) return;
-			signalCleanup = Promise.all([...activeRuns].map((run) => run.cleanup())).then(() => undefined);
-			void signalCleanup.finally(() => process.exit(128 + signalNumber(signal)));
-		});
-	}
-}
-
 process.once("exit", () => {
-	// `exit` cannot await tmux. Send signals only to recorded server pids; an
-	// interrupted parent may leave a bounded residual on macOS if it dies first.
+	// `exit` cannot await tmux. Revalidate each exact server identity before
+	// signalling its process group; never signal a bare, potentially reused PID.
 	for (const run of activeRuns) run.emergencyCleanup();
 });
 
+export interface TmuxTestRunOptions {
+	ownershipDirectory?: string;
+	ownerIdentity?: ProcessIdentity;
+	identify?: ProcessIdentityReader;
+	pidAlive?: ProcessAliveReader;
+}
+
 export class TmuxTestRun {
 	private readonly sockets = new Set<string>();
-	private readonly servers = new Map<string, number>();
-	private readonly ownershipPath = join(
-		OWNERSHIP_DIR,
-		`${OWNERSHIP_FILE_PREFIX}${process.pid}-${randomBytes(6).toString("hex")}.json`,
-	);
+	private readonly servers = new Map<string, ProcessIdentity>();
+	private readonly ownershipPath: string;
 	private readonly command: CommandRunner;
 	private readonly terminate: ProcessTerminator;
+	private readonly ownerIdentity: ProcessIdentity;
+	private readonly identify: ProcessIdentityReader;
+	private readonly pidAlive: ProcessAliveReader;
+	private readonly signalHandlers = new Map<NodeJS.Signals, () => void>();
 	private cleanupPromise: Promise<void> | undefined;
 
 	constructor(
 		command: CommandRunner = (args, options) => runBoundedCommand("tmux", args, options),
-		terminate: ProcessTerminator = (pid) => terminateOwnedProcess(pid),
+		terminate: ProcessTerminator = (identity) => terminateOwnedProcess(identity),
+		options: TmuxTestRunOptions = {},
 	) {
 		this.command = command;
 		this.terminate = terminate;
+		this.identify = options.identify ?? processStartTime;
+		this.pidAlive = options.pidAlive ?? realProcessAlive;
+		this.ownerIdentity = options.ownerIdentity ?? processIdentity(process.pid, this.identify);
+		this.ownershipPath = join(
+			options.ownershipDirectory ?? OWNERSHIP_DIR,
+			`${OWNERSHIP_FILE_PREFIX}${this.ownerIdentity.pid}-${randomBytes(6).toString("hex")}.json`,
+		);
 		activeRuns.add(this);
-		installProcessCleanup();
+		this.installSignalHandlers();
+	}
+
+	get recordPath(): string {
+		return this.ownershipPath;
+	}
+
+	private installSignalHandlers(): void {
+		for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+			const handler = () => {
+				if (signalCleanup) return;
+				signalCleanup = Promise.all([...activeRuns].map((run) => run.cleanup())).then(() => undefined);
+				void signalCleanup.finally(() => process.exit(128 + signalNumber(signal)));
+			};
+			this.signalHandlers.set(signal, handler);
+			process.once(signal, handler);
+		}
+	}
+
+	private unregisterSignalHandlers(): void {
+		for (const [signal, handler] of this.signalHandlers) process.removeListener(signal, handler);
+		this.signalHandlers.clear();
 	}
 
 	ownSocket(socket: string): string {
+		if (!isSafeSocketName(socket)) throw new Error(`Unsafe tmux test socket name: ${socket}`);
 		this.sockets.add(socket);
 		this.persistOwnership();
 		return socket;
@@ -266,18 +470,6 @@ export class TmuxTestRun {
 	async recordServer(socket: string): Promise<{ locator: string; pid: number }> {
 		this.ownSocket(socket);
 		const existing = this.servers.get(socket);
-		if (existing !== undefined) {
-			const result = await this.command([
-				"-L",
-				socket,
-				"display-message",
-				"-p",
-				"#{socket_path},#{pid},#{window_index}",
-			]);
-			if (result.status !== 0 || result.timedOut)
-				throw new Error(result.stderr || "Could not inspect tmux test server.");
-			return { locator: result.stdout.trim(), pid: existing };
-		}
 		const result = await this.command([
 			"-L",
 			socket,
@@ -287,41 +479,58 @@ export class TmuxTestRun {
 		]);
 		if (result.status !== 0 || result.timedOut)
 			throw new Error(result.stderr || "Could not inspect tmux test server.");
-		const parts = result.stdout.trim().split(",");
-		const pid = Number(parts[1]);
-		if (!Number.isSafeInteger(pid) || pid < 1)
-			throw new Error(`Could not record tmux server pid from: ${result.stdout.trim()}`);
-		this.servers.set(socket, pid);
+		const [socketPath, pidText] = result.stdout.trim().split(",");
+		const pid = Number(pidText);
+		if (!socketPathBelongsTo(socketPath ?? "", socket) || !Number.isSafeInteger(pid) || pid < 1)
+			throw new Error(`Could not record tmux server identity from: ${result.stdout.trim()}`);
+		const server = existing ?? processIdentity(pid, this.identify);
+		if (server.pid !== pid || !identityMatches(server, this.identify))
+			throw new Error(`tmux test server identity changed for socket ${socket}.`);
+		this.servers.set(socket, server);
 		this.persistOwnership();
 		return { locator: result.stdout.trim(), pid };
 	}
 
 	private persistOwnership(): void {
-		writeOwnershipRecord(this.ownershipPath, { ownerPid: process.pid, sockets: [...this.sockets] });
+		writeOwnershipRecordAtomic(this.ownershipPath, {
+			owner: this.ownerIdentity,
+			sockets: [...this.sockets].map((socket) => ({ socket, server: this.servers.get(socket) })),
+		});
 	}
 
 	async cleanup(): Promise<void> {
 		if (this.cleanupPromise) return this.cleanupPromise;
 		this.cleanupPromise = (async () => {
 			let complete = true;
-			for (const socket of this.sockets) {
-				let commandTimedOut = false;
-				try {
-					const result = await this.command(["-L", socket, "kill-server"], { timeoutMs: TMUX_TIMEOUT_MS });
-					commandTimedOut = result.timedOut;
-				} catch {
-					complete = false;
-				}
-				const pid = this.servers.get(socket);
-				if (pid !== undefined) {
+			try {
+				for (const socket of this.sockets) {
+					const server = this.servers.get(socket);
+					if (!server) {
+						complete = false;
+						continue;
+					}
+					let ownership: "owned" | "gone" | "mismatch" | "unknown";
 					try {
-						await this.terminate(pid);
+						ownership = await inspectOwnedServer(socket, server, this.command, this.identify, this.pidAlive);
+					} catch {
+						complete = false;
+						continue;
+					}
+					if (ownership === "unknown") {
+						complete = false;
+						continue;
+					}
+					if (ownership !== "owned") continue;
+					try {
+						const result = await this.command(["-L", socket, "kill-server"], { timeoutMs: TMUX_TIMEOUT_MS });
+						if (result.timedOut) await this.terminate(server);
+						else if (result.status !== 0 && !missingServer(result)) complete = false;
 					} catch {
 						complete = false;
 					}
-				} else if (commandTimedOut) {
-					complete = false;
 				}
+			} finally {
+				this.unregisterSignalHandlers();
 			}
 			if (complete) {
 				this.sockets.clear();
@@ -336,18 +545,14 @@ export class TmuxTestRun {
 	}
 
 	emergencyCleanup(): void {
-		for (const pid of this.servers.values()) {
+		for (const server of this.servers.values()) {
+			if (!identityMatches(server, this.identify)) continue;
 			try {
-				process.kill(-pid, "SIGTERM");
+				realProcessControl.signal(server.pid, "SIGTERM");
 			} catch {}
+			if (!identityMatches(server, this.identify)) continue;
 			try {
-				process.kill(pid, "SIGTERM");
-			} catch {}
-			try {
-				process.kill(-pid, "SIGKILL");
-			} catch {}
-			try {
-				process.kill(pid, "SIGKILL");
+				realProcessControl.signal(server.pid, "SIGKILL");
 			} catch {}
 		}
 	}
