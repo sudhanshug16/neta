@@ -42,6 +42,8 @@ from monitor import (
     MAX_RESPONSE_SIZE,
 )
 
+TEST_PLUGIN_ROOT = "/tmp/herdr-test-neta-status"
+
 
 class TestHerdrManifest(unittest.TestCase):
     """Test that Herdr resolves every monitor command from its plugin root."""
@@ -52,12 +54,12 @@ class TestHerdrManifest(unittest.TestCase):
         with manifest_path.open("rb") as manifest_file:
             manifest = tomllib.load(manifest_file)
 
+        self.assertNotIn("startup", manifest)
         commands = [
-            manifest["startup"][0]["command"],
             manifest["panes"][0]["command"],
             manifest["actions"][0]["command"],
         ]
-        expected_startup = [True, False, True]
+        expected_startup = [False, True]
 
         for command, starts_up in zip(commands, expected_startup):
             self.assertEqual(command[:2], ["bash", "-c"])
@@ -527,6 +529,18 @@ class TestSingleDisplayIteration(unittest.TestCase):
 class TestHerdrPaneManagement(unittest.TestCase):
     """Test Herdr pane management functions."""
 
+    def setUp(self):
+        """Provide the plugin root Herdr supplies at runtime."""
+        self.plugin_root = patch.dict(
+            os.environ,
+            {"HERDR_PLUGIN_ROOT": TEST_PLUGIN_ROOT},
+        )
+        self.plugin_root.start()
+
+    def tearDown(self):
+        """Restore the caller's environment."""
+        self.plugin_root.stop()
+
     def test_get_herdr_panes_success(self):
         """Test successful pane listing with Herdr 0.8.2 envelope format."""
         with patch("subprocess.run") as mock_run:
@@ -567,7 +581,7 @@ class TestHerdrPaneManagement(unittest.TestCase):
                 "panes": [
                     {
                         "pane_id": "wF:pJ",
-                        "cwd": "/Users/sudhanshugautam/.config/herdr/personal-plugins/personal.neta-status",
+                        "cwd": TEST_PLUGIN_ROOT,
                         "label": "Neta Monitor",
                     }
                 ]
@@ -582,12 +596,12 @@ class TestHerdrPaneManagement(unittest.TestCase):
                 "panes": [
                     {
                         "pane_id": "wF:pJ",
-                        "cwd": "/Users/sudhanshugautam/.config/herdr/personal-plugins/personal.neta-status",
+                        "cwd": TEST_PLUGIN_ROOT,
                         "label": "Neta Monitor",
                     },
                     {
                         "pane_id": "wF:pK",
-                        "cwd": "/Users/sudhanshugautam/.config/herdr/personal-plugins/personal.neta-status",
+                        "cwd": TEST_PLUGIN_ROOT,
                         "label": "Neta Monitor",
                     },
                 ]
@@ -617,12 +631,12 @@ class TestHerdrPaneManagement(unittest.TestCase):
                 "panes": [
                     {
                         "pane_id": "wF:pJ",
-                        "cwd": "/Users/sudhanshugautam/.config/herdr/personal-plugins/personal.neta-status",
+                        "cwd": TEST_PLUGIN_ROOT,
                         "label": "Neta Monitor",
                     },
                     {
                         "pane_id": "wF:pK",
-                        "cwd": "/Users/sudhanshugautam/.config/herdr/personal-plugins/personal.neta-status",
+                        "cwd": TEST_PLUGIN_ROOT,
                         "label": "Neta Monitor",
                     },
                 ]

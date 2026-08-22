@@ -305,21 +305,44 @@ def get_herdr_panes() -> dict | None:
         return None
 
 
+def get_plugin_root() -> Path | None:
+    """Return Herdr's canonical plugin root, if the runtime provided it."""
+    plugin_root = os.environ.get("HERDR_PLUGIN_ROOT")
+    if not plugin_root:
+        return None
+
+    try:
+        return Path(plugin_root).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return None
+
+
+def is_monitor_pane(pane: dict, plugin_root: Path | None) -> bool:
+    """Return whether a pane belongs to this plugin instance."""
+    if plugin_root is None or pane.get("label") != "Neta Monitor":
+        return False
+
+    pane_cwd = pane.get("cwd")
+    if not isinstance(pane_cwd, str):
+        return False
+
+    try:
+        return Path(pane_cwd).expanduser().resolve() == plugin_root
+    except (OSError, RuntimeError):
+        return False
+
+
 def find_monitor_pane() -> str | None:
     """Find first existing monitor pane ID. Returns pane_id if found, None otherwise."""
     panes_data = get_herdr_panes()
     if panes_data is None:
         return None
 
-    # Herdr 0.8.2 pane list format: result.panes[]
-    # Plugin panes are identified by: cwd contains /personal-plugins/personal.neta-status
-    # and label is "Neta Monitor"
+    plugin_root = get_plugin_root()
+    # Herdr 0.8.2 pane list format: result.panes[].
     panes = panes_data.get("panes", [])
     for pane in panes:
-        pane_cwd = pane.get("cwd", "")
-        pane_label = pane.get("label", "")
-        if ("personal-plugins/personal.neta-status" in pane_cwd and
-            pane_label == "Neta Monitor"):
+        if is_monitor_pane(pane, plugin_root):
             return pane.get("pane_id")
 
     return None
@@ -331,13 +354,11 @@ def find_all_monitor_panes() -> list[str]:
     if panes_data is None:
         return []
 
+    plugin_root = get_plugin_root()
     pane_ids = []
     panes = panes_data.get("panes", [])
     for pane in panes:
-        pane_cwd = pane.get("cwd", "")
-        pane_label = pane.get("label", "")
-        if ("personal-plugins/personal.neta-status" in pane_cwd and
-            pane_label == "Neta Monitor"):
+        if is_monitor_pane(pane, plugin_root):
             pane_id = pane.get("pane_id")
             if pane_id:
                 pane_ids.append(pane_id)

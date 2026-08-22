@@ -69,7 +69,7 @@ Press Ctrl+C to exit. Last update: 14:23:45
 
 - **Socket availability**: Sessions must have accessible Unix sockets; adjust `ulimit -n` if needed
 - **Token security**: Session tokens are never printed to output
-- **Startup hook**: The monitor pane auto-opens on Herdr startup for consistency
+- **Manual action**: Use `open-monitor` when you want to open the monitor; it does not auto-open on Herdr startup
 
 ## Testing
 
