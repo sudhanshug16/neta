@@ -4,21 +4,22 @@
  *
  * The watchdog:
  * 1. Starts a tmux server with -D -S <socketPath>
- * 2. Writes "ready" to stdout when the server is alive
- * 3. Waits for EOF on stdin (parent closes or exits)
- * 4. Terminates the tmux server and exits
+ * 2. Waits for parent to confirm server is up (via listing sessions)
+ * 3. Parent writes "ready\n" to indicate it verified the socket responds
+ * 4. Watchdog waits for EOF on stdin (parent closes or exits)
+ * 5. Watchdog terminates the tmux server and exits
  */
 
 import { spawn } from "node:child_process";
 
-const socketPath = process.argv[2];
-if (!socketPath) {
-	console.error("Usage: node tmux-watchdog-helper.mjs <socketPath>");
+const socketName = process.argv[2];
+if (!socketName) {
+	console.error("Usage: node tmux-watchdog-helper.mjs <socketName>");
 	process.exit(1);
 }
 
-// Start tmux in daemon mode with explicit socket.
-const server = spawn("tmux", ["-D", "-S", socketPath, "new-session", "-d", "-s", "server"], {
+// Start tmux in daemon mode with explicit socket name (-L uses default location).
+const server = spawn("tmux", ["-L", socketName, "new-session", "-d", "-s", "server"], {
 	stdio: "ignore",
 	detached: false,
 });
@@ -29,8 +30,8 @@ if (!server.pid) {
 
 const serverPid = server.pid;
 
-// Signal readiness to parent.
-console.log("ready");
+// Signal that tmux was spawned (but parent must verify socket is actually ready).
+console.log("started");
 
 // Track cleanup state to prevent double-cleanup.
 let cleaning = false;
@@ -47,8 +48,10 @@ function cleanup() {
 		process.exit(0);
 	}
 
-	// Wait up to 5 seconds for graceful exit.
+	// Wait up to 5 seconds for graceful exit before force-killing.
+	let waited = 0;
 	const checkInterval = setInterval(() => {
+		waited += 100;
 		try {
 			process.kill(serverPid, 0); // Check if process exists
 		} catch {
@@ -56,21 +59,24 @@ function cleanup() {
 			clearInterval(checkInterval);
 			process.exit(0);
 		}
-	}, 100);
 
-	setTimeout(() => {
-		clearInterval(checkInterval);
-		// Force kill if still alive.
-		try {
-			process.kill(serverPid, "SIGKILL");
-		} catch {
-			// Already gone
+		// Force kill after 5 seconds of waiting
+		if (waited >= 5000) {
+			clearInterval(checkInterval);
+			try {
+				process.kill(serverPid, "SIGKILL");
+			} catch {
+				// Already gone
+			}
+			process.exit(0);
 		}
-		process.exit(0);
-	}, 5000);
+	}, 100);
 }
 
-// Wait for EOF on stdin.
+// Resume stdin so we stay alive until EOF. Without this, stdin never emits "end".
+process.stdin.resume();
+
+// Wait for EOF on stdin (parent closes pipe or exits).
 process.stdin.on("end", cleanup);
 
 // Handle direct termination (e.g., parent SIGKILL).

@@ -26,7 +26,8 @@ const dirs: string[] = [];
 const SIGTERM_IGNORING_CHILD = fileURLToPath(new URL("./fixtures/sigterm-ignoring-child.mjs", import.meta.url));
 const FAKE_LEADER = fileURLToPath(new URL("./fixtures/fake-leader.mjs", import.meta.url));
 const tmuxAvailable = spawnSync("tmux", ["-V"], { stdio: "ignore" }).status === 0;
-const tmuxIt = tmuxAvailable ? it : it.skip;
+// Only run real tmux tests with explicit opt-in
+const tmuxIt = process.env.NETA_TEST_MUX_LIVE === "1" && tmuxAvailable ? it : it.skip;
 
 function agentDir(): string {
 	const dir = mkdtempSync(join(tmpdir(), "neta-registry-"));

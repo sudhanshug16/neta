@@ -42,10 +42,10 @@ function leader(record: string, env: Record<string, string>): ProcessSpec {
 	};
 }
 
-function start(socketPath: string, name: string, spec: ProcessSpec): void {
+function start(socketName: string, name: string, spec: ProcessSpec): void {
 	const args = newSessionArgs(name, spec);
 	args.splice(1, 0, "-d");
-	const result = spawnSync("tmux", ["-S", socketPath, ...args], { encoding: "utf-8" });
+	const result = spawnSync("tmux", ["-L", socketName, ...args], { encoding: "utf-8" });
 	if (result.status !== 0) throw new Error(result.stderr || `tmux exited ${result.status}`);
 }
 
@@ -70,14 +70,18 @@ describe("live tmux server isolation", () => {
 
 		try {
 			const name = `neta-pane-${process.pid}`;
-			const started = spawnSync("tmux", ["-S", session.socket, "new-session", "-d", "-s", name, "sleep", "30"], {
+			const started = spawnSync("tmux", ["-L", session.socketName, "new-session", "-d", "-s", name, "sleep", "30"], {
 				encoding: "utf-8",
 			});
 			if (started.status !== 0) throw new Error(started.stderr || "Could not start tmux test session.");
 
 			const opened = spawnSync(
 				"tmux",
-				["-S", session.socket, ...newWindowArgs("worker", { command: "sleep", args: ["30"] }, process.cwd(), name)],
+				[
+					"-L",
+					session.socketName,
+					...newWindowArgs("worker", { command: "sleep", args: ["30"] }, process.cwd(), name),
+				],
 				{
 					encoding: "utf-8",
 				},
@@ -85,7 +89,7 @@ describe("live tmux server isolation", () => {
 
 			expect(opened.status).toBe(0);
 			expect(
-				spawnSync("tmux", ["-S", session.socket, "list-windows", "-t", name, "-F", "#W"], { encoding: "utf-8" })
+				spawnSync("tmux", ["-L", session.socketName, "list-windows", "-t", name, "-F", "#W"], { encoding: "utf-8" })
 					.stdout,
 			).toContain("worker");
 		} finally {
@@ -113,7 +117,7 @@ describe("live tmux server isolation", () => {
 			try {
 				for (const [name, agentDir, channel, sessionId] of specs) {
 					start(
-						session.socket,
+						session.socketName,
 						`neta-${name}`,
 						leader(join(records, `${name}.json`), {
 							NETA_DIR: agentDir,
@@ -142,16 +146,18 @@ describe("live tmux server isolation", () => {
 		const session = await startTmuxSession("pipe-eof-cleanup");
 		if (!session) throw new Error("Failed to start tmux session");
 
-		// Verify server is running
-		const beforeCleanup = spawnSync("tmux", ["-S", session.socket, "list-sessions"], { encoding: "utf-8" });
-		expect(beforeCleanup.status === 1 || beforeCleanup.status === 0); // Either 0 or 1 means server exists
+		// Verify server is running before cleanup
+		const beforeCleanup = spawnSync("tmux", ["-L", session.socketName, "list-sessions"], { stdio: "ignore" });
+		expect(beforeCleanup.status === 0 || beforeCleanup.status === 1);
 
 		// Clean up via pipe EOF
 		await session.cleanup();
 
-		// After cleanup, server should be gone (connection refused)
-		const afterCleanup = spawnSync("tmux", ["-S", session.socket, "list-sessions"], { stdio: "ignore" });
-		expect(afterCleanup.status !== 0 && afterCleanup.status !== 1); // Connection error means server is gone
+		// After cleanup, verify socket is inaccessible by checking it returns an error.
+		// The server should be terminated by the watchdog.
+		const afterCleanup = spawnSync("tmux", ["-L", session.socketName, "list-sessions"], { stdio: "ignore" });
+		// Any non-zero status indicates the socket is no longer accessible
+		expect(afterCleanup.status !== 0);
 	});
 
 	liveIt("two private servers cannot cross-talk or share state", async () => {
@@ -163,7 +169,7 @@ describe("live tmux server isolation", () => {
 			// Create a session in server1
 			const start1 = spawnSync(
 				"tmux",
-				["-S", session1.socket, "new-session", "-d", "-s", "test-s1", "sleep", "30"],
+				["-L", session1.socketName, "new-session", "-d", "-s", "test-s1", "sleep", "30"],
 				{
 					encoding: "utf-8",
 				},
@@ -171,13 +177,13 @@ describe("live tmux server isolation", () => {
 			expect(start1.status === 0);
 
 			// Server2 should NOT see this session
-			const list2 = spawnSync("tmux", ["-S", session2.socket, "list-sessions"], { encoding: "utf-8" });
+			const list2 = spawnSync("tmux", ["-L", session2.socketName, "list-sessions"], { encoding: "utf-8" });
 			expect(list2.stdout).not.toContain("test-s1");
 
 			// Create a session in server2 with the same name
 			const start2 = spawnSync(
 				"tmux",
-				["-S", session2.socket, "new-session", "-d", "-s", "test-s1", "sleep", "40"],
+				["-L", session2.socketName, "new-session", "-d", "-s", "test-s1", "sleep", "40"],
 				{
 					encoding: "utf-8",
 				},
@@ -185,8 +191,8 @@ describe("live tmux server isolation", () => {
 			expect(start2.status === 0);
 
 			// Each server should have its own session
-			const list1 = spawnSync("tmux", ["-S", session1.socket, "list-sessions"], { encoding: "utf-8" });
-			const list2After = spawnSync("tmux", ["-S", session2.socket, "list-sessions"], { encoding: "utf-8" });
+			const list1 = spawnSync("tmux", ["-L", session1.socketName, "list-sessions"], { encoding: "utf-8" });
+			const list2After = spawnSync("tmux", ["-L", session2.socketName, "list-sessions"], { encoding: "utf-8" });
 
 			expect(list1.stdout).toContain("test-s1");
 			expect(list2After.stdout).toContain("test-s1");
