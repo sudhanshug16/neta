@@ -32,9 +32,11 @@ import {
 	type SessionCheckpoint,
 } from "../checkpoint.ts";
 import {
-	readV6Manifest,
+	readV6TerminalWorkerRefs,
 	readV6WorkerDetails,
 	readV6WorkerOutcome,
+	readV6WorkerRef,
+	type V6CheckpointDelta,
 	type V6ReadCounters,
 	type V6WorkerRef,
 } from "../checkpoint-store.ts";
@@ -520,8 +522,11 @@ export class WorkerManager implements ChannelHandler {
 				: undefined,
 		});
 		if (options.checkpointStorePath) {
-			const manifest = readV6Manifest(options.checkpointStorePath, options.checkpointReadCounters);
-			for (const reference of manifest.workers) manager.terminalRefs.set(reference.id, reference);
+			for (const [workerId, reference] of readV6TerminalWorkerRefs(
+				options.checkpointStorePath,
+				options.checkpointReadCounters,
+			))
+				manager.terminalRefs.set(workerId, reference);
 		}
 		manager.goal = cloneGoal(checkpoint.goal);
 		manager.counter = checkpoint.counter;
@@ -607,6 +612,7 @@ export class WorkerManager implements ChannelHandler {
 				);
 			}
 			manager.workers.set(worker.id, record);
+			if (wasActive) manager.checkpointChanged(record);
 			if (wasActive) {
 				const link = worker.noteId
 					? manager.notes.get(worker.noteId)?.workers.find((item) => item.workerId === worker.id)
@@ -669,6 +675,57 @@ export class WorkerManager implements ChannelHandler {
 			counter: this.counter,
 			noteCounter: this.noteCounter,
 			workers: [...this.workers.values()].map((record) => this.checkpointWorkerSnapshot(record)),
+			activeWriter: this.activeWriter,
+			writerQueue: [...this.writerQueue],
+			writerQueueHistory: this.writerQueueHistory.map((event) => ({ ...event })),
+			notes: [...this.notes.values()].map((note) => ({
+				...note,
+				workers: note.workers.map((worker) => ({ ...worker })),
+			})),
+			rooms: [...this.rooms].map(([name, posts]) => ({ name, posts: posts.map((post) => ({ ...post })) })),
+			spreadCursors: [...this.spreadCursors].map(([tier, cursor]) => ({ tier, cursor })),
+			lastWriterBackend: this.lastWriterBackend,
+			roomDebaterBackends: [...this.roomDebaterBackends].map(([room, backends]) => ({
+				room,
+				backends: [...backends],
+			})),
+			goal: cloneGoal(this.goal),
+		};
+	}
+
+	/** Typed bounded persistence input. It never contains the manager's worker map. */
+	checkpointDelta(record?: WorkerRecord): V6CheckpointDelta {
+		const checkpoint = this.options.checkpoint;
+		if (!checkpoint) throw new Error("This manager has no durable checkpoint configured.");
+		if (record) record.updatedAt = Date.now();
+		const persistedTerminal = record?.terminalSummary !== undefined && isTerminalState(record.state);
+		return {
+			id: checkpoint.id,
+			state: this.checkpointStateSnapshot(),
+			workers:
+				record && !persistedTerminal
+					? [{ worker: this.checkpointWorkerSnapshot(record), terminal: isTerminalState(record.state) }]
+					: [],
+		};
+	}
+
+	private checkpointStateSnapshot(): V6CheckpointDelta["state"] {
+		const checkpoint = this.options.checkpoint;
+		if (!checkpoint) throw new Error("This manager has no durable checkpoint configured.");
+		return {
+			...newCheckpointBase({
+				id: checkpoint.id,
+				canonicalCwd: this.checkpointCwd,
+				leaderBackend: checkpoint.leaderBackend,
+				leaderVendorConversationId: checkpoint.leaderVendorConversationId,
+				liveLease: this.shutdownProof ? undefined : checkpoint.liveLease,
+				shutdown: this.shutdownProof,
+				createdAt: this.checkpointCreatedAt,
+			}),
+			updatedAt: Date.now(),
+			sessionTiers: [...this.tiers],
+			counter: this.counter,
+			noteCounter: this.noteCounter,
 			activeWriter: this.activeWriter,
 			writerQueue: [...this.writerQueue],
 			writerQueueHistory: this.writerQueueHistory.map((event) => ({ ...event })),
@@ -2488,11 +2545,16 @@ export class WorkerManager implements ChannelHandler {
 	}
 
 	private checkpointChanged(record?: WorkerRecord, lane: "immediate" | "deferred" = "immediate"): void {
-		if (record) record.updatedAt = Date.now();
 		const checkpoint = this.options.checkpoint;
 		if (!checkpoint) return;
-		if (lane === "deferred") checkpoint.writer.scheduleDeferred(() => this.checkpointSnapshot(), checkpoint.id);
-		else checkpoint.writer.schedule(this.checkpointSnapshot());
+		if (!checkpoint.writer.isV6 && !this.options.checkpointStorePath) {
+			if (lane === "deferred") checkpoint.writer.scheduleDeferred(() => this.checkpointSnapshot(), checkpoint.id);
+			else checkpoint.writer.schedule(this.checkpointSnapshot());
+			return;
+		}
+		if (lane === "deferred")
+			checkpoint.writer.scheduleDeferredDelta(() => this.checkpointDelta(record), checkpoint.id);
+		else checkpoint.writer.scheduleDelta(this.checkpointDelta(record));
 	}
 
 	/** One transport shape for immediate and dequeued workers, including crash-recovery registration. */
@@ -2804,8 +2866,11 @@ export class WorkerManager implements ChannelHandler {
 				throw new Error(`Terminal result for ${record.id} was not durably published: ${persistenceError.message}`);
 			}
 			if (this.options.checkpointStorePath) {
-				const published = readV6Manifest(this.options.checkpointStorePath, this.options.checkpointReadCounters);
-				const publishedRef = published.workers.find((candidate) => candidate.id === record.id);
+				const publishedRef = readV6WorkerRef(
+					this.options.checkpointStorePath,
+					record.id,
+					this.options.checkpointReadCounters,
+				);
 				if (publishedRef) this.terminalRefs.set(record.id, publishedRef);
 			}
 

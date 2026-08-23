@@ -1,99 +1,126 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CheckpointWriter, emptySessionCheckpoint } from "../src/checkpoint.ts";
+import { CheckpointWriter, emptySessionCheckpoint, type SessionCheckpoint } from "../src/checkpoint.ts";
+import {
+	readV6CheckpointMetadata,
+	type V6CheckpointDelta,
+	type V6ReadCounters,
+	type V6WriteCounters,
+	v6CheckpointStorePath,
+	writeV6Checkpoint,
+	writeV6CheckpointDelta,
+	writeV6CheckpointUpdate,
+} from "../src/checkpoint-store.ts";
 
-const EVENTS_PER_SECOND = 50;
-const STATE_BYTES = 46 * 1024 * 1024;
+const TERMINAL_WORKERS = 1_000;
+const TELEMETRY_MUTATIONS = 50;
 
-function baseCheckpoint(id: string, payload: string) {
+function bytesIn(path: string): number {
+	const stat = statSync(path);
+	if (!stat.isDirectory()) return stat.size;
+	return readdirSync(path).reduce((total, name) => total + bytesIn(join(path, name)), 0);
+}
+
+function worker(id: string, state: "done" | "running", index: number) {
 	return {
-		...emptySessionCheckpoint({ id, canonicalCwd: process.cwd(), leaderBackend: "claude" }),
+		id,
+		name: "worker",
+		role: "scout",
+		tier: "expert" as const,
+		backend: "fake",
+		writer: false,
+		task: `task-${index}-${"t".repeat(256)}`,
+		state,
+		startedAt: index + 1,
+		updatedAt: index + 2,
+		...(state === "done" ? { endedAt: index + 3, finalResult: `result-${index}-${"r".repeat(256)}` } : {}),
+		log: [],
+		logFirstIndex: 0,
+		logCursor: 0,
+		pendingBrief: [],
+	};
+}
+
+function base(id: string): SessionCheckpoint {
+	const empty = emptySessionCheckpoint({ id, canonicalCwd: process.cwd(), leaderBackend: "claude" });
+	return {
+		...empty,
 		workers: [
-			{
-				id: "worker-1",
-				name: "worker",
-				role: "scout",
-				tier: "expert" as const,
-				backend: "fake",
-				writer: false,
-				task: payload,
-				state: "running" as const,
-				startedAt: 1,
-				updatedAt: 1,
-				log: [],
-				logFirstIndex: 0,
-				logCursor: 0,
-				pendingBrief: [],
-			},
+			...Array.from({ length: TERMINAL_WORKERS }, (_, index) => worker(`terminal-${index}`, "done", index)),
+			worker("active", "running", TERMINAL_WORKERS + 1),
 		],
 	};
 }
 
-async function eager(agentDir: string, checkpoint: ReturnType<typeof baseCheckpoint>): Promise<number> {
-	const writer = new CheckpointWriter(agentDir);
-	const started = process.hrtime.bigint();
-	for (let event = 0; event < EVENTS_PER_SECOND; event += 1) {
-		writer.schedule({ ...checkpoint, updatedAt: event + 1 });
-		await writer.flush();
-	}
-	return Number(process.hrtime.bigint() - started) / 1_000_000;
+function stateOf(checkpoint: SessionCheckpoint) {
+	const { workers: _workers, ...state } = checkpoint;
+	return state;
 }
 
-async function deferred(agentDir: string, checkpoint: ReturnType<typeof baseCheckpoint>): Promise<{
-	ms: number;
-	materializations: number;
-	writer: CheckpointWriter;
-}> {
-	const writer = new CheckpointWriter(agentDir);
-	let materializations = 0;
+function activeDelta(checkpoint: SessionCheckpoint, mutation: number): V6CheckpointDelta {
+	const active = checkpoint.workers.at(-1);
+	if (!active) throw new Error("active fixture worker missing");
+	return {
+		id: checkpoint.id,
+		state: stateOf(checkpoint),
+		workers: [{ terminal: false, worker: { ...active, updatedAt: mutation, log: [{ at: mutation, kind: "progress", text: `telemetry-${mutation}` }] } }],
+	};
+}
+
+function measure<T>(callback: () => T): { result: T; ms: number; rssDelta: number } {
+	const before = process.memoryUsage().rss;
 	const started = process.hrtime.bigint();
-	for (let event = 0; event < EVENTS_PER_SECOND; event += 1) {
-		writer.scheduleDeferred(() => {
-			materializations += 1;
-			return { ...checkpoint, updatedAt: event + 1 };
-		});
-	}
-	await writer.flush();
-	return { ms: Number(process.hrtime.bigint() - started) / 1_000_000, materializations, writer };
+	const result = callback();
+	return { result, ms: Number(process.hrtime.bigint() - started) / 1_000_000, rssDelta: process.memoryUsage().rss - before };
 }
 
 const root = mkdtempSync(join(tmpdir(), "neta-checkpoint-benchmark-"));
 try {
-	const payload = "x".repeat(STATE_BYTES);
-	const eagerDir = join(root, "eager");
-	const deferredDir = join(root, "deferred");
-	const eagerMs = await eager(eagerDir, baseCheckpoint("eager", payload));
-	const deferredResult = await deferred(deferredDir, baseCheckpoint("deferred", payload));
-	const eagerWrites = EVENTS_PER_SECOND;
-	const deferredWrites = deferredResult.writer.writeCount;
-	const materializationRatio = EVENTS_PER_SECOND / deferredResult.materializations;
-	const writeRatio = eagerWrites / deferredWrites;
-	const cpuRatio = eagerMs / deferredResult.ms;
+	const beforeStore = join(root, "before");
+	const afterAgentDir = join(root, "after-agent");
+	const afterStore = v6CheckpointStorePath("after", afterAgentDir);
+	const source = base("before");
+	const afterSource = { ...source, id: "after" };
+	writeV6Checkpoint(source, beforeStore);
+	writeV6Checkpoint(afterSource, afterStore);
+	const beforeCounters: V6WriteCounters = {};
+	const beforeRun = measure(() => {
+		for (let mutation = 0; mutation < TELEMETRY_MUTATIONS; mutation += 1) {
+			const active = afterSource.workers.at(-1);
+			if (!active) throw new Error("active fixture worker missing");
+			writeV6CheckpointUpdate(
+				{ ...source, workers: [...source.workers.slice(0, -1), { ...active, updatedAt: mutation, log: [{ at: mutation, kind: "progress", text: `telemetry-${mutation}` }] }] },
+				beforeStore,
+				{ counters: beforeCounters },
+			);
+		}
+	});
 
-	console.log(
-		JSON.stringify(
-			{
-				stateMiB: STATE_BYTES / (1024 * 1024),
-				eventsPerSecond: EVENTS_PER_SECOND,
-				eager: { materializations: EVENTS_PER_SECOND, writes: eagerWrites, ms: eagerMs },
-				deferred: {
-					materializations: deferredResult.materializations,
-					writes: deferredWrites,
-					writesPerSecond: deferredWrites,
-					ms: deferredResult.ms,
-				},
-				ratio: { materializations: materializationRatio, writes: writeRatio, cpu: cpuRatio },
-				deterministicRequirements: {
-					materializationsAtLeast40x: materializationRatio >= 40,
-					writesAtLeast40xFewer: writeRatio >= 40,
-					deferredWritesAtMost1_1PerSecond: deferredWrites <= 1.1,
-				},
-				measuredTiming: { checkpointCpuAtLeast4xLower: cpuRatio >= 4 },
-			},
-			2,
-		),
-	);
+	const afterCounters: V6WriteCounters = {};
+	let materializations = 0;
+	const writer = new CheckpointWriter(afterAgentDir, () => {}, undefined, "v6", { counters: afterCounters });
+	const afterRss = process.memoryUsage().rss;
+	const afterStarted = process.hrtime.bigint();
+	for (let mutation = 0; mutation < TELEMETRY_MUTATIONS; mutation += 1) {
+		writer.scheduleDeferredDelta(() => {
+			materializations += 1;
+			return activeDelta(afterSource, mutation);
+		}, "after");
+	}
+	await writer.flush();
+	const afterRun = { ms: Number(process.hrtime.bigint() - afterStarted) / 1_000_000, rssDelta: process.memoryUsage().rss - afterRss };
+
+	const reads: V6ReadCounters = {};
+	readV6CheckpointMetadata(afterStore, reads);
+	const beforeBytes = bytesIn(beforeStore);
+	const afterBytes = bytesIn(afterStore);
+	console.log(JSON.stringify({
+		fixture: { terminalWorkers: TERMINAL_WORKERS, activeWorkers: 1, telemetryMutations: TELEMETRY_MUTATIONS },
+		before: { ms: beforeRun.ms, rssDelta: beforeRun.rssDelta, bytesWritten: beforeCounters.writtenBytes ?? 0, bytesSerialized: beforeCounters.serializedBytes ?? 0, terminalShardWrites: beforeCounters.terminalShardWrites ?? 0 },
+		after: { ms: afterRun.ms, rssDelta: afterRun.rssDelta, materializations, manifests: afterCounters.manifestWrites ?? 0, bytesWritten: afterCounters.writtenBytes ?? 0, bytesSerialized: afterCounters.serializedBytes ?? 0, detailReads: reads.detailReads ?? 0, terminalDetailReads: reads.terminalDetailReads ?? 0, terminalShardWrites: afterCounters.terminalShardWrites ?? 0, terminalIndexEntriesVisited: afterCounters.terminalIndexEntriesVisited ?? 0, rssUnder512MiB: process.memoryUsage().rss < 512 * 1024 * 1024 },
+		storeBytes: { before: beforeBytes, after: afterBytes },
+	}, null, 2));
 } finally {
 	rmSync(root, { recursive: true, force: true });
 }

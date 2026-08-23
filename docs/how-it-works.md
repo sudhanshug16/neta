@@ -60,15 +60,21 @@ The live registry and the recovery checkpoint have different jobs:
 - `~/.neta/sessions/<manager-id>.json` is an ephemeral lease. It contains the
   socket, authorization token, process identity, and crash-cleanup process
   groups. Graceful cleanup and stale-session sweep remove it.
-- `~/.neta/checkpoints/<logical-id>.json` is durable, versioned semantic state.
-  It contains worker outcomes and logs, notes, rooms, assignment cursors, and
-  writer queue history. It never contains tokens, sockets, environment, process
-  ids for workers, scratch paths, transports, callbacks, or other live objects.
+- `~/.neta/checkpoints-v6/<logical-id>/manifest.json` is the published v6
+  authority. Its root is constant-size: structural state is one content-
+  addressed blob, active workers have bounded refs, and terminal workers are
+  addressed through 64 deterministic worker-ID index shards. The shard files
+  contain only bounded terminal summaries plus refs to immutable outcome and
+  detail artifacts; terminal history is not embedded in the root.
+- `~/.neta/checkpoints/<logical-id>.json` remains the v1-v5 reader/migration
+  input. It is never the fresh-session or v6 production writer.
 
-Checkpoint files are written by rename from a same-directory temporary file,
-after syncing the file; the directory is synced after rename. The directory is
-mode `0700` and files are `0600`. Corrupt files and unknown schema versions fail
-closed and are never overwritten.
+Checkpoint artifacts are content-addressed and immutable. The manifest is
+written by rename from a same-directory temporary file, after syncing the
+file; its directory is synced after rename. Store directories are mode `0700`
+and files are `0600`. Root, state, shard, blob, and required detail corruption
+fail closed; optional terminal detail corruption preserves the terminal summary
+and reports a warning.
 
 A session's checkpoint is created *before* its vendor CLI starts, and a launch
 that cannot create it stops there with an error rather than starting a leader.
@@ -79,12 +85,15 @@ not launched. (Once a session is running, a failed checkpoint write is reported
 and never interrupts live orchestration; that trade only applies after the
 session exists.)
 
-Durable writes and deferred writes serve different consistency needs.
-Structural state — worker outcomes, notes, rooms, writer queue, leader
-conversation id, and ownership — is written immediately. Telemetry, logs, progress,
-usage, and terminal cursors coalesce with a 100ms trailing debounce and a hard
-1-second deadline, so they may lag up to 1 second in exchange for reducing write
-overhead when many events fire in quick succession.
+Durable writes and deferred writes serve different consistency needs. A typed
+delta writer accumulates dirty active/terminal worker IDs and structural state.
+Structural changes publish the state blob and root; active telemetry writes only
+that worker's active blob/detail segment and the root, reusing every terminal
+shard hash. A terminal completion writes its active, terminal, outcome, and
+detail artifacts, rewrites exactly its worker-ID shard, then publishes the root;
+the completion event is emitted only after that publication. Telemetry, logs,
+progress, usage, and terminal cursors coalesce with a 100ms trailing debounce and
+a hard 1-second deadline.
 
 Hydration is inert: it creates no worker process, prompt, pane, callback, or
 scratch directory. `starting`, `running`, `waiting`, and `queued` workers become

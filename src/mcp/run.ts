@@ -272,7 +272,7 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 	// there must be no socket to talk to, no registry entry to find, and no
 	// released launch lock for a second launcher to take.
 	try {
-		await checkpointWriter.writeDurable(manager.checkpointSnapshot());
+		await checkpointWriter.writeDurableDelta(manager.checkpointDelta());
 	} catch (error) {
 		throw new Error(
 			`Neta could not record session ${checkpointId} in ${agentDir}, so nothing would know this manager owns ` +

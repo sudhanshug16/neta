@@ -21,7 +21,7 @@ import { adapterFor } from "./adapters/index.ts";
 import type { LeaderLaunch } from "./adapters/types.ts";
 import { createChannelAddress } from "./channel/protocol.ts";
 import { emptySessionCheckpoint, ensureLeaderSessionDir } from "./checkpoint.ts";
-import { openCheckpointForHydration, writeV6Checkpoint } from "./checkpoint-store.ts";
+import { openCheckpointForHydration, writeV6InitialState } from "./checkpoint-store.ts";
 import { resolveSelfInvocation } from "./cli-shim.ts";
 import { APP_NAME, getAgentDir, VERSION } from "./config.ts";
 import { type DetectedLeaderBackend, detectLeaderBackends, LEADER_BACKENDS } from "./detect.ts";
@@ -239,14 +239,15 @@ export async function launchLeader(options: LaunchOptions): Promise<number> {
 		// carrying on here would hand the user a session that looks normal and can
 		// never be resumed, which is the exact failure this is here to prevent.
 		try {
-			writeV6Checkpoint(
-				emptySessionCheckpoint({
-					id: logicalSessionId,
-					canonicalCwd: cwd,
-					leaderBackend: backend.id,
-					leaderVendorConversationId: leaderConversationId,
-					sessionTiers,
-				}),
+			const initial = emptySessionCheckpoint({
+				id: logicalSessionId,
+				canonicalCwd: cwd,
+				leaderBackend: backend.id,
+				leaderVendorConversationId: leaderConversationId,
+				sessionTiers,
+			});
+			writeV6InitialState(
+				(({ workers: _workers, ...state }) => state)(initial),
 				join(agentDir, "checkpoints-v6", logicalSessionId),
 			);
 		} catch (error) {

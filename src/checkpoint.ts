@@ -17,9 +17,13 @@ import {
 import { join } from "node:path";
 import {
 	readV6Checkpoint,
+	readV6CheckpointMetadata,
+	readV6StructuralState,
+	type V6CheckpointDelta,
+	type V6FaultHooks,
 	v6CheckpointStorePath,
 	v6ManifestPath,
-	writeV6CheckpointUpdate,
+	writeV6CheckpointDelta,
 } from "./checkpoint-store.ts";
 import { VERSION } from "./config.ts";
 import { isSessionLeaseAlive } from "./session.ts";
@@ -641,7 +645,7 @@ export function listCheckpoints(agentDir: string): CheckpointListEntry[] {
 				// A published v6 manifest is authoritative even when its contents are
 				// corrupt; readCheckpoint deliberately fails closed instead of falling
 				// back to a stale legacy JSON file.
-				entries.set(id, { id, path, checkpoint: readCheckpoint(id, agentDir) });
+				entries.set(id, { id, path, checkpoint: readV6CheckpointMetadata(join(v6Root, id)).checkpoint });
 			} catch (error) {
 				entries.set(id, { id, path, error: error instanceof Error ? error.message : String(error) });
 			}
@@ -666,8 +670,7 @@ export function writeCheckpointAtomic(input: SessionCheckpoint, agentDir: string
 	const checkpoint = validateCheckpoint(input);
 	const v6Path = v6CheckpointStorePath(checkpoint.id, agentDir);
 	if (existsSync(v6ManifestPath(v6Path))) {
-		writeV6CheckpointUpdate(checkpoint, v6Path);
-		return v6ManifestPath(v6Path);
+		throw new CheckpointError("v6 checkpoints require a typed delta write; refusing the legacy full writer.");
 	}
 	const dir = checkpointDir(agentDir);
 	mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -770,6 +773,7 @@ export const CHECKPOINT_TRAILING_DEBOUNCE_MS = 100;
 export const CHECKPOINT_HARD_DEADLINE_MS = 1_000;
 
 type CheckpointSnapshotFactory = () => SessionCheckpoint;
+type CheckpointDeltaFactory = () => V6CheckpointDelta;
 
 export interface CheckpointWriterTimers {
 	setTimeout(callback: () => void, delayMs: number): unknown;
@@ -786,6 +790,9 @@ export class CheckpointWriter {
 	private pendingImmediate: SessionCheckpoint | undefined;
 	private pendingDeferred: CheckpointSnapshotFactory | undefined;
 	private pendingDeferredId: string | undefined;
+	private pendingImmediateDelta: V6CheckpointDelta | undefined;
+	private pendingDeferredDelta: CheckpointDeltaFactory | undefined;
+	private pendingDeferredDeltaId: string | undefined;
 	private writing: Promise<void> | undefined;
 	private deferredTimer: unknown;
 	private hardDeadlineTimer: unknown;
@@ -796,17 +803,24 @@ export class CheckpointWriter {
 	private readonly report: (message: string) => void;
 	private readonly timers: CheckpointWriterTimers;
 	private readonly format: "legacy" | "v6";
+	private readonly v6Hooks: V6FaultHooks | undefined;
 
 	constructor(
 		agentDir: string,
 		report: (message: string) => void = (message) => console.error(`[neta] ${message}`),
 		timers: CheckpointWriterTimers = REAL_CHECKPOINT_TIMERS,
 		format: "legacy" | "v6" = "legacy",
+		v6Hooks?: V6FaultHooks,
 	) {
 		this.agentDir = agentDir;
 		this.report = report;
 		this.timers = timers;
 		this.format = format;
+		this.v6Hooks = v6Hooks;
+	}
+
+	get isV6(): boolean {
+		return this.format === "v6";
 	}
 
 	schedule(checkpoint: SessionCheckpoint): void {
@@ -817,10 +831,40 @@ export class CheckpointWriter {
 		this.start();
 	}
 
+	/** Queue a bounded v6 delta. Worker deltas are merged by id before persistence. */
+	scheduleDelta(delta: V6CheckpointDelta): void {
+		this.cancelDeferredTimers();
+		this.pendingDeferredDelta = undefined;
+		this.pendingDeferredDeltaId = undefined;
+		this.pendingImmediateDelta = mergeCheckpointDeltas(this.pendingImmediateDelta, delta);
+		this.start();
+	}
+
 	/** Queue telemetry without materializing the manager's large checkpoint yet. */
 	scheduleDeferred(snapshot: CheckpointSnapshotFactory, checkpointId?: string): void {
 		this.pendingDeferred = snapshot;
 		this.pendingDeferredId = checkpointId;
+		if (this.deferredTimer !== undefined) this.timers.clearTimeout(this.deferredTimer);
+		this.deferredTimer = this.timers.setTimeout(() => {
+			this.deferredTimer = undefined;
+			if (this.hardDeadlineTimer !== undefined) this.timers.clearTimeout(this.hardDeadlineTimer);
+			this.hardDeadlineTimer = undefined;
+			this.start();
+		}, CHECKPOINT_TRAILING_DEBOUNCE_MS);
+		if (this.hardDeadlineTimer === undefined) {
+			this.hardDeadlineTimer = this.timers.setTimeout(() => {
+				this.hardDeadlineTimer = undefined;
+				if (this.deferredTimer !== undefined) this.timers.clearTimeout(this.deferredTimer);
+				this.deferredTimer = undefined;
+				this.start();
+			}, CHECKPOINT_HARD_DEADLINE_MS);
+		}
+	}
+
+	/** Queue a bounded v6 delta factory under the same 100ms/1s coalescing rules. */
+	scheduleDeferredDelta(delta: CheckpointDeltaFactory, checkpointId?: string): void {
+		this.pendingDeferredDelta = delta;
+		this.pendingDeferredDeltaId = checkpointId;
 		if (this.deferredTimer !== undefined) this.timers.clearTimeout(this.deferredTimer);
 		this.deferredTimer = this.timers.setTimeout(() => {
 			this.deferredTimer = undefined;
@@ -849,20 +893,41 @@ export class CheckpointWriter {
 		if (this.writing) return;
 		this.writing = Promise.resolve()
 			.then(() => {
-				while (this.pendingImmediate || this.pendingDeferred) {
+				while (
+					this.pendingImmediate ||
+					this.pendingDeferred ||
+					this.pendingImmediateDelta ||
+					this.pendingDeferredDelta
+				) {
 					const immediate = this.pendingImmediate;
 					this.pendingImmediate = undefined;
 					const deferred = this.pendingDeferred;
 					this.pendingDeferred = undefined;
-					const checkpointId = immediate?.id ?? this.pendingDeferredId ?? "unknown";
+					const immediateDelta = this.pendingImmediateDelta;
+					this.pendingImmediateDelta = undefined;
+					const deferredDelta = this.pendingDeferredDelta;
+					this.pendingDeferredDelta = undefined;
+					const checkpointId =
+						immediate?.id ??
+						immediateDelta?.id ??
+						this.pendingDeferredId ??
+						this.pendingDeferredDeltaId ??
+						"unknown";
 					this.pendingDeferredId = undefined;
+					this.pendingDeferredDeltaId = undefined;
 					try {
 						const checkpoint = immediate ?? deferred?.();
-						if (!checkpoint) continue;
+						const delta = immediateDelta ?? deferredDelta?.();
+						if (!checkpoint && !delta) continue;
 						this.writeCount += 1;
-						if (this.format === "v6")
-							writeV6CheckpointUpdate(checkpoint, v6CheckpointStorePath(checkpoint.id, this.agentDir));
-						else writeCheckpointAtomic(checkpoint, this.agentDir);
+						if (delta) {
+							writeV6CheckpointDelta(delta, v6CheckpointStorePath(delta.id, this.agentDir), this.v6Hooks);
+						} else {
+							if (this.format === "v6")
+								throw new Error("v6 checkpoint writer received a full checkpoint; use scheduleDelta.");
+							if (!checkpoint) throw new Error("legacy checkpoint writer received a delta");
+							writeCheckpointAtomic(checkpoint, this.agentDir);
+						}
 						this.lastError = undefined;
 					} catch (error) {
 						this.lastError = error instanceof Error ? error : new Error(String(error));
@@ -872,13 +937,25 @@ export class CheckpointWriter {
 			})
 			.finally(() => {
 				this.writing = undefined;
-				if (this.pendingImmediate || this.pendingDeferred) this.start();
+				if (
+					this.pendingImmediate ||
+					this.pendingDeferred ||
+					this.pendingImmediateDelta ||
+					this.pendingDeferredDelta
+				)
+					this.start();
 			});
 	}
 
 	async flush(): Promise<void> {
 		this.cancelDeferredTimers();
-		while (this.writing || this.pendingImmediate || this.pendingDeferred) {
+		while (
+			this.writing ||
+			this.pendingImmediate ||
+			this.pendingDeferred ||
+			this.pendingImmediateDelta ||
+			this.pendingDeferredDelta
+		) {
 			this.start();
 			const writing = this.writing;
 			if (writing) await writing;
@@ -909,12 +986,35 @@ export class CheckpointWriter {
 		this.pendingImmediate = undefined;
 		this.pendingDeferred = undefined;
 		this.pendingDeferredId = undefined;
+		this.pendingImmediateDelta = undefined;
+		this.pendingDeferredDelta = undefined;
+		this.pendingDeferredDeltaId = undefined;
 		await this.writing;
-		if (this.format === "v6")
-			writeV6CheckpointUpdate(checkpoint, v6CheckpointStorePath(checkpoint.id, this.agentDir));
-		else writeCheckpointAtomic(checkpoint, this.agentDir);
+		if (this.format === "v6") throw new Error("v6 checkpoint writers require writeDurableDelta.");
+		writeCheckpointAtomic(checkpoint, this.agentDir);
 		this.lastError = undefined;
 	}
+
+	/** Write the first or a later v6 delta durably, allowing terminal completion to publish before its event. */
+	async writeDurableDelta(delta: V6CheckpointDelta): Promise<void> {
+		this.cancelDeferredTimers();
+		while (this.writing || this.pendingImmediateDelta || this.pendingDeferredDelta) {
+			this.start();
+			const writing = this.writing;
+			if (writing) await writing;
+		}
+		if (this.format !== "v6") throw new Error("Delta checkpoint writes require the v6 checkpoint writer.");
+		writeV6CheckpointDelta(delta, v6CheckpointStorePath(delta.id, this.agentDir), this.v6Hooks);
+		this.lastError = undefined;
+	}
+}
+
+function mergeCheckpointDeltas(prior: V6CheckpointDelta | undefined, next: V6CheckpointDelta): V6CheckpointDelta {
+	if (!prior) return next;
+	if (prior.id !== next.id) throw new Error(`Cannot merge checkpoint deltas for ${prior.id} and ${next.id}.`);
+	const workers = new Map(prior.workers.map((delta) => [delta.worker.id, delta]));
+	for (const delta of next.workers) workers.set(delta.worker.id, delta);
+	return { id: next.id, state: next.state ?? prior.state, workers: [...workers.values()] };
 }
 
 export function newCheckpointBase(options: {
@@ -989,6 +1089,9 @@ export function updateCheckpoint(
 	agentDir: string,
 	mutate: (checkpoint: SessionCheckpoint) => SessionCheckpoint | undefined,
 ): SessionCheckpoint | undefined {
+	const v6Path = v6CheckpointStorePath(id, agentDir);
+	if (existsSync(v6ManifestPath(v6Path)))
+		throw new CheckpointError("v6 checkpoints require a typed delta update; refusing the legacy full writer.");
 	const next = mutate(readCheckpoint(id, agentDir));
 	if (!next) return undefined;
 	writeCheckpointAtomic({ ...next, updatedAt: Date.now() }, agentDir);
@@ -1006,6 +1109,14 @@ export function recordCheckpointStopped(
 	by: CheckpointShutdown["by"],
 	managerId?: string,
 ): SessionCheckpoint | undefined {
+	const v6Path = v6CheckpointStorePath(id, agentDir);
+	if (existsSync(v6ManifestPath(v6Path))) {
+		const state = readV6StructuralState(v6Path);
+		if (managerId && state.liveLease && state.liveLease.managerId !== managerId) return undefined;
+		const next = { ...state, liveLease: undefined, shutdown: { at: Date.now(), processesStopped: true, by } };
+		writeV6CheckpointDelta({ id, state: next, workers: [] }, v6Path);
+		return { ...next, workers: [] } as SessionCheckpoint;
+	}
 	return updateCheckpoint(id, agentDir, (checkpoint) => {
 		if (managerId && checkpoint.liveLease && checkpoint.liveLease.managerId !== managerId) return undefined;
 		return { ...checkpoint, liveLease: undefined, shutdown: { at: Date.now(), processesStopped: true, by } };
@@ -1026,6 +1137,20 @@ export function recordLeaderVendorConversationId(
 	agentDir: string,
 	vendorConversationId: string,
 ): SessionCheckpoint | undefined {
+	const v6Path = v6CheckpointStorePath(id, agentDir);
+	if (existsSync(v6ManifestPath(v6Path))) {
+		const state = readV6StructuralState(v6Path);
+		const existing = state.leader.vendorConversationId;
+		if (existing === vendorConversationId) return undefined;
+		if (existing) {
+			throw new CheckpointError(
+				`Checkpoint "${id}" already records leader conversation ${existing}; refusing to replace it with ${vendorConversationId}.`,
+			);
+		}
+		const next = { ...state, leader: { ...state.leader, vendorConversationId } };
+		writeV6CheckpointDelta({ id, state: next, workers: [] }, v6Path);
+		return { ...next, workers: [] } as SessionCheckpoint;
+	}
 	return updateCheckpoint(id, agentDir, (checkpoint) => {
 		const existing = checkpoint.leader.vendorConversationId;
 		if (existing === vendorConversationId) return undefined;
