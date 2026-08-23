@@ -22,7 +22,9 @@ class Driver implements WorkerTransportDriver {
 		this.options = options;
 	}
 
-	async start(): Promise<void> {}
+	async start(): Promise<void> {
+		this.options.events.vendorSession(`vendor-${this.options.workerId}`);
+	}
 
 	prompt(): Promise<PromptOutcome> {
 		return new Promise((resolve) => {
@@ -106,6 +108,60 @@ describe("v6 manager integration", () => {
 		const inspection = manager.inspect(summary.id);
 		expect(inspection.entries.map((entry) => entry.text)).toContain("durable terminal detail");
 		expect((counters.detailReads ?? 0) > detailReadsBeforeStatus).toBe(true);
+		await manager.dispose();
+	});
+
+	it("revival timing uses its live interval without reading terminal detail", async () => {
+		const root = mkdtempSync(join(tmpdir(), "neta-v6-revival-timing-"));
+		roots.push(root);
+		const agentDir = join(root, "agent");
+		const storePath = v6CheckpointStorePath("revival", agentDir);
+		writeV6Checkpoint(checkpoint("revival"), storePath);
+		const writer = new CheckpointWriter(agentDir, () => {}, undefined, "v6");
+		const counters: V6ReadCounters = {};
+		const drivers: Driver[] = [];
+		let now = 1_000;
+		const manager = new WorkerManager({
+			cwd: process.cwd(),
+			agentDir,
+			config: fixtureBackendConfig(),
+			channelAddress: join(root, "channel.sock"),
+			onEvent: () => {},
+			checkpoint: { id: "revival", leaderBackend: "codex", writer },
+			checkpointStorePath: storePath,
+			checkpointReadCounters: counters,
+			now: () => now,
+			createTransport: (options) => {
+				const driver = new Driver(options);
+				drivers.push(driver);
+				return driver;
+			},
+		});
+
+		const worker = await manager.spawn({ role: "scout", tier: "expert", task: "revive" });
+		drivers[0]?.options.events.log("status", "terminal detail remains lazy");
+		now = 10_000;
+		drivers[0]?.finish({ ok: true, summary: "first" });
+		await manager.wait([worker.id], 1_000);
+		const terminal = manager.get(worker.id);
+		expect(terminal.activeMs).toBe(9_000);
+		expect(terminal.activeStartedAt).toBeUndefined();
+		const detailReadsBeforeRevival = counters.detailReads ?? 0;
+
+		now = 20_000;
+		const resumed = await manager.steer(worker.id, "continue");
+		expect(resumed.worker.state).toBe("running");
+		expect(manager.get(worker.id)).toMatchObject({ activeMs: 9_000, activeStartedAt: 20_000 });
+		expect(manager.status()).toContain("active 9s");
+
+		now = 23_000;
+		expect(manager.get(worker.id)).toMatchObject({ activeMs: 9_000, activeStartedAt: 20_000 });
+		expect(manager.status()).toContain("active 12s");
+		expect(counters.detailReads ?? 0).toBe(detailReadsBeforeRevival);
+
+		now = 25_000;
+		drivers[1]?.finish({ ok: true, summary: "second" });
+		await manager.wait([worker.id], 1_000);
 		await manager.dispose();
 	});
 

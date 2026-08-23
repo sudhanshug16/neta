@@ -1508,6 +1508,9 @@ export class WorkerManager implements ChannelHandler {
 			].join("\n");
 			record.driver = this.createWorkerTransport(record, backend, runtimeEnv, systemPrompt, record.vendorSessionId);
 			await record.driver.start();
+			// A successful revival returns this record to live state. The old bounded
+			// terminal summary must not mask its new active interval in public views.
+			record.terminalSummary = undefined;
 		} catch (error) {
 			this.freezeTiming(record);
 			await record.driver?.kill().catch(() => {});
