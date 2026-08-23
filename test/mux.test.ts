@@ -33,7 +33,17 @@ import {
 
 const leader: ProcessSpec = { command: "/usr/local/bin/claude", args: ["--append-system-prompt", "be a lead"] };
 
+const defaultMuxTestModules = [new URL("./session.test.ts", import.meta.url), new URL("./mux.test.ts", import.meta.url)];
+
 describe("tmux", () => {
+	it("does not invoke real tmux from default test modules", () => {
+		const directTmuxCall = /\b(?:spawn|spawnSync|exec|execSync|execFile|execFileSync)\s*\(\s*[\"']tmux[\"']/;
+
+		for (const module of defaultMuxTestModules) {
+			expect(readFileSync(module, "utf-8")).not.toMatch(directTmuxCall);
+		}
+	});
+
 	// Command and arguments stay separate argv entries, so a task containing
 	// quotes or spaces cannot turn into extra shell words.
 	it("starts a session running the leader without a shell", () => {

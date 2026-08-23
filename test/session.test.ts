@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -26,11 +26,8 @@ const dirs: string[] = [];
 const SIGTERM_IGNORING_CHILD = fileURLToPath(new URL("./fixtures/sigterm-ignoring-child.mjs", import.meta.url));
 const FAKE_LEADER = fileURLToPath(new URL("./fixtures/fake-leader.mjs", import.meta.url));
 
-// Only check tmux availability if live tests are enabled.
-// Default `bun test` never checks for tmux to keep default suite clean.
-const tmuxAvailable = process.env.NETA_TEST_MUX_LIVE === "1" && spawnSync("tmux", ["-V"], { stdio: "ignore" }).status === 0;
-// Only run real tmux tests with explicit opt-in
-const tmuxIt = process.env.NETA_TEST_MUX_LIVE === "1" && tmuxAvailable ? it : it.skip;
+// Host live tmux E2E is deliberately absent: macOS portable cleanup cannot atomically target stale PIDs/sockets.
+// Future live coverage must run inside a disposable process/container namespace.
 
 function agentDir(): string {
 	const dir = mkdtempSync(join(tmpdir(), "neta-registry-"));
@@ -93,20 +90,6 @@ describe("session registry", () => {
 
 		expect(killed).toEqual(["tmux:neta-dead-mux"]);
 		expect(existsSync(join(dir, "sessions", "dead-mux.json"))).toBe(false);
-	});
-
-	tmuxIt("kills a live tmux husk while sweeping a dead manager", () => {
-		const dir = agentDir();
-		const name = `neta-sweep-${process.pid}-${Date.now()}`;
-		const started = spawnSync("tmux", ["new-session", "-d", "-s", name, "sleep", "30"], { encoding: "utf-8" });
-		if (started.status !== 0) throw new Error(started.stderr || "Could not start tmux test session.");
-		writeSessionRecord(record({ id: "dead-tmux", pid: 2147483646, mux: { id: "tmux", name } }), dir);
-		try {
-			sweepStaleSessions(dir);
-			expect(spawnSync("tmux", ["has-session", "-t", name], { stdio: "ignore" }).status).not.toBe(0);
-		} finally {
-			spawnSync("tmux", ["kill-session", "-t", name], { stdio: "ignore" });
-		}
 	});
 
 	it("reaps recorded worker groups and socket residue from a dead manager", async () => {
