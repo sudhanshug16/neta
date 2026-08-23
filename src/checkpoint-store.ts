@@ -574,6 +574,7 @@ export function migrateV5ToV6(
 			mkdirSync(join(targetStorePath, directory), { recursive: true, mode: 0o700 });
 		copyTreeWithoutManifest(staging, targetStorePath, hooks);
 		publishManifest(targetStorePath, manifest, hooks);
+		fsyncDirectory(parent, "manifest-parent-fsync", hooks);
 		return { storePath: targetStorePath, published: true, alreadyMigrated: false };
 	}
 }

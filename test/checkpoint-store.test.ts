@@ -184,8 +184,10 @@ describe("normalized v6 checkpoint store", () => {
 		expect(readFileSync(legacyPath)).toEqual(before);
 
 		const fallbackTarget = join(agentDir, "fallback");
+		const fallbackEvents: V6FaultEvent[] = [];
 		const fallback = migrateV5ToV6("migration", agentDir, fallbackTarget, {
 			fail: (event) => {
+				fallbackEvents.push(event);
 				if (event.type === "store-rename") {
 					const error = new Error("cross device") as NodeJS.ErrnoException;
 					error.code = "EXDEV";
@@ -196,6 +198,46 @@ describe("normalized v6 checkpoint store", () => {
 		expect(fallback.published).toBe(true);
 		expect(statSync(join(fallbackTarget, "manifest.json")).isFile()).toBe(true);
 		expect(readV6Checkpoint(fallbackTarget).checkpoint.id).toBe("migration");
+		expect(
+			fallbackEvents.filter(
+				(event) => event.type === "manifest-parent-fsync" && event.path === join(fallbackTarget, ".."),
+			),
+		).toHaveLength(1);
+
+		const completeAfterBoundaryFault = join(agentDir, "complete-after-boundary-fault");
+		const completeBefore = readFileSync(legacyPath);
+		expect(() =>
+			migrateV5ToV6("migration", agentDir, completeAfterBoundaryFault, {
+				fail: (event) => {
+					if (event.type === "store-rename") {
+						const error = new Error("cross device") as NodeJS.ErrnoException;
+						error.code = "EXDEV";
+						throw error;
+					}
+					if (event.type === "manifest-parent-fsync" && event.path === join(completeAfterBoundaryFault, ".."))
+						throw new Error("crash after fallback publication");
+				},
+			}),
+		).toThrow("crash after fallback publication");
+		expect(readFileSync(legacyPath)).toEqual(completeBefore);
+		expect(readV6Checkpoint(completeAfterBoundaryFault).checkpoint.id).toBe("migration");
+
+		const priorAuthority = join(agentDir, "prior-authority");
+		expect(() =>
+			migrateV5ToV6("migration", agentDir, priorAuthority, {
+				fail: (event) => {
+					if (event.type === "store-rename") {
+						const error = new Error("cross device") as NodeJS.ErrnoException;
+						error.code = "EXDEV";
+						throw error;
+					}
+					if (event.type === "manifest-rename" && event.to === join(priorAuthority, "manifest.json"))
+						throw new Error("crash before fallback publication");
+				},
+			}),
+		).toThrow("crash before fallback publication");
+		expect(readFileSync(legacyPath)).toEqual(completeBefore);
+		expect(() => readV6Checkpoint(priorAuthority)).toThrow("No published v6 manifest");
 	});
 
 	it("rejects malformed manifest sequence and unsupported format", () => {
