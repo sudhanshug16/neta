@@ -35,6 +35,7 @@ const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const FAKE_LEADER = fileURLToPath(new URL("./fixtures/fake-leader.mjs", import.meta.url));
 const FAKE_AGENT = fileURLToPath(new URL("./fixtures/fake-acp-agent.mjs", import.meta.url));
 const run = promisify(execFile);
+const LEGACY_APP_VERSION = "0.0.1-old";
 
 const dirs: string[] = [];
 
@@ -243,7 +244,7 @@ describe("closing and reopening a session", () => {
 		expect(listed.stdout).toContain(`neta resume ${checkpointId}`);
 
 		// Pretend the checkpoint was written by an older Neta, as an upgrade would.
-		const legacyBytes = `${JSON.stringify({ ...closed, appVersion: "0.0.1-old" }, null, 2)}\n`;
+		const legacyBytes = `${JSON.stringify({ ...closed, appVersion: LEGACY_APP_VERSION }, null, 2)}\n`;
 		mkdirSync(join(agentDir, "checkpoints"), { recursive: true });
 		writeFileSync(checkpointPath(checkpointId, agentDir), legacyBytes);
 		rmSync(v6CheckpointStorePath(checkpointId, agentDir), { recursive: true, force: true });
@@ -273,7 +274,9 @@ describe("closing and reopening a session", () => {
 		const prompt = second.argv[second.argv.indexOf("--append-system-prompt") + 1];
 		expect(prompt).toContain("## Recovered session");
 		expect(prompt).toContain(checkpointId);
-		expect(prompt).toContain("0.0.1-old");
+		expect(prompt).not.toContain(
+			`This conversation was reopened from Neta session \`${checkpointId}\`, saved by Neta ${LEGACY_APP_VERSION} and now running on ${VERSION}.`,
+		);
 		expect(prompt).toContain("No worker was restarted");
 		expect(prompt).toContain("neta_status");
 
@@ -630,7 +633,7 @@ describe("closing and reopening a session", () => {
 
 		// Resume on a newer bundle: same ids, fresh everything else.
 		const closed = readCheckpointFile(agentDir, checkpointId);
-		const legacyBytes = `${JSON.stringify({ ...closed, appVersion: "0.0.1-old" }, null, 2)}\n`;
+		const legacyBytes = `${JSON.stringify({ ...closed, appVersion: LEGACY_APP_VERSION }, null, 2)}\n`;
 		mkdirSync(join(agentDir, "checkpoints"), { recursive: true });
 		writeFileSync(checkpointPath(checkpointId, agentDir), legacyBytes);
 		rmSync(v6CheckpointStorePath(checkpointId, agentDir), { recursive: true, force: true });
@@ -661,7 +664,9 @@ describe("closing and reopening a session", () => {
 		const instructions = second.files[resumedConfig.instructions[0]];
 		expect(instructions).toContain("You are Neta, a leader");
 		expect(instructions).toContain("## Recovered session");
-		expect(instructions).toContain("0.0.1-old");
+		expect(instructions).not.toContain(
+			`This conversation was reopened from Neta session \`${checkpointId}\`, saved by Neta ${LEGACY_APP_VERSION} and now running on ${VERSION}.`,
+		);
 		expect(instructions).toContain("No worker was restarted");
 
 		const workers = await neta(["workers", "--session", resumedSession.id], agentDir, repo);

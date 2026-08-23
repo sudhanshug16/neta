@@ -414,8 +414,10 @@ describe("a session saved by an older Neta, reopened by the current build", () =
 					: Object.values(launch.files).join("\n");
 				expect(prompt).toContain("## Recovered session");
 				expect(prompt).toContain(entry.checkpointId);
-				expect(prompt).not.toContain(provenance.appVersion);
-				expect(prompt).not.toContain(VERSION);
+				const forbiddenRecoveryAnnouncement =
+					`This conversation was reopened from Neta session \`${entry.checkpointId}\`, saved by Neta ` +
+					`${provenance.appVersion} and now running on ${VERSION}.`;
+				expect(prompt).not.toContain(forbiddenRecoveryAnnouncement);
 				expect(prompt).toContain("No worker was restarted");
 				expect(prompt).toContain("Substantive report");
 
