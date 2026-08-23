@@ -26,12 +26,8 @@ import {
 	NETA_WORKER_TOKEN_ENV,
 } from "../channel/protocol.ts";
 import { ChannelServer } from "../channel/server.ts";
-import {
-	CheckpointWriter,
-	readCheckpointForHydration,
-	readVendorSessionCapture,
-	readVendorSessionCaptureError,
-} from "../checkpoint.ts";
+import { CheckpointWriter, readVendorSessionCapture, readVendorSessionCaptureError } from "../checkpoint.ts";
+import { openCheckpointForHydration, v6CheckpointStorePath } from "../checkpoint-store.ts";
 import { type CliInvocation, createLeaderCliShim, prependToPath, resolveSelfInvocation } from "../cli-shim.ts";
 import { APP_NAME, getAgentDir, VERSION } from "../config.ts";
 import { selectMux } from "../mux/index.ts";
@@ -149,7 +145,7 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 	// previous run's processes were proven stopped by `neta resume`. Refusing here
 	// is the safe answer: starting empty over an existing checkpoint would write
 	// away a session's whole history.
-	const hydrating = resuming ? readCheckpointForHydration(checkpointId, agentDir) : undefined;
+	const hydrating = resuming ? openCheckpointForHydration(checkpointId, agentDir) : undefined;
 	// A resumed session runs on the tiers it was launched with. The checkpoint is
 	// the authority, not this process's environment and never today's startup
 	// preferences: the session's recorded workers were staffed under that answer.
@@ -196,7 +192,7 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 		startedAt: Date.now(),
 		...(muxName && (muxId === "zellij" || muxId === "tmux") ? { mux: { id: muxId, name: muxName } } : {}),
 	};
-	const checkpointWriter = new CheckpointWriter(agentDir, note);
+	const checkpointWriter = new CheckpointWriter(agentDir, note, undefined, "v6");
 	const writeRegistry = () =>
 		writeSessionRecord({ ...sessionRecord, workerGroups: [...workerGroups.values()] }, agentDir);
 	const managerOptions: WorkerManagerOptions = {
@@ -246,6 +242,7 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 			},
 			writer: checkpointWriter,
 		},
+		checkpointStorePath: v6CheckpointStorePath(checkpointId, agentDir),
 	};
 
 	let manager: WorkerManager;

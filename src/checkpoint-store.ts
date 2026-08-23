@@ -1,14 +1,14 @@
 /**
  * Staged, normalized checkpoint storage.
  *
- * This module is deliberately not wired into WorkerManager yet. A v6 store is
- * useful only when its manifest is valid; the legacy v5 JSON remains the
- * manager's authority until the integration work makes that boundary explicit.
+ * A v6 store is useful only when its manifest is valid. Once published, the
+ * manifest is authoritative and a corrupt store fails closed.
  */
 
 import { createHash, randomBytes } from "node:crypto";
 import {
 	closeSync,
+	existsSync,
 	fsyncSync,
 	mkdirSync,
 	openSync,
@@ -19,7 +19,9 @@ import {
 	writeSync,
 } from "node:fs";
 import { join } from "node:path";
+import type { HydratableCheckpoint } from "./checkpoint.ts";
 import { type CheckpointWorker, readCheckpoint, type SessionCheckpoint, validateCheckpoint } from "./checkpoint.ts";
+import { isSessionLeaseAlive } from "./session.ts";
 
 export const CHECKPOINT_STORE_FORMAT_VERSION = 6 as const;
 export const V6_FORMAT_VERSION = CHECKPOINT_STORE_FORMAT_VERSION;
@@ -68,6 +70,14 @@ export interface V6ReadResult {
 	manifest: V6Manifest;
 	warnings: V6ReadWarning[];
 	terminalDetailCorrupt: boolean;
+}
+
+/** Read instrumentation is injected by tests; production has no global counters. */
+export interface V6ReadCounters {
+	manifestReads?: number;
+	stateReads?: number;
+	blobReads?: number;
+	detailReads?: number;
 }
 
 export interface V6FaultHooks {
@@ -295,7 +305,8 @@ function writeImmutable(path: string, bytes: Uint8Array, hooks: V6FaultHooks | u
 	writeNew(path, bytes, "artifact-write", hooks);
 }
 
-function readArtifact(storePath: string, sha256: string): unknown {
+function readArtifact(storePath: string, sha256: string, counters?: V6ReadCounters): unknown {
+	if (counters) counters.blobReads = (counters.blobReads ?? 0) + 1;
 	const path = blobPath(storePath, sha256);
 	let bytes: Buffer;
 	try {
@@ -312,15 +323,23 @@ function readBlob(
 	reference: V6BlobRef,
 	expectedKind: BlobKind,
 	workerId: string,
+	counters?: V6ReadCounters,
 ): Record<string, unknown> {
 	if (reference.kind !== expectedKind)
 		throw new CheckpointStoreError(
 			`Corrupt v6 manifest worker ${workerId}: ${expectedKind} blob reference has kind ${reference.kind}.`,
 		);
-	return object(readArtifact(storePath, reference.sha256), `${workerId} ${expectedKind} blob`);
+	return object(readArtifact(storePath, reference.sha256, counters), `${workerId} ${expectedKind} blob`);
 }
 
-function readSegment(storePath: string, workerId: string, segment: V6DetailSegmentRef, terminal: boolean): unknown[] {
+function readSegment(
+	storePath: string,
+	workerId: string,
+	segment: V6DetailSegmentRef,
+	terminal: boolean,
+	counters?: V6ReadCounters,
+): unknown[] {
+	if (counters) counters.detailReads = (counters.detailReads ?? 0) + 1;
 	const path = segmentPath(storePath, workerId, segment.sequence, terminal);
 	let bytes: Buffer;
 	try {
@@ -354,6 +373,9 @@ function activeWorker(worker: CheckpointWorker): Record<string, unknown> {
 function terminalWorker(worker: CheckpointWorker): Record<string, unknown> {
 	return {
 		state: worker.state,
+		...(worker.finalResult === undefined ? {} : { finalResult: worker.finalResult }),
+		...(worker.laterFailure === undefined ? {} : { laterFailure: worker.laterFailure }),
+		...(worker.lastResponse === undefined ? {} : { lastResponse: worker.lastResponse }),
 		...(worker.stateBeforeStop === undefined ? {} : { stateBeforeStop: worker.stateBeforeStop }),
 		...(worker.endedAt === undefined ? {} : { endedAt: worker.endedAt }),
 		...(worker.pendingQuestion === undefined ? {} : { pendingQuestion: worker.pendingQuestion }),
@@ -437,7 +459,7 @@ function writeStoreContents(
 			worker.state === "failed" ||
 			worker.state === "killed" ||
 			worker.state === "interrupted"
-				? [writeSegment(storePath, worker.id, 0, [{ lastResponse: worker.lastResponse }], true, hooks, true)]
+				? [writeSegment(storePath, worker.id, 0, worker.log, true, hooks, true)]
 				: [];
 		workers.push({
 			id: worker.id,
@@ -467,6 +489,64 @@ export function writeV6Checkpoint(checkpoint: SessionCheckpoint, storePath: stri
 	return manifest;
 }
 
+/** Publish a later snapshot without rewriting immutable blobs or terminal history. */
+export function writeV6CheckpointUpdate(
+	checkpoint: SessionCheckpoint,
+	storePath: string,
+	hooks?: V6FaultHooks,
+): V6Manifest {
+	const validated = validateCheckpoint(checkpoint);
+	if (!manifestExists(storePath)) return writeV6Checkpoint(validated, storePath, hooks);
+	const prior = readV6Manifest(storePath);
+	if (prior.id !== validated.id) throw new CheckpointStoreError(`v6 store id does not match "${validated.id}".`);
+	mkdirSync(join(storePath, "blobs"), { recursive: true, mode: 0o700 });
+	mkdirSync(join(storePath, "segments"), { recursive: true, mode: 0o700 });
+	const state = artifact(stateWithoutWorkers(validated));
+	writeImmutable(blobPath(storePath, state.sha256), state.bytes, hooks);
+	const workers: V6WorkerRef[] = [];
+	for (const worker of validated.workers) {
+		const previous = prior.workers.find((candidate) => candidate.id === worker.id);
+		const active = artifact(activeWorker(worker));
+		const terminal = artifact(terminalWorker(worker));
+		const outcome = artifact(outcomeWorker(worker));
+		writeImmutable(blobPath(storePath, active.sha256), active.bytes, hooks);
+		writeImmutable(blobPath(storePath, terminal.sha256), terminal.bytes, hooks);
+		writeImmutable(blobPath(storePath, outcome.sha256), outcome.bytes, hooks);
+		const detailSegments = [...(previous?.detailSegments ?? [])];
+		let priorDetails: unknown[] = [];
+		if (previous) {
+			priorDetails = previous.detailSegments.flatMap((segment) => readSegment(storePath, worker.id, segment, false));
+		}
+		const hasPriorPrefix = priorDetails.every(
+			(entry, index) => JSON.stringify(worker.log[index]) === JSON.stringify(entry),
+		);
+		const newEntries = hasPriorPrefix ? worker.log.slice(priorDetails.length) : worker.log;
+		if (newEntries.length > 0) {
+			detailSegments.push(writeSegment(storePath, worker.id, detailSegments.length, newEntries, false, hooks));
+		}
+		let terminalDetailSegments = [...(previous?.terminalDetailSegments ?? [])];
+		if (terminalDetailSegments.length === 0 && isTerminalWorkerState(worker.state) && worker.log.length > 0) {
+			terminalDetailSegments = [writeSegment(storePath, worker.id, 0, worker.log, true, hooks, true)];
+		}
+		workers.push({
+			id: worker.id,
+			active: { kind: "active", sha256: active.sha256 },
+			terminal: { kind: "terminal", sha256: terminal.sha256 },
+			outcome: { kind: "outcome", sha256: outcome.sha256 },
+			detailSegments,
+			terminalDetailSegments,
+		});
+	}
+	const unsigned = { formatVersion: 6 as const, id: validated.id, state: state.sha256, workers };
+	const manifest = { ...unsigned, checksum: hash(canonical(unsigned)) };
+	publishManifest(storePath, manifest, hooks);
+	return manifest;
+}
+
+function isTerminalWorkerState(state: CheckpointWorker["state"]): boolean {
+	return state === "done" || state === "failed" || state === "killed" || state === "interrupted";
+}
+
 function manifestExists(storePath: string): boolean {
 	try {
 		statSync(manifestPath(storePath));
@@ -476,28 +556,91 @@ function manifestExists(storePath: string): boolean {
 	}
 }
 
-export function readV6Checkpoint(storePath: string): V6ReadResult {
+export function readV6Manifest(storePath: string, counters?: V6ReadCounters): V6Manifest {
 	let manifestBytes: Buffer;
 	try {
 		manifestBytes = readFileSync(manifestPath(storePath));
 	} catch {
 		throw new CheckpointStoreError(`No published v6 manifest at ${storePath}.`);
 	}
-	const manifest = validateV6Manifest(parseJson(manifestBytes, manifestPath(storePath)));
-	const state = readArtifact(storePath, manifest.state);
-	const stateObject = object(state, "state blob");
+	if (counters) counters.manifestReads = (counters.manifestReads ?? 0) + 1;
+	return validateV6Manifest(parseJson(manifestBytes, manifestPath(storePath)));
+}
+
+function readV6StateBlob(storePath: string, manifest: V6Manifest, counters?: V6ReadCounters): Record<string, unknown> {
+	if (counters) counters.stateReads = (counters.stateReads ?? 0) + 1;
+	return object(readArtifact(storePath, manifest.state, counters), "state blob");
+}
+
+function buildV6Checkpoint(stateObject: Record<string, unknown>, workers: CheckpointWorker[]): SessionCheckpoint {
+	return { ...stateObject, workers, schemaVersion: 5 } as unknown as SessionCheckpoint;
+}
+
+/** Read only the state and summary blobs. Detail segments and outcomes stay lazy. */
+export function readV6CheckpointMetadata(
+	storePath: string,
+	counters?: V6ReadCounters,
+): { checkpoint: SessionCheckpoint; manifest: V6Manifest } {
+	const manifest = readV6Manifest(storePath, counters);
+	const stateObject = readV6StateBlob(storePath, manifest, counters);
+	const workers: CheckpointWorker[] = [];
+	for (const reference of manifest.workers) {
+		const active = readBlob(storePath, reference.active, "active", reference.id, counters);
+		const terminal = readBlob(storePath, reference.terminal, "terminal", reference.id, counters);
+		workers.push({
+			...(active as unknown as CheckpointWorker),
+			...(terminal as unknown as Partial<CheckpointWorker>),
+			log: [],
+			logFirstIndex: typeof active.logFirstIndex === "number" ? active.logFirstIndex : 0,
+			logCursor: typeof active.logCursor === "number" ? active.logCursor : 0,
+		});
+	}
+	const checkpoint = buildV6Checkpoint(stateObject, workers);
+	try {
+		const validated = validateCheckpoint(checkpoint);
+		if (validated.id !== manifest.id)
+			throw new CheckpointStoreError("Manifest id does not match the referenced state blob.");
+		return { checkpoint: validated, manifest };
+	} catch (error) {
+		throw new CheckpointStoreError(
+			`Corrupt v6 reconstructed checkpoint: ${error instanceof Error ? error.message : String(error)}.`,
+		);
+	}
+}
+
+export function readV6WorkerOutcome(
+	storePath: string,
+	reference: V6WorkerRef,
+	counters?: V6ReadCounters,
+): Record<string, unknown> {
+	return readBlob(storePath, reference.outcome, "outcome", reference.id, counters);
+}
+
+export function readV6WorkerDetails(
+	storePath: string,
+	reference: V6WorkerRef,
+	counters?: V6ReadCounters,
+	terminal = true,
+): unknown[] {
+	const segments = terminal ? reference.terminalDetailSegments : reference.detailSegments;
+	return segments.flatMap((segment) => readSegment(storePath, reference.id, segment, terminal, counters));
+}
+
+export function readV6Checkpoint(storePath: string, counters?: V6ReadCounters): V6ReadResult {
+	const manifest = readV6Manifest(storePath, counters);
+	const stateObject = readV6StateBlob(storePath, manifest, counters);
 	const workers: CheckpointWorker[] = [];
 	const warnings: V6ReadWarning[] = [];
 	for (const reference of manifest.workers) {
-		const active = readBlob(storePath, reference.active, "active", reference.id);
-		const terminal = readBlob(storePath, reference.terminal, "terminal", reference.id);
-		const outcome = readBlob(storePath, reference.outcome, "outcome", reference.id);
+		const active = readBlob(storePath, reference.active, "active", reference.id, counters);
+		const terminal = readBlob(storePath, reference.terminal, "terminal", reference.id, counters);
+		const outcome = readBlob(storePath, reference.outcome, "outcome", reference.id, counters);
 		const details = reference.detailSegments.flatMap((segment) =>
-			readSegment(storePath, reference.id, segment, false),
+			readSegment(storePath, reference.id, segment, false, counters),
 		);
 		for (const segment of reference.terminalDetailSegments) {
 			try {
-				readSegment(storePath, reference.id, segment, true);
+				readSegment(storePath, reference.id, segment, true, counters);
 			} catch (error) {
 				if (!segment.optional) throw error;
 				warnings.push({
@@ -516,7 +659,7 @@ export function readV6Checkpoint(storePath: string): V6ReadResult {
 			logCursor: typeof active.logCursor === "number" ? active.logCursor : details.length,
 		});
 	}
-	const checkpoint = { ...stateObject, workers, schemaVersion: 5 } as unknown as SessionCheckpoint;
+	const checkpoint = buildV6Checkpoint(stateObject, workers);
 	try {
 		const validated = validateCheckpoint(checkpoint);
 		if (validated.id !== manifest.id)
@@ -597,6 +740,26 @@ function copyTreeWithoutManifest(source: string, destination: string, hooks: V6F
 
 export const stageV5ToV6 = migrateV5ToV6;
 
+/** v6 is authoritative as soon as its manifest exists; a corrupt v6 never falls back. */
+export function readAuthoritativeCheckpoint(id: string, agentDir: string): SessionCheckpoint {
+	const storePath = v6CheckpointStorePath(id, agentDir);
+	if (existsSync(manifestPath(storePath))) return readV6Checkpoint(storePath).checkpoint;
+	return readCheckpoint(id, agentDir);
+}
+
+/** Open legacy checkpoints by publishing a v6 copy, leaving the original JSON untouched. */
+export function openCheckpointForHydration(id: string, agentDir: string): HydratableCheckpoint {
+	const storePath = v6CheckpointStorePath(id, agentDir);
+	if (!manifestExists(storePath)) migrateV5ToV6(id, agentDir, storePath);
+	const checkpoint = readV6CheckpointMetadata(storePath).checkpoint;
+	if (checkpoint.liveLease && isSessionLeaseAlive(checkpoint.liveLease, agentDir)) {
+		throw new CheckpointStoreError(
+			`Checkpoint "${id}" is still owned by live manager ${checkpoint.liveLease.managerId}; refusing unsafe hydration.`,
+		);
+	}
+	return checkpoint as HydratableCheckpoint;
+}
+
 export class CheckpointStore {
 	readonly storePath: string;
 	readonly hooks: V6FaultHooks | undefined;
@@ -606,6 +769,9 @@ export class CheckpointStore {
 	}
 	write(checkpoint: SessionCheckpoint): V6Manifest {
 		return writeV6Checkpoint(checkpoint, this.storePath, this.hooks);
+	}
+	update(checkpoint: SessionCheckpoint): V6Manifest {
+		return writeV6CheckpointUpdate(checkpoint, this.storePath, this.hooks);
 	}
 	read(): V6ReadResult {
 		return readV6Checkpoint(this.storePath);

@@ -20,7 +20,8 @@ import { sanitizeInheritedEnv } from "./acp/connection.ts";
 import { adapterFor } from "./adapters/index.ts";
 import type { LeaderLaunch } from "./adapters/types.ts";
 import { createChannelAddress } from "./channel/protocol.ts";
-import { emptySessionCheckpoint, ensureLeaderSessionDir, readCheckpoint, writeCheckpointAtomic } from "./checkpoint.ts";
+import { emptySessionCheckpoint, ensureLeaderSessionDir } from "./checkpoint.ts";
+import { openCheckpointForHydration, writeV6Checkpoint } from "./checkpoint-store.ts";
 import { resolveSelfInvocation } from "./cli-shim.ts";
 import { APP_NAME, getAgentDir, VERSION } from "./config.ts";
 import { type DetectedLeaderBackend, detectLeaderBackends, LEADER_BACKENDS } from "./detect.ts";
@@ -238,7 +239,7 @@ export async function launchLeader(options: LaunchOptions): Promise<number> {
 		// carrying on here would hand the user a session that looks normal and can
 		// never be resumed, which is the exact failure this is here to prevent.
 		try {
-			writeCheckpointAtomic(
+			writeV6Checkpoint(
 				emptySessionCheckpoint({
 					id: logicalSessionId,
 					canonicalCwd: cwd,
@@ -246,7 +247,7 @@ export async function launchLeader(options: LaunchOptions): Promise<number> {
 					leaderVendorConversationId: leaderConversationId,
 					sessionTiers,
 				}),
-				agentDir,
+				join(agentDir, "checkpoints-v6", logicalSessionId),
 			);
 		} catch (error) {
 			throw new LaunchError(
@@ -283,7 +284,7 @@ export async function launchLeader(options: LaunchOptions): Promise<number> {
 export async function resumeLeader(options: ResumeOptions): Promise<number> {
 	const agentDir = options.agentDir ?? getAgentDir();
 	const write = options.write ?? ((line: string) => process.stderr.write(`${line}\n`));
-	const checkpoint = readCheckpoint(options.checkpointId, agentDir);
+	const checkpoint = openCheckpointForHydration(options.checkpointId, agentDir);
 	const cwd = requireCheckpointCwd(checkpoint);
 
 	// Two claims, because they answer different questions: the checkpoint claim

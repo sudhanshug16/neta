@@ -30,6 +30,13 @@ import {
 	newCheckpointBase,
 	type SessionCheckpoint,
 } from "../checkpoint.ts";
+import {
+	readV6Manifest,
+	readV6WorkerDetails,
+	readV6WorkerOutcome,
+	type V6ReadCounters,
+	type V6WorkerRef,
+} from "../checkpoint-store.ts";
 import { APP_NAME } from "../config.ts";
 import { loadRoleText, roleNames, workingAgreement } from "../prompts/roles.ts";
 import { canonicalizeCwd } from "../session.ts";
@@ -233,6 +240,8 @@ interface WorkerRecord {
 	revivalFromState?: "blocked" | "done" | "failed";
 	revivalPreviousQueuedBehind?: string;
 	reviving?: Promise<SteerResult>;
+	/** Set after the terminal outcome has been loaded from the v6 store. */
+	terminalOutcomeLoaded?: boolean;
 }
 
 /** Opens a pane per worker, when a multiplexer is running. */
@@ -311,6 +320,9 @@ export interface WorkerManagerOptions {
 		writer: CheckpointWriter;
 		createdAt?: number;
 	};
+	/** v6 store location and optional test-only read instrumentation. */
+	checkpointStorePath?: string;
+	checkpointReadCounters?: V6ReadCounters;
 }
 
 async function gitDirtyFiles(cwd: string): Promise<string[]> {
@@ -401,6 +413,7 @@ export class WorkerManager implements ChannelHandler {
 	/** Tiers this session may staff, in canonical order. Fixed for the session's life. */
 	private readonly tiers: Tier[];
 	private goal: SessionGoal | undefined;
+	private readonly terminalRefs = new Map<string, V6WorkerRef>();
 
 	constructor(options: WorkerManagerOptions) {
 		this.options = options;
@@ -438,6 +451,10 @@ export class WorkerManager implements ChannelHandler {
 					}
 				: undefined,
 		});
+		if (options.checkpointStorePath) {
+			const manifest = readV6Manifest(options.checkpointStorePath, options.checkpointReadCounters);
+			for (const reference of manifest.workers) manager.terminalRefs.set(reference.id, reference);
+		}
 		manager.goal = cloneGoal(checkpoint.goal);
 		manager.counter = checkpoint.counter;
 		manager.noteCounter = checkpoint.noteCounter;
@@ -508,6 +525,7 @@ export class WorkerManager implements ChannelHandler {
 				headlessReason: worker.headlessReason,
 				revivalCount: worker.revivalCount ?? 0,
 				nativeAttached: worker.nativeAttached,
+				terminalOutcomeLoaded: !options.checkpointStorePath || !isTerminalState(worker.state),
 			});
 			if (wasActive) {
 				const link = worker.noteId
@@ -1453,7 +1471,42 @@ export class WorkerManager implements ChannelHandler {
 	}
 
 	get(workerId: string): WorkerSummary {
-		return this.summarize(this.require(workerId));
+		const record = this.require(workerId);
+		this.loadTerminalOutcome(record);
+		return this.summarize(record);
+	}
+
+	private loadTerminalOutcome(record: WorkerRecord): void {
+		if (!isTerminalState(record.state) || record.terminalOutcomeLoaded) return;
+		record.terminalOutcomeLoaded = true;
+		const reference = this.terminalRefs.get(record.id);
+		if (!reference || !this.options.checkpointStorePath) return;
+		const outcome = readV6WorkerOutcome(
+			this.options.checkpointStorePath,
+			reference,
+			this.options.checkpointReadCounters,
+		);
+		if (typeof outcome.finalResult === "string") record.result = outcome.finalResult;
+		if (typeof outcome.substantiveResponse === "string") record.substantiveResponse = outcome.substantiveResponse;
+		if (typeof outcome.lastResponse === "string") record.lastResponse = outcome.lastResponse;
+		if (typeof outcome.laterFailure === "string") record.laterFailure = outcome.laterFailure;
+	}
+
+	private loadTerminalDetails(record: WorkerRecord): WorkerLogEntry[] {
+		const reference = this.terminalRefs.get(record.id);
+		if (!reference || !this.options.checkpointStorePath) return [];
+		try {
+			const terminal = reference.terminalDetailSegments.length > 0;
+			return readV6WorkerDetails(
+				this.options.checkpointStorePath,
+				reference,
+				this.options.checkpointReadCounters,
+				terminal,
+			) as WorkerLogEntry[];
+		} catch {
+			// Terminal detail is optional by contract; summary/result remain usable.
+			return [];
+		}
 	}
 
 	/** Open a fresh native backend TUI without changing any worker lifecycle state. */
@@ -1660,10 +1713,12 @@ export class WorkerManager implements ChannelHandler {
 	 */
 	inspect(workerId: string, options: { maxEntries?: number; maxChars?: number } = {}): WorkerInspection {
 		const record = this.require(workerId);
+		this.loadTerminalOutcome(record);
 		const maxEntries = Math.max(1, Math.min(options.maxEntries ?? INSPECT_MAX_ENTRIES, INSPECT_MAX_ENTRIES));
 		const maxChars = Math.max(80, Math.min(options.maxChars ?? INSPECT_MAX_CHARS, INSPECT_MAX_CHARS));
 
-		const all = record.log;
+		const all =
+			isTerminalState(record.state) && record.log.length === 0 ? this.loadTerminalDetails(record) : record.log;
 		const shown = all.slice(Math.max(0, all.length - maxEntries));
 		// Trimmed history counts too: a worker whose oldest lines have already
 		// aged out of the retained log has more missing than this slice dropped.
@@ -1751,13 +1806,19 @@ export class WorkerManager implements ChannelHandler {
 			wokeBy?: WorkerRecord,
 			roomActivity?: WaitResult["roomActivity"],
 			discovery?: GoalDiscovery,
-		): WaitResult => ({
-			reason,
-			workers: records.map((record) => this.summarize(record)),
-			wokeBy: wokeBy ? this.summarize(wokeBy) : undefined,
-			roomActivity,
-			discovery,
-		});
+		): WaitResult => {
+			for (const record of records) {
+				if (isTerminalState(record.state)) this.loadTerminalOutcome(record);
+			}
+			if (wokeBy && isTerminalState(wokeBy.state)) this.loadTerminalOutcome(wokeBy);
+			return {
+				reason,
+				workers: records.map((record) => this.summarize(record)),
+				wokeBy: wokeBy ? this.summarize(wokeBy) : undefined,
+				roomActivity,
+				discovery,
+			};
+		};
 
 		const evaluate = (): WaitResult | undefined => {
 			const discoveryWorker = records.find(
@@ -2583,6 +2644,23 @@ export class WorkerManager implements ChannelHandler {
 			// A preserved report ends "done"; the thing that went wrong after it
 			// still has to be visible in the log, not only on the summary.
 			if (options.failure && state === "done") this.appendLog(record, "error", options.failure);
+			// Terminal publication is the linearization point: the complete result and
+			// its immutable detail segment must be durable before any event wakes wait.
+			record.terminalOutcomeLoaded = true;
+			await this.flushCheckpoint();
+			const persistenceError = this.options.checkpoint?.writer.lastError;
+			if (persistenceError) {
+				throw new Error(`Terminal result for ${record.id} was not durably published: ${persistenceError.message}`);
+			}
+			if (this.options.checkpointStorePath) {
+				const published = readV6Manifest(this.options.checkpointStorePath, this.options.checkpointReadCounters);
+				const publishedRef = published.workers.find((candidate) => candidate.id === record.id);
+				if (publishedRef) this.terminalRefs.set(record.id, publishedRef);
+				const retained = record.log.length;
+				record.log = [];
+				record.logFirstIndex += retained;
+				record.logCursor = record.logFirstIndex;
+			}
 
 			if (state === "done") {
 				this.options.onEvent({

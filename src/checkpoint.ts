@@ -15,6 +15,12 @@ import {
 	writeSync,
 } from "node:fs";
 import { join } from "node:path";
+import {
+	readV6Checkpoint,
+	v6CheckpointStorePath,
+	v6ManifestPath,
+	writeV6CheckpointUpdate,
+} from "./checkpoint-store.ts";
 import { VERSION } from "./config.ts";
 import { isSessionLeaseAlive } from "./session.ts";
 import {
@@ -585,6 +591,8 @@ export function validateCheckpoint(value: unknown): SessionCheckpoint {
 }
 
 export function readCheckpoint(id: string, agentDir: string): SessionCheckpoint {
+	const v6Path = v6CheckpointStorePath(id, agentDir);
+	if (existsSync(v6ManifestPath(v6Path))) return readV6Checkpoint(v6Path).checkpoint;
 	const path = checkpointPath(id, agentDir);
 	let parsed: unknown;
 	try {
@@ -639,6 +647,11 @@ export function readCheckpointForHydration(id: string, agentDir: string): Hydrat
 
 export function writeCheckpointAtomic(input: SessionCheckpoint, agentDir: string): string {
 	const checkpoint = validateCheckpoint(input);
+	const v6Path = v6CheckpointStorePath(checkpoint.id, agentDir);
+	if (existsSync(v6ManifestPath(v6Path))) {
+		writeV6CheckpointUpdate(checkpoint, v6Path);
+		return v6ManifestPath(v6Path);
+	}
 	const dir = checkpointDir(agentDir);
 	mkdirSync(dir, { recursive: true, mode: 0o700 });
 	chmodSync(dir, 0o700);
@@ -765,15 +778,18 @@ export class CheckpointWriter {
 	private readonly agentDir: string;
 	private readonly report: (message: string) => void;
 	private readonly timers: CheckpointWriterTimers;
+	private readonly format: "legacy" | "v6";
 
 	constructor(
 		agentDir: string,
 		report: (message: string) => void = (message) => console.error(`[neta] ${message}`),
 		timers: CheckpointWriterTimers = REAL_CHECKPOINT_TIMERS,
+		format: "legacy" | "v6" = "legacy",
 	) {
 		this.agentDir = agentDir;
 		this.report = report;
 		this.timers = timers;
+		this.format = format;
 	}
 
 	schedule(checkpoint: SessionCheckpoint): void {
@@ -827,7 +843,9 @@ export class CheckpointWriter {
 						const checkpoint = immediate ?? deferred?.();
 						if (!checkpoint) continue;
 						this.writeCount += 1;
-						writeCheckpointAtomic(checkpoint, this.agentDir);
+						if (this.format === "v6")
+							writeV6CheckpointUpdate(checkpoint, v6CheckpointStorePath(checkpoint.id, this.agentDir));
+						else writeCheckpointAtomic(checkpoint, this.agentDir);
 						this.lastError = undefined;
 					} catch (error) {
 						this.lastError = error instanceof Error ? error : new Error(String(error));
@@ -875,7 +893,9 @@ export class CheckpointWriter {
 		this.pendingDeferred = undefined;
 		this.pendingDeferredId = undefined;
 		await this.writing;
-		writeCheckpointAtomic(checkpoint, this.agentDir);
+		if (this.format === "v6")
+			writeV6CheckpointUpdate(checkpoint, v6CheckpointStorePath(checkpoint.id, this.agentDir));
+		else writeCheckpointAtomic(checkpoint, this.agentDir);
 		this.lastError = undefined;
 	}
 }
