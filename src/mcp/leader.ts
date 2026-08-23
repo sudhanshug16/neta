@@ -7,6 +7,7 @@ import {
 	formatNotePreview,
 	formatOpenNotesLines,
 	formatSteerResult,
+	formatWorkerDuration,
 	formatWorkerSummary,
 } from "../orchestrator/status.ts";
 import { roleNames } from "../prompts/roles.ts";
@@ -439,7 +440,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 				const assignments = results.map((result) => {
 					if ("failure" in result) return result.failure;
 					const summary = result.summary;
-					return `${summary.id}: ${summary.role}/${summary.tier} -> ${summary.backend} (${summary.writer ? "writer" : "read-only"}, ${summary.state})${summary.state === "queued" ? " — Queued" : ""}${startupFailures.has(summary.id) ? `\n  Startup failure: ${startupFailures.get(summary.id)}` : ""}${summary.headlessReason ? `\n  Worker view: headless — ${summary.headlessReason}` : ""}`;
+					return `${summary.id}: ${summary.role}/${summary.tier} -> ${summary.backend} (${summary.writer ? "writer" : "read-only"}, ${summary.state}) | ${formatWorkerDuration(summary)}${summary.state === "queued" ? " — Queued" : ""}${startupFailures.has(summary.id) ? `\n  Startup failure: ${startupFailures.get(summary.id)}` : ""}${summary.headlessReason ? `\n  Worker view: headless — ${summary.headlessReason}` : ""}`;
 				});
 				return text(
 					`${team ? `Team "${team}"\n` : ""}${assignments.join("\n")}\nCollect with neta_wait before ending your turn.`,

@@ -33,6 +33,32 @@ function omittedLine(omitted: number, noun: string): string | undefined {
 	return omitted > 0 ? `  ... ${omitted} ${noun} omitted` : undefined;
 }
 
+function formatDuration(milliseconds: number): string {
+	const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+	const days = Math.floor(seconds / 86_400);
+	const hours = Math.floor((seconds % 86_400) / 3_600);
+	const minutes = Math.floor((seconds % 3_600) / 60);
+	const remainder = seconds % 60;
+	const parts = [
+		days > 0 ? `${days}d` : undefined,
+		hours > 0 ? `${hours}h` : undefined,
+		minutes > 0 ? `${minutes}m` : undefined,
+		remainder > 0 || seconds === 0 ? `${remainder}s` : undefined,
+	].filter((part): part is string => part !== undefined);
+	return parts.join(" ");
+}
+
+/** Shared compact timing suffix for every leader-facing worker row. */
+export function formatWorkerDuration(summary: WorkerSummary, now = Date.now()): string {
+	const active =
+		(summary.activeMs ?? 0) +
+		(summary.activeStartedAt === undefined ? 0 : Math.max(0, now - summary.activeStartedAt));
+	const queued =
+		(summary.queuedMs ?? 0) +
+		(summary.queuedStartedAt === undefined ? 0 : Math.max(0, now - summary.queuedStartedAt));
+	return `active ${formatDuration(active)}${queued > 0 ? ` | queued ${formatDuration(queued)}` : ""}`;
+}
+
 /** The most recent `neta progress` as a "last:" line, or undefined before any progress. */
 export function formatLastProgress(summary: WorkerSummary): string | undefined {
 	if (!summary.lastProgress) return undefined;
@@ -80,9 +106,9 @@ export function statusHint(summary: Pick<WorkerSummary, "id" | "state" | "laterF
  * complete is worse than no dump: a reader concludes the worker did nothing
  * between the lines that are missing.
  */
-export function formatInspection(inspection: WorkerInspection): string[] {
+export function formatInspection(inspection: WorkerInspection, now = Date.now()): string[] {
 	const { worker } = inspection;
-	const lines = [`${formatWorkerSummary(worker)}`];
+	const lines = [`${formatWorkerSummary(worker, now)}`];
 	if (inspection.headlessReason) {
 		lines.push(`Worker view: headless — ${inspection.headlessReason}; inspection still works without a tab.`);
 	}
@@ -118,7 +144,7 @@ export function formatInspection(inspection: WorkerInspection): string[] {
 	return [marker, newest];
 }
 
-export function formatWorkerSummary(summary: WorkerSummary): string {
+export function formatWorkerSummary(summary: WorkerSummary, now = Date.now()): string {
 	const name = clipDisplay(summary.name);
 	const role = clipDisplay(summary.role);
 	const named = name === role ? summary.id : `${summary.id} "${name}"`;
@@ -132,6 +158,7 @@ export function formatWorkerSummary(summary: WorkerSummary): string {
 	if (usage) parts.push(clipDisplay(usage));
 	if (summary.pendingQuestion) parts.push(`asking: ${clipDisplay(summary.pendingQuestion)}`);
 	if (summary.promptBlockedReason) parts.push(`steering blocked: ${clipDisplay(summary.promptBlockedReason)}`);
+	parts.push(formatWorkerDuration(summary, now));
 	return [
 		parts.join(" | "),
 		...(summary.laterFailure ? [`After its report: ${clipDisplay(summary.laterFailure)}`] : []),
@@ -224,14 +251,14 @@ function formatGoal(goal: SessionGoal | undefined): string[] {
 
 /** One status section, with an action hint only where it is useful. */
 
-function section(label: string, workers: WorkerSummary[]): string[] {
+function section(label: string, workers: WorkerSummary[], now: number): string[] {
 	return [
 		label,
 		...(workers.length === 0
 			? ["  (none)"]
 			: workers.flatMap((worker) => {
 					const lastProgress = formatLastProgress(worker);
-					const line = `  ${formatWorkerSummary(worker)}`;
+					const line = `  ${formatWorkerSummary(worker, now)}`;
 					const hint = statusHint(worker);
 					return [...(lastProgress ? [line, `    ${lastProgress}`] : [line]), ...(hint ? [`    ${hint}`] : [])];
 				})),
@@ -239,7 +266,7 @@ function section(label: string, workers: WorkerSummary[]): string[] {
 	];
 }
 
-function terminalSection(workers: WorkerSummary[]): string[] {
+function terminalSection(workers: WorkerSummary[], now: number): string[] {
 	const states = ["blocked", "failed", "interrupted", "done", "killed"] as const;
 	const counts = states.map((state) => `${state}=${workers.filter((worker) => worker.state === state).length}`);
 	const diagnostic = workers.filter((worker) => worker.state === "blocked" || worker.laterFailure);
@@ -249,7 +276,7 @@ function terminalSection(workers: WorkerSummary[]): string[] {
 		...(diagnostic.length === 0
 			? ["  (no diagnostic rows; ordinary done/killed rows omitted)"]
 			: diagnostic.flatMap((worker) => {
-					const line = `  ${formatWorkerSummary(worker)}`;
+					const line = `  ${formatWorkerSummary(worker, now)}`;
 					const hint = statusHint(worker);
 					return [line, ...(hint ? [`    ${hint}`] : [])];
 				})),
@@ -281,10 +308,10 @@ export function formatWriterActivityNotice(
 	return lines.join("\n");
 }
 
-function formatWriter(summary: WorkerSummary): string {
+function formatWriter(summary: WorkerSummary, now = Date.now()): string {
 	const name = clipDisplay(summary.name);
 	const displayName = name === clipDisplay(summary.role) ? name : `"${name}"`;
-	return `${summary.id} ${displayName} | ${formatWriterObjective(summary)}`;
+	return `${summary.id} ${displayName} | ${formatWriterObjective(summary)} | ${formatWorkerDuration(summary, now)}`;
 }
 
 /** Context prepended to a read-only task while writers may change the checkout. */
@@ -304,7 +331,7 @@ export function formatWriterContext(active: WorkerSummary | undefined, queued: W
 }
 
 /** Render only writers for workers that need to inspect concurrent write work. */
-export function formatWriterStatus(snapshot: WorkerStatusSnapshot): string {
+export function formatWriterStatus(snapshot: WorkerStatusSnapshot, now = Date.now()): string {
 	const active = [...snapshot.workers.running, ...snapshot.workers.waiting].filter((worker) => worker.writer);
 	const finished = snapshot.workers.terminal.filter((worker) => worker.writer);
 	const queued = snapshot.writerQueue.filter((worker) => worker.writer);
@@ -322,7 +349,7 @@ export function formatWriterStatus(snapshot: WorkerStatusSnapshot): string {
 	);
 	const writerSection = (label: string, writers: WorkerSummary[]): string[] => [
 		label,
-		...(writers.length === 0 ? ["  (none)"] : writers.map((writer) => `  ${formatWriter(writer)}`)),
+		...(writers.length === 0 ? ["  (none)"] : writers.map((writer) => `  ${formatWriter(writer, now)}`)),
 	];
 	const counts = ["blocked", "failed", "interrupted", "done", "killed"].map(
 		(state) => `${state}=${finished.filter((writer) => writer.state === state).length}`,
@@ -341,15 +368,15 @@ export function formatWriterStatus(snapshot: WorkerStatusSnapshot): string {
 }
 
 /** Render a full status snapshot for either Neta control-plane door. */
-export function formatStatusSnapshot(snapshot: WorkerStatusSnapshot): string {
+export function formatStatusSnapshot(snapshot: WorkerStatusSnapshot, now = Date.now()): string {
 	return [
 		"Neta status",
-		...section("Writer slot:", snapshot.writerSlot ? [snapshot.writerSlot] : []),
-		...section("Writer queue:", snapshot.writerQueue),
-		...section("Running:", snapshot.workers.running),
-		...section("Queued:", snapshot.workers.queued),
-		...section("Waiting (legacy active state):", snapshot.workers.waiting),
-		...terminalSection(snapshot.workers.terminal),
+		...section("Writer slot:", snapshot.writerSlot ? [snapshot.writerSlot] : [], now),
+		...section("Writer queue:", snapshot.writerQueue, now),
+		...section("Running:", snapshot.workers.running, now),
+		...section("Queued:", snapshot.workers.queued, now),
+		...section("Waiting (legacy active state):", snapshot.workers.waiting, now),
+		...terminalSection(snapshot.workers.terminal, now),
 		...formatGoal(snapshot.goal),
 		...formatAllOpenNotesLines(snapshot.openNotes),
 	].join("\n");

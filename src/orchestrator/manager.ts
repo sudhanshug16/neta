@@ -74,6 +74,7 @@ import {
 	formatLastProgress,
 	formatStatusSnapshot,
 	formatSteerResult,
+	formatWorkerDuration,
 	formatWriterActivityNotice,
 	formatWriterContext,
 	formatWriterStatus,
@@ -247,6 +248,14 @@ interface WorkerRecord {
 	terminalOutcomeLoaded?: boolean;
 	/** Bounded public summary retained after immutable terminal artifacts publish. */
 	terminalSummary?: TerminalHotSummary;
+	/** Cumulative wall time admitted to run, excluding writer queue delay. */
+	activeMs: number;
+	/** Cumulative wall time spent in the writer queue. */
+	queuedMs: number;
+	/** Start of the current active interval. */
+	activeStartedAt?: number;
+	/** Start of the current writer-queue interval. */
+	queuedStartedAt?: number;
 }
 
 /** Opens a pane per worker, when a multiplexer is running. */
@@ -328,6 +337,8 @@ export interface WorkerManagerOptions {
 	/** v6 store location and optional test-only read instrumentation. */
 	checkpointStorePath?: string;
 	checkpointReadCounters?: V6ReadCounters;
+	/** Test seam for deterministic worker elapsed-time accounting. */
+	now?: () => number;
 }
 
 async function gitDirtyFiles(cwd: string): Promise<string[]> {
@@ -386,6 +397,10 @@ interface TerminalHotSummary {
 	state: WorkerState;
 	startedAt: number;
 	endedAt?: number;
+	activeMs?: number;
+	queuedMs?: number;
+	activeStartedAt?: number;
+	queuedStartedAt?: number;
 	stateBeforeStop?: ActiveWorkerState;
 }
 
@@ -409,6 +424,10 @@ function terminalHotSummary(input: {
 	state: WorkerState;
 	startedAt: number;
 	endedAt?: number;
+	activeMs?: number;
+	queuedMs?: number;
+	activeStartedAt?: number;
+	queuedStartedAt?: number;
 	stateBeforeStop?: ActiveWorkerState;
 }): TerminalHotSummary {
 	return {
@@ -429,6 +448,10 @@ function terminalHotSummary(input: {
 		state: input.state,
 		startedAt: input.startedAt,
 		endedAt: input.endedAt,
+		activeMs: input.activeMs,
+		queuedMs: input.queuedMs,
+		activeStartedAt: input.activeStartedAt,
+		queuedStartedAt: input.queuedStartedAt,
 		stateBeforeStop: input.stateBeforeStop,
 	};
 }
@@ -447,6 +470,7 @@ function gitHead(cwd: string): string | undefined {
 
 export class WorkerManager implements ChannelHandler {
 	private options: WorkerManagerOptions;
+	private readonly clock: () => number;
 	private readonly workers = new Map<string, WorkerRecord>();
 	private readonly rooms = new Map<string, RoomPost[]>();
 	private readonly createTransport: TransportFactory;
@@ -492,10 +516,15 @@ export class WorkerManager implements ChannelHandler {
 			throw new Error("A Neta session must be able to staff at least one worker tier.");
 		}
 		this.leaderToken = options.leaderToken ?? randomBytes(16).toString("hex");
+		this.clock = options.now ?? Date.now;
 		this.createTransport =
 			options.createTransport ?? ((transportOptions) => new AcpWorkerTransport(transportOptions));
-		this.checkpointCreatedAt = options.checkpoint?.createdAt ?? Date.now();
+		this.checkpointCreatedAt = options.checkpoint?.createdAt ?? this.now();
 		this.checkpointCwd = options.checkpoint ? canonicalizeCwd(options.cwd) : options.cwd;
+	}
+
+	private now(): number {
+		return this.clock();
 	}
 
 	/** Build an inert manager from safe semantic state. No transports, prompts, panes or scratch directories are created. */
@@ -545,11 +574,27 @@ export class WorkerManager implements ChannelHandler {
 				room.name,
 				room.posts.map((post) => ({ ...post })),
 			);
-		const recoveredAt = Date.now();
+		const recoveredAt = manager.now();
 		for (const worker of checkpoint.workers) {
 			const wasActive = !isTerminalState(worker.state);
 			const state = wasActive ? "interrupted" : worker.state;
 			const stateBeforeStop = wasActive ? (worker.state as ActiveWorkerState) : worker.stateBeforeStop;
+			const timing = {
+				activeMs: worker.activeMs ?? 0,
+				queuedMs: worker.queuedMs ?? 0,
+				activeStartedAt: worker.activeStartedAt,
+				queuedStartedAt: worker.queuedStartedAt,
+			};
+			if (wasActive) {
+				if (timing.activeStartedAt !== undefined) {
+					timing.activeMs += Math.max(0, recoveredAt - timing.activeStartedAt);
+					timing.activeStartedAt = undefined;
+				}
+				if (timing.queuedStartedAt !== undefined) {
+					timing.queuedMs += Math.max(0, recoveredAt - timing.queuedStartedAt);
+					timing.queuedStartedAt = undefined;
+				}
+			}
 			const record: WorkerRecord = {
 				id: worker.id,
 				name: worker.name,
@@ -598,6 +643,7 @@ export class WorkerManager implements ChannelHandler {
 				headlessReason: worker.headlessReason,
 				revivalCount: worker.revivalCount ?? 0,
 				nativeAttached: worker.nativeAttached,
+				...timing,
 				terminalOutcomeLoaded: !options.checkpointStorePath || !isTerminalState(worker.state),
 			};
 			if (options.checkpointStorePath && !wasActive && isTerminalState(worker.state)) {
@@ -762,6 +808,10 @@ export class WorkerManager implements ChannelHandler {
 			startedAt: record.startedAt,
 			updatedAt: record.updatedAt,
 			endedAt: record.endedAt,
+			activeMs: record.activeMs,
+			queuedMs: record.queuedMs,
+			activeStartedAt: record.activeStartedAt,
+			queuedStartedAt: record.queuedStartedAt,
 			finalResult: terminal ? undefined : record.result,
 			substantiveResponse: terminal ? undefined : record.substantiveResponse,
 			lastResponse: terminal ? undefined : record.lastResponse,
@@ -1110,6 +1160,7 @@ export class WorkerManager implements ChannelHandler {
 		}
 		const shouldQueue = writer && this.activeWriter !== id;
 		if (writer && !this.activeWriter) this.activeWriter = id;
+		const recordNow = this.now();
 
 		const systemPrompt = [
 			roleText.trim(),
@@ -1130,8 +1181,8 @@ export class WorkerManager implements ChannelHandler {
 			task: request.task,
 			cwd: this.options.cwd,
 			state: shouldQueue ? "queued" : "starting",
-			startedAt: Date.now(),
-			updatedAt: Date.now(),
+			startedAt: recordNow,
+			updatedAt: recordNow,
 			scratchDir,
 			channelToken: randomBytes(16).toString("hex"),
 			log: [],
@@ -1149,6 +1200,9 @@ export class WorkerManager implements ChannelHandler {
 			pendingBrief: [],
 			pendingBriefLeaderMessages: [],
 			revivalCount: 0,
+			activeMs: 0,
+			queuedMs: 0,
+			...(shouldQueue ? { queuedStartedAt: recordNow } : { activeStartedAt: recordNow }),
 		};
 
 		this.workers.set(id, record);
@@ -1166,7 +1220,7 @@ export class WorkerManager implements ChannelHandler {
 		// record.result and every listing showed it as the worker's output.
 		if (shouldQueue) {
 			this.writerQueue.push(id);
-			this.writerQueueHistory.push({ workerId: id, action: "queued", at: Date.now() });
+			this.writerQueueHistory.push({ workerId: id, action: "queued", at: recordNow });
 			const queuedBehind = this.activeWriter;
 			const holderInfo = queuedBehind ? this.workers.get(queuedBehind) : undefined;
 			record.queuedBehind = queuedBehind;
@@ -1394,9 +1448,12 @@ export class WorkerManager implements ChannelHandler {
 			record.revivalPreviousQueuedBehind = record.queuedBehind;
 			record.revivalMessage = message;
 			record.state = "queued";
+			record.activeStartedAt = undefined;
+			const queuedAt = this.now();
+			record.queuedStartedAt = queuedAt;
 			record.queuedBehind = this.activeWriter;
 			this.writerQueue.push(record.id);
-			this.writerQueueHistory.push({ workerId: record.id, action: "queued", at: Date.now() });
+			this.writerQueueHistory.push({ workerId: record.id, action: "queued", at: queuedAt });
 			this.appendLog(
 				record,
 				"status",
@@ -1420,6 +1477,7 @@ export class WorkerManager implements ChannelHandler {
 	}
 
 	private async resumeRecord(record: WorkerRecord, message: string): Promise<SteerResult> {
+		this.beginActive(record);
 		const priorState = record.revivalFromState ?? (record.state as "blocked" | "done" | "failed");
 		const prior = {
 			state: priorState,
@@ -1451,6 +1509,7 @@ export class WorkerManager implements ChannelHandler {
 			record.driver = this.createWorkerTransport(record, backend, runtimeEnv, systemPrompt, record.vendorSessionId);
 			await record.driver.start();
 		} catch (error) {
+			this.freezeTiming(record);
 			await record.driver?.kill().catch(() => {});
 			if (record.processGroupId !== undefined) {
 				this.options.onWorkerProcessGroup?.(record.id, undefined);
@@ -1598,7 +1657,7 @@ export class WorkerManager implements ChannelHandler {
 				const index = this.writerQueue.indexOf(workerId);
 				if (index >= 0) {
 					this.writerQueue.splice(index, 1);
-					this.writerQueueHistory.push({ workerId, action: "removed", at: Date.now() });
+					this.writerQueueHistory.push({ workerId, action: "removed", at: this.now() });
 				}
 				await this.finish(record, "killed", "Killed by the leader.");
 			} else {
@@ -1784,13 +1843,13 @@ export class WorkerManager implements ChannelHandler {
 
 	/** Render the shared status snapshot for the socket channel. */
 	status(): string {
-		return formatStatusSnapshot(this.statusSnapshot());
+		return formatStatusSnapshot(this.statusSnapshot(), this.now());
 	}
 
 	/** Writers-only status available to read-only workers through their channel. */
 	writerStatus(workerId: string): ChannelResponse {
 		this.require(workerId);
-		return { ok: true, text: formatWriterStatus(this.statusSnapshot()) };
+		return { ok: true, text: formatWriterStatus(this.statusSnapshot(), this.now()) };
 	}
 
 	/** Compact goal status available to workers without exposing goal history. */
@@ -2334,7 +2393,7 @@ export class WorkerManager implements ChannelHandler {
 				}
 				case "inspect": {
 					const inspection = this.inspect(request.workerId);
-					return { ok: true, text: formatInspection(inspection).join("\n"), data: inspection };
+					return { ok: true, text: formatInspection(inspection, this.now()).join("\n"), data: inspection };
 				}
 				case "wait": {
 					const summaries = await this.waitFor(request.workerIds, request.timeoutMs ?? 600_000);
@@ -2472,7 +2531,7 @@ export class WorkerManager implements ChannelHandler {
 				? `, ${[model ? (boundedFields ? clipChannel(model) : model) : undefined, summary.mode ? (boundedFields ? clipChannel(summary.mode) : summary.mode) : undefined].filter(Boolean).join("/")}`
 				: "";
 		const task = boundedFields ? clipChannel(summary.task) : summary.task;
-		let line = `${summary.id} [${boundedFields ? clipChannel(summary.role) : summary.role}/${summary.tier}, ${access}${room}${session}] ${summary.state} — ${task}`;
+		let line = `${summary.id} [${boundedFields ? clipChannel(summary.role) : summary.role}/${summary.tier}, ${access}${room}${session}] ${summary.state} — ${task} | ${formatWorkerDuration(summary, this.now())}`;
 		const usage = formatUsage(summary.usage, summary.modelId ?? summary.model);
 		if (usage) line += `\n  usage: ${boundedFields ? clipChannel(usage) : usage}`;
 		const lastProgress = formatLastProgress(summary);
@@ -2626,12 +2685,32 @@ export class WorkerManager implements ChannelHandler {
 
 	private setState(record: WorkerRecord, state: WorkerState): void {
 		record.state = state;
-		record.updatedAt = Date.now();
+		record.updatedAt = this.now();
 		if (record.noteId) {
 			const link = this.notes.get(record.noteId)?.workers.find((w) => w.workerId === record.id);
 			if (link) link.state = state;
 		}
 		this.checkpointChanged(record);
+	}
+
+	private beginActive(record: WorkerRecord, at = this.now()): void {
+		if (record.activeStartedAt !== undefined) return;
+		if (record.queuedStartedAt !== undefined) {
+			record.queuedMs += Math.max(0, at - record.queuedStartedAt);
+			record.queuedStartedAt = undefined;
+		}
+		record.activeStartedAt = at;
+	}
+
+	private freezeTiming(record: WorkerRecord, at = this.now()): void {
+		if (record.activeStartedAt !== undefined) {
+			record.activeMs += Math.max(0, at - record.activeStartedAt);
+			record.activeStartedAt = undefined;
+		}
+		if (record.queuedStartedAt !== undefined) {
+			record.queuedMs += Math.max(0, at - record.queuedStartedAt);
+			record.queuedStartedAt = undefined;
+		}
 	}
 
 	private enqueue(
@@ -2813,6 +2892,7 @@ export class WorkerManager implements ChannelHandler {
 			state = "killed";
 			result = record.killReason;
 		}
+		this.freezeTiming(record);
 		if (record.finishing) return record.finishing;
 		// This is the backstop during shutdown: a late ACP write is rejected while
 		// the process-group kill below is still waiting for its exit event.
@@ -2913,6 +2993,10 @@ export class WorkerManager implements ChannelHandler {
 						state,
 						startedAt: record.startedAt,
 						endedAt: record.endedAt,
+						activeMs: record.activeMs,
+						queuedMs: record.queuedMs,
+						activeStartedAt: record.activeStartedAt,
+						queuedStartedAt: record.queuedStartedAt,
 						stateBeforeStop: record.stateBeforeStop,
 					}),
 				);
@@ -2982,7 +3066,9 @@ export class WorkerManager implements ChannelHandler {
 
 		const record = this.workers.get(nextId);
 		if (!record || record.state !== "queued") return;
-		this.writerQueueHistory.push({ workerId: nextId, action: "started", at: Date.now() });
+		const dequeuedAt = this.now();
+		this.writerQueueHistory.push({ workerId: nextId, action: "started", at: dequeuedAt });
+		this.beginActive(record, dequeuedAt);
 		this.checkpointChanged(record);
 
 		this.activeWriter = nextId;
@@ -3091,6 +3177,10 @@ export class WorkerManager implements ChannelHandler {
 			task: terminal?.taskPreview ?? record.task,
 			startedAt: terminal?.startedAt ?? record.startedAt,
 			endedAt: terminal?.endedAt ?? record.endedAt,
+			activeMs: terminal?.activeMs ?? record.activeMs,
+			queuedMs: terminal?.queuedMs ?? record.queuedMs,
+			activeStartedAt: terminal?.activeStartedAt ?? record.activeStartedAt,
+			queuedStartedAt: terminal?.queuedStartedAt ?? record.queuedStartedAt,
 			stateBeforeStop: terminal?.stateBeforeStop ?? record.stateBeforeStop,
 			result: record.result ?? terminal?.resultPreview,
 			laterFailure: record.laterFailure ?? terminal?.laterFailurePreview,

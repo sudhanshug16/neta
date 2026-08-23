@@ -205,6 +205,14 @@ export interface WorkerSummary {
 	task: string;
 	startedAt: number;
 	endedAt?: number;
+	/** Cumulative wall time spent admitted to run, excluding writer queue delay. */
+	activeMs?: number;
+	/** Cumulative wall time spent waiting in the writer queue. */
+	queuedMs?: number;
+	/** Start of the current active interval, when this worker is running. */
+	activeStartedAt?: number;
+	/** Start of the current writer-queue interval, when this worker is queued. */
+	queuedStartedAt?: number;
 	/** Original nonterminal state when recovery made this worker interrupted. */
 	stateBeforeStop?: Exclude<WorkerState, "done" | "failed" | "killed" | "interrupted">;
 	/** Set once the worker reaches a terminal state. */

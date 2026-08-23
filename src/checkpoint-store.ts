@@ -71,6 +71,10 @@ export interface V6TerminalSummary {
 	state: WorkerState;
 	startedAt: number;
 	endedAt?: number;
+	activeMs?: number;
+	queuedMs?: number;
+	activeStartedAt?: number;
+	queuedStartedAt?: number;
 	stateBeforeStop?: "starting" | "running" | "waiting" | "queued";
 }
 
@@ -304,6 +308,10 @@ function validateSummary(value: unknown, path: string): V6TerminalSummary {
 			"state",
 			"startedAt",
 			"endedAt",
+			"activeMs",
+			"queuedMs",
+			"activeStartedAt",
+			"queuedStartedAt",
 			"stateBeforeStop",
 		],
 		path,
@@ -322,6 +330,13 @@ function validateSummary(value: unknown, path: string): V6TerminalSummary {
 	}
 	numberFinite(summary.startedAt, `${path}.startedAt`);
 	if (summary.endedAt !== undefined) numberFinite(summary.endedAt, `${path}.endedAt`);
+	for (const key of ["activeMs", "queuedMs", "activeStartedAt", "queuedStartedAt"] as const) {
+		if (summary[key] !== undefined) {
+			numberFinite(summary[key], `${path}.${key}`);
+			if (summary[key] < 0)
+				throw new CheckpointStoreError(`Corrupt v6 ${path}.${key}: expected a non-negative number.`);
+		}
+	}
 	if (summary.stateBeforeStop !== undefined) string(summary.stateBeforeStop, `${path}.stateBeforeStop`);
 	return summary as unknown as V6TerminalSummary;
 }
@@ -612,6 +627,10 @@ function terminalSummary(worker: CheckpointWorker): V6TerminalSummary {
 		state: worker.state,
 		startedAt: worker.startedAt,
 		endedAt: worker.endedAt,
+		activeMs: worker.activeMs,
+		queuedMs: worker.queuedMs,
+		activeStartedAt: worker.activeStartedAt,
+		queuedStartedAt: worker.queuedStartedAt,
 		stateBeforeStop: worker.stateBeforeStop,
 	};
 }
@@ -960,6 +979,10 @@ function summaryWorker(summary: V6TerminalSummary): CheckpointWorker {
 		startedAt: summary.startedAt,
 		updatedAt: summary.endedAt ?? summary.startedAt,
 		endedAt: summary.endedAt,
+		activeMs: summary.activeMs,
+		queuedMs: summary.queuedMs,
+		activeStartedAt: summary.activeStartedAt,
+		queuedStartedAt: summary.queuedStartedAt,
 		finalResult: summary.resultPreview,
 		laterFailure: summary.laterFailurePreview,
 		pendingQuestion: summary.pendingQuestionPreview,

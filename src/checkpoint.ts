@@ -86,6 +86,14 @@ export interface CheckpointWorker {
 	startedAt: number;
 	updatedAt: number;
 	endedAt?: number;
+	/** Cumulative wall time spent admitted to run, excluding writer queue delay. */
+	activeMs?: number;
+	/** Cumulative wall time spent waiting in the writer queue. */
+	queuedMs?: number;
+	/** Start of the current active interval, when this worker is running. */
+	activeStartedAt?: number;
+	/** Start of the current writer-queue interval, when this worker is queued. */
+	queuedStartedAt?: number;
 	finalResult?: string;
 	substantiveResponse?: string;
 	lastResponse?: string;
@@ -272,6 +280,10 @@ function validateWorker(value: unknown, path: string): void {
 			"startedAt",
 			"updatedAt",
 			"endedAt",
+			"activeMs",
+			"queuedMs",
+			"activeStartedAt",
+			"queuedStartedAt",
 			"finalResult",
 			"substantiveResponse",
 			"lastResponse",
@@ -312,6 +324,11 @@ function validateWorker(value: unknown, path: string): void {
 	});
 	for (const key of ["startedAt", "updatedAt", "logFirstIndex", "logCursor"]) number(worker[key], `${path}.${key}`);
 	optional(worker.endedAt, (item) => number(item, `${path}.endedAt`));
+	for (const key of ["activeMs", "queuedMs", "activeStartedAt", "queuedStartedAt"])
+		optional(worker[key], (item) => {
+			number(item, `${path}.${key}`);
+			if (item < 0) throw new CheckpointError(`Corrupt checkpoint: ${path}.${key} must not be negative.`);
+		});
 	validateLog(worker.log, `${path}.log`);
 	strings(worker.pendingBrief, `${path}.pendingBrief`);
 	for (const key of [
