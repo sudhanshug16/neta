@@ -384,10 +384,12 @@ function terminalWorker(worker: CheckpointWorker): Record<string, unknown> {
 
 function outcomeWorker(worker: CheckpointWorker): Record<string, unknown> {
 	return {
+		...(worker.task === undefined ? {} : { task: worker.task }),
 		...(worker.finalResult === undefined ? {} : { finalResult: worker.finalResult }),
 		...(worker.substantiveResponse === undefined ? {} : { substantiveResponse: worker.substantiveResponse }),
 		...(worker.lastResponse === undefined ? {} : { lastResponse: worker.lastResponse }),
 		...(worker.laterFailure === undefined ? {} : { laterFailure: worker.laterFailure }),
+		...(worker.pendingQuestion === undefined ? {} : { pendingQuestion: worker.pendingQuestion }),
 	};
 }
 
@@ -506,12 +508,21 @@ export function writeV6CheckpointUpdate(
 	const workers: V6WorkerRef[] = [];
 	for (const worker of validated.workers) {
 		const previous = prior.workers.find((candidate) => candidate.id === worker.id);
+		const clearedTerminal =
+			previous !== undefined &&
+			isTerminalWorkerState(worker.state) &&
+			worker.finalResult === undefined &&
+			worker.substantiveResponse === undefined &&
+			worker.lastResponse === undefined &&
+			worker.laterFailure === undefined &&
+			worker.pendingQuestion === undefined &&
+			worker.log.length === 0;
 		const active = artifact(activeWorker(worker));
-		const terminal = artifact(terminalWorker(worker));
-		const outcome = artifact(outcomeWorker(worker));
 		writeImmutable(blobPath(storePath, active.sha256), active.bytes, hooks);
-		writeImmutable(blobPath(storePath, terminal.sha256), terminal.bytes, hooks);
-		writeImmutable(blobPath(storePath, outcome.sha256), outcome.bytes, hooks);
+		const terminal = clearedTerminal ? undefined : artifact(terminalWorker(worker));
+		const outcome = clearedTerminal ? undefined : artifact(outcomeWorker(worker));
+		if (terminal) writeImmutable(blobPath(storePath, terminal.sha256), terminal.bytes, hooks);
+		if (outcome) writeImmutable(blobPath(storePath, outcome.sha256), outcome.bytes, hooks);
 		const detailSegments = [...(previous?.detailSegments ?? [])];
 		let priorDetails: unknown[] = [];
 		if (previous) {
@@ -531,10 +542,16 @@ export function writeV6CheckpointUpdate(
 		workers.push({
 			id: worker.id,
 			active: { kind: "active", sha256: active.sha256 },
-			terminal: { kind: "terminal", sha256: terminal.sha256 },
-			outcome: { kind: "outcome", sha256: outcome.sha256 },
+			terminal: clearedTerminal
+				? (previous as V6WorkerRef).terminal
+				: { kind: "terminal", sha256: terminal?.sha256 as string },
+			outcome: clearedTerminal
+				? (previous as V6WorkerRef).outcome
+				: { kind: "outcome", sha256: outcome?.sha256 as string },
 			detailSegments,
-			terminalDetailSegments,
+			terminalDetailSegments: clearedTerminal
+				? (previous as V6WorkerRef).terminalDetailSegments
+				: terminalDetailSegments,
 		});
 	}
 	const unsigned = { formatVersion: 6 as const, id: validated.id, state: state.sha256, workers };

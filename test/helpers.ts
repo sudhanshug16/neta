@@ -3,6 +3,7 @@
  */
 
 import { fileURLToPath } from "node:url";
+import { listCheckpoints, readCheckpoint, type SessionCheckpoint } from "../src/checkpoint.ts";
 import { NetaConfig, type NetaSettings } from "../src/settings.ts";
 
 const FAKE_ACP_AGENT = fileURLToPath(new URL("./fixtures/fake-acp-agent.mjs", import.meta.url));
@@ -58,6 +59,15 @@ export function processGone(pid: number): boolean {
 	} catch {
 		return true;
 	}
+}
+
+/** Read the checkpoint format currently authoritative for this session. */
+export function readAuthoritativeCheckpoint(agentDir: string, id: string): SessionCheckpoint {
+	return readCheckpoint(id, agentDir);
+}
+
+export function authoritativeCheckpointIds(agentDir: string): string[] {
+	return listCheckpoints(agentDir).map((entry) => entry.id);
 }
 
 /**

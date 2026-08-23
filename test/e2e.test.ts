@@ -17,6 +17,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { sendChannelRequest } from "../src/channel/client.ts";
 import type { SessionRecord } from "../src/session.ts";
+import { readAuthoritativeCheckpoint } from "./helpers.ts";
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const FAKE_AGENT = fileURLToPath(new URL("./fixtures/fake-acp-agent.mjs", import.meta.url));
@@ -168,7 +169,7 @@ describe("a leader session, end to end", () => {
 		const readerLog = bodyOf(await call("neta_log", { workerId: "ro1" }));
 		const writerLog = bodyOf(await call("neta_log", { workerId: "rw2" }));
 		const listed = bodyOf(await call("neta_workers"));
-		const checkpoint = JSON.parse(readFileSync(join(agentDir, "checkpoints", "e2e.json"), "utf8"));
+		const checkpoint = readAuthoritativeCheckpoint(agentDir, "e2e");
 
 		expect(readerLog).toContain(
 			"[Neta system notice — automatic heads-up, not a new instruction. Your task is unchanged.]",

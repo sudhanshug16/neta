@@ -13,6 +13,7 @@ import { execFile, spawn } from "node:child_process";
 import {
 	chmodSync,
 	existsSync,
+	mkdirSync,
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
@@ -24,10 +25,11 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import type { SessionCheckpoint } from "../src/checkpoint.ts";
+import { checkpointPath, type SessionCheckpoint } from "../src/checkpoint.ts";
+import { v6CheckpointStorePath } from "../src/checkpoint-store.ts";
 import { VERSION } from "../src/config.ts";
 import type { SessionRecord } from "../src/session.ts";
-import { processGone, waitFor } from "./helpers.ts";
+import { authoritativeCheckpointIds, processGone, readAuthoritativeCheckpoint, waitFor } from "./helpers.ts";
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const FAKE_LEADER = fileURLToPath(new URL("./fixtures/fake-leader.mjs", import.meta.url));
@@ -149,7 +151,7 @@ function isAlive(pid: number): boolean {
 }
 
 function readCheckpointFile(agentDir: string, id: string): SessionCheckpoint {
-	return JSON.parse(readFileSync(join(agentDir, "checkpoints", `${id}.json`), "utf8")) as SessionCheckpoint;
+	return readAuthoritativeCheckpoint(agentDir, id);
 }
 
 function neta(
@@ -241,10 +243,10 @@ describe("closing and reopening a session", () => {
 		expect(listed.stdout).toContain(`neta resume ${checkpointId}`);
 
 		// Pretend the checkpoint was written by an older Neta, as an upgrade would.
-		writeFileSync(
-			join(agentDir, "checkpoints", `${checkpointId}.json`),
-			JSON.stringify({ ...closed, appVersion: "0.0.1-old" }, null, 2),
-		);
+		const legacyBytes = `${JSON.stringify({ ...closed, appVersion: "0.0.1-old" }, null, 2)}\n`;
+		mkdirSync(join(agentDir, "checkpoints"), { recursive: true });
+		writeFileSync(checkpointPath(checkpointId, agentDir), legacyBytes);
+		rmSync(v6CheckpointStorePath(checkpointId, agentDir), { recursive: true, force: true });
 
 		const secondRecord = join(scratch("neta-record-"), "second.json");
 		const resumeEnv = leaderEnv({
@@ -287,6 +289,7 @@ describe("closing and reopening a session", () => {
 
 		await resumed.quit();
 		const after = readCheckpointFile(agentDir, checkpointId);
+		expect(readFileSync(checkpointPath(checkpointId, agentDir), "utf8")).toBe(legacyBytes);
 		expect(after.appVersion).toBe(VERSION);
 		expect(after.id).toBe(checkpointId);
 		expect(after.leader.vendorConversationId).toBe(conversationId);
@@ -557,7 +560,7 @@ describe("closing and reopening a session", () => {
 		writeSettings(agentDir);
 		// Nothing retries the checkpoint write before the vendor starts, so an
 		// unwritable checkpoint directory has to stop the launch outright.
-		writeFileSync(join(agentDir, "checkpoints"), "not a directory");
+		writeFileSync(join(agentDir, "checkpoints-v6"), "not a directory");
 		const record = join(scratch("neta-record-"), "never.json");
 		const env = leaderEnv({ binDir, agentDir, record, quitFile: join(scratch("neta-quit-"), "quit") });
 
@@ -627,10 +630,10 @@ describe("closing and reopening a session", () => {
 
 		// Resume on a newer bundle: same ids, fresh everything else.
 		const closed = readCheckpointFile(agentDir, checkpointId);
-		writeFileSync(
-			join(agentDir, "checkpoints", `${checkpointId}.json`),
-			JSON.stringify({ ...closed, appVersion: "0.0.1-old" }, null, 2),
-		);
+		const legacyBytes = `${JSON.stringify({ ...closed, appVersion: "0.0.1-old" }, null, 2)}\n`;
+		mkdirSync(join(agentDir, "checkpoints"), { recursive: true });
+		writeFileSync(checkpointPath(checkpointId, agentDir), legacyBytes);
+		rmSync(v6CheckpointStorePath(checkpointId, agentDir), { recursive: true, force: true });
 		const secondRecord = join(scratch("neta-record-"), "second.json");
 		const resumeEnv = leaderEnv({
 			binDir,
@@ -666,6 +669,7 @@ describe("closing and reopening a session", () => {
 
 		await resumed.quit();
 		const after = readCheckpointFile(agentDir, checkpointId);
+		expect(readFileSync(checkpointPath(checkpointId, agentDir), "utf8")).toBe(legacyBytes);
 		expect(after.appVersion).toBe(VERSION);
 		expect(after.leader.vendorConversationId).toBe(conversationId);
 	}, 90000);
@@ -756,9 +760,7 @@ describe("closing and reopening a session", () => {
 		expect(existsSync(record)).toBe(false);
 		expect(readdirSync(join(agentDir, "sessions")).filter((name) => name.endsWith(".json"))).toEqual([]);
 
-		const checkpointId = readdirSync(join(agentDir, "checkpoints"))
-			.map((name) => name.replace(/\.json$/, ""))
-			.at(0) as string;
+		const checkpointId = authoritativeCheckpointIds(agentDir).at(0) as string;
 		expect(readCheckpointFile(agentDir, checkpointId).leader.vendorConversationId).toBeUndefined();
 		const refused = await neta(["resume", checkpointId], agentDir, repo).catch((error: { stderr: string }) => error);
 		expect(refused.stderr).toContain("no recorded opencode conversation id");

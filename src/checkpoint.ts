@@ -620,19 +620,36 @@ export interface CheckpointListEntry {
 /** Durable checkpoints, newest valid checkpoint first; invalid files remain visible with an actionable error. */
 export function listCheckpoints(agentDir: string): CheckpointListEntry[] {
 	const dir = checkpointDir(agentDir);
-	if (!existsSync(dir)) return [];
-	return readdirSync(dir)
-		.filter((name) => name.endsWith(".json"))
-		.map((name): CheckpointListEntry => {
+	const entries = new Map<string, CheckpointListEntry>();
+	if (existsSync(dir)) {
+		for (const name of readdirSync(dir).filter((candidate) => candidate.endsWith(".json"))) {
 			const id = name.slice(0, -".json".length);
 			const path = join(dir, name);
 			try {
-				return { id, path, checkpoint: readCheckpoint(id, agentDir) };
+				entries.set(id, { id, path, checkpoint: readCheckpoint(id, agentDir) });
 			} catch (error) {
-				return { id, path, error: error instanceof Error ? error.message : String(error) };
+				entries.set(id, { id, path, error: error instanceof Error ? error.message : String(error) });
 			}
-		})
-		.sort((left, right) => (right.checkpoint?.updatedAt ?? 0) - (left.checkpoint?.updatedAt ?? 0));
+		}
+	}
+	const v6Root = join(agentDir, "checkpoints-v6");
+	if (existsSync(v6Root)) {
+		for (const id of readdirSync(v6Root)) {
+			const path = v6ManifestPath(join(v6Root, id));
+			if (!existsSync(path)) continue;
+			try {
+				// A published v6 manifest is authoritative even when its contents are
+				// corrupt; readCheckpoint deliberately fails closed instead of falling
+				// back to a stale legacy JSON file.
+				entries.set(id, { id, path, checkpoint: readCheckpoint(id, agentDir) });
+			} catch (error) {
+				entries.set(id, { id, path, error: error instanceof Error ? error.message : String(error) });
+			}
+		}
+	}
+	return [...entries.values()].sort(
+		(left, right) => (right.checkpoint?.updatedAt ?? 0) - (left.checkpoint?.updatedAt ?? 0),
+	);
 }
 
 export function readCheckpointForHydration(id: string, agentDir: string): HydratableCheckpoint {

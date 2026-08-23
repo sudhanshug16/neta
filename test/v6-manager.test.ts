@@ -9,7 +9,7 @@ import {
 	v6CheckpointStorePath,
 	writeV6Checkpoint,
 } from "../src/checkpoint-store.ts";
-import { WorkerManager } from "../src/orchestrator/manager.ts";
+import { TERMINAL_HOT_STATE_MAX_BYTES, WorkerManager } from "../src/orchestrator/manager.ts";
 import type { PromptOutcome, TransportOptions, WorkerTransportDriver } from "../src/orchestrator/transport.ts";
 import type { WorkerEvent } from "../src/types.ts";
 import { fixtureBackendConfig } from "./helpers.ts";
@@ -99,10 +99,97 @@ describe("v6 manager integration", () => {
 		const detailReadsBeforeStatus = counters.detailReads ?? 0;
 		manager.statusSnapshot();
 		expect(counters.detailReads ?? 0).toBe(detailReadsBeforeStatus);
+		manager.createNote("a later structural update");
+		await manager.flushCheckpoint();
+		expect(manager.get(summary.id).result).toBe("exact terminal result");
+		expect(counters.detailReads ?? 0).toBe(detailReadsBeforeStatus);
 		const inspection = manager.inspect(summary.id);
 		expect(inspection.entries.map((entry) => entry.text)).toContain("durable terminal detail");
 		expect((counters.detailReads ?? 0) > detailReadsBeforeStatus).toBe(true);
 		await manager.dispose();
+	});
+
+	it("bounds terminal hot state for large outcomes and many terminal workers", async () => {
+		const root = mkdtempSync(join(tmpdir(), "neta-v6-bounded-"));
+		roots.push(root);
+		const agentDir = join(root, "agent");
+		const storePath = v6CheckpointStorePath("large", agentDir);
+		writeV6Checkpoint(checkpoint("large"), storePath);
+		const writer = new CheckpointWriter(agentDir, () => {}, undefined, "v6");
+		const counters: V6ReadCounters = {};
+		let driver: Driver | undefined;
+		const manager = new WorkerManager({
+			cwd: process.cwd(),
+			agentDir,
+			config: fixtureBackendConfig(),
+			channelAddress: join(root, "channel.sock"),
+			onEvent: () => {},
+			checkpoint: { id: "large", leaderBackend: "codex", writer },
+			checkpointStorePath: storePath,
+			checkpointReadCounters: counters,
+			createTransport: (options) => {
+				driver = new Driver(options);
+				return driver;
+			},
+		});
+		const largeTask = "task-".repeat(20_000);
+		const largeOutcome = "outcome-".repeat(20_000);
+		const summary = await manager.spawn({ role: "scout", tier: "expert", task: largeTask });
+		for (let index = 0; index < 500; index += 1)
+			driver?.options.events.log("text", `${"x".repeat(200)}-log-${index}`);
+		driver?.finish({ ok: true, summary: largeOutcome });
+		await manager.wait([summary.id], 1000);
+		expect(manager.terminalHotStateBytes(summary.id)).toBeLessThanOrEqual(TERMINAL_HOT_STATE_MAX_BYTES);
+		const detailReadsBeforeStatus = counters.detailReads ?? 0;
+		manager.statusSnapshot();
+		expect(counters.detailReads ?? 0).toBe(detailReadsBeforeStatus);
+		expect(manager.get(summary.id).result).toBe(largeOutcome);
+		const inspected = manager.inspect(summary.id, { maxEntries: 40, maxChars: 6000 });
+		expect(inspected.worker.result).toBe(largeOutcome);
+		expect(inspected.entries.at(-2)?.text).toContain("log-499");
+
+		const manyStorePath = v6CheckpointStorePath("many", agentDir);
+		const manyWorkers = Array.from({ length: 1000 }, (_, index) => ({
+			id: `w${index + 1}`,
+			name: "worker",
+			role: "scout",
+			tier: "expert" as const,
+			backend: "codex",
+			writer: false,
+			task: `large task ${"t".repeat(20_000)}`,
+			state: "done" as const,
+			startedAt: 1,
+			updatedAt: 2,
+			endedAt: 2,
+			finalResult: `large outcome ${"o".repeat(20_000)}`,
+			log: [],
+			logFirstIndex: 0,
+			logCursor: 0,
+			pendingBrief: [],
+		}));
+		writeV6Checkpoint({ ...checkpoint("many"), workers: manyWorkers }, manyStorePath);
+		const manyCounters: V6ReadCounters = {};
+		const many = WorkerManager.hydrate(
+			{
+				cwd: process.cwd(),
+				agentDir,
+				config: fixtureBackendConfig(),
+				channelAddress: join(root, "many.channel.sock"),
+				onEvent: () => {},
+				checkpoint: { id: "many", leaderBackend: "codex", writer: new CheckpointWriter(agentDir) },
+				checkpointStorePath: manyStorePath,
+				checkpointReadCounters: manyCounters,
+			},
+			readV6CheckpointMetadata(manyStorePath).checkpoint as Parameters<typeof WorkerManager.hydrate>[1],
+		);
+		expect(many.terminalHotStateCount()).toBe(1000);
+		expect(many.terminalHotStateBytes("w1")).toBeLessThanOrEqual(TERMINAL_HOT_STATE_MAX_BYTES);
+		expect(many.terminalHotStateBytes("w1000")).toBeLessThanOrEqual(TERMINAL_HOT_STATE_MAX_BYTES);
+		const manyStatus = many.statusSnapshot();
+		expect(manyStatus.workers.terminal).toHaveLength(1000);
+		expect(manyCounters.detailReads ?? 0).toBe(0);
+		await manager.dispose();
+		await many.dispose();
 	});
 
 	it("hydrates active workers inertly from v6 without restarting them", () => {

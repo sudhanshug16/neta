@@ -43,7 +43,7 @@ import type { SessionCheckpoint } from "../src/checkpoint.ts";
 import { CHECKPOINT_SCHEMA_VERSION, checkpointPath, emptySessionCheckpoint } from "../src/checkpoint.ts";
 import { VERSION } from "../src/config.ts";
 import type { SessionRecord } from "../src/session.ts";
-import { processGone, waitFor } from "./helpers.ts";
+import { processGone, readAuthoritativeCheckpoint, waitFor } from "./helpers.ts";
 
 const OLD_RUNTIME = fileURLToPath(new URL("./fixtures/neta-old-runtime.mjs", import.meta.url));
 const OLD_PROVENANCE = fileURLToPath(new URL("./fixtures/neta-old-runtime.json", import.meta.url));
@@ -122,7 +122,7 @@ interface LaunchRecord {
 }
 
 function readCheckpointFile(agentDir: string, id: string): SessionCheckpoint {
-	return JSON.parse(readFileSync(join(agentDir, "checkpoints", `${id}.json`), "utf8")) as SessionCheckpoint;
+	return readAuthoritativeCheckpoint(agentDir, id);
 }
 
 function liveSessions(agentDir: string): SessionRecord[] {
@@ -279,7 +279,13 @@ describe("a session saved by an older Neta, reopened by the current build", () =
 			{ id: "opencode", close: "graceful", resume: (conversation: string) => ["--session", conversation] },
 		] as const;
 
-		const saved: Array<{ backend: string; checkpointId: string; conversation: string; repo: string }> = [];
+		const saved: Array<{
+			backend: string;
+			checkpointId: string;
+			conversation: string;
+			repo: string;
+			legacyBytes: string;
+		}> = [];
 
 		// A: the old runtime runs three real sessions and leaves three checkpoints.
 		for (const backend of backends) {
@@ -352,7 +358,8 @@ describe("a session saved by an older Neta, reopened by the current build", () =
 				await old.quit();
 			}
 			await waitFor(() => liveSessions(agentDir).length === 0, 20000);
-			saved.push({ backend: backend.id, checkpointId, conversation, repo });
+			const legacyBytes = readFileSync(checkpointPath(checkpointId, agentDir), "utf8");
+			saved.push({ backend: backend.id, checkpointId, conversation, repo, legacyBytes });
 		}
 
 		// The old runtime really did run those workers, so it really did prompt the
@@ -427,6 +434,9 @@ describe("a session saved by an older Neta, reopened by the current build", () =
 			}
 
 			const after = readCheckpointFile(agentDir, entry.checkpointId);
+			// Migration publishes v6 beside the old checkpoint. The old bytes are
+			// evidence of the source format and remain recoverable forever.
+			expect(readFileSync(checkpointPath(entry.checkpointId, agentDir), "utf8")).toBe(entry.legacyBytes);
 			expect(after.schemaVersion).toBe(CHECKPOINT_SCHEMA_VERSION);
 			expect(after.appVersion).toBe(VERSION);
 			expect(after.leader.vendorConversationId).toBe(entry.conversation);

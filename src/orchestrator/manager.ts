@@ -24,6 +24,7 @@ import type { ChannelHandler } from "../channel/server.ts";
 import {
 	type CheckpointLiveLease,
 	type CheckpointShutdown,
+	type CheckpointWorker,
 	type CheckpointWriter,
 	type CheckpointWriterQueueEvent,
 	type HydratableCheckpoint,
@@ -242,6 +243,8 @@ interface WorkerRecord {
 	reviving?: Promise<SteerResult>;
 	/** Set after the terminal outcome has been loaded from the v6 store. */
 	terminalOutcomeLoaded?: boolean;
+	/** Bounded public summary retained after immutable terminal artifacts publish. */
+	terminalSummary?: TerminalHotSummary;
 }
 
 /** Opens a pane per worker, when a multiplexer is running. */
@@ -362,6 +365,71 @@ function missingUnixChannel(address: string): boolean {
  */
 export const INSPECT_MAX_ENTRIES = 40;
 export const INSPECT_MAX_CHARS = 6000;
+/** Terminal records retain only this bounded JSON-sized hot summary in memory. */
+export const TERMINAL_HOT_STATE_MAX_BYTES = 4096;
+
+interface TerminalHotSummary {
+	id: string;
+	name: string;
+	role: string;
+	tier: Tier;
+	backend: string;
+	writer: boolean;
+	room?: string;
+	taskPreview: string;
+	resultPreview?: string;
+	laterFailurePreview?: string;
+	pendingQuestionPreview?: string;
+	lastProgress?: { text: string; at: number };
+	state: WorkerState;
+	startedAt: number;
+	endedAt?: number;
+	stateBeforeStop?: ActiveWorkerState;
+}
+
+function terminalTextPreview(value: string | undefined): string | undefined {
+	return value === undefined ? undefined : clipChannel(value, 512);
+}
+
+function terminalHotSummary(input: {
+	id: string;
+	name: string;
+	role: string;
+	tier: Tier;
+	backend: string;
+	writer: boolean;
+	room?: string;
+	task: string;
+	result?: string;
+	laterFailure?: string;
+	pendingQuestion?: string;
+	lastProgress?: { text: string; at: number };
+	state: WorkerState;
+	startedAt: number;
+	endedAt?: number;
+	stateBeforeStop?: ActiveWorkerState;
+}): TerminalHotSummary {
+	return {
+		id: clipChannel(input.id, 128),
+		name: clipChannel(input.name, 128),
+		role: clipChannel(input.role, 128),
+		tier: input.tier,
+		backend: clipChannel(input.backend, 128),
+		writer: input.writer,
+		room: terminalTextPreview(input.room),
+		taskPreview: terminalTextPreview(input.task) ?? "",
+		resultPreview: terminalTextPreview(input.result),
+		laterFailurePreview: terminalTextPreview(input.laterFailure),
+		pendingQuestionPreview: terminalTextPreview(input.pendingQuestion),
+		lastProgress: input.lastProgress
+			? { text: clipChannel(input.lastProgress.text, 512), at: input.lastProgress.at }
+			: undefined,
+		state: input.state,
+		startedAt: input.startedAt,
+		endedAt: input.endedAt,
+		stateBeforeStop: input.stateBeforeStop,
+	};
+}
 
 function gitHead(cwd: string): string | undefined {
 	try {
@@ -477,7 +545,7 @@ export class WorkerManager implements ChannelHandler {
 			const wasActive = !isTerminalState(worker.state);
 			const state = wasActive ? "interrupted" : worker.state;
 			const stateBeforeStop = wasActive ? (worker.state as ActiveWorkerState) : worker.stateBeforeStop;
-			manager.workers.set(worker.id, {
+			const record: WorkerRecord = {
 				id: worker.id,
 				name: worker.name,
 				role: worker.role,
@@ -526,7 +594,19 @@ export class WorkerManager implements ChannelHandler {
 				revivalCount: worker.revivalCount ?? 0,
 				nativeAttached: worker.nativeAttached,
 				terminalOutcomeLoaded: !options.checkpointStorePath || !isTerminalState(worker.state),
-			});
+			};
+			if (options.checkpointStorePath && !wasActive && isTerminalState(worker.state)) {
+				manager.evictTerminalRecord(
+					record,
+					terminalHotSummary({
+						...worker,
+						result: worker.finalResult,
+						state,
+						endedAt: worker.endedAt,
+					}),
+				);
+			}
+			manager.workers.set(worker.id, record);
 			if (wasActive) {
 				const link = worker.noteId
 					? manager.notes.get(worker.noteId)?.workers.find((item) => item.workerId === worker.id)
@@ -588,45 +668,7 @@ export class WorkerManager implements ChannelHandler {
 			sessionTiers: [...this.tiers],
 			counter: this.counter,
 			noteCounter: this.noteCounter,
-			workers: [...this.workers.values()].map((record) => ({
-				id: record.id,
-				name: record.name,
-				role: record.role,
-				tier: record.tier,
-				backend: record.backend,
-				writer: record.writer,
-				room: record.room,
-				task: record.task,
-				cwd: record.cwd,
-				state: record.state,
-				stateBeforeStop: record.stateBeforeStop,
-				startedAt: record.startedAt,
-				updatedAt: record.updatedAt,
-				endedAt: record.endedAt,
-				finalResult: record.result,
-				substantiveResponse: record.substantiveResponse,
-				lastResponse: record.lastResponse,
-				laterFailure: record.laterFailure,
-				log: record.log.map((entry) => ({ ...entry })),
-				logFirstIndex: record.logFirstIndex,
-				logCursor: record.logCursor,
-				pendingQuestion: record.pendingQuestion,
-				lastProgress: record.lastProgress ? { ...record.lastProgress } : undefined,
-				usage: record.usage ? { ...record.usage } : undefined,
-				vendorSessionId: record.vendorSessionId,
-				archived: record.archived,
-				model: record.model,
-				modelId: record.modelId,
-				mode: record.mode,
-				agentInfo: record.agentInfo,
-				noteId: record.noteId,
-				queuedBehind: record.queuedBehind,
-				pendingBrief: [...record.pendingBrief],
-				headAtStart: record.headAtStart,
-				headlessReason: record.headlessReason,
-				revivalCount: record.revivalCount,
-				nativeAttached: record.nativeAttached,
-			})),
+			workers: [...this.workers.values()].map((record) => this.checkpointWorkerSnapshot(record)),
 			activeWriter: this.activeWriter,
 			writerQueue: [...this.writerQueue],
 			writerQueueHistory: this.writerQueueHistory.map((event) => ({ ...event })),
@@ -642,6 +684,50 @@ export class WorkerManager implements ChannelHandler {
 				backends: [...backends],
 			})),
 			goal: cloneGoal(this.goal),
+		};
+	}
+
+	private checkpointWorkerSnapshot(record: WorkerRecord): CheckpointWorker {
+		const terminalSummary = record.terminalSummary;
+		const terminal = terminalSummary !== undefined;
+		return {
+			id: record.id,
+			name: record.name,
+			role: record.role,
+			tier: record.tier,
+			backend: record.backend,
+			writer: record.writer,
+			room: record.room,
+			task: terminalSummary?.taskPreview ?? record.task,
+			cwd: record.cwd,
+			state: record.state,
+			stateBeforeStop: record.stateBeforeStop,
+			startedAt: record.startedAt,
+			updatedAt: record.updatedAt,
+			endedAt: record.endedAt,
+			finalResult: terminal ? undefined : record.result,
+			substantiveResponse: terminal ? undefined : record.substantiveResponse,
+			lastResponse: terminal ? undefined : record.lastResponse,
+			laterFailure: terminal ? undefined : record.laterFailure,
+			log: terminal ? [] : record.log.map((entry) => ({ ...entry })),
+			logFirstIndex: record.logFirstIndex,
+			logCursor: record.logCursor,
+			pendingQuestion: terminal ? undefined : record.pendingQuestion,
+			lastProgress: record.lastProgress ? { ...record.lastProgress } : undefined,
+			usage: record.usage ? { ...record.usage } : undefined,
+			vendorSessionId: record.vendorSessionId,
+			archived: record.archived,
+			model: record.model,
+			modelId: record.modelId,
+			mode: record.mode,
+			agentInfo: record.agentInfo,
+			noteId: record.noteId,
+			queuedBehind: record.queuedBehind,
+			pendingBrief: [...record.pendingBrief],
+			headAtStart: record.headAtStart,
+			headlessReason: record.headlessReason,
+			revivalCount: record.revivalCount,
+			nativeAttached: record.nativeAttached,
 		};
 	}
 
@@ -1473,7 +1559,9 @@ export class WorkerManager implements ChannelHandler {
 	get(workerId: string): WorkerSummary {
 		const record = this.require(workerId);
 		this.loadTerminalOutcome(record);
-		return this.summarize(record);
+		const summary = this.summarize(record);
+		this.releaseTerminalOutcome(record);
+		return summary;
 	}
 
 	private loadTerminalOutcome(record: WorkerRecord): void {
@@ -1486,10 +1574,67 @@ export class WorkerManager implements ChannelHandler {
 			reference,
 			this.options.checkpointReadCounters,
 		);
+		if (typeof outcome.task === "string") record.task = outcome.task;
 		if (typeof outcome.finalResult === "string") record.result = outcome.finalResult;
 		if (typeof outcome.substantiveResponse === "string") record.substantiveResponse = outcome.substantiveResponse;
 		if (typeof outcome.lastResponse === "string") record.lastResponse = outcome.lastResponse;
 		if (typeof outcome.laterFailure === "string") record.laterFailure = outcome.laterFailure;
+		if (typeof outcome.pendingQuestion === "string") record.pendingQuestion = outcome.pendingQuestion;
+	}
+
+	private evictTerminalRecord(record: WorkerRecord, summary: TerminalHotSummary): void {
+		record.terminalSummary = summary;
+		record.task = summary.taskPreview;
+		record.result = undefined;
+		record.substantiveResponse = undefined;
+		record.lastResponse = undefined;
+		record.laterFailure = undefined;
+		record.pendingQuestion = undefined;
+		record.lastProgress = summary.lastProgress;
+		const retainedLogEntries = record.log.length;
+		record.log = [];
+		record.logFirstIndex += retainedLogEntries;
+		record.logCursor = record.logFirstIndex;
+		record.driver = undefined;
+		record.processGroupId = undefined;
+		record.channelToken = undefined;
+		record.scratchDir = undefined;
+		record.queue = Promise.resolve();
+		record.pendingBrief = [];
+		record.pendingBriefLeaderMessages = [];
+		record.steeredTurns.clear();
+		record.interruptedTurns.clear();
+		record.cancelDispatches.clear();
+		record.killReason = undefined;
+		record.unsafeToPrompt = undefined;
+		record.revivalMessage = undefined;
+		record.revivalFromState = undefined;
+		record.revivalPreviousQueuedBehind = undefined;
+		record.terminalOutcomeLoaded = false;
+	}
+
+	/** Test-facing proof that terminal hot state is bounded without exposing records. */
+	terminalHotStateBytes(workerId: string): number {
+		const record = this.require(workerId);
+		return record.terminalSummary ? Buffer.byteLength(JSON.stringify(record.terminalSummary), "utf8") : 0;
+	}
+
+	/** Test-facing count of evicted terminal records. */
+	terminalHotStateCount(): number {
+		return [...this.workers.values()].filter((record) => record.terminalSummary !== undefined).length;
+	}
+
+	private releaseTerminalOutcome(record: WorkerRecord): void {
+		const summary = record.terminalSummary;
+		if (!summary || !record.terminalOutcomeLoaded) return;
+		record.task = summary.taskPreview;
+		record.result = summary.resultPreview;
+		record.substantiveResponse = undefined;
+		record.lastResponse = undefined;
+		record.laterFailure = summary.laterFailurePreview;
+		record.pendingQuestion = summary.pendingQuestionPreview;
+		record.lastProgress = summary.lastProgress;
+		record.terminalOutcomeLoaded = false;
 	}
 
 	private loadTerminalDetails(record: WorkerRecord): WorkerLogEntry[] {
@@ -1750,13 +1895,15 @@ export class WorkerManager implements ChannelHandler {
 		}
 		kept.reverse();
 
-		return {
+		const inspection = {
 			worker: this.summarize(record),
 			entries: kept,
 			droppedEntries: droppedEntries + (kept.length < shown.length ? shown.length - kept.length : 0),
 			droppedChars,
 			headlessReason: record.headlessReason ?? this.options.headlessReason,
 		};
+		this.releaseTerminalOutcome(record);
+		return inspection;
 	}
 
 	roomTranscript(room: string, tail?: number): RoomPost[] {
@@ -1811,13 +1958,16 @@ export class WorkerManager implements ChannelHandler {
 				if (isTerminalState(record.state)) this.loadTerminalOutcome(record);
 			}
 			if (wokeBy && isTerminalState(wokeBy.state)) this.loadTerminalOutcome(wokeBy);
-			return {
+			const result = {
 				reason,
 				workers: records.map((record) => this.summarize(record)),
 				wokeBy: wokeBy ? this.summarize(wokeBy) : undefined,
 				roomActivity,
 				discovery,
 			};
+			for (const record of records) this.releaseTerminalOutcome(record);
+			if (wokeBy && !records.includes(wokeBy)) this.releaseTerminalOutcome(wokeBy);
+			return result;
 		};
 
 		const evaluate = (): WaitResult | undefined => {
@@ -2644,6 +2794,7 @@ export class WorkerManager implements ChannelHandler {
 			// A preserved report ends "done"; the thing that went wrong after it
 			// still has to be visible in the log, not only on the summary.
 			if (options.failure && state === "done") this.appendLog(record, "error", options.failure);
+			this.checkpointChanged(record);
 			// Terminal publication is the linearization point: the complete result and
 			// its immutable detail segment must be durable before any event wakes wait.
 			record.terminalOutcomeLoaded = true;
@@ -2656,33 +2807,52 @@ export class WorkerManager implements ChannelHandler {
 				const published = readV6Manifest(this.options.checkpointStorePath, this.options.checkpointReadCounters);
 				const publishedRef = published.workers.find((candidate) => candidate.id === record.id);
 				if (publishedRef) this.terminalRefs.set(record.id, publishedRef);
-				const retained = record.log.length;
-				record.log = [];
-				record.logFirstIndex += retained;
-				record.logCursor = record.logFirstIndex;
 			}
 
-			if (state === "done") {
-				this.options.onEvent({
-					type: "done",
-					workerId: record.id,
-					summary: result,
-					dirtyFiles: dirtyFiles.length > 0 ? dirtyFiles : undefined,
-				});
-			} else if (state === "failed") {
-				this.options.onEvent({ type: "failed", workerId: record.id, error: options.failure ?? result });
-			} else if (state === "blocked") {
-				const discovery = record.pendingDiscoveryId
-					? this.goal?.discoveries.find((candidate) => candidate.id === record.pendingDiscoveryId)
-					: undefined;
-				if (discovery) this.options.onEvent({ type: "discovery", workerId: record.id, discovery });
-				else
-					this.options.onEvent({
-						type: "blocked",
-						workerId: record.id,
-						question: record.pendingQuestion ?? result,
-					});
+			const event: WorkerEvent | undefined =
+				state === "done"
+					? {
+							type: "done",
+							workerId: record.id,
+							summary: result,
+							dirtyFiles: dirtyFiles.length > 0 ? dirtyFiles : undefined,
+						}
+					: state === "failed"
+						? { type: "failed", workerId: record.id, error: options.failure ?? result }
+						: state === "blocked"
+							? (() => {
+									const discovery = record.pendingDiscoveryId
+										? this.goal?.discoveries.find((candidate) => candidate.id === record.pendingDiscoveryId)
+										: undefined;
+									return discovery
+										? { type: "discovery", workerId: record.id, discovery }
+										: { type: "blocked", workerId: record.id, question: record.pendingQuestion ?? result };
+								})()
+							: undefined;
+			if (this.options.checkpointStorePath && isTerminalState(state)) {
+				this.evictTerminalRecord(
+					record,
+					terminalHotSummary({
+						id: record.id,
+						name: record.name,
+						role: record.role,
+						tier: record.tier,
+						backend: record.backend,
+						writer: record.writer,
+						room: record.room,
+						task: record.task,
+						result,
+						laterFailure: record.laterFailure,
+						pendingQuestion: record.pendingQuestion,
+						lastProgress: record.lastProgress,
+						state,
+						startedAt: record.startedAt,
+						endedAt: record.endedAt,
+						stateBeforeStop: record.stateBeforeStop,
+					}),
+				);
 			}
+			if (event) this.options.onEvent(event);
 
 			const wasActiveWriter = this.activeWriter === record.id;
 			if (startedWriter) this.notifyReadOnlyWorkers(record, "finished", changes);
@@ -2843,23 +3013,24 @@ export class WorkerManager implements ChannelHandler {
 	}
 
 	private summarize(record: WorkerRecord): WorkerSummary {
+		const terminal = record.terminalSummary;
 		return {
-			id: record.id,
-			name: record.name,
-			role: record.role,
-			tier: record.tier,
-			backend: record.backend,
-			writer: record.writer,
-			room: record.room,
+			id: terminal?.id ?? record.id,
+			name: terminal?.name ?? record.name,
+			role: terminal?.role ?? record.role,
+			tier: terminal?.tier ?? record.tier,
+			backend: terminal?.backend ?? record.backend,
+			writer: terminal?.writer ?? record.writer,
+			room: terminal?.room ?? record.room,
 			state: record.state,
-			task: record.task,
-			startedAt: record.startedAt,
-			endedAt: record.endedAt,
-			stateBeforeStop: record.stateBeforeStop,
-			result: record.result,
-			laterFailure: record.laterFailure,
+			task: terminal?.taskPreview ?? record.task,
+			startedAt: terminal?.startedAt ?? record.startedAt,
+			endedAt: terminal?.endedAt ?? record.endedAt,
+			stateBeforeStop: terminal?.stateBeforeStop ?? record.stateBeforeStop,
+			result: record.result ?? terminal?.resultPreview,
+			laterFailure: record.laterFailure ?? terminal?.laterFailurePreview,
 			queuedBehind: record.state === "queued" ? record.queuedBehind : undefined,
-			pendingQuestion: record.pendingQuestion,
+			pendingQuestion: record.pendingQuestion ?? terminal?.pendingQuestionPreview,
 			promptBlockedReason: record.unsafeToPrompt,
 			lastProgress: record.lastProgress,
 			scratchDir: record.scratchDir,
