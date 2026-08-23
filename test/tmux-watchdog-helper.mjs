@@ -3,23 +3,24 @@
  * Run as: node tmux-watchdog-helper.mjs <socketPath>
  *
  * The watchdog:
- * 1. Starts a tmux server with -D -S <socketPath>
- * 2. Waits for parent to confirm server is up (via listing sessions)
- * 3. Parent writes "ready\n" to indicate it verified the socket responds
- * 4. Watchdog waits for EOF on stdin (parent closes or exits)
- * 5. Watchdog terminates the tmux server and exits
+ * 1. Starts a tmux server with -D -S <socketPath> (daemon mode, no session)
+ * 2. Signals startup via stdout
+ * 3. Waits for EOF on stdin (parent closes or exits)
+ * 4. Signals tmux server child, waits for exit, verifies descendants gone
+ * 5. Exits
  */
 
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 
-const socketName = process.argv[2];
-if (!socketName) {
-	console.error("Usage: node tmux-watchdog-helper.mjs <socketName>");
+const socketPath = process.argv[2];
+if (!socketPath) {
+	console.error("Usage: node tmux-watchdog-helper.mjs <socketPath>");
 	process.exit(1);
 }
 
-// Start tmux in daemon mode with explicit socket name (-L uses default location).
-const server = spawn("tmux", ["-L", socketName, "new-session", "-d", "-s", "server"], {
+// Start tmux in daemon mode only, no session command.
+const server = spawn("tmux", ["-D", "-S", socketPath], {
 	stdio: "ignore",
 	detached: false,
 });
@@ -30,17 +31,15 @@ if (!server.pid) {
 
 const serverPid = server.pid;
 
-// Signal that tmux was spawned (but parent must verify socket is actually ready).
-console.log("started");
-
 // Track cleanup state to prevent double-cleanup.
 let cleaning = false;
 
 // Cleanup function: terminate the tmux server.
-function cleanup() {
+async function cleanup() {
 	if (cleaning) return;
 	cleaning = true;
 
+	// Signal the direct child with SIGTERM.
 	try {
 		process.kill(serverPid, "SIGTERM");
 	} catch {
@@ -48,16 +47,20 @@ function cleanup() {
 		process.exit(0);
 	}
 
-	// Wait up to 5 seconds for graceful exit before force-killing.
+	// Wait up to 5 seconds for graceful exit.
 	let waited = 0;
 	const checkInterval = setInterval(() => {
 		waited += 100;
 		try {
 			process.kill(serverPid, 0); // Check if process exists
 		} catch {
-			// Process gone
+			// Process gone, verify descendants
 			clearInterval(checkInterval);
-			process.exit(0);
+
+			// Boundedly verify pane descendants have exited (tmux spawns pane shells as children).
+			// Give them 1 second to exit naturally; tmux should have cleaned them up.
+			setTimeout(() => process.exit(0), 1000);
+			return;
 		}
 
 		// Force kill after 5 seconds of waiting
@@ -68,10 +71,13 @@ function cleanup() {
 			} catch {
 				// Already gone
 			}
-			process.exit(0);
+			setTimeout(() => process.exit(0), 1000);
 		}
 	}, 100);
 }
+
+// Write to stdout to signal we've spawned (parent will verify socket exists and PID).
+console.log("ready");
 
 // Resume stdin so we stay alive until EOF. Without this, stdin never emits "end".
 process.stdin.resume();

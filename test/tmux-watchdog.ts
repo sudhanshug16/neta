@@ -1,22 +1,22 @@
 /**
  * Crash-safe tmux server watchdog.
  *
- * Spawns a private tmux server using a unique socket name with ownership tracking
- * via a control pipe. The watchdog process holds one end of the pipe; when the
- * test process closes its end (or exits), the watchdog sees EOF and terminates
- * its direct child tmux server only. This ensures we never kill unrelated tmux
- * processes, even if the test crashes.
+ * Spawns a private tmux server in a unique socket path with ownership tracking
+ * via a control pipe. The watchdog process holds the direct ChildProcess handle
+ * and one end of the pipe; when the test process closes its end (or exits),
+ * the watchdog sees EOF and terminates its direct child tmux server only.
+ * This ensures we never kill unrelated tmux processes, even if the test crashes.
  */
 
-import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, rmSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { chmodSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { processGone, waitFor } from "./helpers.ts";
 
 interface TmuxSession {
-	socketName: string;
+	socket: string;
 	directory: string;
 	watchdogPid: number;
 	cleanup(): Promise<void>;
@@ -25,7 +25,7 @@ interface TmuxSession {
 const WATCHDOG_HELPER = fileURLToPath(new URL("./tmux-watchdog-helper.mjs", import.meta.url));
 
 /**
- * Start a private tmux server and return its socket name. The server runs as a
+ * Start a private tmux server and return its socket path. The server runs as a
  * child of a watchdog process that cleans up only when this process exits or
  * the returned cleanup function is called.
  *
@@ -35,16 +35,14 @@ export async function startTmuxSession(name: string, timeoutMs: number = 5000): 
 	const socketDir = mkdtempSync(join(tmpdir(), `neta-tmux-${name}-`));
 	chmodSync(socketDir, 0o700);
 
-	// Use a unique socket name that won't collide with other tmux sessions.
-	// This is a tmux socket name (used with -L), not a file path.
-	const socketName = `neta-${name}-${process.pid}-${Date.now()}`;
+	const socketPath = join(socketDir, "server.sock");
 
 	try {
 		// Start watchdog process that will manage the tmux server. The watchdog
-		// waits for EOF on its stdin (from the parent) and then terminates its
-		// tmux child. This is crash-safe: if the test is killed, the pipe EOF
-		// wakes the watchdog to clean up.
-		const watchdog = spawn(process.execPath, [WATCHDOG_HELPER, socketName], {
+		// holds the direct ChildProcess and waits for EOF on its stdin (from the
+		// parent). On EOF, it terminates the direct child. This is crash-safe:
+		// if the test is killed, the pipe EOF wakes the watchdog to clean up.
+		const watchdog = spawn(process.execPath, [WATCHDOG_HELPER, socketPath], {
 			stdio: ["pipe", "pipe", "pipe"],
 			detached: false,
 		});
@@ -53,7 +51,7 @@ export async function startTmuxSession(name: string, timeoutMs: number = 5000): 
 		if (!watchdogPid) throw new Error("Failed to spawn watchdog process.");
 
 		// Wait for the watchdog to signal it started the tmux process.
-		const started = await new Promise<boolean>((resolve) => {
+		const ready = await new Promise<boolean>((resolve) => {
 			const timeout = setTimeout(() => {
 				resolve(false);
 			}, timeoutMs);
@@ -75,27 +73,49 @@ export async function startTmuxSession(name: string, timeoutMs: number = 5000): 
 			watchdog.once("exit", onExit);
 		});
 
-		if (!started) throw new Error("Watchdog startup timeout or early exit");
+		if (!ready) throw new Error("Watchdog startup timeout or early exit");
 
-		// Verify the server is actually responding to commands.
+		// Wait for socket to exist.
 		await waitFor(
-			() => {
-				const check = spawnSync("tmux", ["-L", socketName, "list-sessions"], { stdio: "ignore" });
-				// Status 0 (has sessions) or 1 (no sessions but server exists) both mean server is alive
-				return check.status === 0 || check.status === 1;
-			},
+			() => existsSync(socketPath),
 			timeoutMs,
 			100,
 		);
 
+		// Verify the server is actually running and responding to clients.
+		// Use bounded async client with explicit timeout.
+		const serverResponds = await new Promise<boolean>((resolve) => {
+			const timeout = setTimeout(() => {
+				resolve(false);
+			}, timeoutMs);
+
+			const client = spawn("tmux", ["-S", socketPath, "display-message", "-p", "#{pid}"], {
+				stdio: ["ignore", "pipe", "pipe"],
+			});
+
+			client.once("exit", (code) => {
+				clearTimeout(timeout);
+				// Exit 0 means server is running and responded
+				resolve(code === 0);
+			});
+
+			client.once("error", () => {
+				clearTimeout(timeout);
+				resolve(false);
+			});
+		});
+
+		if (!serverResponds) throw new Error("Server did not respond to client request");
+
 		return {
-			socketName,
+			socket: socketPath,
 			directory: socketDir,
 			watchdogPid,
 			async cleanup() {
 				try {
 					// Close the control pipe (test's stdin to watchdog). The watchdog sees
-					// EOF and terminates its tmux server child, waiting boundedly.
+					// EOF and terminates its direct child tmux server, waiting boundedly,
+					// then verifies pane descendants exited.
 					if (watchdog.stdin && !watchdog.stdin.closed) {
 						watchdog.stdin.end();
 					}

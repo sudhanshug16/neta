@@ -25,7 +25,10 @@ import { processGone, waitFor } from "./helpers.ts";
 const dirs: string[] = [];
 const SIGTERM_IGNORING_CHILD = fileURLToPath(new URL("./fixtures/sigterm-ignoring-child.mjs", import.meta.url));
 const FAKE_LEADER = fileURLToPath(new URL("./fixtures/fake-leader.mjs", import.meta.url));
-const tmuxAvailable = spawnSync("tmux", ["-V"], { stdio: "ignore" }).status === 0;
+
+// Only check tmux availability if live tests are enabled.
+// Default `bun test` never checks for tmux to keep default suite clean.
+const tmuxAvailable = process.env.NETA_TEST_MUX_LIVE === "1" && spawnSync("tmux", ["-V"], { stdio: "ignore" }).status === 0;
 // Only run real tmux tests with explicit opt-in
 const tmuxIt = process.env.NETA_TEST_MUX_LIVE === "1" && tmuxAvailable ? it : it.skip;
 
