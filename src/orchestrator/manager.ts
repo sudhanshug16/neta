@@ -1615,7 +1615,7 @@ export class WorkerManager implements ChannelHandler {
 		const from = Math.max(record.logCursor, record.logFirstIndex);
 		const entries = record.log.slice(from - record.logFirstIndex);
 		record.logCursor = record.logFirstIndex + record.log.length;
-		this.checkpointChanged(record);
+		this.checkpointChanged(record, "deferred");
 		return entries;
 	}
 
@@ -1954,7 +1954,7 @@ export class WorkerManager implements ChannelHandler {
 		const record = this.workers.get(workerId);
 		if (!record) return { ok: false, error: `Unknown worker ${workerId}.` };
 		record.lastProgress = { text, at: Date.now() };
-		this.appendLog(record, "progress", text);
+		this.appendTelemetryLog(record, "progress", text);
 		return { ok: true };
 	}
 
@@ -2255,10 +2255,28 @@ export class WorkerManager implements ChannelHandler {
 		this.checkpointChanged(record);
 	}
 
-	private checkpointChanged(record?: WorkerRecord): void {
+	private appendTelemetryLog(
+		record: WorkerRecord,
+		kind: WorkerLogEntry["kind"],
+		text: string,
+		attribution?: { from: string; label: string },
+	): void {
+		record.log.push({ at: Date.now(), kind, text, ...attribution });
+		if (record.log.length > MAX_LOG_ENTRIES) {
+			const dropped = record.log.length - MAX_LOG_ENTRIES;
+			record.log.splice(0, dropped);
+			record.logFirstIndex += dropped;
+			record.logCursor = Math.max(record.logCursor, record.logFirstIndex);
+		}
+		this.checkpointChanged(record, "deferred");
+	}
+
+	private checkpointChanged(record?: WorkerRecord, lane: "immediate" | "deferred" = "immediate"): void {
 		if (record) record.updatedAt = Date.now();
 		const checkpoint = this.options.checkpoint;
-		if (checkpoint) checkpoint.writer.schedule(this.checkpointSnapshot());
+		if (!checkpoint) return;
+		if (lane === "deferred") checkpoint.writer.scheduleDeferred(() => this.checkpointSnapshot(), checkpoint.id);
+		else checkpoint.writer.schedule(this.checkpointSnapshot());
 	}
 
 	/** One transport shape for immediate and dequeued workers, including crash-recovery registration. */
@@ -2304,10 +2322,10 @@ export class WorkerManager implements ChannelHandler {
 			resumeSessionId,
 			initialUsage: resumeSessionId ? record.usage : undefined,
 			events: {
-				log: (kind, text) => this.appendLog(record, kind, text),
+				log: (kind, text) => this.appendTelemetryLog(record, kind, text),
 				usage: (usage) => {
 					record.usage = usage;
-					this.checkpointChanged(record);
+					this.checkpointChanged(record, "deferred");
 				},
 				vendorSession: (sessionId) => {
 					record.vendorSessionId = sessionId;

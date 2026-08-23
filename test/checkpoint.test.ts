@@ -14,11 +14,13 @@ import { join } from "node:path";
 import {
 	CHECKPOINT_SCHEMA_VERSION,
 	CheckpointWriter,
+	type CheckpointWriterTimers,
 	checkpointPath,
 	listCheckpoints,
 	newCheckpointBase,
 	readCheckpoint,
 	readCheckpointForHydration,
+	recordLeaderVendorConversationId,
 	type SessionCheckpoint,
 	validateCheckpoint,
 	writeCheckpointAtomic,
@@ -75,6 +77,36 @@ function emptyCheckpoint(id: string, cwd: string): SessionCheckpoint {
 		spreadCursors: [],
 		roomDebaterBackends: [],
 	};
+}
+
+class FakeTimers implements CheckpointWriterTimers {
+	private nextId = 0;
+	private readonly tasks = new Map<number, { at: number; callback: () => void }>();
+	now = 0;
+
+	setTimeout(callback: () => void, delayMs: number): number {
+		const id = ++this.nextId;
+		this.tasks.set(id, { at: this.now + delayMs, callback });
+		return id;
+	}
+
+	clearTimeout(timer: unknown): void {
+		this.tasks.delete(timer as number);
+	}
+
+	advance(delayMs: number): void {
+		const target = this.now + delayMs;
+		for (;;) {
+			const due = [...this.tasks.entries()]
+				.filter(([, task]) => task.at <= target)
+				.sort(([, left], [, right]) => left.at - right.at)[0];
+			if (!due) break;
+			this.now = due[1].at;
+			this.tasks.delete(due[0]);
+			due[1].callback();
+		}
+		this.now = target;
+	}
 }
 
 describe("durable session checkpoints", () => {
@@ -408,5 +440,85 @@ describe("durable session checkpoints", () => {
 		await expect(writer.flush()).resolves.toBeUndefined();
 		expect(writer.lastError).toBeInstanceOf(Error);
 		expect(reports[0]).toContain("checkpoint write-failure was not saved");
+	});
+
+	it("defers materialization, coalesces telemetry, and preserves an external leader capture", async () => {
+		const agentDir = tempDir("neta-checkpoint-writer-");
+		const checkpoint = emptyCheckpoint("writer", process.cwd());
+		const writer = new CheckpointWriter(agentDir);
+		let materializations = 0;
+		writer.scheduleDeferred(() => {
+			materializations += 1;
+			return checkpoint;
+		});
+		await Promise.resolve();
+		expect(materializations).toBe(0);
+		await writer.flush();
+		expect(materializations).toBe(1);
+
+		const stale = { ...checkpoint, updatedAt: 1 };
+		recordLeaderVendorConversationId("writer", agentDir, "ses_external_capture_1234");
+		writer.schedule(stale);
+		await writer.flush();
+		expect(readCheckpoint("writer", agentDir).leader.vendorConversationId).toBe("ses_external_capture_1234");
+	});
+
+	it("uses trailing debounce, a hard deadline, latest-wins, and immediate priority", async () => {
+		const agentDir = tempDir("neta-checkpoint-timers-");
+		const checkpoint = emptyCheckpoint("timers", process.cwd());
+		const timers = new FakeTimers();
+		const writer = new CheckpointWriter(agentDir, () => {}, timers);
+		const snapshots: number[] = [];
+		writer.scheduleDeferred(() => {
+			snapshots.push(1);
+			return { ...checkpoint, updatedAt: 1 };
+		});
+		timers.advance(99);
+		writer.scheduleDeferred(() => {
+			snapshots.push(2);
+			return { ...checkpoint, updatedAt: 2 };
+		});
+		timers.advance(99);
+		expect(snapshots).toEqual([]);
+		timers.advance(1);
+		await writer.flush();
+		expect(snapshots).toEqual([2]);
+
+		const hardSnapshots: number[] = [];
+		for (let event = 0; event < 11; event += 1) {
+			writer.scheduleDeferred(() => {
+				hardSnapshots.push(event);
+				return { ...checkpoint, updatedAt: event + 10 };
+			});
+			timers.advance(90);
+		}
+		expect(hardSnapshots).toEqual([]);
+		timers.advance(10);
+		await writer.flush();
+		expect(hardSnapshots).toEqual([10]);
+
+		let immediateMaterializations = 0;
+		writer.scheduleDeferred(() => {
+			immediateMaterializations += 1;
+			return checkpoint;
+		});
+		writer.schedule({ ...checkpoint, updatedAt: 99 });
+		await writer.flush();
+		expect(immediateMaterializations).toBe(0);
+	});
+
+	it("fails visibly when an atomic write presents a different nonempty leader id", () => {
+		const agentDir = tempDir("neta-checkpoint-race-");
+		const checkpoint = emptyCheckpoint("race", process.cwd());
+		writeCheckpointAtomic(
+			{ ...checkpoint, leader: { ...checkpoint.leader, vendorConversationId: "id-a" } },
+			agentDir,
+		);
+		expect(() =>
+			writeCheckpointAtomic(
+				{ ...checkpoint, leader: { ...checkpoint.leader, vendorConversationId: "id-b" } },
+				agentDir,
+			),
+		).toThrow("refusing to replace it");
 	});
 });

@@ -643,12 +643,15 @@ export function writeCheckpointAtomic(input: SessionCheckpoint, agentDir: string
 	mkdirSync(dir, { recursive: true, mode: 0o700 });
 	chmodSync(dir, 0o700);
 	const path = checkpointPath(checkpoint.id, agentDir);
-	if (existsSync(path)) readCheckpoint(checkpoint.id, agentDir);
-	const temp = join(dir, `.${checkpoint.id}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
+	const release = acquireCheckpointLock(path);
+	let temp: string | undefined;
 	let handle: number | undefined;
 	try {
+		const current = existsSync(path) ? readCheckpoint(checkpoint.id, agentDir) : undefined;
+		const merged = mergeCheckpointForAtomicWrite(checkpoint, current);
+		temp = join(dir, `.${merged.id}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
 		handle = openSync(temp, "wx", 0o600);
-		writeSync(handle, `${JSON.stringify(checkpoint, null, 2)}\n`, undefined, "utf8");
+		writeSync(handle, `${JSON.stringify(merged, null, 2)}\n`, undefined, "utf8");
 		fsyncSync(handle);
 		closeSync(handle);
 		handle = undefined;
@@ -663,55 +666,192 @@ export function writeCheckpointAtomic(input: SessionCheckpoint, agentDir: string
 		return path;
 	} finally {
 		if (handle !== undefined) closeSync(handle);
-		rmSync(temp, { force: true });
+		if (temp !== undefined) rmSync(temp, { force: true });
+		release();
 	}
 }
 
+function processIsAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
+function acquireCheckpointLock(path: string): () => void {
+	const lockPath = `${path}.lock`;
+	const waitBuffer = new Int32Array(new SharedArrayBuffer(4));
+	let handle: number | undefined;
+	for (let attempt = 0; attempt < 10_000; attempt += 1) {
+		try {
+			handle = openSync(lockPath, "wx", 0o600);
+			writeSync(handle, `${process.pid}\n`, undefined, "utf8");
+			break;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+			let ownerPid: number | undefined;
+			try {
+				const parsed = Number.parseInt(readFileSync(lockPath, "utf8"), 10);
+				if (Number.isInteger(parsed) && parsed > 0) ownerPid = parsed;
+			} catch {
+				// A just-created lock may not have its owner written yet.
+			}
+			if (ownerPid !== undefined && !processIsAlive(ownerPid)) {
+				rmSync(lockPath, { force: true });
+				continue;
+			}
+			Atomics.wait(waitBuffer, 0, 0, 1);
+		}
+	}
+	if (handle === undefined) throw new CheckpointError(`Could not acquire checkpoint lock for ${path}.`);
+	return () => {
+		closeSync(handle as number);
+		rmSync(lockPath, { force: true });
+	};
+}
+
+function mergeCheckpointForAtomicWrite(
+	checkpoint: SessionCheckpoint,
+	current: SessionCheckpoint | undefined,
+): SessionCheckpoint {
+	if (!current) return checkpoint;
+	const currentId = current.leader.vendorConversationId;
+	const incomingId = checkpoint.leader.vendorConversationId;
+	if (currentId && incomingId && currentId !== incomingId) {
+		throw new CheckpointError(
+			`Checkpoint "${checkpoint.id}" already records leader conversation ${currentId}; refusing to replace it with ${incomingId}.`,
+		);
+	}
+	return {
+		...checkpoint,
+		// updatedAt is a monotonic write version. An external capture can advance
+		// the file between a manager snapshot and its deferred flush.
+		updatedAt: Math.max(checkpoint.updatedAt, current.updatedAt),
+		leader: {
+			...checkpoint.leader,
+			vendorConversationId: currentId ?? incomingId,
+		},
+	};
+}
+
+export const CHECKPOINT_TRAILING_DEBOUNCE_MS = 100;
+export const CHECKPOINT_HARD_DEADLINE_MS = 1_000;
+
+type CheckpointSnapshotFactory = () => SessionCheckpoint;
+
+export interface CheckpointWriterTimers {
+	setTimeout(callback: () => void, delayMs: number): unknown;
+	clearTimeout(timer: unknown): void;
+}
+
+const REAL_CHECKPOINT_TIMERS: CheckpointWriterTimers = {
+	setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+	clearTimeout: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
+};
+
 /** Serialized, coalesced writes. Errors are reported but never escape into live orchestration. */
 export class CheckpointWriter {
-	private pending: SessionCheckpoint | undefined;
+	private pendingImmediate: SessionCheckpoint | undefined;
+	private pendingDeferred: CheckpointSnapshotFactory | undefined;
+	private pendingDeferredId: string | undefined;
 	private writing: Promise<void> | undefined;
+	private deferredTimer: unknown;
+	private hardDeadlineTimer: unknown;
 	lastError: Error | undefined;
+	/** Attempted atomic writes, useful for deterministic diagnostics. */
+	writeCount = 0;
 	private readonly agentDir: string;
 	private readonly report: (message: string) => void;
+	private readonly timers: CheckpointWriterTimers;
 
-	constructor(agentDir: string, report: (message: string) => void = (message) => console.error(`[neta] ${message}`)) {
+	constructor(
+		agentDir: string,
+		report: (message: string) => void = (message) => console.error(`[neta] ${message}`),
+		timers: CheckpointWriterTimers = REAL_CHECKPOINT_TIMERS,
+	) {
 		this.agentDir = agentDir;
 		this.report = report;
+		this.timers = timers;
 	}
 
 	schedule(checkpoint: SessionCheckpoint): void {
-		this.pending = structuredClone(checkpoint);
+		this.cancelDeferredTimers();
+		this.pendingDeferred = undefined;
+		this.pendingDeferredId = undefined;
+		this.pendingImmediate = structuredClone(checkpoint);
 		this.start();
+	}
+
+	/** Queue telemetry without materializing the manager's large checkpoint yet. */
+	scheduleDeferred(snapshot: CheckpointSnapshotFactory, checkpointId?: string): void {
+		this.pendingDeferred = snapshot;
+		this.pendingDeferredId = checkpointId;
+		if (this.deferredTimer !== undefined) this.timers.clearTimeout(this.deferredTimer);
+		this.deferredTimer = this.timers.setTimeout(() => {
+			this.deferredTimer = undefined;
+			if (this.hardDeadlineTimer !== undefined) this.timers.clearTimeout(this.hardDeadlineTimer);
+			this.hardDeadlineTimer = undefined;
+			this.start();
+		}, CHECKPOINT_TRAILING_DEBOUNCE_MS);
+		if (this.hardDeadlineTimer === undefined) {
+			this.hardDeadlineTimer = this.timers.setTimeout(() => {
+				this.hardDeadlineTimer = undefined;
+				if (this.deferredTimer !== undefined) this.timers.clearTimeout(this.deferredTimer);
+				this.deferredTimer = undefined;
+				this.start();
+			}, CHECKPOINT_HARD_DEADLINE_MS);
+		}
+	}
+
+	private cancelDeferredTimers(): void {
+		if (this.deferredTimer !== undefined) this.timers.clearTimeout(this.deferredTimer);
+		if (this.hardDeadlineTimer !== undefined) this.timers.clearTimeout(this.hardDeadlineTimer);
+		this.deferredTimer = undefined;
+		this.hardDeadlineTimer = undefined;
 	}
 
 	private start(): void {
 		if (this.writing) return;
 		this.writing = Promise.resolve()
 			.then(() => {
-				while (this.pending) {
-					const checkpoint = this.pending;
-					this.pending = undefined;
+				while (this.pendingImmediate || this.pendingDeferred) {
+					const immediate = this.pendingImmediate;
+					this.pendingImmediate = undefined;
+					const deferred = this.pendingDeferred;
+					this.pendingDeferred = undefined;
+					const checkpointId = immediate?.id ?? this.pendingDeferredId ?? "unknown";
+					this.pendingDeferredId = undefined;
 					try {
+						const checkpoint = immediate ?? deferred?.();
+						if (!checkpoint) continue;
+						this.writeCount += 1;
 						writeCheckpointAtomic(checkpoint, this.agentDir);
 						this.lastError = undefined;
 					} catch (error) {
 						this.lastError = error instanceof Error ? error : new Error(String(error));
-						this.report(`checkpoint ${checkpoint.id} was not saved: ${this.lastError.message}`);
+						this.report(`checkpoint ${checkpointId} was not saved: ${this.lastError.message}`);
 					}
 				}
 			})
 			.finally(() => {
 				this.writing = undefined;
-				if (this.pending) this.start();
+				if (this.pendingImmediate || this.pendingDeferred) this.start();
 			});
 	}
 
 	async flush(): Promise<void> {
-		while (this.writing || this.pending) {
+		this.cancelDeferredTimers();
+		while (this.writing || this.pendingImmediate || this.pendingDeferred) {
 			this.start();
-			await this.writing;
+			const writing = this.writing;
+			if (writing) await writing;
 		}
+	}
+
+	async dispose(): Promise<void> {
+		await this.flush();
 	}
 
 	/**
@@ -730,7 +870,10 @@ export class CheckpointWriter {
 		// This snapshot supersedes anything queued behind it; a queued write that
 		// is already in flight still finishes first, so the file is never written
 		// out of order.
-		this.pending = undefined;
+		this.cancelDeferredTimers();
+		this.pendingImmediate = undefined;
+		this.pendingDeferred = undefined;
+		this.pendingDeferredId = undefined;
 		await this.writing;
 		writeCheckpointAtomic(checkpoint, this.agentDir);
 		this.lastError = undefined;

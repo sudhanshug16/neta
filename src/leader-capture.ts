@@ -63,9 +63,12 @@ export function captureLeaderSession(options: CaptureOptions): string | undefine
 	}
 	try {
 		recordLeaderVendorConversationId(options.checkpointId, agentDir, sessionId);
-	} catch {
-		// Either the id is already recorded, or the checkpoint is corrupt or from a
-		// future schema. All three are cases where the file must be left alone.
+	} catch (error) {
+		// A differing nonempty id is a visible resume-integrity failure, not a
+		// harmless duplicate capture. The checkpoint writer uses the same invariant.
+		write(
+			`neta: could not persist leader conversation id: ${error instanceof Error ? error.message : String(error)}`,
+		);
 	}
 	return sessionId;
 }
