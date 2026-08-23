@@ -950,8 +950,8 @@ describe("what a resumed leader is told", () => {
 
 		const summary = buildRecoverySummary(checkpoint, VERSION);
 		expect(summary).toContain("logical-9");
-		expect(summary).toContain("0.9.0");
-		expect(summary).toContain(VERSION);
+		expect(summary).not.toContain("0.9.0");
+		expect(summary).not.toContain(VERSION);
 		expect(summary).toContain("rw1");
 		expect(summary).toContain("interrupted (was running)");
 		expect(summary).toContain("Mapped the auth flow");

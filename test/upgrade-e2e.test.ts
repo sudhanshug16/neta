@@ -414,8 +414,8 @@ describe("a session saved by an older Neta, reopened by the current build", () =
 					: Object.values(launch.files).join("\n");
 				expect(prompt).toContain("## Recovered session");
 				expect(prompt).toContain(entry.checkpointId);
-				expect(prompt).toContain(provenance.appVersion);
-				expect(prompt).toContain(VERSION);
+				expect(prompt).not.toContain(provenance.appVersion);
+				expect(prompt).not.toContain(VERSION);
 				expect(prompt).toContain("No worker was restarted");
 				expect(prompt).toContain("Substantive report");
 

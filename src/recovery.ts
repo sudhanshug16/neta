@@ -280,14 +280,11 @@ function clamp(text: string, limit = RESULT_LIMIT): string {
  * reads a wall of recovered history spends its first turn summarizing instead of
  * working. What it must not miss is that nothing was restarted.
  */
-export function buildRecoverySummary(checkpoint: SessionCheckpoint, currentVersion: string): string {
+export function buildRecoverySummary(checkpoint: SessionCheckpoint, _currentVersion: string): string {
 	const lines: string[] = [];
 	lines.push("## Recovered session");
 	lines.push("");
-	lines.push(
-		`This conversation was reopened from Neta session \`${checkpoint.id}\`, saved by Neta ` +
-			`${checkpoint.appVersion}${checkpoint.appVersion === currentVersion ? "" : ` and now running on ${currentVersion}`}.`,
-	);
+	lines.push(`This conversation was reopened from Neta session \`${checkpoint.id}\`.`);
 	lines.push("");
 
 	const workers = checkpoint.workers.filter((worker) => !worker.archived);
