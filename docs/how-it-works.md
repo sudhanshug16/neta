@@ -79,6 +79,13 @@ not launched. (Once a session is running, a failed checkpoint write is reported
 and never interrupts live orchestration; that trade only applies after the
 session exists.)
 
+Durable writes and deferred writes serve different consistency needs.
+Structural state — worker outcomes, notes, rooms, writer queue, leader
+conversation id, and ownership — is written immediately. Telemetry, logs, progress,
+usage, and terminal cursors coalesce with a 100ms trailing debounce and a hard
+1-second deadline, so they may lag up to 1 second in exchange for reducing write
+overhead when many events fire in quick succession.
+
 Hydration is inert: it creates no worker process, prompt, pane, callback, or
 scratch directory. `starting`, `running`, `waiting`, and `queued` workers become
 terminal `interrupted` records carrying their previous state. Queued writer
@@ -470,6 +477,9 @@ conversation and delivers the answer. The pane is a window onto the worker,
 not the worker itself — the agent process stays under Neta's control. Panes read the log
 without consuming it, so nothing a pane shows is stolen from the leader, and
 `neta watch <id> --plain` prints the same stream as bare lines for piping.
+Worker views abort promptly when closed or when the leader restarts, and
+missing Unix sockets fail truthfully without leaving orphaned views.
+
 
 `neta inspect <id>` and `neta_inspect` provide the repo-owned expansion for a
 worker row. They show a 6,000-character hard-capped recent window, including
