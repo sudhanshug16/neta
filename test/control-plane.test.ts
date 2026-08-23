@@ -157,6 +157,7 @@ describe("neta mcp", () => {
 		// A file where the checkpoint directory has to be: every write fails, and
 		// nothing about the failure is Neta's to repair.
 		writeFileSync(join(home, "checkpoints"), "not a directory");
+		writeFileSync(join(home, "checkpoints-v6"), "not a directory");
 		const lock = tryAcquireSessionLock(process.cwd(), home);
 		if (!lock) throw new Error("Could not acquire test launch lock.");
 		const child = spawn(process.execPath, [CLI, "mcp"], {
