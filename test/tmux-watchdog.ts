@@ -8,7 +8,7 @@
  * This ensures we never kill unrelated tmux processes, even if the test crashes.
  */
 
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -30,50 +30,73 @@ const WATCHDOG_HELPER = fileURLToPath(new URL("./tmux-watchdog-helper.mjs", impo
  * the returned cleanup function is called.
  *
  * All paths and descriptors owned by the watchdog until cleanup.
+ *
+ * Optional tmuxExecutable parameter for test injection (default: "tmux").
  */
-export async function startTmuxSession(name: string, timeoutMs: number = 5000): Promise<TmuxSession | undefined> {
+export async function startTmuxSession(
+	name: string,
+	timeoutMs: number = 5000,
+	tmuxExecutable: string = "tmux",
+	tmuxArgs: string[] = [],
+): Promise<TmuxSession | undefined> {
 	const socketDir = mkdtempSync(join(tmpdir(), `neta-tmux-${name}-`));
 	chmodSync(socketDir, 0o700);
 
 	const socketPath = join(socketDir, "server.sock");
 
+	let watchdog: ChildProcess | undefined;
 	try {
 		// Start watchdog process that will manage the tmux server. The watchdog
 		// holds the direct ChildProcess and waits for EOF on its stdin (from the
 		// parent). On EOF, it terminates the direct child. This is crash-safe:
 		// if the test is killed, the pipe EOF wakes the watchdog to clean up.
-		const watchdog = spawn(process.execPath, [WATCHDOG_HELPER, socketPath], {
+		watchdog = spawn(process.execPath, [WATCHDOG_HELPER, socketPath, tmuxExecutable, ...tmuxArgs], {
 			stdio: ["pipe", "pipe", "pipe"],
 			detached: false,
 		});
 
+		if (!watchdog.pid) throw new Error("Failed to spawn watchdog process.");
 		const watchdogPid = watchdog.pid;
-		if (!watchdogPid) throw new Error("Failed to spawn watchdog process.");
 
-		// Wait for the watchdog to signal it started the tmux process.
-		const ready = await new Promise<boolean>((resolve) => {
+		// Wait for the watchdog to emit ready with verified server PID.
+		const readyPayload = await new Promise<{ serverPid: number } | null>((resolve) => {
 			const timeout = setTimeout(() => {
-				resolve(false);
+				resolve(null);
 			}, timeoutMs);
 
-			const onData = () => {
-				clearTimeout(timeout);
-				watchdog.stdout?.removeListener("data", onData);
-				watchdog.removeListener("exit", onExit);
-				resolve(true);
+			let buffer = "";
+			const onData = (chunk: Buffer) => {
+				buffer += chunk.toString();
+				const lines = buffer.split("\n");
+				buffer = lines[lines.length - 1]; // Keep incomplete line
+
+				for (let i = 0; i < lines.length - 1; i++) {
+					const line = lines[i].trim();
+					if (line) {
+						try {
+							clearTimeout(timeout);
+							watchdog!.stdout?.removeListener("data", onData);
+							watchdog!.removeListener("exit", onExit);
+							resolve(JSON.parse(line));
+							return;
+						} catch {
+							// Invalid JSON, keep waiting
+						}
+					}
+				}
 			};
 
 			const onExit = () => {
 				clearTimeout(timeout);
-				watchdog.stdout?.removeListener("data", onData);
-				resolve(false);
+				watchdog!.stdout?.removeListener("data", onData);
+				resolve(null);
 			};
 
-			watchdog.stdout?.on("data", onData);
-			watchdog.once("exit", onExit);
+			watchdog!.stdout?.on("data", onData);
+			watchdog!.once("exit", onExit);
 		});
 
-		if (!ready) throw new Error("Watchdog startup timeout or early exit");
+		if (!readyPayload?.serverPid) throw new Error("Watchdog startup timeout or invalid ready payload");
 
 		// Wait for socket to exist.
 		await waitFor(
@@ -82,92 +105,87 @@ export async function startTmuxSession(name: string, timeoutMs: number = 5000): 
 			100,
 		);
 
-		// Verify the server is actually running and responding to clients.
-		// Use bounded async client with explicit timeout.
-		const serverResponds = await new Promise<boolean>((resolve) => {
-			const timeout = setTimeout(() => {
-				resolve(false);
-			}, timeoutMs);
-
-			const client = spawn("tmux", ["-S", socketPath, "display-message", "-p", "#{pid}"], {
-				stdio: ["ignore", "pipe", "pipe"],
-			});
-
-			client.once("exit", (code) => {
-				clearTimeout(timeout);
-				// Exit 0 means server is running and responded
-				resolve(code === 0);
-			});
-
-			client.once("error", () => {
-				clearTimeout(timeout);
-				resolve(false);
-			});
-		});
-
-		if (!serverResponds) throw new Error("Server did not respond to client request");
-
 		return {
 			socket: socketPath,
 			directory: socketDir,
 			watchdogPid,
 			async cleanup() {
+				let watchdogExited = false;
+				const cleanupError: Error[] = [];
+
 				try {
 					// Close the control pipe (test's stdin to watchdog). The watchdog sees
 					// EOF and terminates its direct child tmux server, waiting boundedly,
 					// then verifies pane descendants exited.
-					if (watchdog.stdin && !watchdog.stdin.closed) {
-						watchdog.stdin.end();
+					if (watchdog!.stdin && !watchdog!.stdin.closed) {
+						watchdog!.stdin.end();
 					}
-					watchdog.unref();
+					watchdog!.unref();
 
-					// Wait for watchdog to exit via the ChildProcess handle (up to 5 seconds).
-					await new Promise<void>((resolve) => {
-						const timeout = setTimeout(resolve, 5000);
-						watchdog.once("exit", () => {
+					// Wait for watchdog to exit via the ChildProcess handle (bounded).
+					watchdogExited = await new Promise<boolean>((resolve) => {
+						const timeout = setTimeout(() => {
+							resolve(false);
+						}, 10000);
+						watchdog!.once("exit", () => {
 							clearTimeout(timeout);
-							resolve();
+							resolve(true);
 						});
 					});
 
-					// If watchdog is still alive (didn't exit), signal it.
-					if (!processGone(watchdogPid)) {
-						try {
-							process.kill(watchdogPid, "SIGTERM");
-							await new Promise<void>((resolve) => {
-								const timeout = setTimeout(resolve, 1000);
-								watchdog.once("exit", () => {
-									clearTimeout(timeout);
-									resolve();
-								});
-							});
-
-							// Force kill if still not gone.
-							if (!processGone(watchdogPid)) {
-								process.kill(watchdogPid, "SIGKILL");
-							}
-						} catch {
-							// Already gone
-						}
+					if (!watchdogExited) {
+						throw new Error("Watchdog did not exit within 10s; server and directory left intact");
 					}
-				} finally {
-					// Clean up the socket directory. Only remove after confirming ownership
-					// via watchdog exit and server termination.
+				} catch (err) {
+					if (err instanceof Error) {
+						cleanupError.push(err);
+					}
+				}
+
+				// Only remove directory after confirmed watchdog exit and server termination.
+				if (watchdogExited) {
 					try {
 						rmSync(socketDir, { recursive: true, force: true });
-					} catch {
-						// Directory in use or already gone; fail closed by leaving it.
+					} catch (err) {
+						if (err instanceof Error) {
+							cleanupError.push(new Error(`Failed to remove directory: ${err.message}`));
+						}
 					}
+				}
+
+				// Surface all errors
+				if (cleanupError.length > 0) {
+					throw new Error(cleanupError.map((e) => e.message).join("; "));
 				}
 			},
 		};
-	} catch (_error) {
-		// Cleanup on failure
+	} catch (error) {
+		// Startup failed: close watchdog stdin, await bounded exit, remove directory only after confirmed.
 		try {
-			rmSync(socketDir, { recursive: true, force: true });
+			if (watchdog && watchdog.stdin && !watchdog.stdin.closed) {
+				watchdog.stdin.end();
+			}
+
+			if (watchdog) {
+				// Wait for watchdog to exit after stdin close.
+				const exited = await new Promise<boolean>((resolve) => {
+					const timeout = setTimeout(() => {
+						resolve(false);
+					}, 5000);
+					watchdog!.once("exit", () => {
+						clearTimeout(timeout);
+						resolve(true);
+					});
+				});
+
+				if (exited) {
+					rmSync(socketDir, { recursive: true, force: true });
+				}
+			}
 		} catch {
-			// Ignore cleanup errors on startup failure
+			// Directory left inert on cleanup failure
 		}
+
 		return undefined;
 	}
 }
