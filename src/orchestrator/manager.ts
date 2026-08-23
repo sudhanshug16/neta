@@ -12,6 +12,7 @@
 
 import { execFile, execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -338,6 +339,10 @@ async function gitDirtyFiles(cwd: string): Promise<string[]> {
  * the leader's tool call any longer.
  */
 const STEER_TIMEOUT_MS = 15_000;
+
+function missingUnixChannel(address: string): boolean {
+	return process.platform !== "win32" && !address.startsWith("\\\\.\\pipe\\") && !existsSync(address);
+}
 
 /**
  * The hard cap on an inspection. Not a default a caller can raise: the point of
@@ -2733,6 +2738,14 @@ export class WorkerManager implements ChannelHandler {
 
 	/** A missing pane is visible in the delegate result; it never blocks the worker. */
 	private async openWorkerView(record: WorkerRecord): Promise<void> {
+		if (this.options.panes && missingUnixChannel(this.options.channelAddress)) {
+			const reason =
+				`manager Unix socket ${this.options.channelAddress} is missing; ` +
+				"restart the Neta session before opening worker views";
+			record.headlessReason = reason;
+			this.appendLog(record, "status", `Worker view: headless — ${reason}`);
+			return;
+		}
 		const outcome = await this.options.panes?.open(this.summarize(record));
 		const reason = outcome ? (outcome.opened ? undefined : outcome.reason) : this.options.headlessReason;
 		if (reason) {

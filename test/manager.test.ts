@@ -911,6 +911,7 @@ describe("WorkerManager", () => {
 	it("opens one room pane when the room's first member joins", async () => {
 		const opened: string[] = [];
 		const roomsOpened: string[] = [];
+		writeFileSync("/tmp/neta-test-room-pane.sock", "");
 		const paneManager = new WorkerManager({
 			cwd: process.cwd(),
 			agentDir: "/nonexistent-agent-dir",
@@ -943,6 +944,7 @@ describe("WorkerManager", () => {
 	});
 
 	it("does not retain a headless reason after a pane opens successfully", async () => {
+		writeFileSync("/tmp/neta-test-positive-pane.sock", "");
 		const paneManager = new WorkerManager({
 			cwd: process.cwd(),
 			agentDir: "/nonexistent-agent-dir",

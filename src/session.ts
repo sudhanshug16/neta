@@ -27,6 +27,10 @@ import { killSessionSpec } from "./mux/index.ts";
 
 export interface SessionRecord {
 	id: string;
+	/** Neta runtime that owns this live lease; absent on pre-metadata records. */
+	appVersion?: string;
+	/** Channel protocol understood by the manager; absent on pre-metadata records. */
+	channelProtocolVersion?: number;
 	/** Unix socket or named pipe the control plane listens on. */
 	socket: string;
 	/** Authorizes worker management. Readable only by this user. */

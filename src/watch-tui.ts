@@ -48,7 +48,16 @@ import {
 	type WorkerState,
 	type WorkerSummary,
 } from "./types.ts";
-import { metadataCandidates, resolveTarget, sayAuthor, sayEntry, sendWatchRequest, sentMessage } from "./watch.ts";
+import {
+	abortableDelay,
+	installWatchCancellation,
+	metadataCandidates,
+	resolveTarget,
+	sayAuthor,
+	sayEntry,
+	sendWatchRequest,
+	sentMessage,
+} from "./watch.ts";
 
 const POLL_MS = 400;
 
@@ -317,6 +326,8 @@ export interface WatchTuiOptions {
 	workerId: string;
 	sessionId?: string;
 	agentDir?: string;
+	signal?: AbortSignal;
+	startupGraceMs?: number;
 }
 
 export const WORKER_INPUT_HINT = "enter steers this worker now · ctrl+c closes this view";
@@ -327,164 +338,180 @@ export async function watchWorkerTui(options: WatchTuiOptions): Promise<number> 
 		console.error(`No Neta session found. Start one with \`${APP_NAME}\`, or pass --session <id>.`);
 		return 1;
 	}
+	target.startupGraceMs = options.startupGraceMs;
+	const cancellation = installWatchCancellation(options.signal);
+	try {
+		if (cancellation.signal.aborted) return 0;
 
-	const tui = new TuiMainScreen(new ProcessTerminal());
-	const header = new Text("", 0, 0);
-	const transcript = new TranscriptView();
-	const footerSlot = new Container();
-	const inputSlot = new Container();
-	const statusLine = new StatusLine();
-	const loader = new Loader(tui, style.cyan, style.dim, "connecting");
-	const editor = new Editor(tui, editorTheme);
-	footerSlot.addChild(loader);
-	inputSlot.addChild(editor);
-	inputSlot.addChild(new Text(style.dim(WORKER_INPUT_HINT), 0, 0));
-	for (const child of [header, transcript, footerSlot, inputSlot, statusLine]) tui.addChild(child);
+		const tui = new TuiMainScreen(new ProcessTerminal());
+		const header = new Text("", 0, 0);
+		const transcript = new TranscriptView();
+		const footerSlot = new Container();
+		const inputSlot = new Container();
+		const statusLine = new StatusLine();
+		const loader = new Loader(tui, style.cyan, style.dim, "connecting");
+		const editor = new Editor(tui, editorTheme);
+		footerSlot.addChild(loader);
+		inputSlot.addChild(editor);
+		inputSlot.addChild(new Text(style.dim(WORKER_INPUT_HINT), 0, 0));
+		for (const child of [header, transcript, footerSlot, inputSlot, statusLine]) tui.addChild(child);
 
-	let briefed = false;
-	let finished = false;
-	let closed = false;
-	let exitCode = 0;
-	/** Printed after the terminal is back to normal, where it can be read. */
-	let partingWords: string | undefined;
-	let resolveClosed = () => {};
-	const closedPromise = new Promise<void>((resolve) => {
-		resolveClosed = resolve;
-	});
+		let briefed = false;
+		let finished = false;
+		let closed = false;
+		let exitCode = 0;
+		/** Printed after the terminal is back to normal, where it can be read. */
+		let partingWords: string | undefined;
+		let resolveClosed = () => {};
+		const closedPromise = new Promise<void>((resolve) => {
+			resolveClosed = resolve;
+		});
 
-	const close = (code: number) => {
-		if (closed) return;
-		closed = true;
-		exitCode = code;
-		loader.stop();
-		tui.stop();
-		resolveClosed();
-	};
+		const close = (code: number) => {
+			if (closed) return;
+			closed = true;
+			exitCode = code;
+			cancellation.abort();
+			loader.stop();
+			tui.stop();
+			resolveClosed();
+		};
 
-	const finish = (finalPage: WorkerLogPage) => {
-		finished = true;
-		if (finalPage.worker) markWorkerPaneTerminal(finalPage.worker);
-		loader.stop();
-		footerSlot.clear();
-		footerSlot.addChild(
-			new Text(style.dim(`── ${finalPage.worker?.id ?? options.workerId} ${finalPage.state} ──`), 0, 1),
-		);
-		inputSlot.clear();
-		inputSlot.addChild(
-			new Text(
-				style.dim(`(${APP_NAME} attach ${options.workerId} to open this in its own CLI · enter to close)`),
-				0,
-				0,
-			),
-		);
-		tui.setFocus(null);
-	};
+		const finish = (finalPage: WorkerLogPage) => {
+			finished = true;
+			if (finalPage.worker) markWorkerPaneTerminal(finalPage.worker);
+			loader.stop();
+			footerSlot.clear();
+			footerSlot.addChild(
+				new Text(style.dim(`── ${finalPage.worker?.id ?? options.workerId} ${finalPage.state} ──`), 0, 1),
+			);
+			inputSlot.clear();
+			inputSlot.addChild(
+				new Text(
+					style.dim(`(${APP_NAME} attach ${options.workerId} to open this in its own CLI · enter to close)`),
+					0,
+					0,
+				),
+			);
+			tui.setFocus(null);
+		};
 
-	tui.addInputListener((data) => {
-		if (data === "\x03") {
-			close(0);
-			return { consume: true };
-		}
-		if (finished && (data === "\r" || data === "\n")) {
-			close(0);
-			return { consume: true };
-		}
-		return undefined;
-	});
+		tui.addInputListener((data) => {
+			if (data === "\x03") {
+				close(0);
+				return { consume: true };
+			}
+			if (finished && (data === "\r" || data === "\n")) {
+				close(0);
+				return { consume: true };
+			}
+			return undefined;
+		});
 
-	const deliver = async (text: string) => {
-		// This request reaches the exact same cancel-and-reprompt primitive as
-		// `neta_send`. The pane is a second surface, not a weaker queue-only path.
-		try {
-			const response = await sendChannelRequest(target.address, {
-				type: "pane-input",
-				token: target.token,
-				workerId: options.workerId,
-				text,
-			});
-			if (!response.ok) transcript.append({ at: Date.now(), kind: "error", text: response.error });
-		} catch (error) {
-			transcript.append({
-				at: Date.now(),
-				kind: "error",
-				text: `Could not reach the leader: ${error instanceof Error ? error.message : String(error)}`,
-			});
-		}
-		tui.requestRender();
-	};
-
-	editor.onSubmit = (submitted) => {
-		const text = submitted.trim();
-		if (!text || finished) return;
-		editor.setText("");
-		editor.addToHistory(text);
-		void deliver(text);
-	};
-
-	tui.setFocus(editor);
-	loader.start();
-	tui.start();
-
-	const poll = async () => {
-		let since = 0;
-		while (!closed) {
-			let response: Awaited<ReturnType<typeof sendWatchRequest>>;
+		const deliver = async (text: string) => {
+			// This request reaches the exact same cancel-and-reprompt primitive as
+			// `neta_send`. The pane is a second surface, not a weaker queue-only path.
 			try {
-				response = await sendWatchRequest(target, {
-					type: "tail",
-					token: target.token,
-					workerId: options.workerId,
-					since,
+				const response = await sendChannelRequest(
+					target.address,
+					{
+						type: "pane-input",
+						token: target.token,
+						workerId: options.workerId,
+						text,
+					},
+					cancellation.signal,
+				);
+				if (!response.ok) transcript.append({ at: Date.now(), kind: "error", text: response.error });
+			} catch (error) {
+				transcript.append({
+					at: Date.now(),
+					kind: "error",
+					text: `Could not reach the leader: ${error instanceof Error ? error.message : String(error)}`,
 				});
-			} catch {
-				// The leader is gone; a finished transcript was still worth reading.
-				close(finished ? 0 : 1);
-				return;
-			}
-			if (!response) {
-				close(0);
-				return;
-			}
-			if (!response.ok) {
-				partingWords = response.error;
-				close(1);
-				return;
-			}
-			const next = response.data as WorkerLogPage | undefined;
-			if (!next) {
-				partingWords = "The leader sent no log page; is this a current Neta session?";
-				close(1);
-				return;
-			}
-			if (next.worker) {
-				header.setText(workerHeaderText(next.worker));
-				statusLine.update(next.worker, next.state);
-				// The header's one-line "task:" summary truncates; the full brief —
-				// the first thing ever sent to the worker — opens the transcript,
-				// ahead of the entries this same page carries.
-				if (!briefed) {
-					briefed = true;
-					transcript.addChild(new SentBlock("task", next.worker.task));
-				}
-			}
-			for (const entry of next.entries) transcript.append(entry);
-			since = next.cursor;
-			if (isTerminalState(next.state) && !finished) finish(next);
-			if (!finished) loader.setMessage(footerMessage(next));
-			// The leader has moved on to a new batch; this view closes itself.
-			if (next.archived) {
-				close(0);
-				return;
 			}
 			tui.requestRender();
-			await new Promise((resolve) => setTimeout(resolve, POLL_MS));
-		}
-	};
+		};
 
-	void poll();
-	await closedPromise;
-	if (partingWords) console.error(partingWords);
-	return exitCode;
+		editor.onSubmit = (submitted) => {
+			const text = submitted.trim();
+			if (!text || finished) return;
+			editor.setText("");
+			editor.addToHistory(text);
+			void deliver(text);
+		};
+
+		tui.setFocus(editor);
+		loader.start();
+		tui.start();
+
+		const poll = async () => {
+			let since = 0;
+			while (!closed) {
+				let response: Awaited<ReturnType<typeof sendWatchRequest>>;
+				try {
+					response = await sendWatchRequest(
+						target,
+						{
+							type: "tail",
+							token: target.token,
+							workerId: options.workerId,
+							since,
+						},
+						cancellation.signal,
+					);
+				} catch {
+					// The leader is gone; a finished transcript was still worth reading.
+					close(cancellation.signal.aborted || finished ? 0 : 1);
+					return;
+				}
+				if (!response) {
+					close(0);
+					return;
+				}
+				if (!response.ok) {
+					partingWords = response.error;
+					close(1);
+					return;
+				}
+				const next = response.data as WorkerLogPage | undefined;
+				if (!next) {
+					partingWords = "The leader sent no log page; is this a current Neta session?";
+					close(1);
+					return;
+				}
+				if (next.worker) {
+					header.setText(workerHeaderText(next.worker));
+					statusLine.update(next.worker, next.state);
+					// The header's one-line "task:" summary truncates; the full brief —
+					// the first thing ever sent to the worker — opens the transcript,
+					// ahead of the entries this same page carries.
+					if (!briefed) {
+						briefed = true;
+						transcript.addChild(new SentBlock("task", next.worker.task));
+					}
+				}
+				for (const entry of next.entries) transcript.append(entry);
+				since = next.cursor;
+				if (isTerminalState(next.state) && !finished) finish(next);
+				if (!finished) loader.setMessage(footerMessage(next));
+				// The leader has moved on to a new batch; this view closes itself.
+				if (next.archived) {
+					close(0);
+					return;
+				}
+				tui.requestRender();
+				await abortableDelay(POLL_MS, cancellation.signal);
+			}
+		};
+
+		void poll();
+		await closedPromise;
+		if (partingWords) console.error(partingWords);
+		return exitCode;
+	} finally {
+		cancellation.dispose();
+	}
 }
 
 /** Which room this is and who is in it, in the worker header's grammar. */
@@ -504,6 +531,8 @@ export interface WatchRoomTuiOptions {
 	room: string;
 	sessionId?: string;
 	agentDir?: string;
+	signal?: AbortSignal;
+	startupGraceMs?: number;
 }
 
 /**
@@ -517,105 +546,117 @@ export async function watchRoomTui(options: WatchRoomTuiOptions): Promise<number
 		console.error(`No Neta session found. Start one with \`${APP_NAME}\`, or pass --session <id>.`);
 		return 1;
 	}
+	target.startupGraceMs = options.startupGraceMs;
+	const cancellation = installWatchCancellation(options.signal);
+	try {
+		if (cancellation.signal.aborted) return 0;
 
-	const tui = new TuiMainScreen(new ProcessTerminal());
-	const header = new Text("", 0, 0);
-	const transcript = new TranscriptView();
-	const footerSlot = new Container();
-	const loader = new Loader(tui, style.cyan, style.dim, "connecting");
-	footerSlot.addChild(loader);
-	footerSlot.addChild(new Text(style.dim("a room view only reads · ctrl+c closes this view"), 0, 0));
-	for (const child of [header, transcript, footerSlot]) tui.addChild(child);
+		const tui = new TuiMainScreen(new ProcessTerminal());
+		const header = new Text("", 0, 0);
+		const transcript = new TranscriptView();
+		const footerSlot = new Container();
+		const loader = new Loader(tui, style.cyan, style.dim, "connecting");
+		footerSlot.addChild(loader);
+		footerSlot.addChild(new Text(style.dim("a room view only reads · ctrl+c closes this view"), 0, 0));
+		for (const child of [header, transcript, footerSlot]) tui.addChild(child);
 
-	let finished = false;
-	let closed = false;
-	let exitCode = 0;
-	/** Printed after the terminal is back to normal, where it can be read. */
-	let partingWords: string | undefined;
-	let resolveClosed = () => {};
-	const closedPromise = new Promise<void>((resolve) => {
-		resolveClosed = resolve;
-	});
+		let finished = false;
+		let closed = false;
+		let exitCode = 0;
+		/** Printed after the terminal is back to normal, where it can be read. */
+		let partingWords: string | undefined;
+		let resolveClosed = () => {};
+		const closedPromise = new Promise<void>((resolve) => {
+			resolveClosed = resolve;
+		});
 
-	const close = (code: number) => {
-		if (closed) return;
-		closed = true;
-		exitCode = code;
-		loader.stop();
-		tui.stop();
-		resolveClosed();
-	};
+		const close = (code: number) => {
+			if (closed) return;
+			closed = true;
+			exitCode = code;
+			cancellation.abort();
+			loader.stop();
+			tui.stop();
+			resolveClosed();
+		};
 
-	const finish = () => {
-		finished = true;
-		loader.stop();
-		footerSlot.clear();
-		footerSlot.addChild(new Text(style.dim(`── room ${options.room} done ── (enter to close)`), 0, 1));
-	};
+		const finish = () => {
+			finished = true;
+			loader.stop();
+			footerSlot.clear();
+			footerSlot.addChild(new Text(style.dim(`── room ${options.room} done ── (enter to close)`), 0, 1));
+		};
 
-	tui.addInputListener((data) => {
-		if (data === "\x03") {
-			close(0);
-			return { consume: true };
-		}
-		if (finished && (data === "\r" || data === "\n")) {
-			close(0);
-			return { consume: true };
-		}
-		return undefined;
-	});
-
-	loader.start();
-	tui.start();
-
-	const poll = async () => {
-		let since = 0;
-		while (!closed) {
-			let response: Awaited<ReturnType<typeof sendWatchRequest>>;
-			try {
-				response = await sendWatchRequest(target, {
-					type: "room-tail",
-					token: target.token,
-					room: options.room,
-					since,
-				});
-			} catch {
-				// The leader is gone; a finished exchange was still worth reading.
-				close(finished ? 0 : 1);
-				return;
-			}
-			if (!response) {
+		tui.addInputListener((data) => {
+			if (data === "\x03") {
 				close(0);
-				return;
+				return { consume: true };
 			}
-			if (!response.ok) {
-				partingWords = response.error;
-				close(1);
-				return;
-			}
-			const page = response.data as RoomLogPage | undefined;
-			if (!page) {
-				partingWords = "The leader sent no room page; is this a current Neta session?";
-				close(1);
-				return;
-			}
-			header.setText(roomHeaderText(options.room, page));
-			for (const post of page.posts) transcript.append(sayEntry(post));
-			since = page.cursor;
-			if (page.done && !finished) finish();
-			if (!finished) loader.setMessage(roomFooterMessage(page));
-			// The leader has moved on to a new batch; this view closes itself.
-			if (page.archived) {
+			if (finished && (data === "\r" || data === "\n")) {
 				close(0);
-				return;
+				return { consume: true };
 			}
-			tui.requestRender();
-			await new Promise((resolve) => setTimeout(resolve, POLL_MS));
-		}
-	};
+			return undefined;
+		});
 
-	void poll();
-	await closedPromise;
-	if (partingWords) console.error(partingWords);
-	return exitCode;
+		loader.start();
+		tui.start();
+
+		const poll = async () => {
+			let since = 0;
+			while (!closed) {
+				let response: Awaited<ReturnType<typeof sendWatchRequest>>;
+				try {
+					response = await sendWatchRequest(
+						target,
+						{
+							type: "room-tail",
+							token: target.token,
+							room: options.room,
+							since,
+						},
+						cancellation.signal,
+					);
+				} catch {
+					// The leader is gone; a finished exchange was still worth reading.
+					close(cancellation.signal.aborted || finished ? 0 : 1);
+					return;
+				}
+				if (!response) {
+					close(0);
+					return;
+				}
+				if (!response.ok) {
+					partingWords = response.error;
+					close(1);
+					return;
+				}
+				const page = response.data as RoomLogPage | undefined;
+				if (!page) {
+					partingWords = "The leader sent no room page; is this a current Neta session?";
+					close(1);
+					return;
+				}
+				header.setText(roomHeaderText(options.room, page));
+				for (const post of page.posts) transcript.append(sayEntry(post));
+				since = page.cursor;
+				if (page.done && !finished) finish();
+				if (!finished) loader.setMessage(roomFooterMessage(page));
+				// The leader has moved on to a new batch; this view closes itself.
+				if (page.archived) {
+					close(0);
+					return;
+				}
+				tui.requestRender();
+				await abortableDelay(POLL_MS, cancellation.signal);
+			}
+		};
+
+		void poll();
+		await closedPromise;
+		if (partingWords) console.error(partingWords);
+		return exitCode;
+	} finally {
+		cancellation.dispose();
+	}
 }

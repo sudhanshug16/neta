@@ -6,7 +6,11 @@
  */
 
 import { describe, expect, it } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { stripTerminalSequences } from "@earendil-works/pi-tui";
+import { writeSessionRecord } from "../src/session.ts";
 import type { WorkerLogEntry, WorkerSummary } from "../src/types.ts";
 import {
 	colorDiff,
@@ -15,6 +19,7 @@ import {
 	StatusLine,
 	TranscriptView,
 	WORKER_INPUT_HINT,
+	watchWorkerTui,
 	workerHeaderText,
 } from "../src/watch-tui.ts";
 
@@ -360,6 +365,40 @@ describe("StatusLine", () => {
 		expect(status.render(120).map(stripTerminalSequences)).toEqual([
 			"w1 auth flow · Claude Opus 4.5 · running · 68,000 tokens · est. $0.50",
 		]);
+	});
+});
+
+describe("watch TUI cancellation", () => {
+	it("closes while the first connection is still pending", async () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "neta-watch-tui-home-"));
+		try {
+			writeSessionRecord(
+				{
+					id: "tui-cancel",
+					socket: join(agentDir, "missing.sock"),
+					token: "tok",
+					cwd: process.cwd(),
+					leader: "claude",
+					pid: process.pid,
+					startedAt: Date.now(),
+				},
+				agentDir,
+			);
+			const controller = new AbortController();
+			const cancel = setTimeout(() => controller.abort(), 20);
+			expect(
+				await watchWorkerTui({
+					workerId: "ro1",
+					sessionId: "tui-cancel",
+					agentDir,
+					signal: controller.signal,
+					startupGraceMs: 5_000,
+				}),
+			).toBe(0);
+			clearTimeout(cancel);
+		} finally {
+			rmSync(agentDir, { recursive: true, force: true });
+		}
 	});
 });
 

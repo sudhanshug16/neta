@@ -11,8 +11,15 @@
  * stays the same way once its last member finishes.
  */
 
+import { existsSync } from "node:fs";
 import { sendChannelRequest } from "./channel/client.ts";
-import { type ChannelRequest, type ChannelResponse, NETA_LEADER_ENV, NETA_SOCKET_ENV } from "./channel/protocol.ts";
+import {
+	CHANNEL_PROTOCOL_VERSION,
+	type ChannelRequest,
+	type ChannelResponse,
+	NETA_LEADER_ENV,
+	NETA_SOCKET_ENV,
+} from "./channel/protocol.ts";
 import { getAgentDir } from "./config.ts";
 import { markWorkerPaneTerminal } from "./mux/panes.ts";
 import { formatLastProgress } from "./orchestrator/status.ts";
@@ -33,6 +40,7 @@ const POLL_MS = 400;
 const ARCHIVE_POLL_MS = 2000;
 const CONTROL_PLANE_RETRY_MS = 100;
 const CONTROL_PLANE_RETRY_WINDOW_MS = 30_000;
+export const WATCH_STARTUP_GRACE_MS = 2_000;
 
 /** Worker ids are minted as ro<N>/rw<N>; anything else `watch` takes as a room name. */
 export function isWorkerId(target: string): boolean {
@@ -204,6 +212,13 @@ export interface WatchTarget {
 	/** A registry-backed id lets a watcher stop when its manager is gone. */
 	sessionId?: string;
 	agentDir?: string;
+	/** Set after the first successful channel response; reconnects are then normal. */
+	connected?: boolean;
+	/** The bounded window applies to the initial registry-backed connection only. */
+	startupDeadline?: number;
+	startupGraceMs?: number;
+	/** Set when a registry record advertises an incompatible channel protocol. */
+	compatibilityError?: string;
 }
 
 /** Env first (we are inside the session), then the registry (we are not). */
@@ -219,7 +234,12 @@ export function resolveTarget(
 	const record = sessionId
 		? listSessions(agentDir).find((entry) => entry.id === sessionId)
 		: findSession(cwd, agentDir);
-	return record ? { address: record.socket, token: record.token, sessionId: record.id, agentDir } : undefined;
+	if (!record) return undefined;
+	const compatibilityError =
+		record.channelProtocolVersion !== undefined && record.channelProtocolVersion !== CHANNEL_PROTOCOL_VERSION
+			? `The Neta session uses channel protocol ${record.channelProtocolVersion}; this watcher supports ${CHANNEL_PROTOCOL_VERSION}. Restart the session with the current Neta runtime.`
+			: undefined;
+	return { address: record.socket, token: record.token, sessionId: record.id, agentDir, compatibilityError };
 }
 
 function isTransientChannelError(error: unknown): boolean {
@@ -231,6 +251,71 @@ function sessionStillRegistered(target: WatchTarget): boolean {
 	return target.sessionId === undefined || readSessionRecord(target.sessionId, target.agentDir) !== undefined;
 }
 
+function isWindowsPipe(address: string): boolean {
+	return address.startsWith("\\\\.\\pipe\\");
+}
+
+function isMissingUnixSocket(address: string): boolean {
+	return process.platform !== "win32" && !isWindowsPipe(address) && !existsSync(address);
+}
+
+export function abortableDelay(milliseconds: number, signal?: AbortSignal): Promise<void> {
+	if (signal?.aborted) return Promise.resolve();
+	return new Promise((resolve) => {
+		const timer = setTimeout(done, milliseconds);
+		const abort = () => {
+			clearTimeout(timer);
+			signal?.removeEventListener("abort", abort);
+			resolve();
+		};
+		function done(): void {
+			signal?.removeEventListener("abort", abort);
+			resolve();
+		}
+		signal?.addEventListener("abort", abort, { once: true });
+	});
+}
+
+function isAbortError(error: unknown): boolean {
+	return (error as Error | undefined)?.name === "AbortError";
+}
+
+interface WatchCancellation {
+	signal: AbortSignal;
+	abort(): void;
+	dispose(): void;
+}
+
+/** Keep signal handlers active through the first connect attempt and every retry. */
+export function installWatchCancellation(external?: AbortSignal): WatchCancellation {
+	const controller = new AbortController();
+	const abort = () => controller.abort();
+	const signals = ["SIGINT", "SIGTERM"] as const;
+	for (const signal of signals) process.on(signal, abort);
+	if (external) {
+		if (external.aborted) abort();
+		else external.addEventListener("abort", abort, { once: true });
+	}
+	return {
+		signal: controller.signal,
+		abort,
+		dispose: () => {
+			for (const signal of signals) process.removeListener(signal, abort);
+			external?.removeEventListener("abort", abort);
+		},
+	};
+}
+
+function startupFailure(target: WatchTarget): Error {
+	const grace = target.startupGraceMs ?? WATCH_STARTUP_GRACE_MS;
+	const detail = isMissingUnixSocket(target.address)
+		? `the registered Unix socket ${target.address} is still missing`
+		: `the registered socket ${target.address} never accepted a connection`;
+	return new Error(
+		`Neta session ${target.sessionId ?? "<environment>"} is unavailable after its ${grace}ms startup grace: ${detail}. Restart the Neta session.`,
+	);
+}
+
 /**
  * A pane can start during the control-plane handoff: the socket path exists in
  * the session record, but the listener is not accepting yet. Retry only those
@@ -240,32 +325,51 @@ function sessionStillRegistered(target: WatchTarget): boolean {
 export async function sendWatchRequest(
 	target: WatchTarget,
 	request: ChannelRequest,
+	signal?: AbortSignal,
 ): Promise<ChannelResponse | undefined> {
-	const deadline = target.sessionId === undefined ? Date.now() + CONTROL_PLANE_RETRY_WINDOW_MS : undefined;
+	if (target.compatibilityError) throw new Error(target.compatibilityError);
+	const deadline =
+		target.startupDeadline ??
+		(target.sessionId === undefined
+			? Date.now() + CONTROL_PLANE_RETRY_WINDOW_MS
+			: Date.now() + (target.startupGraceMs ?? WATCH_STARTUP_GRACE_MS));
+	target.startupDeadline ??= deadline;
 	for (;;) {
 		try {
-			return await sendChannelRequest(target.address, request);
+			const response = await sendChannelRequest(target.address, request, signal);
+			target.connected = true;
+			return response;
 		} catch (error) {
+			if (signal?.aborted || isAbortError(error)) throw error;
 			if (!isTransientChannelError(error)) throw error;
 			if (!sessionStillRegistered(target)) return undefined;
-			if (deadline !== undefined && Date.now() >= deadline) throw error;
-			await new Promise((resolve) => setTimeout(resolve, CONTROL_PLANE_RETRY_MS));
+			if (!target.connected && Date.now() >= deadline) throw startupFailure(target);
+			if (target.sessionId === undefined && Date.now() >= deadline) throw error;
+			const remaining = deadline - Date.now();
+			await abortableDelay(
+				target.connected ? CONTROL_PLANE_RETRY_MS : Math.min(CONTROL_PLANE_RETRY_MS, Math.max(1, remaining)),
+				signal,
+			);
 		}
 	}
 }
 
 /** Resolves when the leader has moved on, or when the session goes away. */
-async function waitForArchive(target: WatchTarget, workerId: string): Promise<void> {
+async function waitForArchive(target: WatchTarget, workerId: string, signal: AbortSignal): Promise<void> {
 	for (;;) {
-		await new Promise((resolve) => setTimeout(resolve, ARCHIVE_POLL_MS));
+		await abortableDelay(ARCHIVE_POLL_MS, signal);
 		let response: ChannelResponse | undefined;
 		try {
-			response = await sendWatchRequest(target, {
-				type: "tail",
-				token: target.token,
-				workerId,
-				since: Number.MAX_SAFE_INTEGER,
-			});
+			response = await sendWatchRequest(
+				target,
+				{
+					type: "tail",
+					token: target.token,
+					workerId,
+					since: Number.MAX_SAFE_INTEGER,
+				},
+				signal,
+			);
 		} catch {
 			// The leader is gone; nothing left to watch.
 			return;
@@ -287,6 +391,8 @@ export interface WatchOptions {
 	/** Keep the view open after the worker finishes. Defaults to true on a terminal. */
 	hold?: boolean;
 	write?: (line: string) => void;
+	signal?: AbortSignal;
+	startupGraceMs?: number;
 }
 
 export async function watchWorker(options: WatchOptions): Promise<number> {
@@ -296,77 +402,101 @@ export async function watchWorker(options: WatchOptions): Promise<number> {
 		write("No Neta session found. Start one with `neta`, or pass --session <id>.");
 		return 1;
 	}
+	target.startupGraceMs = options.startupGraceMs;
+	const cancellation = installWatchCancellation(options.signal);
+	try {
+		if (cancellation.signal.aborted) return 0;
 
-	let since = 0;
-	let introduced = false;
-	let shownState: WorkerState | undefined;
-	for (;;) {
-		let response: ChannelResponse | undefined;
-		try {
-			response = await sendWatchRequest(target, {
-				type: "tail",
-				token: target.token,
-				workerId: options.workerId,
-				since,
-			});
-		} catch (error) {
-			write(`Could not reach the leader on ${target.address}: ${error instanceof Error ? error.message : error}`);
-			return 1;
-		}
-		if (!response) return 0;
-		if (!response.ok) {
-			write(response.error);
-			return 1;
-		}
-
-		const page = response.data as WorkerLogPage | undefined;
-		if (!page) {
-			write("The leader sent no log page; is this a current Neta session?");
-			return 1;
-		}
-		if (!introduced && page.worker) {
-			for (const line of header(page.worker)) write(line);
-			// The header's "task:" line truncates; the brief was the first thing
-			// sent to the worker and opens the transcript whole.
-			write(formatSent("task", page.worker.task));
-			introduced = true;
-		}
-		for (const entry of page.entries) write(formatLine(entry));
-		since = page.cursor;
-		// The header scrolls away with the log; the metadata must not. Every state
-		// change reprints it as one line — current model and spend included — so a
-		// headless reader always has it nearby.
-		if (page.worker && page.state !== shownState) {
-			write(`· ${metadataCandidates(page.worker, page.state)[0]}`);
-			shownState = page.state;
-		}
-
-		if (isTerminalState(page.state) || options.once) {
-			if (isTerminalState(page.state)) {
-				if (page.worker) markWorkerPaneTerminal(page.worker);
-				write(footer(page));
+		let since = 0;
+		let introduced = false;
+		let shownState: WorkerState | undefined;
+		for (;;) {
+			let response: ChannelResponse | undefined;
+			try {
+				response = await sendWatchRequest(
+					target,
+					{
+						type: "tail",
+						token: target.token,
+						workerId: options.workerId,
+						since,
+					},
+					cancellation.signal,
+				);
+			} catch (error) {
+				if (cancellation.signal.aborted || isAbortError(error)) return 0;
+				write(`Could not reach the leader on ${target.address}: ${error instanceof Error ? error.message : error}`);
+				return 1;
 			}
-			break;
-		}
-		await new Promise((resolve) => setTimeout(resolve, POLL_MS));
-	}
+			if (!response) return 0;
+			if (!response.ok) {
+				write(response.error);
+				return 1;
+			}
 
-	// A finished worker's tab stays up so its report can be read, and closes
-	// itself once the leader starts a new batch — or sooner, on a keypress.
-	const hold = options.hold ?? (process.stdin.isTTY === true && !options.once);
-	if (hold) {
-		// This view is read-only by design. The worker's conversation lives in its
-		// own CLI's history, so say how to open it there and talk to it.
-		write(`(neta attach ${options.workerId} to open this in its own CLI · enter to close)`);
-		await Promise.race([
-			new Promise<void>((resolve) => {
-				process.stdin.resume();
-				process.stdin.once("data", () => resolve());
-			}),
-			waitForArchive(target, options.workerId),
-		]);
+			const page = response.data as WorkerLogPage | undefined;
+			if (!page) {
+				write("The leader sent no log page; is this a current Neta session?");
+				return 1;
+			}
+			if (!introduced && page.worker) {
+				for (const line of header(page.worker)) write(line);
+				// The header's "task:" line truncates; the brief was the first thing
+				// sent to the worker and opens the transcript whole.
+				write(formatSent("task", page.worker.task));
+				introduced = true;
+			}
+			for (const entry of page.entries) write(formatLine(entry));
+			since = page.cursor;
+			// The header scrolls away with the log; the metadata must not. Every state
+			// change reprints it as one line — current model and spend included — so a
+			// headless reader always has it nearby.
+			if (page.worker && page.state !== shownState) {
+				write(`· ${metadataCandidates(page.worker, page.state)[0]}`);
+				shownState = page.state;
+			}
+
+			if (isTerminalState(page.state) || options.once) {
+				if (isTerminalState(page.state)) {
+					if (page.worker) markWorkerPaneTerminal(page.worker);
+					write(footer(page));
+				}
+				break;
+			}
+			await abortableDelay(POLL_MS, cancellation.signal);
+		}
+
+		// A finished worker's tab stays up so its report can be read, and closes
+		// itself once the leader starts a new batch — or sooner, on a keypress.
+		const hold = options.hold ?? (process.stdin.isTTY === true && !options.once);
+		if (hold) {
+			// This view is read-only by design. The worker's conversation lives in its
+			// own CLI's history, so say how to open it there and talk to it.
+			write(`(neta attach ${options.workerId} to open this in its own CLI · enter to close)`);
+			await Promise.race([
+				new Promise<void>((resolve) => {
+					process.stdin.resume();
+					const onData = () => {
+						process.stdin.removeListener("data", onData);
+						resolve();
+					};
+					process.stdin.once("data", onData);
+					cancellation.signal.addEventListener(
+						"abort",
+						() => {
+							process.stdin.removeListener("data", onData);
+							resolve();
+						},
+						{ once: true },
+					);
+				}),
+				waitForArchive(target, options.workerId, cancellation.signal),
+			]);
+		}
+		return 0;
+	} finally {
+		cancellation.dispose();
 	}
-	return 0;
 }
 
 /** Which room this is and who is in it, mirroring the worker header. */
@@ -376,17 +506,21 @@ function roomHeader(room: string, page: RoomLogPage): string[] {
 }
 
 /** Resolves when the room's batch has been archived, or the session goes away. */
-async function waitForRoomArchive(target: WatchTarget, room: string): Promise<void> {
+async function waitForRoomArchive(target: WatchTarget, room: string, signal: AbortSignal): Promise<void> {
 	for (;;) {
-		await new Promise((resolve) => setTimeout(resolve, ARCHIVE_POLL_MS));
+		await abortableDelay(ARCHIVE_POLL_MS, signal);
 		let response: ChannelResponse | undefined;
 		try {
-			response = await sendWatchRequest(target, {
-				type: "room-tail",
-				token: target.token,
-				room,
-				since: Number.MAX_SAFE_INTEGER,
-			});
+			response = await sendWatchRequest(
+				target,
+				{
+					type: "room-tail",
+					token: target.token,
+					room,
+					since: Number.MAX_SAFE_INTEGER,
+				},
+				signal,
+			);
 		} catch {
 			// The leader is gone; nothing left to watch.
 			return;
@@ -408,6 +542,8 @@ export interface WatchRoomOptions {
 	/** Keep the view open after the room finishes. Defaults to true on a terminal. */
 	hold?: boolean;
 	write?: (line: string) => void;
+	signal?: AbortSignal;
+	startupGraceMs?: number;
 }
 
 /**
@@ -422,58 +558,82 @@ export async function watchRoom(options: WatchRoomOptions): Promise<number> {
 		write("No Neta session found. Start one with `neta`, or pass --session <id>.");
 		return 1;
 	}
+	target.startupGraceMs = options.startupGraceMs;
+	const cancellation = installWatchCancellation(options.signal);
+	try {
+		if (cancellation.signal.aborted) return 0;
 
-	let since = 0;
-	let introduced = false;
-	for (;;) {
-		let response: ChannelResponse | undefined;
-		try {
-			response = await sendWatchRequest(target, {
-				type: "room-tail",
-				token: target.token,
-				room: options.room,
-				since,
-			});
-		} catch (error) {
-			write(`Could not reach the leader on ${target.address}: ${error instanceof Error ? error.message : error}`);
-			return 1;
-		}
-		if (!response) return 0;
-		if (!response.ok) {
-			write(response.error);
-			return 1;
-		}
-		const page = response.data as RoomLogPage | undefined;
-		if (!page) {
-			write("The leader sent no room page; is this a current Neta session?");
-			return 1;
-		}
-		if (!introduced) {
-			for (const line of roomHeader(options.room, page)) write(line);
-			introduced = true;
-		}
-		for (const post of page.posts) write(formatLine(sayEntry(post)));
-		since = page.cursor;
+		let since = 0;
+		let introduced = false;
+		for (;;) {
+			let response: ChannelResponse | undefined;
+			try {
+				response = await sendWatchRequest(
+					target,
+					{
+						type: "room-tail",
+						token: target.token,
+						room: options.room,
+						since,
+					},
+					cancellation.signal,
+				);
+			} catch (error) {
+				if (cancellation.signal.aborted || isAbortError(error)) return 0;
+				write(`Could not reach the leader on ${target.address}: ${error instanceof Error ? error.message : error}`);
+				return 1;
+			}
+			if (!response) return 0;
+			if (!response.ok) {
+				write(response.error);
+				return 1;
+			}
+			const page = response.data as RoomLogPage | undefined;
+			if (!page) {
+				write("The leader sent no room page; is this a current Neta session?");
+				return 1;
+			}
+			if (!introduced) {
+				for (const line of roomHeader(options.room, page)) write(line);
+				introduced = true;
+			}
+			for (const post of page.posts) write(formatLine(sayEntry(post)));
+			since = page.cursor;
 
-		if (page.done || options.once) {
-			if (page.done) write(`── room ${options.room} done ──`);
-			break;
+			if (page.done || options.once) {
+				if (page.done) write(`── room ${options.room} done ──`);
+				break;
+			}
+			await abortableDelay(POLL_MS, cancellation.signal);
 		}
-		await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+
+		// Like a finished worker's tab: the exchange stays readable until dismissed,
+		// and the view closes itself when the leader moves on to a new batch.
+		const hold = options.hold ?? (process.stdin.isTTY === true && !options.once);
+		if (hold) {
+			write("(enter to close)");
+			await Promise.race([
+				new Promise<void>((resolve) => {
+					process.stdin.resume();
+					const onData = () => {
+						process.stdin.removeListener("data", onData);
+						resolve();
+					};
+					process.stdin.once("data", onData);
+					cancellation.signal.addEventListener(
+						"abort",
+						() => {
+							process.stdin.removeListener("data", onData);
+							resolve();
+						},
+						{ once: true },
+					);
+				}),
+				waitForRoomArchive(target, options.room, cancellation.signal),
+			]);
+		}
+		return 0;
+	} finally {
+		cancellation.dispose();
 	}
-
-	// Like a finished worker's tab: the exchange stays readable until dismissed,
-	// and the view closes itself when the leader moves on to a new batch.
-	const hold = options.hold ?? (process.stdin.isTTY === true && !options.once);
-	if (hold) {
-		write("(enter to close)");
-		await Promise.race([
-			new Promise<void>((resolve) => {
-				process.stdin.resume();
-				process.stdin.once("data", () => resolve());
-			}),
-			waitForRoomArchive(target, options.room),
-		]);
-	}
-	return 0;
 }

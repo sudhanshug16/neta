@@ -9,6 +9,8 @@
  */
 
 import { beforeEach, describe, expect, it } from "bun:test";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	INSPECT_MAX_CHARS,
 	INSPECT_MAX_ENTRIES,
@@ -60,13 +62,13 @@ const refusingPanes: WorkerPaneHost = {
 	openRoom: () => ({ opened: false, reason: "zellij action new-tab failed: no session" }),
 };
 
-function build(options: { panes?: WorkerPaneHost; headlessReason?: string } = {}) {
+function build(options: { panes?: WorkerPaneHost; headlessReason?: string; channelAddress?: string } = {}) {
 	const transports: FakeTransport[] = [];
 	const manager = new WorkerManager({
 		cwd: process.cwd(),
 		agentDir: "/nonexistent-agent-dir",
 		config: fixtureBackendConfig(),
-		channelAddress: "/tmp/neta-inspect-test.sock",
+		channelAddress: options.channelAddress ?? process.cwd(),
 		leaderToken: "leader-token",
 		onEvent: () => {},
 		panes: options.panes,
@@ -203,6 +205,25 @@ describe("the inspection cap", () => {
 });
 
 describe("a worker whose tab was never created", () => {
+	it("does not open a zombie pane when the manager socket is missing", async () => {
+		let opens = 0;
+		const panes: WorkerPaneHost = {
+			open: () => {
+				opens += 1;
+				return { opened: true };
+			},
+			openRoom: () => ({ opened: true }),
+		};
+		const missing = join(tmpdir(), `neta-manager-missing-${process.pid}-${Date.now()}.sock`);
+		const { manager, transports } = build({ panes, channelAddress: missing });
+		await manager.spawn({ role: "scout", tier: "expert", task: "do not open" });
+		await waitFor(() => transports[0].prompts.length === 1);
+
+		expect(opens).toBe(0);
+		expect(manager.inspect("ro1").headlessReason).toContain("manager Unix socket");
+		expect(manager.inspect("ro1").headlessReason).toContain("restart the Neta session");
+	});
+
 	// The exact case in the ask: automatic Zellij pane creation failed, so the
 	// worker is headless and there is nothing to click.
 	it("still expands, and says why it has no tab", async () => {

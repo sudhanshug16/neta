@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
+	CHANNEL_PROTOCOL_VERSION,
 	createChannelAddress,
 	NETA_LEADER_ENV,
 	NETA_SOCKET_ENV,
@@ -32,7 +33,7 @@ import {
 	readVendorSessionCaptureError,
 } from "../checkpoint.ts";
 import { type CliInvocation, createLeaderCliShim, prependToPath, resolveSelfInvocation } from "../cli-shim.ts";
-import { APP_NAME, getAgentDir } from "../config.ts";
+import { APP_NAME, getAgentDir, VERSION } from "../config.ts";
 import { selectMux } from "../mux/index.ts";
 import { createPaneHost } from "../mux/panes.ts";
 import { WorkerManager, type WorkerManagerOptions } from "../orchestrator/manager.ts";
@@ -183,6 +184,8 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 	const workerGroups = new Map<string, SessionWorkerGroup>();
 	const sessionRecord: SessionRecord = {
 		id: sessionId,
+		appVersion: VERSION,
+		channelProtocolVersion: CHANNEL_PROTOCOL_VERSION,
 		socket: address,
 		token,
 		cwd,

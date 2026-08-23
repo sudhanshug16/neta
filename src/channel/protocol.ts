@@ -29,6 +29,9 @@ export const NETA_SCRATCH_ENV = "NETA_SCRATCH";
  */
 export const NETA_LEADER_ENV = "NETA_LEADER_TOKEN";
 
+/** Version of the leader channel requests shared by managers and watchers. */
+export const CHANNEL_PROTOCOL_VERSION = 1;
+
 export type WorkerChannelRequest =
 	/** Record a progress milestone in this worker's log. The leader pulls it; nothing is pushed. */
 	| { type: "progress"; workerId: string; token: string; text: string }

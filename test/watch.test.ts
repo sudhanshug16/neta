@@ -144,6 +144,139 @@ describe("watch", () => {
 		expect(lines).toContain("task: recover the view");
 	});
 
+	it("exits with a truthful diagnostic when a live registry has no socket", async () => {
+		const worker = await manager.spawn({ role: "scout", tier: "expert", task: "missing socket" });
+		await server.stop();
+		env.set(NETA_SOCKET_ENV, "");
+		env.set(NETA_LEADER_ENV, "");
+		env.set("NETA_DIR", agentDir);
+		writeSessionRecord(
+			{
+				id: "missing-socket",
+				socket: address,
+				token: "tok",
+				cwd: process.cwd(),
+				leader: "claude",
+				pid: process.pid,
+				startedAt: Date.now(),
+			},
+			agentDir,
+		);
+
+		const code = await watchWorker({
+			workerId: worker.id,
+			sessionId: "missing-socket",
+			once: true,
+			hold: false,
+			startupGraceMs: 40,
+			write,
+		});
+
+		expect(code).toBe(1);
+		expect(lines.join(" ")).toContain("registered Unix socket");
+		expect(lines.join(" ")).toContain("Restart the Neta session");
+	});
+
+	it("rejects an incompatible registry channel before connecting", async () => {
+		const worker = await manager.spawn({ role: "scout", tier: "expert", task: "incompatible channel" });
+		env.set(NETA_SOCKET_ENV, "");
+		env.set(NETA_LEADER_ENV, "");
+		env.set("NETA_DIR", agentDir);
+		writeSessionRecord(
+			{
+				id: "incompatible-channel",
+				socket: address,
+				token: "tok",
+				cwd: process.cwd(),
+				leader: "claude",
+				pid: process.pid,
+				startedAt: Date.now(),
+				channelProtocolVersion: 99,
+			},
+			agentDir,
+		);
+
+		const code = await watchWorker({
+			workerId: worker.id,
+			sessionId: "incompatible-channel",
+			once: true,
+			hold: false,
+			write,
+		});
+
+		expect(code).toBe(1);
+		expect(lines.join(" ")).toContain("channel protocol 99");
+	});
+
+	it("cancels a connect immediately on Ctrl+C", async () => {
+		const worker = await manager.spawn({ role: "scout", tier: "expert", task: "cancel connect" });
+		await server.stop();
+		env.set(NETA_SOCKET_ENV, "");
+		env.set(NETA_LEADER_ENV, "");
+		env.set("NETA_DIR", agentDir);
+		writeSessionRecord(
+			{
+				id: "cancel-connect",
+				socket: address,
+				token: "tok",
+				cwd: process.cwd(),
+				leader: "claude",
+				pid: process.pid,
+				startedAt: Date.now(),
+			},
+			agentDir,
+		);
+
+		const started = Date.now();
+		const watching = watchWorker({
+			workerId: worker.id,
+			sessionId: "cancel-connect",
+			hold: false,
+			startupGraceMs: 5_000,
+			write,
+		});
+		const interrupt = setTimeout(() => process.emit("SIGINT"), 20);
+
+		const code = await watching;
+		clearTimeout(interrupt);
+		expect(code).toBe(0);
+		expect(Date.now() - started).toBeLessThan(1_000);
+	});
+
+	it("connects when the registry socket appears during startup grace", async () => {
+		const worker = await manager.spawn({ role: "scout", tier: "expert", task: "socket race" });
+		await server.stop();
+		env.set(NETA_SOCKET_ENV, "");
+		env.set(NETA_LEADER_ENV, "");
+		env.set("NETA_DIR", agentDir);
+		writeSessionRecord(
+			{
+				id: "socket-race",
+				socket: address,
+				token: "tok",
+				cwd: process.cwd(),
+				leader: "claude",
+				pid: process.pid,
+				startedAt: Date.now(),
+			},
+			agentDir,
+		);
+		const restart = setTimeout(() => void server.start(), 80);
+
+		const code = await watchWorker({
+			workerId: worker.id,
+			sessionId: "socket-race",
+			once: true,
+			hold: false,
+			startupGraceMs: 500,
+			write,
+		});
+
+		clearTimeout(restart);
+		expect(code).toBe(0);
+		expect(lines).toContain("task: socket race");
+	});
+
 	it("exits normally when a finished worker has been archived", async () => {
 		const worker = await manager.spawn({ role: "scout", tier: "expert", task: "finish before archive" });
 		transports[0].finish({ ok: true, summary: "done" });

@@ -5,7 +5,7 @@
  * requires NETA_SOCKET to be set.
  */
 
-import { connect } from "node:net";
+import { Socket } from "node:net";
 import { APP_NAME } from "../config.ts";
 import {
 	type ChannelRequest,
@@ -33,20 +33,44 @@ const CHANNEL_HELP = `Worker channel commands (available inside a Neta worker):
  * for as long as the leader takes, so there is no timeout here; the leader
  * closes the socket when the worker is killed.
  */
-export function sendChannelRequest(address: string, request: ChannelRequest): Promise<ChannelResponse> {
+export function sendChannelRequest(
+	address: string,
+	request: ChannelRequest,
+	signal?: AbortSignal,
+): Promise<ChannelResponse> {
+	if (signal?.aborted) {
+		const error = new Error("The channel request was aborted.");
+		error.name = "AbortError";
+		return Promise.reject(error);
+	}
 	return new Promise((resolve, reject) => {
-		const socket = connect(address);
+		const socket = new Socket();
 		let buffer = "";
 		let settled = false;
+		let connected = false;
+		const abort = () => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			socket.destroy();
+			const error = new Error("The channel request was aborted.");
+			error.name = "AbortError";
+			reject(error);
+		};
+		const cleanup = () => signal?.removeEventListener("abort", abort);
 
 		const finish = (response: ChannelResponse) => {
 			if (settled) return;
 			settled = true;
+			cleanup();
 			socket.end();
 			resolve(response);
 		};
 
+		signal?.addEventListener("abort", abort, { once: true });
+
 		socket.on("connect", () => {
+			connected = true;
 			socket.write(`${JSON.stringify(request)}\n`);
 		});
 		socket.on("data", (chunk) => {
@@ -63,13 +87,22 @@ export function sendChannelRequest(address: string, request: ChannelRequest): Pr
 		socket.on("error", (error) => {
 			if (settled) return;
 			settled = true;
+			cleanup();
 			reject(error);
 		});
 		socket.on("close", () => {
 			if (settled) return;
 			settled = true;
+			cleanup();
+			if (!connected) {
+				const error = new Error("The leader closed the channel before accepting the connection.");
+				(error as NodeJS.ErrnoException).code = "ECONNRESET";
+				reject(error);
+				return;
+			}
 			resolve({ ok: false, error: "Leader closed the channel without answering." });
 		});
+		socket.connect(address);
 	});
 }
 
