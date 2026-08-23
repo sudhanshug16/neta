@@ -46,6 +46,7 @@
 		"typecheck": "tsc --noEmit",
 		"check": "biome check --write --error-on-warnings . && bun run typecheck",
 		"test": "bun test",
+		"test:mux-live": "NETA_TEST_MUX_LIVE=1 bun test test/mux-live.test.ts",
 		"benchmark:checkpoint": "bun run scripts/benchmark-checkpoint.ts",
 		"prepublishOnly": "bun run clean && bun run check && bun test && python3 -W error plugins/herdr/neta-status/tests/test_monitor.py && bun run build",
 		"refresh-pricing": "bun run scripts/refresh-pricing.ts"
