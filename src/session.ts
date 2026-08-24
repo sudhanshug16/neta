@@ -112,8 +112,17 @@ export function assertSessionLockHeld(lock: SessionLock): void {
 /** Identity captured when a detached ACP group is created, before crash recovery can ever reap it. */
 export interface SessionWorkerGroup {
 	pgid: number;
+	/** The process id saved for the group leader; `pgid` is retained for old records. */
+	leaderPid?: number;
 	/** `ps lstart` for the group leader; absence is retained as uncertainty and never treated as death. */
 	leaderStartedAt?: string;
+	/** Individual owned processes available to the unsupported-group fallback. */
+	ownedProcesses?: SessionProcessIdentity[];
+}
+
+export interface SessionProcessIdentity {
+	pid: number;
+	startedAt?: string;
 }
 
 /**
@@ -132,6 +141,9 @@ export interface SessionStoppedMarker {
 	/** Every recorded worker group was reaped, or was already gone. */
 	processesStopped: boolean;
 	processStartedAt?: string;
+	/** Saved manager pid and worker identities for a fresh proof after ambiguity. */
+	pid?: number;
+	workerGroups?: SessionWorkerGroup[];
 }
 
 export interface SessionSweepOptions {
@@ -422,9 +434,43 @@ export function isProcessGroupGone(
 	const { pgid } = group;
 	if (!Number.isInteger(pgid) || pgid <= 1) return false;
 	const populated = groupPopulated(pgid);
+	if (populated === undefined) return unsupportedProcessGroupGone(group, _identify);
 	// An empty group is proof of death. A live or unobservable group is not gone,
 	// even when its leader identity is missing or belongs to a replacement.
 	return populated === false;
+}
+
+type ProcessObservation = "dead" | "owned" | "reused" | "unknown";
+
+function observeProcess(
+	identity: SessionProcessIdentity,
+	identify: (pid: number) => string | undefined,
+): ProcessObservation {
+	if (!Number.isInteger(identity.pid) || identity.pid <= 1) return "unknown";
+	if (identity.startedAt !== undefined && typeof identity.startedAt !== "string") return "unknown";
+	if (!isAlive(identity.pid)) return "dead";
+	const actual = identify(identity.pid);
+	if (actual === undefined) return "unknown";
+	if (identity.startedAt === undefined || actual !== identity.startedAt) return "reused";
+	return "owned";
+}
+
+/**
+ * Windows and other platforms may not implement a meaningful negative-pid
+ * process-group probe. In that case only exact saved process identities count:
+ * an unavailable identity is unknown, never evidence of death, and no signal is
+ * sent because there is no ownership proof for a group-wide operation.
+ */
+function unsupportedProcessGroupGone(
+	group: SessionWorkerGroup,
+	identify: (pid: number) => string | undefined,
+): boolean {
+	const leader: SessionProcessIdentity = {
+		pid: group.leaderPid ?? group.pgid,
+		...(group.leaderStartedAt ? { startedAt: group.leaderStartedAt } : {}),
+	};
+	const identities = [leader, ...(group.ownedProcesses ?? [])];
+	return identities.every((identity) => observeProcess(identity, identify) === "dead");
 }
 
 function ownsLiveProcessGroup(
@@ -453,6 +499,13 @@ export function reapProcessGroup(
 	const { pgid } = group;
 	if (!Number.isInteger(pgid) || pgid <= 1 || pgid === process.pid) {
 		warn(`[neta] stale session skipped invalid process group ${pgid}`);
+		return false;
+	}
+	if (groupPopulated(pgid) === undefined) {
+		if (isProcessGroupGone(group, identify, groupPopulated)) return true;
+		warn(
+			`[neta] stale session skipped process group ${pgid}: this platform cannot prove every owned process is stopped`,
+		);
 		return false;
 	}
 	if (isProcessGroupGone(group, identify, groupPopulated)) return true;
@@ -574,6 +627,8 @@ function tearDownSession(
 			at: Date.now(),
 			processesStopped,
 			processStartedAt: record.processStartedAt,
+			pid: record.pid,
+			workerGroups: record.workerGroups,
 		},
 		agentDir,
 	);

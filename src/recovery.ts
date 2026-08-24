@@ -28,6 +28,7 @@ import {
 import { APP_NAME } from "./config.ts";
 import {
 	canonicalizeCwd,
+	isProcessGroupGone,
 	isSessionAlive,
 	isSessionLeaseAlive,
 	listSessions,
@@ -37,6 +38,7 @@ import {
 	reapSessionRecord,
 	removeStoppedMarker,
 	type SessionSweepOptions,
+	type SessionWorkerGroup,
 } from "./session.ts";
 import { isTerminalState } from "./types.ts";
 
@@ -157,10 +159,30 @@ export async function proveManagerStopped(checkpoint: SessionCheckpoint, options
 	} else {
 		const marker = readStoppedMarker(lease.managerId, agentDir);
 		if (marker && !marker.processesStopped) {
-			throw new RecoveryError(
-				`An earlier cleanup of manager ${lease.managerId} could not confirm its worker processes exited. ` +
-					`Stop them yourself and resume again; the checkpoint was left unchanged.`,
-			);
+			const managerIdentityKnown = marker.pid !== undefined && marker.processStartedAt !== undefined;
+			if (!managerIdentityKnown) {
+				throw new RecoveryError(
+					`An earlier cleanup of manager ${lease.managerId} could not confirm its worker processes exited. ` +
+						`Its saved process identities are incomplete; stop them yourself and resume again.`,
+				);
+			}
+			if (isSessionAlive({ pid: marker.pid as number })) {
+				const actual = identify(marker.pid as number);
+				if (actual === undefined || actual === marker.processStartedAt) {
+					throw new RecoveryError(
+						`An earlier cleanup of manager ${lease.managerId} could not confirm its worker processes exited. ` +
+							`Manager pid ${marker.pid} is still alive; stop it yourself and resume again.`,
+					);
+				}
+			}
+			const groups: SessionWorkerGroup[] = marker.workerGroups ?? [];
+			if (!groups.every((group) => isProcessGroupGone(group, identify, options.groupPopulated))) {
+				throw new RecoveryError(
+					`An earlier cleanup of manager ${lease.managerId} could not confirm its worker processes exited. ` +
+						`Fresh process proof is still ambiguous or live; stop them yourself and resume again.`,
+				);
+			}
+			notes.push(`an earlier ambiguous cleanup was rechecked and all recorded processes are now stopped`);
 		}
 		if (marker) {
 			notes.push(`manager ${lease.managerId} was already reaped by an earlier Neta command`);

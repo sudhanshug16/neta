@@ -231,7 +231,12 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 				// Keep an unidentifiable live group in the durable registry. Dropping it
 				// would make a crash look clean and let recovery hydrate a replacement
 				// while the original worker may still be editing the repository.
-				workerGroups.set(workerId, { pgid, leaderStartedAt });
+				workerGroups.set(workerId, {
+					pgid,
+					leaderPid: pgid,
+					...(leaderStartedAt ? { leaderStartedAt } : {}),
+					ownedProcesses: [{ pid: pgid, ...(leaderStartedAt ? { startedAt: leaderStartedAt } : {}) }],
+				});
 			}
 			writeRegistry();
 		},

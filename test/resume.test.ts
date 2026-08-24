@@ -74,7 +74,7 @@ import {
 	writeSessionRecord,
 	writeStoppedMarker,
 } from "../src/session.ts";
-import { EnvStub, fixtureBackendConfig, waitFor } from "./helpers.ts";
+import { EnvStub, fixtureBackendConfig, processGone, waitFor } from "./helpers.ts";
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const run = promisify(execFile);
@@ -302,6 +302,54 @@ describe("resume refuses rather than guesses", () => {
 		writeStoppedMarker({ id: "manager-swept", at: Date.now(), processesStopped: false }, agentDir);
 
 		await expect(proveManagerStopped(checkpoint, { agentDir })).rejects.toThrow("could not confirm");
+	});
+
+	it("rechecks an ambiguous stopped marker after its saved processes exit", async () => {
+		const agentDir = scratch("neta-resume-home-");
+		const cwd = scratch("neta-resume-repo-");
+		const checkpoint = checkpointWith({
+			id: "retry-stopped",
+			canonicalCwd: cwd,
+			liveLease: { managerId: "manager-retry" },
+			workers: [runningWorker()],
+		});
+		writeCheckpointAtomic(checkpoint, agentDir);
+		const worker = spawn("sleep", ["30"], { stdio: "ignore", detached: true });
+		if (worker.pid === undefined) throw new Error("Could not start retry worker.");
+		worker.unref();
+		const workerStartedAt = "retry-worker";
+		const managerStartedAt = "retry-manager";
+		const managerPid = 999_999;
+		const identify = (pid: number): string | undefined => (pid === managerPid ? managerStartedAt : workerStartedAt);
+		const groupPopulated = (pgid: number): boolean => !processGone(pgid);
+		writeStoppedMarker(
+			{
+				id: "manager-retry",
+				at: Date.now(),
+				processesStopped: false,
+				pid: managerPid,
+				processStartedAt: managerStartedAt,
+				workerGroups: [{ pgid: worker.pid, leaderPid: worker.pid, leaderStartedAt: workerStartedAt }],
+			},
+			agentDir,
+		);
+		try {
+			await expect(
+				proveManagerStopped(checkpoint, { agentDir, processStartTime: identify, groupPopulated }),
+			).rejects.toThrow("Fresh process proof");
+			process.kill(worker.pid, "SIGKILL");
+			await waitFor(() => processGone(worker.pid as number), 5000);
+			expect(
+				(await proveManagerStopped(checkpoint, { agentDir, processStartTime: identify, groupPopulated })).join(" "),
+			).toContain("rechecked");
+			expect(readCheckpoint("retry-stopped", agentDir).shutdown?.processesStopped).toBe(true);
+		} finally {
+			try {
+				process.kill(worker.pid, "SIGKILL");
+			} catch {
+				// The retry worker already exited.
+			}
+		}
 	});
 
 	it("never signals a process group whose leader identity was recycled", async () => {
@@ -1111,6 +1159,12 @@ describe("listing sessions", () => {
 			env: { ...process.env, NETA_DIR: agentDir },
 		});
 		expect(empty.stdout).toContain("No Neta sessions, running or closed.");
+
+		writeFileSync(join(agentDir, "checkpoints-v6"), "not a directory");
+		const corruptRoot = await failing([CLI, "sessions", "--all"], agentDir);
+		expect(corruptRoot.code).toBe(1);
+		expect(corruptRoot.stderr).toContain("v6 checkpoint root is not a regular directory");
+		expect(corruptRoot.stderr).not.toContain("at ");
 	});
 });
 

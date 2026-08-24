@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	checkpointPath,
+	listCheckpoints,
 	newCheckpointBase,
 	readCheckpoint,
 	type SessionCheckpoint,
@@ -176,6 +177,25 @@ describe("normalized v6 checkpoint store", () => {
 		mkdirSync(store, { recursive: true });
 		writeFileSync(v6ManifestPath(store), "{broken");
 		expect(() => readCheckpoint(legacy.id, agentDir)).toThrow("invalid JSON");
+	});
+
+	it("treats a malformed v6 root as authoritative across reads, hydration, and enumeration", () => {
+		const agentDir = temp();
+		const legacy = checkpoint("root-authority");
+		writeCheckpointAtomic(legacy, agentDir);
+		const root = join(agentDir, "checkpoints-v6");
+		for (const kind of ["file", "symlink"] as const) {
+			if (kind === "file") writeFileSync(root, "not a directory");
+			else {
+				rmSync(root, { force: true });
+				symlinkSync(join(agentDir, "missing-v6-root"), root);
+			}
+			expect(() => readCheckpoint(legacy.id, agentDir)).toThrow("v6 checkpoint root");
+			expect(() => openCheckpointForHydration(legacy.id, agentDir)).toThrow("v6 checkpoint root");
+			expect(() => listCheckpoints(agentDir)).toThrow("v6 checkpoint root");
+			expect(reclaimV6StoreOffline(v6CheckpointStorePath(legacy.id, agentDir), offlineProof).status).toBe("failed");
+			rmSync(root, { force: true });
+		}
 	});
 
 	it("cleans failed manifest temps while preserving the prior authority", () => {

@@ -6,7 +6,6 @@ import {
 	closeSync,
 	existsSync,
 	fsyncSync,
-	lstatSync,
 	mkdirSync,
 	openSync,
 	readdirSync,
@@ -25,6 +24,7 @@ import {
 	type V6WriteCounters,
 	v6CheckpointStorePath,
 	v6ManifestPath,
+	v6RootPresence,
 	v6StorePresence,
 	writeV6CheckpointDelta,
 } from "./checkpoint-store.ts";
@@ -619,6 +619,7 @@ export function validateCheckpoint(value: unknown): SessionCheckpoint {
 }
 
 export function readCheckpoint(id: string, agentDir: string): SessionCheckpoint {
+	v6RootPresence(agentDir);
 	const v6Path = v6CheckpointStorePath(id, agentDir);
 	if (v6StorePresence(v6Path) === "published") return readV6Checkpoint(v6Path).checkpoint;
 	const path = checkpointPath(id, agentDir);
@@ -661,15 +662,7 @@ export function listCheckpoints(agentDir: string): CheckpointListEntry[] {
 		}
 	}
 	const v6Root = join(agentDir, "checkpoints-v6");
-	let v6RootStat: ReturnType<typeof lstatSync> | undefined;
-	try {
-		v6RootStat = lstatSync(v6Root);
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-	}
-	if (v6RootStat) {
-		if (v6RootStat.isSymbolicLink() || !v6RootStat.isDirectory())
-			throw new CheckpointError(`v6 checkpoint root is not a regular directory: ${v6Root}.`);
+	if (v6RootPresence(agentDir) === "present") {
 		for (const id of readdirSync(v6Root)) {
 			const storePath = join(v6Root, id);
 			const path = v6ManifestPath(storePath);

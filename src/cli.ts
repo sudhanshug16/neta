@@ -171,7 +171,20 @@ async function main(argv: string[]): Promise<void> {
 			return;
 		}
 		case "sessions":
-			printSessions(args.includes("--all"));
+			try {
+				printSessions(args.includes("--all"));
+			} catch (error) {
+				if (
+					!(
+						error instanceof CheckpointError ||
+						error instanceof CheckpointStoreError ||
+						error instanceof SessionIdError
+					)
+				)
+					throw error;
+				console.error(error.message);
+				process.exitCode = 1;
+			}
 			return;
 		case "resume": {
 			const checkpointId = args[1];

@@ -214,6 +214,42 @@ describe("session registry", () => {
 		}
 	});
 
+	it("uses saved identities as a safe fallback when process groups are unsupported", async () => {
+		const worker = spawn("sleep", ["30"], { stdio: "ignore", detached: true });
+		if (worker.pid === undefined) throw new Error("Could not start fallback worker.");
+		worker.unref();
+		const startedAt = "known-worker";
+		const identify = () => startedAt;
+		const unsupported = () => undefined;
+		const live = { pgid: worker.pid, leaderPid: worker.pid, leaderStartedAt: startedAt };
+		try {
+			expect(isProcessGroupGone(live, identify, unsupported)).toBe(false);
+			expect(reapProcessGroup(live, identify, () => {}, 20, unsupported)).toBe(false);
+
+			const reused = { ...live, leaderStartedAt: "old-process" };
+			expect(isProcessGroupGone(reused, identify, unsupported)).toBe(false);
+
+			const unknown = {
+				...live,
+				ownedProcesses: [{ pid: process.pid, startedAt }],
+			};
+			expect(isProcessGroupGone(unknown, () => undefined, unsupported)).toBe(false);
+
+			process.kill(worker.pid, "SIGKILL");
+			await waitFor(() => processGone(worker.pid as number), 5000);
+			expect(isProcessGroupGone(live, identify, unsupported)).toBe(true);
+			expect(
+				isProcessGroupGone({ ...live, ownedProcesses: [{ pid: worker.pid as number }] }, identify, unsupported),
+			).toBe(true);
+		} finally {
+			try {
+				process.kill(worker.pid, "SIGKILL");
+			} catch {
+				// The fallback worker already exited.
+			}
+		}
+	});
+
 	it("never reaps a worker group while its manager is alive", async () => {
 		const dir = agentDir();
 		const socket = join(tmpdir(), `neta-live-${process.pid}-${Date.now()}.sock`);

@@ -25,7 +25,7 @@ import {
 	writeFileSync,
 	writeSync,
 } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type { CheckpointWorker, HydratableCheckpoint, SessionCheckpoint } from "./checkpoint.ts";
 import { readCheckpoint, validateCheckpoint } from "./checkpoint.ts";
 import {
@@ -471,7 +471,11 @@ export function validateV6Manifest(value: unknown): V6Manifest {
 
 export function v6CheckpointStorePath(id: string, agentDir: string): string {
 	safePart(id, "checkpoint id");
-	return join(agentDir, "checkpoints-v6", id);
+	return join(v6CheckpointRootPath(agentDir), id);
+}
+
+export function v6CheckpointRootPath(agentDir: string): string {
+	return join(agentDir, "checkpoints-v6");
 }
 
 export const checkpointStorePath = v6CheckpointStorePath;
@@ -480,8 +484,38 @@ export function v6ManifestPath(storePath: string): string {
 	return join(storePath, V6_MANIFEST_FILE);
 }
 
+/**
+ * The v6 root is itself part of the authority boundary. A missing root means
+ * an older installation may still be migrated; every other root entry is a
+ * damaged authority and must stop the caller before it examines a session.
+ */
+export function v6RootPresence(agentDir: string): "absent" | "present" {
+	const root = v6CheckpointRootPath(agentDir);
+	let stat: ReturnType<typeof lstatSync>;
+	try {
+		stat = lstatSync(root);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return "absent";
+		throw new CheckpointStoreError(`Could not inspect v6 checkpoint root ${root}.`);
+	}
+	if (stat.isSymbolicLink() || !stat.isDirectory())
+		throw new CheckpointStoreError(`v6 checkpoint root is not a regular directory: ${root}.`);
+	try {
+		readdirSync(root);
+	} catch {
+		throw new CheckpointStoreError(`Could not read v6 checkpoint root ${root}.`);
+	}
+	return "present";
+}
+
+function validateStoreRoot(storePath: string): void {
+	const root = dirname(storePath);
+	if (basename(root) === "checkpoints-v6") v6RootPresence(dirname(root));
+}
+
 /** Whether a v6 store is absent or published; any other entry is corruption. */
 export function v6StorePresence(storePath: string): "absent" | "published" {
+	validateStoreRoot(storePath);
 	let store: ReturnType<typeof lstatSync>;
 	try {
 		store = lstatSync(storePath);
@@ -1719,6 +1753,12 @@ export function reclaimV6StoreOffline(
 		deletedBytes: 0,
 	};
 	let counts: Omit<V6GcResult, "status" | "durationMs" | "reason"> = empty;
+	let presence: "absent" | "published";
+	try {
+		presence = v6StorePresence(storePath);
+	} catch (error) {
+		return gcResult("failed", error instanceof Error ? error.message : String(error), startedAt, empty);
+	}
 	if (
 		!proof?.checkpointClaimHeld ||
 		!proof.directoryLockHeld ||
@@ -1727,12 +1767,7 @@ export function reclaimV6StoreOffline(
 		!proof.shutdownProof
 	)
 		return gcResult("skipped", "offline ownership, process-death, or shutdown proof is absent", startedAt, empty);
-	try {
-		if (v6StorePresence(storePath) === "absent")
-			return gcResult("skipped", "no published v6 manifest", startedAt, empty);
-	} catch (error) {
-		return gcResult("failed", error instanceof Error ? error.message : String(error), startedAt, empty);
-	}
+	if (presence === "absent") return gcResult("skipped", "no published v6 manifest", startedAt, empty);
 	if (!claimV6Maintenance(storePath, options))
 		return gcResult("skipped", "exclusive maintenance ownership is unavailable", startedAt, empty);
 	try {
@@ -1953,6 +1988,7 @@ function canonicalMigrationPaths(id: string, agentDir: string): MigrationPaths {
 	const agentStat = lstatSync(canonicalAgentDir);
 	if (!agentStat.isDirectory() || agentStat.isSymbolicLink())
 		throw new CheckpointStoreError(`The Neta directory is not a safe directory: ${canonicalAgentDir}.`);
+	v6RootPresence(canonicalAgentDir);
 	const parent = join(canonicalAgentDir, "checkpoints-v6");
 	const storePath = v6CheckpointStorePath(id, canonicalAgentDir);
 	if (dirname(storePath) !== parent)
