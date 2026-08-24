@@ -95,6 +95,19 @@ the completion event is emitted only after that publication. Telemetry, logs,
 progress, usage, and terminal cursors coalesce with a 100ms trailing debounce and
 a hard 1-second deadline.
 
+The writer carries an explicit worker-only or structural lane. Worker-only
+changes reuse the manifest's state hash; spawn, queue, goal, note, room, lease,
+state-transition, discovery, shutdown, and terminal-completion changes carry a
+fresh structural snapshot. On `neta resume`, after the checkpoint claim,
+directory lock, and old-process death proof are held, Neta may perform one
+offline v6 mark/sweep. It validates the manifest and every transitively
+referenced blob, shard, and detail segment before deleting only recognized
+unreachable artifacts. A live reader, unreadable scan, unexpected entry,
+symlink, changed manifest, or missing proof makes reclamation skip or fail
+closed; the manifest is never rewritten. Operator stderr reports scan,
+candidate, deletion, and duration counters while worker-facing prompts and
+status remain semantic.
+
 Hydration is inert: it creates no worker process, prompt, pane, callback, or
 scratch directory. `starting`, `running`, `waiting`, and `queued` workers become
 terminal `interrupted` records carrying their previous state. Queued writer

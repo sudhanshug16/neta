@@ -21,7 +21,12 @@ import { adapterFor } from "./adapters/index.ts";
 import type { LeaderLaunch } from "./adapters/types.ts";
 import { createChannelAddress } from "./channel/protocol.ts";
 import { emptySessionCheckpoint, ensureLeaderSessionDir } from "./checkpoint.ts";
-import { openCheckpointForHydration, writeV6InitialState } from "./checkpoint-store.ts";
+import {
+	openCheckpointForHydration,
+	reclaimV6StoreOffline,
+	v6CheckpointStorePath,
+	writeV6InitialState,
+} from "./checkpoint-store.ts";
 import { resolveSelfInvocation } from "./cli-shim.ts";
 import { APP_NAME, getAgentDir, VERSION } from "./config.ts";
 import { type DetectedLeaderBackend, detectLeaderBackends, LEADER_BACKENDS } from "./detect.ts";
@@ -313,6 +318,24 @@ export async function resumeLeader(options: ResumeOptions): Promise<number> {
 			// Nothing from the old run may still be running before its state is
 			// reopened. This proves it, or refuses.
 			for (const note of await proveManagerStopped(checkpoint, { agentDir })) write(`${APP_NAME}: ${note}`);
+			const gc = reclaimV6StoreOffline(v6CheckpointStorePath(checkpoint.id, agentDir), {
+				checkpointClaimHeld: true,
+				directoryLockHeld: true,
+				processDeathProven: true,
+				noLiveManager: true,
+				shutdownProof: checkpoint.shutdown?.by ?? "recovery",
+			});
+			write(
+				`${APP_NAME}: checkpoint maintenance ${gc.status} · scanned ${gc.scannedFiles} files/${gc.scannedBytes} bytes · ` +
+					`candidates ${gc.candidateFiles} files/${gc.candidateBytes} bytes · ` +
+					`deleted ${gc.deletedFiles} files/${gc.deletedBytes} bytes · ${gc.durationMs.toFixed(1)}ms` +
+					(gc.reason ? ` · ${gc.reason}` : ""),
+			);
+			if (gc.status === "failed")
+				throw new LaunchError(
+					`Checkpoint ${checkpoint.id} failed v6 maintenance validation: ${gc.reason ?? "unknown failure"}. ` +
+						`Nothing was rewritten; repair the checkpoint before resuming.`,
+				);
 			const conversationId = requireLeaderConversationId(checkpoint, agentDir);
 
 			const config = loadConfig(cwd, agentDir);

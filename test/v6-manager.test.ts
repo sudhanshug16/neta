@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CheckpointWriter, emptySessionCheckpoint } from "../src/checkpoint.ts";
 import {
 	readV6CheckpointMetadata,
+	readV6Manifest,
 	type V6ReadCounters,
 	v6CheckpointStorePath,
 	writeV6Checkpoint,
@@ -93,7 +94,15 @@ describe("v6 manager integration", () => {
 			},
 		});
 		const summary = await manager.spawn({ role: "scout", tier: "expert", task: "inspect" });
+		await manager.flushCheckpoint();
 		driver?.options.events.log("status", "durable terminal detail");
+		const beforeTelemetry = readV6Manifest(storePath);
+		const stateBlobCountBefore = readdirSync(join(storePath, "blobs")).length;
+		await manager.flushCheckpoint();
+		const afterTelemetry = readV6Manifest(storePath);
+		expect(afterTelemetry.state).toBe(beforeTelemetry.state);
+		expect(readdirSync(join(storePath, "blobs")).length).toBe(stateBlobCountBefore + 1);
+		expect(writer.writeCounters.stateHashReuses).toBeGreaterThan(0);
 		driver?.finish({ ok: true, summary: "exact terminal result" });
 		await manager.wait([summary.id], 1000);
 		const snapshot = manager.checkpointSnapshot();

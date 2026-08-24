@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { CheckpointWriter, emptySessionCheckpoint, type SessionCheckpoint } from "../src/checkpoint.ts";
 import {
 	readV6CheckpointMetadata,
+	readV6Manifest,
+	reclaimV6StoreOffline,
 	type V6CheckpointDelta,
 	type V6ReadCounters,
 	type V6WriteCounters,
@@ -53,17 +55,12 @@ function base(id: string): SessionCheckpoint {
 	};
 }
 
-function stateOf(checkpoint: SessionCheckpoint) {
-	const { workers: _workers, ...state } = checkpoint;
-	return state;
-}
-
 function activeDelta(checkpoint: SessionCheckpoint, mutation: number): V6CheckpointDelta {
 	const active = checkpoint.workers.at(-1);
 	if (!active) throw new Error("active fixture worker missing");
 	return {
 		id: checkpoint.id,
-		state: stateOf(checkpoint),
+		lane: "worker",
 		workers: [{ terminal: false, worker: { ...active, updatedAt: mutation, log: [{ at: mutation, kind: "progress", text: `telemetry-${mutation}` }] } }],
 	};
 }
@@ -84,6 +81,7 @@ try {
 	const afterSource = { ...source, id: "after" };
 	writeV6Checkpoint(source, beforeStore);
 	writeV6Checkpoint(afterSource, afterStore);
+	const stateHashBefore = readV6Manifest(afterStore).state;
 	const beforeCounters: V6WriteCounters = {};
 	const beforeRun = measure(() => {
 		for (let mutation = 0; mutation < TELEMETRY_MUTATIONS; mutation += 1) {
@@ -113,12 +111,21 @@ try {
 
 	const reads: V6ReadCounters = {};
 	readV6CheckpointMetadata(afterStore, reads);
+	const stateHashAfter = readV6Manifest(afterStore).state;
+	const gc = reclaimV6StoreOffline(afterStore, {
+		checkpointClaimHeld: true,
+		directoryLockHeld: true,
+		processDeathProven: true,
+		noLiveManager: true,
+		shutdownProof: "recovery",
+	});
 	const beforeBytes = bytesIn(beforeStore);
 	const afterBytes = bytesIn(afterStore);
 	console.log(JSON.stringify({
 		fixture: { terminalWorkers: TERMINAL_WORKERS, activeWorkers: 1, telemetryMutations: TELEMETRY_MUTATIONS },
 		before: { ms: beforeRun.ms, rssDelta: beforeRun.rssDelta, bytesWritten: beforeCounters.writtenBytes ?? 0, bytesSerialized: beforeCounters.serializedBytes ?? 0, terminalShardWrites: beforeCounters.terminalShardWrites ?? 0 },
-		after: { ms: afterRun.ms, rssDelta: afterRun.rssDelta, materializations, manifests: afterCounters.manifestWrites ?? 0, bytesWritten: afterCounters.writtenBytes ?? 0, bytesSerialized: afterCounters.serializedBytes ?? 0, detailReads: reads.detailReads ?? 0, terminalDetailReads: reads.terminalDetailReads ?? 0, terminalShardWrites: afterCounters.terminalShardWrites ?? 0, terminalIndexEntriesVisited: afterCounters.terminalIndexEntriesVisited ?? 0, rssUnder512MiB: process.memoryUsage().rss < 512 * 1024 * 1024 },
+		after: { ms: afterRun.ms, rssDelta: afterRun.rssDelta, materializations, manifests: afterCounters.manifestWrites ?? 0, stateWrites: afterCounters.stateWrites ?? 0, stateHashReuses: afterCounters.stateHashReuses ?? 0, stateHashStable: stateHashBefore === stateHashAfter, newArtifacts: (afterCounters.activeArtifactWrites ?? 0) + (afterCounters.activeDetailWrites ?? 0), bytesWritten: afterCounters.writtenBytes ?? 0, bytesSerialized: afterCounters.serializedBytes ?? 0, detailReads: reads.detailReads ?? 0, terminalDetailReads: reads.terminalDetailReads ?? 0, terminalShardWrites: afterCounters.terminalShardWrites ?? 0, terminalIndexEntriesVisited: afterCounters.terminalIndexEntriesVisited ?? 0, rssUnder512MiB: process.memoryUsage().rss < 512 * 1024 * 1024 },
+		gc: { status: gc.status, scannedFiles: gc.scannedFiles, scannedBytes: gc.scannedBytes, candidateFiles: gc.candidateFiles, candidateBytes: gc.candidateBytes, deletedFiles: gc.deletedFiles, deletedBytes: gc.deletedBytes, durationMs: gc.durationMs, reason: gc.reason },
 		storeBytes: { before: beforeBytes, after: afterBytes },
 	}, null, 2));
 } finally {

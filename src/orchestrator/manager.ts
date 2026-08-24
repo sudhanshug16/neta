@@ -37,6 +37,8 @@ import {
 	readV6WorkerOutcome,
 	readV6WorkerRef,
 	type V6CheckpointDelta,
+	type V6CheckpointDeltaLane,
+	type V6CheckpointState,
 	type V6ReadCounters,
 	type V6WorkerRef,
 } from "../checkpoint-store.ts";
@@ -740,13 +742,24 @@ export class WorkerManager implements ChannelHandler {
 	}
 
 	/** Typed bounded persistence input. It never contains the manager's worker map. */
-	checkpointDelta(record?: WorkerRecord): V6CheckpointDelta {
+	checkpointDelta(record?: WorkerRecord, lane: V6CheckpointDeltaLane = "structural"): V6CheckpointDelta {
 		const checkpoint = this.options.checkpoint;
 		if (!checkpoint) throw new Error("This manager has no durable checkpoint configured.");
 		if (record) record.updatedAt = Date.now();
 		const persistedTerminal = record?.terminalSummary !== undefined && isTerminalState(record.state);
+		if (lane === "worker") {
+			return {
+				id: checkpoint.id,
+				lane,
+				workers:
+					record && !persistedTerminal
+						? [{ worker: this.checkpointWorkerSnapshot(record), terminal: isTerminalState(record.state) }]
+						: [],
+			};
+		}
 		return {
 			id: checkpoint.id,
+			lane,
 			state: this.checkpointStateSnapshot(),
 			workers:
 				record && !persistedTerminal
@@ -755,7 +768,7 @@ export class WorkerManager implements ChannelHandler {
 		};
 	}
 
-	private checkpointStateSnapshot(): V6CheckpointDelta["state"] {
+	private checkpointStateSnapshot(): V6CheckpointState {
 		const checkpoint = this.options.checkpoint;
 		if (!checkpoint) throw new Error("This manager has no durable checkpoint configured.");
 		return {
@@ -1811,7 +1824,7 @@ export class WorkerManager implements ChannelHandler {
 			);
 		}
 		record.nativeAttached = true;
-		this.checkpointChanged(record);
+		this.checkpointChanged(record, "immediate", "worker");
 		return summary;
 	}
 
@@ -1937,7 +1950,7 @@ export class WorkerManager implements ChannelHandler {
 		const from = Math.max(record.logCursor, record.logFirstIndex);
 		const entries = record.log.slice(from - record.logFirstIndex);
 		record.logCursor = record.logFirstIndex + record.log.length;
-		this.checkpointChanged(record, "deferred");
+		this.checkpointChanged(record, "deferred", "worker");
 		return entries;
 	}
 
@@ -2603,20 +2616,25 @@ export class WorkerManager implements ChannelHandler {
 			record.logFirstIndex += dropped;
 			record.logCursor = Math.max(record.logCursor, record.logFirstIndex);
 		}
-		this.checkpointChanged(record, "deferred");
+		this.checkpointChanged(record, "deferred", "worker");
 	}
 
-	private checkpointChanged(record?: WorkerRecord, lane: "immediate" | "deferred" = "immediate"): void {
+	private checkpointChanged(
+		record?: WorkerRecord,
+		scheduleLane: "immediate" | "deferred" = "immediate",
+		mutationLane: V6CheckpointDeltaLane = "structural",
+	): void {
 		const checkpoint = this.options.checkpoint;
 		if (!checkpoint) return;
 		if (!checkpoint.writer.isV6 && !this.options.checkpointStorePath) {
-			if (lane === "deferred") checkpoint.writer.scheduleDeferred(() => this.checkpointSnapshot(), checkpoint.id);
+			if (scheduleLane === "deferred")
+				checkpoint.writer.scheduleDeferred(() => this.checkpointSnapshot(), checkpoint.id);
 			else checkpoint.writer.schedule(this.checkpointSnapshot());
 			return;
 		}
-		if (lane === "deferred")
-			checkpoint.writer.scheduleDeferredDelta(() => this.checkpointDelta(record), checkpoint.id);
-		else checkpoint.writer.scheduleDelta(this.checkpointDelta(record));
+		if (scheduleLane === "deferred")
+			checkpoint.writer.scheduleDeferredDelta(() => this.checkpointDelta(record, mutationLane), checkpoint.id);
+		else checkpoint.writer.scheduleDelta(this.checkpointDelta(record, mutationLane));
 	}
 
 	/** One transport shape for immediate and dequeued workers, including crash-recovery registration. */
@@ -2665,18 +2683,18 @@ export class WorkerManager implements ChannelHandler {
 				log: (kind, text) => this.appendTelemetryLog(record, kind, text),
 				usage: (usage) => {
 					record.usage = usage;
-					this.checkpointChanged(record, "deferred");
+					this.checkpointChanged(record, "deferred", "worker");
 				},
 				vendorSession: (sessionId) => {
 					record.vendorSessionId = sessionId;
-					this.checkpointChanged(record);
+					this.checkpointChanged(record, "immediate", "worker");
 				},
 				session: (session) => {
 					record.model = session.model;
 					record.modelId = session.modelId;
 					record.mode = session.mode;
 					record.agentInfo = session.agentInfo;
-					this.checkpointChanged(record);
+					this.checkpointChanged(record, "immediate", "worker");
 				},
 				processGroup: (pgid) => {
 					record.processGroupId = pgid;
@@ -2693,7 +2711,7 @@ export class WorkerManager implements ChannelHandler {
 			const link = this.notes.get(record.noteId)?.workers.find((w) => w.workerId === record.id);
 			if (link) link.state = state;
 		}
-		this.checkpointChanged(record);
+		this.checkpointChanged(record, "immediate", "structural");
 	}
 
 	private beginActive(record: WorkerRecord, at = this.now()): void {
@@ -2800,7 +2818,7 @@ export class WorkerManager implements ChannelHandler {
 				}
 				record.lastResponse = outcome.summary;
 				if (!automatic) record.substantiveResponse = outcome.summary;
-				this.checkpointChanged(record);
+				this.checkpointChanged(record, "immediate", "worker");
 				// A follow-up arrived while this turn ran. An earlier version
 				// finished the worker here anyway, which silently dropped every
 				// message sent to a running worker: it was logged, queued, and then
@@ -2819,7 +2837,7 @@ export class WorkerManager implements ChannelHandler {
 				);
 			} finally {
 				record.queuedPrompts -= 1;
-				this.checkpointChanged(record);
+				this.checkpointChanged(record, "immediate", "worker");
 			}
 		});
 		return true;

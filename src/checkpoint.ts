@@ -21,6 +21,7 @@ import {
 	readV6StructuralState,
 	type V6CheckpointDelta,
 	type V6FaultHooks,
+	type V6WriteCounters,
 	v6CheckpointStorePath,
 	v6ManifestPath,
 	writeV6CheckpointDelta,
@@ -821,6 +822,8 @@ export class CheckpointWriter {
 	private readonly timers: CheckpointWriterTimers;
 	private readonly format: "legacy" | "v6";
 	private readonly v6Hooks: V6FaultHooks | undefined;
+	/** Operator-only persistence counters; never included in checkpoint state. */
+	readonly writeCounters: V6WriteCounters;
 
 	constructor(
 		agentDir: string,
@@ -833,7 +836,8 @@ export class CheckpointWriter {
 		this.report = report;
 		this.timers = timers;
 		this.format = format;
-		this.v6Hooks = v6Hooks;
+		this.writeCounters = v6Hooks?.counters ?? {};
+		this.v6Hooks = format === "v6" ? { ...v6Hooks, counters: this.writeCounters } : v6Hooks;
 	}
 
 	get isV6(): boolean {
@@ -1031,7 +1035,17 @@ function mergeCheckpointDeltas(prior: V6CheckpointDelta | undefined, next: V6Che
 	if (prior.id !== next.id) throw new Error(`Cannot merge checkpoint deltas for ${prior.id} and ${next.id}.`);
 	const workers = new Map(prior.workers.map((delta) => [delta.worker.id, delta]));
 	for (const delta of next.workers) workers.set(delta.worker.id, delta);
-	return { id: next.id, state: next.state ?? prior.state, workers: [...workers.values()] };
+	if (prior.lane === "structural" || next.lane === "structural") {
+		const state = next.lane === "structural" ? next.state : prior.lane === "structural" ? prior.state : undefined;
+		if (!state) throw new Error("Structural checkpoint delta was merged without state.");
+		return {
+			id: next.id,
+			lane: "structural",
+			state,
+			workers: [...workers.values()],
+		};
+	}
+	return { id: next.id, lane: "worker", workers: [...workers.values()] };
 }
 
 export function newCheckpointBase(options: {
@@ -1131,7 +1145,7 @@ export function recordCheckpointStopped(
 		const state = readV6StructuralState(v6Path);
 		if (managerId && state.liveLease && state.liveLease.managerId !== managerId) return undefined;
 		const next = { ...state, liveLease: undefined, shutdown: { at: Date.now(), processesStopped: true, by } };
-		writeV6CheckpointDelta({ id, state: next, workers: [] }, v6Path);
+		writeV6CheckpointDelta({ id, lane: "structural", state: next, workers: [] }, v6Path);
 		return { ...next, workers: [] } as SessionCheckpoint;
 	}
 	return updateCheckpoint(id, agentDir, (checkpoint) => {
@@ -1165,7 +1179,7 @@ export function recordLeaderVendorConversationId(
 			);
 		}
 		const next = { ...state, leader: { ...state.leader, vendorConversationId } };
-		writeV6CheckpointDelta({ id, state: next, workers: [] }, v6Path);
+		writeV6CheckpointDelta({ id, lane: "structural", state: next, workers: [] }, v6Path);
 		return { ...next, workers: [] } as SessionCheckpoint;
 	}
 	return updateCheckpoint(id, agentDir, (checkpoint) => {

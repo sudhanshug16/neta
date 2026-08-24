@@ -7,19 +7,23 @@
  */
 
 import { createHash, randomBytes } from "node:crypto";
+import type { Dirent } from "node:fs";
 import {
 	closeSync,
 	existsSync,
 	fsyncSync,
+	lstatSync,
 	mkdirSync,
 	openSync,
 	readdirSync,
 	readFileSync,
 	renameSync,
+	rmSync,
 	statSync,
+	unlinkSync,
 	writeSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { CheckpointWorker, HydratableCheckpoint, SessionCheckpoint } from "./checkpoint.ts";
 import { readCheckpoint, validateCheckpoint } from "./checkpoint.ts";
 import { isSessionLeaseAlive } from "./session.ts";
@@ -109,11 +113,21 @@ export interface V6WorkerDelta {
 	terminal: boolean;
 }
 
-export interface V6CheckpointDelta {
-	id: string;
-	state?: V6CheckpointState;
-	workers: V6WorkerDelta[];
-}
+export type V6CheckpointDelta =
+	| {
+			id: string;
+			lane: "worker";
+			workers: V6WorkerDelta[];
+			state?: never;
+	  }
+	| {
+			id: string;
+			lane: "structural";
+			state: V6CheckpointState;
+			workers: V6WorkerDelta[];
+	  };
+
+export type V6CheckpointDeltaLane = V6CheckpointDelta["lane"];
 
 export interface V6ReadWarning {
 	workerId: string;
@@ -134,6 +148,8 @@ export interface V6ReadCounters {
 export interface V6WriteCounters {
 	serializedBytes?: number;
 	writtenBytes?: number;
+	stateWrites?: number;
+	stateHashReuses?: number;
 	manifestWrites?: number;
 	activeArtifactWrites?: number;
 	terminalArtifactWrites?: number;
@@ -427,6 +443,43 @@ export const checkpointStorePath = v6CheckpointStorePath;
 
 export function v6ManifestPath(storePath: string): string {
 	return join(storePath, V6_MANIFEST_FILE);
+}
+
+const V6_LOCKS_DIR = "locks";
+const V6_READERS_DIR = "readers";
+const V6_MAINTENANCE_DIR = "maintenance";
+
+function v6ReadersPath(storePath: string): string {
+	return join(storePath, V6_LOCKS_DIR, V6_READERS_DIR);
+}
+
+function v6MaintenancePath(storePath: string): string {
+	return join(storePath, V6_LOCKS_DIR, V6_MAINTENANCE_DIR);
+}
+
+function withV6ReadLock<T>(storePath: string, read: () => T): T {
+	if (!existsSync(storePath)) return read();
+	const readers = v6ReadersPath(storePath);
+	mkdirSync(readers, { recursive: true, mode: 0o700 });
+	const tokenPath = join(readers, `${process.pid}-${randomBytes(8).toString("hex")}`);
+	try {
+		mkdirSync(tokenPath, { recursive: false, mode: 0o700 });
+	} catch {
+		throw new CheckpointStoreError(`Could not claim a v6 read slot for ${storePath}.`);
+	}
+	try {
+		if (existsSync(v6MaintenancePath(storePath)))
+			throw new CheckpointStoreError(`v6 store maintenance is in progress for ${storePath}.`);
+		return read();
+	} finally {
+		try {
+			// This is one exact, process-owned reader token; stale tokens are safe
+			// because maintenance treats them as a reason to skip.
+			rmSync(tokenPath, { recursive: true, force: true });
+		} catch {
+			// A stale token makes future maintenance skip rather than race a reader.
+		}
+	}
 }
 
 function blobPath(storePath: string, sha256: string): string {
@@ -783,6 +836,7 @@ export function writeV6InitialState(state: V6CheckpointState, storePath: string,
 	ensureDirs(storePath);
 	const stateBuilt = artifact(state);
 	writeImmutable(blobPath(storePath, stateBuilt.sha256), stateBuilt.bytes, hooks);
+	if (hooks?.counters) hooks.counters.stateWrites = (hooks.counters.stateWrites ?? 0) + 1;
 	const terminalIndexShards = writeInitialShards(storePath, hooks);
 	fsyncDirectory(join(storePath, "blobs"), "artifact-fsync", hooks);
 	const manifest = buildManifest(state.id, stateBuilt.sha256, [], terminalIndexShards);
@@ -852,7 +906,8 @@ export function writeV6Checkpoint(checkpoint: SessionCheckpoint, storePath: stri
 
 export function writeV6CheckpointDelta(delta: V6CheckpointDelta, storePath: string, hooks?: V6FaultHooks): V6Manifest {
 	if (!manifestExists(storePath)) {
-		if (!delta.state) throw new CheckpointStoreError("The first v6 delta must include structural state.");
+		if (delta.lane !== "structural")
+			throw new CheckpointStoreError("The first v6 delta must include structural state.");
 		const initial = writeV6InitialState(delta.state, storePath, hooks);
 		return delta.workers.length === 0 ? initial : writeV6CheckpointDelta(delta, storePath, hooks);
 	}
@@ -860,10 +915,13 @@ export function writeV6CheckpointDelta(delta: V6CheckpointDelta, storePath: stri
 	if (prior.id !== delta.id) throw new CheckpointStoreError(`v6 store id does not match "${delta.id}".`);
 	ensureDirs(storePath);
 	let stateHash = prior.state;
-	if (delta.state) {
+	if (delta.lane === "structural") {
 		const stateBuilt = artifact(delta.state);
 		writeImmutable(blobPath(storePath, stateBuilt.sha256), stateBuilt.bytes, hooks);
 		stateHash = stateBuilt.sha256;
+		if (hooks?.counters) hooks.counters.stateWrites = (hooks.counters.stateWrites ?? 0) + 1;
+	} else if (hooks?.counters) {
+		hooks.counters.stateHashReuses = (hooks.counters.stateHashReuses ?? 0) + 1;
 	}
 	const activeById = new Map(prior.activeWorkers.map((worker) => [worker.id, worker]));
 	const terminalIndexShards = [...prior.terminalIndexShards];
@@ -923,6 +981,7 @@ export function writeV6CheckpointUpdate(
 	return writeV6CheckpointDelta(
 		{
 			id: validated.id,
+			lane: "structural",
 			state: stateWithoutWorkers(validated),
 			workers: validated.workers.map((worker) => ({ worker, terminal: isTerminalState(worker.state) })),
 		},
@@ -940,7 +999,7 @@ function manifestExists(storePath: string): boolean {
 	}
 }
 
-export function readV6Manifest(storePath: string, counters?: V6ReadCounters): V6Manifest {
+function readV6ManifestUnlocked(storePath: string, counters?: V6ReadCounters): V6Manifest {
 	let bytes: Buffer;
 	try {
 		bytes = readFileSync(v6ManifestPath(storePath));
@@ -951,6 +1010,10 @@ export function readV6Manifest(storePath: string, counters?: V6ReadCounters): V6
 	return validateV6Manifest(parseJson(bytes, v6ManifestPath(storePath)));
 }
 
+export function readV6Manifest(storePath: string, counters?: V6ReadCounters): V6Manifest {
+	return withV6ReadLock(storePath, () => readV6ManifestUnlocked(storePath, counters));
+}
+
 function readState(storePath: string, manifest: V6Manifest, counters?: V6ReadCounters): Record<string, unknown> {
 	if (counters) counters.stateReads = (counters.stateReads ?? 0) + 1;
 	return object(readArtifact(storePath, manifest.state, counters), "state blob");
@@ -958,11 +1021,13 @@ function readState(storePath: string, manifest: V6Manifest, counters?: V6ReadCou
 
 /** Read only bounded structural state for an external v6 mutation. */
 export function readV6StructuralState(storePath: string): V6CheckpointState {
-	const manifest = readV6Manifest(storePath);
-	const state = readState(storePath, manifest);
-	if (state.id !== manifest.id || "workers" in state)
-		throw new CheckpointStoreError("The v6 state blob is malformed or does not match its manifest.");
-	return state as V6CheckpointState;
+	return withV6ReadLock(storePath, () => {
+		const manifest = readV6Manifest(storePath);
+		const state = readState(storePath, manifest);
+		if (state.id !== manifest.id || "workers" in state)
+			throw new CheckpointStoreError("The v6 state blob is malformed or does not match its manifest.");
+		return state as V6CheckpointState;
+	});
 }
 
 function summaryWorker(summary: V6TerminalSummary): CheckpointWorker {
@@ -1007,8 +1072,10 @@ function readAllTerminalEntries(
 }
 
 export function readV6TerminalWorkerRefs(storePath: string, counters?: V6ReadCounters): Map<string, V6WorkerRef> {
-	const manifest = readV6Manifest(storePath, counters);
-	return new Map(readAllTerminalEntries(storePath, manifest, counters).map((entry) => [entry.id, entry.ref]));
+	return withV6ReadLock(storePath, () => {
+		const manifest = readV6Manifest(storePath, counters);
+		return new Map(readAllTerminalEntries(storePath, manifest, counters).map((entry) => [entry.id, entry.ref]));
+	});
 }
 
 export function readV6WorkerRef(
@@ -1016,45 +1083,49 @@ export function readV6WorkerRef(
 	workerId: string,
 	counters?: V6ReadCounters,
 ): V6WorkerRef | undefined {
-	const manifest = readV6Manifest(storePath, counters);
-	const shard = readShard(
-		storePath,
-		manifest.terminalIndexShards[bucketForWorker(workerId)] as string,
-		bucketForWorker(workerId),
-		counters,
-	);
-	return shard.entries.find((entry) => entry.id === workerId)?.ref;
+	return withV6ReadLock(storePath, () => {
+		const manifest = readV6Manifest(storePath, counters);
+		const shard = readShard(
+			storePath,
+			manifest.terminalIndexShards[bucketForWorker(workerId)] as string,
+			bucketForWorker(workerId),
+			counters,
+		);
+		return shard.entries.find((entry) => entry.id === workerId)?.ref;
+	});
 }
 
 export function readV6CheckpointMetadata(
 	storePath: string,
 	counters?: V6ReadCounters,
 ): { checkpoint: SessionCheckpoint; manifest: V6Manifest } {
-	const manifest = readV6Manifest(storePath, counters);
-	const stateObject = readState(storePath, manifest, counters);
-	const workers: CheckpointWorker[] = [];
-	for (const reference of manifest.activeWorkers) {
-		const active = readBlob(storePath, reference.active, "active", reference.id, counters);
-		workers.push({
-			...(active as unknown as CheckpointWorker),
-			log: [],
-			logFirstIndex: typeof active.logFirstIndex === "number" ? active.logFirstIndex : 0,
-			logCursor: typeof active.logCursor === "number" ? active.logCursor : 0,
-		});
-	}
-	for (const entry of readAllTerminalEntries(storePath, manifest, counters))
-		workers.push(summaryWorker(entry.summary));
-	const checkpoint = { ...stateObject, workers, schemaVersion: 5 } as unknown as SessionCheckpoint;
-	try {
-		const validated = validateCheckpoint(checkpoint);
-		if (validated.id !== manifest.id)
-			throw new CheckpointStoreError("Manifest id does not match the referenced state blob.");
-		return { checkpoint: validated, manifest };
-	} catch (error) {
-		throw new CheckpointStoreError(
-			`Corrupt v6 reconstructed checkpoint: ${error instanceof Error ? error.message : String(error)}.`,
-		);
-	}
+	return withV6ReadLock(storePath, () => {
+		const manifest = readV6Manifest(storePath, counters);
+		const stateObject = readState(storePath, manifest, counters);
+		const workers: CheckpointWorker[] = [];
+		for (const reference of manifest.activeWorkers) {
+			const active = readBlob(storePath, reference.active, "active", reference.id, counters);
+			workers.push({
+				...(active as unknown as CheckpointWorker),
+				log: [],
+				logFirstIndex: typeof active.logFirstIndex === "number" ? active.logFirstIndex : 0,
+				logCursor: typeof active.logCursor === "number" ? active.logCursor : 0,
+			});
+		}
+		for (const entry of readAllTerminalEntries(storePath, manifest, counters))
+			workers.push(summaryWorker(entry.summary));
+		const checkpoint = { ...stateObject, workers, schemaVersion: 5 } as unknown as SessionCheckpoint;
+		try {
+			const validated = validateCheckpoint(checkpoint);
+			if (validated.id !== manifest.id)
+				throw new CheckpointStoreError("Manifest id does not match the referenced state blob.");
+			return { checkpoint: validated, manifest };
+		} catch (error) {
+			throw new CheckpointStoreError(
+				`Corrupt v6 reconstructed checkpoint: ${error instanceof Error ? error.message : String(error)}.`,
+			);
+		}
+	});
 }
 
 export function readV6WorkerOutcome(
@@ -1062,7 +1133,7 @@ export function readV6WorkerOutcome(
 	reference: V6WorkerRef,
 	counters?: V6ReadCounters,
 ): Record<string, unknown> {
-	return readBlob(storePath, reference.outcome, "outcome", reference.id, counters);
+	return withV6ReadLock(storePath, () => readBlob(storePath, reference.outcome, "outcome", reference.id, counters));
 }
 
 export function readV6WorkerDetails(
@@ -1071,8 +1142,10 @@ export function readV6WorkerDetails(
 	counters?: V6ReadCounters,
 	terminal = true,
 ): unknown[] {
-	const segments = terminal ? reference.terminalDetailSegments : reference.detailSegments;
-	return segments.flatMap((segment) => readSegment(storePath, reference.id, segment, terminal, counters));
+	return withV6ReadLock(storePath, () => {
+		const segments = terminal ? reference.terminalDetailSegments : reference.detailSegments;
+		return segments.flatMap((segment) => readSegment(storePath, reference.id, segment, terminal, counters));
+	});
 }
 
 export interface V6ReadResult {
@@ -1082,69 +1155,381 @@ export interface V6ReadResult {
 	terminalDetailCorrupt: boolean;
 }
 
-export function readV6Checkpoint(storePath: string, counters?: V6ReadCounters): V6ReadResult {
-	const manifest = readV6Manifest(storePath, counters);
-	const stateObject = readState(storePath, manifest, counters);
-	const terminalEntries = readAllTerminalEntries(storePath, manifest, counters);
-	const workers: CheckpointWorker[] = [];
-	const warnings: V6ReadWarning[] = [];
-	for (const reference of manifest.activeWorkers) {
-		const active = readBlob(storePath, reference.active, "active", reference.id, counters);
-		const details = reference.detailSegments.flatMap((segment) =>
-			readSegment(storePath, reference.id, segment, false, counters),
-		);
-		workers.push({
-			...(active as unknown as CheckpointWorker),
-			log: details as CheckpointWorker["log"],
-			logFirstIndex: typeof active.logFirstIndex === "number" ? active.logFirstIndex : 0,
-			logCursor: details.length,
-		});
-	}
-	for (const entry of terminalEntries) {
-		const active = readBlob(storePath, entry.ref.active, "active", entry.id, counters);
-		const terminal = readBlob(storePath, entry.ref.terminal, "terminal", entry.id, counters);
-		const outcome = readBlob(storePath, entry.ref.outcome, "outcome", entry.id, counters);
-		const details: unknown[] = [];
-		for (const segment of entry.ref.detailSegments)
-			details.push(...readSegment(storePath, entry.id, segment, false, counters));
-		for (const segment of entry.ref.terminalDetailSegments) {
-			try {
-				readSegment(storePath, entry.id, segment, true, counters);
-			} catch (error) {
-				if (!segment.optional) throw error;
-				warnings.push({
-					workerId: entry.id,
-					sequence: segment.sequence,
-					message: error instanceof Error ? error.message : String(error),
-				});
-			}
-		}
-		workers.push({
-			...(active as unknown as CheckpointWorker),
-			...(terminal as unknown as Partial<CheckpointWorker>),
-			...(outcome as unknown as Partial<CheckpointWorker>),
-			log: details as CheckpointWorker["log"],
-			logFirstIndex: 0,
-			logCursor: details.length,
-		});
-	}
-	workers.sort((left, right) => left.startedAt - right.startedAt || left.id.localeCompare(right.id));
-	const checkpoint = { ...stateObject, workers, schemaVersion: 5 } as unknown as SessionCheckpoint;
+export interface V6OfflineOwnershipProof {
+	/** The resume checkpoint claim is held by the caller. */
+	checkpointClaimHeld: true;
+	/** The working-directory launch lock is held by the caller. */
+	directoryLockHeld: true;
+	/** The old manager and every recorded worker group have been proven gone. */
+	processDeathProven: true;
+	/** No manager has been started against this store yet. */
+	noLiveManager: true;
+	/** Durable shutdown/recovery evidence behind processDeathProven. */
+	shutdownProof: "graceful" | "sweep" | "recovery";
+}
+
+export interface V6GcOptions {
+	/** Test seam for a manifest-change race immediately before deletion. */
+	beforeDelete?: () => void;
+}
+
+export interface V6GcResult {
+	status: "deleted" | "skipped" | "failed";
+	scannedFiles: number;
+	scannedBytes: number;
+	candidateFiles: number;
+	candidateBytes: number;
+	deletedFiles: number;
+	deletedBytes: number;
+	durationMs: number;
+	reason?: string;
+}
+
+function gcResult(
+	status: V6GcResult["status"],
+	reason: string | undefined,
+	startedAt: bigint,
+	counts: Omit<V6GcResult, "status" | "durationMs" | "reason">,
+): V6GcResult {
+	return {
+		status,
+		...counts,
+		durationMs: Number(process.hrtime.bigint() - startedAt) / 1_000_000,
+		...(reason ? { reason } : {}),
+	};
+}
+
+function gcRegularFile(path: string, label: string): void {
+	let stat: ReturnType<typeof lstatSync>;
 	try {
-		const validated = validateCheckpoint(checkpoint);
-		if (validated.id !== manifest.id)
-			throw new CheckpointStoreError("Manifest id does not match the referenced state blob.");
-		return {
-			checkpoint: stripUndefinedWorkerFields(validated),
-			manifest,
-			warnings,
-			terminalDetailCorrupt: warnings.length > 0,
-		};
-	} catch (error) {
-		throw new CheckpointStoreError(
-			`Corrupt v6 reconstructed checkpoint: ${error instanceof Error ? error.message : String(error)}.`,
-		);
+		stat = lstatSync(path);
+	} catch {
+		throw new CheckpointStoreError(`v6 GC could not read ${label}.`);
 	}
+	if (!stat.isFile()) throw new CheckpointStoreError(`v6 GC found a non-regular ${label}.`);
+}
+
+function gcVerifiedBytes(path: string, expectedHash: string, label: string): Buffer {
+	gcRegularFile(path, label);
+	let bytes: Buffer;
+	try {
+		bytes = readFileSync(path);
+	} catch {
+		throw new CheckpointStoreError(`v6 GC could not read ${label}.`);
+	}
+	if (hash(bytes) !== expectedHash) throw new CheckpointStoreError(`v6 GC found corrupt ${label}.`);
+	return bytes;
+}
+
+function gcValidateSegment(
+	storePath: string,
+	workerId: string,
+	segment: V6DetailSegmentRef,
+	terminal: boolean,
+): string {
+	const path = segmentFile(storePath, workerId, segment, terminal);
+	const bytes = gcVerifiedBytes(path, segment.sha256, `detail segment ${workerId}/${segment.sequence}`);
+	if (bytes.byteLength !== segment.byteLength)
+		throw new CheckpointStoreError(`v6 GC found a truncated detail segment.`);
+	const parsed = parseJson(bytes, path);
+	if (!Array.isArray(parsed)) throw new CheckpointStoreError(`v6 GC found a malformed detail segment.`);
+	return path;
+}
+
+function gcValidateBlob(storePath: string, ref: V6BlobRef, workerId: string): string {
+	const path = blobPath(storePath, ref.sha256);
+	object(parseJson(gcVerifiedBytes(path, ref.sha256, `${ref.kind} blob ${workerId}`), path), `${ref.kind} blob`);
+	return path;
+}
+
+function gcValidateReferences(storePath: string, manifest: V6Manifest): Set<string> {
+	const marked = new Set<string>([v6ManifestPath(storePath)]);
+	const statePath = blobPath(storePath, manifest.state);
+	const state = object(parseJson(gcVerifiedBytes(statePath, manifest.state, "state blob"), statePath), "state blob");
+	if (state.id !== manifest.id || "workers" in state)
+		throw new CheckpointStoreError("v6 GC found a malformed state reference.");
+	marked.add(statePath);
+	const markWorker = (reference: V6WorkerRef, terminal: boolean): void => {
+		marked.add(gcValidateBlob(storePath, reference.active, reference.id));
+		for (const segment of reference.detailSegments)
+			marked.add(gcValidateSegment(storePath, reference.id, segment, false));
+		for (const segment of reference.terminalDetailSegments)
+			marked.add(gcValidateSegment(storePath, reference.id, segment, true));
+		if (terminal) {
+			if (!reference.terminal || !reference.outcome)
+				throw new CheckpointStoreError(`v6 GC found incomplete terminal refs for ${reference.id}.`);
+			marked.add(gcValidateBlob(storePath, reference.terminal, reference.id));
+			marked.add(gcValidateBlob(storePath, reference.outcome, reference.id));
+		}
+	};
+	for (const reference of manifest.activeWorkers) markWorker(reference, false);
+	for (let bucket = 0; bucket < TERMINAL_INDEX_SHARD_COUNT; bucket += 1) {
+		const shardHash = manifest.terminalIndexShards[bucket];
+		if (!shardHash) throw new CheckpointStoreError(`v6 GC found a missing shard reference.`);
+		const path = shardPath(storePath, shardHash);
+		const shard = validateShard(
+			parseJson(gcVerifiedBytes(path, shardHash, `terminal shard ${bucket}`), path),
+			bucket,
+		);
+		marked.add(path);
+		for (const entry of shard.entries) markWorker(entry.ref, true);
+	}
+	return marked;
+}
+
+function gcScanDirectory(path: string, pattern: RegExp, label: string): { files: string[]; bytes: number } {
+	const files: string[] = [];
+	let bytes = 0;
+	let entries: Dirent[];
+	try {
+		entries = readdirSync(path, { withFileTypes: true });
+	} catch {
+		throw new CheckpointStoreError(`v6 GC could not scan ${label}.`);
+	}
+	for (const entry of entries) {
+		const entryPath = join(path, entry.name);
+		if (entry.isSymbolicLink() || !pattern.test(entry.name) || !entry.isFile())
+			throw new CheckpointStoreError(`v6 GC found an unexpected entry in ${label}.`);
+		gcRegularFile(entryPath, `${label}/${entry.name}`);
+		const size = statSync(entryPath).size;
+		files.push(entryPath);
+		bytes += size;
+	}
+	return { files, bytes };
+}
+
+function gcScanSegments(path: string): { files: string[]; bytes: number } {
+	const files: string[] = [];
+	let bytes = 0;
+	let entries: Dirent[];
+	try {
+		entries = readdirSync(path, { withFileTypes: true });
+	} catch {
+		throw new CheckpointStoreError("v6 GC could not scan segments.");
+	}
+	for (const entry of entries) {
+		const entryPath = join(path, entry.name);
+		if (entry.isSymbolicLink()) throw new CheckpointStoreError("v6 GC found a symlink in segments.");
+		if (entry.isFile()) {
+			if (!/^[a-f0-9]{64}\.json$/.test(entry.name))
+				throw new CheckpointStoreError("v6 GC found an unexpected segment file.");
+			gcRegularFile(entryPath, `segments/${entry.name}`);
+			files.push(entryPath);
+			bytes += statSync(entryPath).size;
+			continue;
+		}
+		if (!entry.isDirectory() || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(entry.name))
+			throw new CheckpointStoreError("v6 GC found an unexpected segment directory.");
+		const nested = gcScanDirectory(entryPath, /^(?:terminal-)?[0-9]+\.json$/, `segments/${entry.name}`);
+		files.push(...nested.files);
+		bytes += nested.bytes;
+	}
+	return { files, bytes };
+}
+
+function gcScanLocks(storePath: string): void {
+	const locksPath = join(storePath, V6_LOCKS_DIR);
+	let entries: Dirent[];
+	try {
+		entries = readdirSync(locksPath, { withFileTypes: true });
+	} catch {
+		throw new CheckpointStoreError("v6 GC could not scan coordination locks.");
+	}
+	for (const entry of entries) {
+		if (entry.isSymbolicLink() || !entry.isDirectory() || ![V6_READERS_DIR, V6_MAINTENANCE_DIR].includes(entry.name))
+			throw new CheckpointStoreError("v6 GC found an unexpected coordination entry.");
+	}
+	const readersPath = v6ReadersPath(storePath);
+	let readers: Dirent[];
+	try {
+		readers = readdirSync(readersPath, { withFileTypes: true });
+	} catch {
+		throw new CheckpointStoreError("v6 GC could not scan reader coordination.");
+	}
+	for (const reader of readers)
+		if (reader.isSymbolicLink() || !reader.isDirectory())
+			throw new CheckpointStoreError("v6 GC found an unexpected reader coordination entry.");
+}
+
+function gcScanArtifacts(storePath: string): { files: string[]; bytes: number } {
+	try {
+		if (!lstatSync(storePath).isDirectory()) throw new CheckpointStoreError("v6 GC store root is not a directory.");
+	} catch (error) {
+		if (error instanceof CheckpointStoreError) throw error;
+		throw new CheckpointStoreError("v6 GC could not inspect the store root.");
+	}
+	let rootEntries: Dirent[];
+	try {
+		rootEntries = readdirSync(storePath, { withFileTypes: true });
+	} catch {
+		throw new CheckpointStoreError("v6 GC could not scan the store root.");
+	}
+	const expected = new Set([V6_MANIFEST_FILE, "blobs", "shards", "segments", V6_LOCKS_DIR]);
+	for (const entry of rootEntries) {
+		if (entry.isSymbolicLink() || !expected.has(entry.name))
+			throw new CheckpointStoreError("v6 GC found an unexpected store entry.");
+		if (entry.name === V6_MANIFEST_FILE) {
+			if (!entry.isFile()) throw new CheckpointStoreError("v6 GC found a non-regular manifest.");
+		} else if (!entry.isDirectory()) throw new CheckpointStoreError("v6 GC found a non-directory store area.");
+	}
+	for (const name of ["blobs", "shards", "segments", V6_LOCKS_DIR])
+		if (!rootEntries.some((entry) => entry.name === name))
+			throw new CheckpointStoreError(`v6 GC found a missing store area: ${name}.`);
+	const blobs = gcScanDirectory(join(storePath, "blobs"), /^[a-f0-9]{64}\.json$/, "blobs");
+	const shards = gcScanDirectory(join(storePath, "shards"), /^[a-f0-9]{64}\.json$/, "shards");
+	const segments = gcScanSegments(join(storePath, "segments"));
+	gcScanLocks(storePath);
+	return {
+		files: [...blobs.files, ...shards.files, ...segments.files],
+		bytes: blobs.bytes + shards.bytes + segments.bytes,
+	};
+}
+
+export function reclaimV6StoreOffline(
+	storePath: string,
+	proof: V6OfflineOwnershipProof | undefined,
+	options: V6GcOptions = {},
+): V6GcResult {
+	const startedAt = process.hrtime.bigint();
+	const empty = {
+		scannedFiles: 0,
+		scannedBytes: 0,
+		candidateFiles: 0,
+		candidateBytes: 0,
+		deletedFiles: 0,
+		deletedBytes: 0,
+	};
+	let counts: Omit<V6GcResult, "status" | "durationMs" | "reason"> = empty;
+	if (
+		!proof?.checkpointClaimHeld ||
+		!proof.directoryLockHeld ||
+		!proof.processDeathProven ||
+		!proof.noLiveManager ||
+		!proof.shutdownProof
+	)
+		return gcResult("skipped", "offline ownership, process-death, or shutdown proof is absent", startedAt, empty);
+	if (!existsSync(v6ManifestPath(storePath))) return gcResult("skipped", "no published v6 manifest", startedAt, empty);
+	const maintenance = v6MaintenancePath(storePath);
+	try {
+		mkdirSync(join(storePath, V6_LOCKS_DIR), { recursive: true, mode: 0o700 });
+		mkdirSync(v6ReadersPath(storePath), { recursive: true, mode: 0o700 });
+		mkdirSync(maintenance, { recursive: false, mode: 0o700 });
+	} catch {
+		return gcResult("skipped", "exclusive maintenance ownership is unavailable", startedAt, empty);
+	}
+	try {
+		let readers: string[];
+		try {
+			readers = readdirSync(v6ReadersPath(storePath));
+		} catch {
+			return gcResult("skipped", "reader coordination scan was unreadable", startedAt, empty);
+		}
+		if (readers.length > 0) return gcResult("skipped", "a v6 reader is still active", startedAt, empty);
+		const manifest = readV6ManifestUnlocked(storePath);
+		const marked = gcValidateReferences(storePath, manifest);
+		const scan = gcScanArtifacts(storePath);
+		const candidates = scan.files.filter((path) => !marked.has(path));
+		const candidateBytes = candidates.reduce((total, path) => total + statSync(path).size, 0);
+		counts = {
+			scannedFiles: scan.files.length,
+			scannedBytes: scan.bytes,
+			candidateFiles: candidates.length,
+			candidateBytes,
+			deletedFiles: 0,
+			deletedBytes: 0,
+		};
+		options.beforeDelete?.();
+		if (readV6ManifestUnlocked(storePath).checksum !== manifest.checksum)
+			return gcResult("skipped", "manifest changed before deletion", startedAt, counts);
+		gcValidateReferences(storePath, manifest);
+		const rescan = gcScanArtifacts(storePath);
+		if (
+			rescan.bytes !== scan.bytes ||
+			rescan.files.length !== scan.files.length ||
+			rescan.files.some((path) => !scan.files.includes(path))
+		)
+			return gcResult("skipped", "v6 store changed before deletion", startedAt, counts);
+		for (const path of candidates) {
+			const size = statSync(path).size;
+			unlinkSync(path);
+			counts.deletedFiles += 1;
+			counts.deletedBytes += size;
+		}
+		for (const directory of new Set(candidates.map((path) => dirname(path))))
+			fsyncDirectory(directory, "artifact-fsync", undefined);
+		return gcResult("deleted", candidates.length === 0 ? "nothing unreachable" : undefined, startedAt, counts);
+	} catch (error) {
+		return gcResult("failed", error instanceof Error ? error.message : String(error), startedAt, counts);
+	} finally {
+		rmSync(maintenance, { recursive: true, force: true });
+	}
+}
+
+export function readV6Checkpoint(storePath: string, counters?: V6ReadCounters): V6ReadResult {
+	return withV6ReadLock(storePath, () => {
+		const manifest = readV6Manifest(storePath, counters);
+		const stateObject = readState(storePath, manifest, counters);
+		const terminalEntries = readAllTerminalEntries(storePath, manifest, counters);
+		const workers: CheckpointWorker[] = [];
+		const warnings: V6ReadWarning[] = [];
+		for (const reference of manifest.activeWorkers) {
+			const active = readBlob(storePath, reference.active, "active", reference.id, counters);
+			const details = reference.detailSegments.flatMap((segment) =>
+				readSegment(storePath, reference.id, segment, false, counters),
+			);
+			workers.push({
+				...(active as unknown as CheckpointWorker),
+				log: details as CheckpointWorker["log"],
+				logFirstIndex: typeof active.logFirstIndex === "number" ? active.logFirstIndex : 0,
+				logCursor: details.length,
+			});
+		}
+		for (const entry of terminalEntries) {
+			const active = readBlob(storePath, entry.ref.active, "active", entry.id, counters);
+			const terminal = readBlob(storePath, entry.ref.terminal, "terminal", entry.id, counters);
+			const outcome = readBlob(storePath, entry.ref.outcome, "outcome", entry.id, counters);
+			const details: unknown[] = [];
+			for (const segment of entry.ref.detailSegments)
+				details.push(...readSegment(storePath, entry.id, segment, false, counters));
+			for (const segment of entry.ref.terminalDetailSegments) {
+				try {
+					readSegment(storePath, entry.id, segment, true, counters);
+				} catch (error) {
+					if (!segment.optional) throw error;
+					warnings.push({
+						workerId: entry.id,
+						sequence: segment.sequence,
+						message: error instanceof Error ? error.message : String(error),
+					});
+				}
+			}
+			workers.push({
+				...(active as unknown as CheckpointWorker),
+				...(terminal as unknown as Partial<CheckpointWorker>),
+				...(outcome as unknown as Partial<CheckpointWorker>),
+				log: details as CheckpointWorker["log"],
+				logFirstIndex: 0,
+				logCursor: details.length,
+			});
+		}
+		workers.sort((left, right) => left.startedAt - right.startedAt || left.id.localeCompare(right.id));
+		const checkpoint = { ...stateObject, workers, schemaVersion: 5 } as unknown as SessionCheckpoint;
+		try {
+			const validated = validateCheckpoint(checkpoint);
+			if (validated.id !== manifest.id)
+				throw new CheckpointStoreError("Manifest id does not match the referenced state blob.");
+			return {
+				checkpoint: stripUndefinedWorkerFields(validated),
+				manifest,
+				warnings,
+				terminalDetailCorrupt: warnings.length > 0,
+			};
+		} catch (error) {
+			throw new CheckpointStoreError(
+				`Corrupt v6 reconstructed checkpoint: ${error instanceof Error ? error.message : String(error)}.`,
+			);
+		}
+	});
 }
 
 function stripUndefinedWorkerFields(checkpoint: SessionCheckpoint): SessionCheckpoint {

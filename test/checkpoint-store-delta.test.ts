@@ -45,7 +45,7 @@ function delta(
 	terminal = false,
 ): V6CheckpointDelta {
 	const { workers: _workers, ...structural } = state;
-	return { id, state: structural, workers: [{ worker: next, terminal }] };
+	return { id, lane: "structural", state: structural, workers: [{ worker: next, terminal }] };
 }
 
 describe("v6 delta checkpoint store", () => {
@@ -121,6 +121,47 @@ describe("v6 delta checkpoint store", () => {
 				(hash, index) => hash !== activeManifest.terminalIndexShards[index],
 			),
 		).toHaveLength(1);
+	});
+
+	it("reuses the state hash for worker-only deltas and changes it for structural deltas", () => {
+		const root = temp();
+		const store = join(root, "store");
+		const source = checkpoint("lanes", [worker("active")]);
+		writeV6Checkpoint(source, store);
+		const before = readV6Manifest(store);
+		const sourceWorker = source.workers[0];
+		if (!sourceWorker) throw new Error("active worker fixture missing");
+		const workerCounters: V6WriteCounters = {};
+		writeV6CheckpointDelta(
+			{
+				id: "lanes",
+				lane: "worker",
+				workers: [
+					{
+						worker: { ...sourceWorker, updatedAt: 9, log: [{ at: 9, kind: "progress", text: "telemetry" }] },
+						terminal: false,
+					},
+				],
+			},
+			store,
+			{ counters: workerCounters },
+		);
+		const workerManifest = readV6Manifest(store);
+		expect(workerManifest.state).toBe(before.state);
+		expect(workerCounters.stateWrites ?? 0).toBe(0);
+		expect(workerCounters.stateHashReuses).toBe(1);
+		const structural = { ...source, updatedAt: 10 };
+		const { workers: _workers, ...state } = structural;
+		writeV6CheckpointDelta(
+			{
+				id: "lanes",
+				lane: "structural",
+				state,
+				workers: [],
+			},
+			store,
+		);
+		expect(readV6Manifest(store).state).not.toBe(workerManifest.state);
 	});
 
 	it("fails closed when a referenced terminal shard is missing or corrupt", () => {
