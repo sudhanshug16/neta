@@ -151,6 +151,14 @@ policy:
 - **status** — `active`, `complete`, or `stopped`. The leader sets this; workers
   see it but do not change it.
 
+Use `neta_goal` with `op="reopen"`, the exact current `expectedRevision`, a
+non-empty `workingObjective`, and a non-empty `reason` to reopen a complete or
+stopped goal. Original intent, discovery history, and prior revisions remain
+unchanged. A terminal goal refuses new delegation and terminal-worker revival;
+queued or pre-transport starting work is recorded as interrupted with the
+terminal-goal reason. Reopening permits only fresh delegation and never
+requeues or revives refused work.
+
 A worker reports a discovery with `neta discover --impact local|goal --finding
 <text> [--suggest <text>]`. Local discoveries are findings that do not require
 the goal to change (informational, a suggestion for later work, or something the
@@ -175,17 +183,18 @@ host process, outside any sandbox:
 | `neta_status` | Live summary with bounded fields: goal (when set), writer slot, unresolved workers, and all open notes. Use `view="workers"` or `view="notes"` with `limit` (default 20, maximum 100), opaque `cursor`, and worker `state` filtering; `workerId`/`noteId` fetch one exact record. |
 | `neta_attach` | Reopen a terminal worker's exact native backend session in a new tab. |
 | `neta_wait` | Block until watched workers finish, report a blocker, or a team posts. |
-| `neta_send` | Steer a live worker or resume a done, failed, or blocked worker in its exact ACP conversation. |
+| `neta_send` | Steer a live worker or resume a done, failed, or blocked worker in its exact ACP conversation; terminal-goal refusals require fresh delegation after reopen. |
 | `neta_inspect` | Expand one worker's recent input and output, bounded, without consuming lines. The returned window is fixed-size and independent of worker pane activity; use it for exceptional detail on a worker row that has no tab, or to verify a worker's activity without scrolling a live pane. |
 | `neta_kill` | Terminate a worker, releasing the writer slot. |
 | `neta_note` | Open-notes ledger: parked work, pending decisions, follow-ups. |
 
 Status summaries always show the writer slot, every queued or active worker, and
-every blocked worker that needs leader action. Every open note is shown, with
-fixed per-field clipping for worker details, progress, diagnostics, and note
-text. Closed history is represented by terminal counts; ordinary done, killed,
-failed, and interrupted rows stay out of the summary unless they carry a
-later-failure diagnostic. For history, continue the `workers` or `notes` view
+every non-clean terminal worker that needs leader action. Every open note is
+shown, with fixed per-field clipping for worker details, progress, diagnostics,
+and note text. Closed history is represented by terminal counts; ordinary clean
+done rows stay out of the summary unless they carry a later-failure diagnostic.
+Failed, blocked, interrupted, and killed rows carry bounded diagnostics and an
+inspect hint. For history, continue the `workers` or `notes` view
 with its returned cursor. The deprecated hidden `neta_workers` route uses the
 same worker paging defaults.
 
@@ -290,6 +299,12 @@ falls back to a new session. Revived writers reacquire or queue for the writer s
 refuses outright if the old session is still live (reattach instead), if its
 directory is gone, or if it cannot prove the previous run's worker processes
 are dead.
+
+Every wait, socket wait, status row, and inspect view uses the same handoff
+classification: only a `done` worker with an available, unclipped latest result
+is complete. Missing or clipped results point to inspection; failed, blocked,
+interrupted, and killed workers never claim completion and include any latest
+report plus later failure.
 
 `neta attach` works because a worker is an ordinary session of the CLI that
 ran it: Neta hands the session id the worker's ACP handshake returned to that

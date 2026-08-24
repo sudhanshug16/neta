@@ -179,6 +179,67 @@ describe("durable session checkpoints", () => {
 		expect(read.shutdown).toBeUndefined();
 	});
 
+	it("hydrates a terminal goal and reopens it without losing its revision history", async () => {
+		const agentDir = tempDir("neta-checkpoint-goal-");
+		const cwd = tempDir("neta-checkpoint-goal-repo-");
+		const sessionId = "goal-reopen";
+		let transport: FakeTransport | undefined;
+		const manager = new WorkerManager({
+			cwd,
+			agentDir,
+			config: fixtureBackendConfig(),
+			channelAddress: "/tmp/neta-checkpoint-goal.sock",
+			onEvent: () => {},
+			createTransport: (options) => {
+				transport = new FakeTransport(options);
+				return transport;
+			},
+			checkpoint: { id: sessionId, leaderBackend: "codex", writer: new CheckpointWriter(agentDir) },
+		});
+		manager.initGoal("ship the release");
+		const prior = await manager.spawn({ role: "scout", tier: "expert", task: "prior" });
+		transport?.options.events.vendorSession("prior-session");
+		transport?.finish({ ok: true, summary: "prior report" });
+		await manager.waitFor([prior.id], 1_000);
+		manager.completeGoal({ expectedRevision: 0 });
+		await manager.flushCheckpoint();
+
+		const hydrated = WorkerManager.hydrate(
+			{
+				cwd,
+				agentDir,
+				config: fixtureBackendConfig(),
+				channelAddress: "/tmp/neta-checkpoint-goal-hydrated.sock",
+				onEvent: () => {},
+				createTransport: (options) => new FakeTransport(options),
+				checkpoint: { id: sessionId, leaderBackend: "codex", writer: new CheckpointWriter(agentDir) },
+			},
+			readCheckpointForHydration(sessionId, agentDir),
+		);
+		try {
+			expect(hydrated.goalSnapshot()).toMatchObject({ status: "complete", revision: 1 });
+			await expect(hydrated.steer(prior.id, "resume")).rejects.toThrow("terminal goal");
+			const reopened = hydrated.reopenGoal({
+				expectedRevision: 1,
+				workingObjective: "ship verified artifacts",
+				reason: "fresh evidence",
+			});
+			expect(reopened).toMatchObject({
+				originalIntent: "ship the release",
+				status: "active",
+				revision: 2,
+			});
+			expect(reopened.revisions.map((revision) => revision.reason)).toEqual([
+				"initialized",
+				"goal completed",
+				"fresh evidence",
+			]);
+		} finally {
+			await manager.dispose();
+			await hydrated.dispose();
+		}
+	});
+
 	it("round-trips semantic state, excludes live secrets, and hydrates without side effects", async () => {
 		const agentDir = tempDir("neta-checkpoint-");
 		const cwd = tempDir("neta-checkpoint-repo-");

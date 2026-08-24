@@ -116,6 +116,32 @@ describe("leader MCP redesign", () => {
 		expect(body(await call("neta_status", { view: "workers" }))).toContain("No workers");
 	});
 
+	it("refuses terminal batches before seeding a team and permits only fresh work after reopen", async () => {
+		await call("neta_goal", { op: "init", originalIntent: "ship the release" });
+		await call("neta_goal", { op: "complete", expectedRevision: 0 });
+		const refused = await call("neta_delegate", {
+			team: "review-room",
+			seed: "seed must not be written",
+			workers: [{ role: "scout", tier: "expert", task: "inspect" }],
+		});
+
+		expect(refused.isError).toBe(true);
+		expect(transports).toHaveLength(0);
+		expect(manager.roomTranscript("review-room")).toEqual([]);
+		const reopened = await call("neta_goal", {
+			op: "reopen",
+			expectedRevision: 1,
+			workingObjective: "ship verified artifacts",
+			reason: "fresh evidence",
+		});
+		expect(body(reopened)).toContain("Goal revision=2 status=active");
+		const fresh = await call("neta_delegate", {
+			workers: [{ role: "scout", tier: "expert", task: "inspect fresh" }],
+		});
+		expect(fresh.isError).toBeFalsy();
+		expect(transports).toHaveLength(1);
+	});
+
 	it("delegates one or many workers and returns real assignments", async () => {
 		const result = await call("neta_delegate", {
 			workers: [
@@ -236,12 +262,12 @@ describe("leader MCP redesign", () => {
 		expect(rendered).not.toContain("transcript output is not the handoff");
 	});
 
-	it("marks a missing terminal handoff and recommends inspection", async () => {
+	it("marks a missing terminal handoff and requires inspection", async () => {
 		await call("neta_delegate", { workers: [{ role: "scout", tier: "expert", task: "map" }] });
 		const waiting = call("neta_wait", { workerIds: ["ro1"], timeoutSeconds: 5 });
 		transports[0].finish({ ok: true, summary: "" });
 
-		expect(body(await waiting)).toContain("handoff: missing; inspect recommended");
+		expect(body(await waiting)).toContain("handoff: missing; inspect required");
 	});
 
 	it("preserves a successful report when a later turn fails", async () => {
@@ -255,7 +281,7 @@ describe("leader MCP redesign", () => {
 		await waitFor(() => manager.get("ro1").state === "failed");
 
 		const rendered = body(await call("neta_wait", { workerIds: ["ro1"] }));
-		expect(rendered).toContain("handoff: complete; later failure detected; inspect recommended");
+		expect(rendered).toContain("handoff: inspect required");
 		expect(rendered).toContain("result: successful report");
 		expect(rendered).toContain(
 			"after its report: follow-up failed after the report above: follow-up backend failure",

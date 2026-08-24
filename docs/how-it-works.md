@@ -113,6 +113,20 @@ order and history remain visible, but nothing starts automatically. The writer
 slot stays held until the recovery boundary proves the old processes dead.
 Completed, failed, and killed outcomes remain unchanged.
 
+## Terminal goals and fresh work
+
+A complete or stopped session goal is an admission boundary. `neta_delegate` and
+direct spawns reject before assignment, room, note, scratch, or transport
+mutation. Queued and pre-transport `starting` workers are drained as
+`interrupted` with a bounded terminal-goal reason; already-running workers may
+finish normally. The guard is an explicit lifecycle generation fence checked
+again immediately before transport startup, writer dequeue, and terminal-worker
+revival, so work admitted before terminalization cannot start after a later
+reopen. Reopening uses the existing `neta_goal` operation with an exact
+`expectedRevision`, a new non-empty working objective, and a reason. It
+preserves original intent and append-only history, permits only fresh
+delegation, and never auto-requeues or auto-revives refused work.
+
 ## Reopening a closed session
 
 `neta resume <id>` reopens one closed session by its exact durable id. The id is
@@ -366,8 +380,9 @@ sessions: it includes the writer slot, every queued or active worker, every
 blocked worker requiring leader action, and every open note. Individual task,
 progress, diagnostic, linked-worker, goal, and note-text fields are clipped to
 fixed bounds, while closed history is represented by terminal counts only;
-ordinary done, killed, failed, and interrupted rows stay hidden unless a
-later-failure diagnostic makes them actionable. Use `view="workers"` or
+ordinary clean done rows stay hidden unless a later-failure diagnostic makes
+them actionable. Failed, blocked, interrupted, and killed rows remain visible
+with bounded diagnostics. Use `view="workers"` or
 `view="notes"` with `limit` (20 by default, 100 max), the returned opaque
 `cursor`, and (for workers) `state` to page stable insertion/created order.
 `workerId` and `noteId` select one exact record; invalid or stale cursors are
@@ -391,6 +406,12 @@ when it chooses, and nothing they say interrupts anyone. Two things block instea
 
 Blocking tool calls are the only cross-agent channel. Neta never types into
 another agent's terminal.
+
+Wait, socket wait, status, and inspect share one handoff classifier. Only a
+`done` worker with an available, unclipped latest result says `handoff:
+complete`; missing or clipped results require inspection, and failed, blocked,
+interrupted, and killed workers always say inspection is required while keeping
+any latest report and later failure visible.
 
 ## Restrictions
 

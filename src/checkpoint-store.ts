@@ -73,6 +73,10 @@ export interface V6TerminalSummary {
 	room?: string;
 	taskPreview: string;
 	resultPreview?: string;
+	/** Optional handoff diagnostics added without a format/schema bump. */
+	resultClipped?: boolean;
+	resultMissing?: boolean;
+	terminalGoalRefused?: boolean;
 	laterFailurePreview?: string;
 	pendingQuestionPreview?: string;
 	lastProgress?: { text: string; at: number };
@@ -334,6 +338,9 @@ function validateSummary(value: unknown, path: string): V6TerminalSummary {
 			"room",
 			"taskPreview",
 			"resultPreview",
+			"resultClipped",
+			"resultMissing",
+			"terminalGoalRefused",
 			"laterFailurePreview",
 			"pendingQuestionPreview",
 			"lastProgress",
@@ -362,6 +369,11 @@ function validateSummary(value: unknown, path: string): V6TerminalSummary {
 		throw new CheckpointStoreError(`Corrupt v6 ${path}.writer: expected a boolean.`);
 	for (const key of ["room", "resultPreview", "laterFailurePreview", "pendingQuestionPreview"] as const)
 		if (summary[key] !== undefined) string(summary[key], `${path}.${key}`);
+	for (const key of ["resultClipped", "resultMissing"] as const)
+		if (summary[key] !== undefined && typeof summary[key] !== "boolean")
+			throw new CheckpointStoreError(`Corrupt v6 ${path}.${key}: expected a boolean.`);
+	if (summary.terminalGoalRefused !== undefined && typeof summary.terminalGoalRefused !== "boolean")
+		throw new CheckpointStoreError(`Corrupt v6 ${path}.terminalGoalRefused: expected a boolean.`);
 	if (summary.lastProgress !== undefined) {
 		const progress = object(summary.lastProgress, `${path}.lastProgress`);
 		exact(progress, ["text", "at"], `${path}.lastProgress`);
@@ -683,6 +695,9 @@ function terminalWorker(worker: CheckpointWorker): Record<string, unknown> {
 	return {
 		state: worker.state,
 		...(worker.finalResult === undefined ? {} : { finalResult: worker.finalResult }),
+		...(worker.resultClipped === undefined ? {} : { resultClipped: worker.resultClipped }),
+		...(worker.resultMissing === undefined ? {} : { resultMissing: worker.resultMissing }),
+		...(worker.terminalGoalRefused === undefined ? {} : { terminalGoalRefused: worker.terminalGoalRefused }),
 		...(worker.laterFailure === undefined ? {} : { laterFailure: worker.laterFailure }),
 		...(worker.lastResponse === undefined ? {} : { lastResponse: worker.lastResponse }),
 		...(worker.stateBeforeStop === undefined ? {} : { stateBeforeStop: worker.stateBeforeStop }),
@@ -724,6 +739,12 @@ function terminalSummary(worker: CheckpointWorker): V6TerminalSummary {
 		room: clipped(worker.room),
 		taskPreview: clipped(worker.task) ?? "",
 		resultPreview: clipped(worker.finalResult),
+		resultClipped:
+			worker.resultClipped === true ||
+			(worker.finalResult !== undefined && clipped(worker.finalResult) !== worker.finalResult),
+		resultMissing:
+			worker.resultMissing === true || worker.finalResult === undefined || worker.finalResult.trim() === "",
+		terminalGoalRefused: worker.terminalGoalRefused,
 		laterFailurePreview: clipped(worker.laterFailure),
 		pendingQuestionPreview: clipped(worker.pendingQuestion),
 		lastProgress: worker.lastProgress
@@ -1145,6 +1166,9 @@ function summaryWorker(summary: V6TerminalSummary): CheckpointWorker {
 		activeStartedAt: summary.activeStartedAt,
 		queuedStartedAt: summary.queuedStartedAt,
 		finalResult: summary.resultPreview,
+		resultClipped: summary.resultClipped,
+		resultMissing: summary.resultMissing,
+		terminalGoalRefused: summary.terminalGoalRefused,
 		laterFailure: summary.laterFailurePreview,
 		pendingQuestion: summary.pendingQuestionPreview,
 		lastProgress: summary.lastProgress,

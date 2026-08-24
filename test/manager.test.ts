@@ -10,7 +10,7 @@ import { WorkerManager } from "../src/orchestrator/manager.ts";
 import type { PromptOutcome, TransportOptions, WorkerTransportDriver } from "../src/orchestrator/transport.ts";
 import { NetaConfig } from "../src/settings.ts";
 import { TIERS, type WorkerEvent } from "../src/types.ts";
-import { fixtureBackendConfig } from "./helpers.ts";
+import { fixtureBackendConfig, waitFor } from "./helpers.ts";
 
 class FakeTransport implements WorkerTransportDriver {
 	readonly options: TransportOptions;
@@ -2647,6 +2647,121 @@ describe("WorkerManager", () => {
 			expect(() =>
 				manager.setDiscoveryPolicy({ discoveryPolicy: "locked", expectedRevision: complete.revision }),
 			).toThrow("terminal");
+		});
+
+		it("reopens a terminal goal without rewriting immutable history", () => {
+			const initial = manager.initGoal("ship the release");
+			const complete = manager.completeGoal({ expectedRevision: initial.revision });
+			const reopened = manager.reopenGoal({
+				expectedRevision: complete.revision,
+				workingObjective: "ship only verified artifacts",
+				reason: "the release needs one bounded follow-up",
+				evidenceRefs: ["evidence://release-gap"],
+			});
+
+			expect(reopened).toMatchObject({
+				originalIntent: "ship the release",
+				workingObjective: "ship only verified artifacts",
+				revision: complete.revision + 1,
+				status: "active",
+			});
+			expect(reopened.revisions).toHaveLength(3);
+			expect(reopened.revisions[1]).toMatchObject({ reason: "goal completed" });
+			expect(reopened.revisions[2]).toMatchObject({
+				reason: "the release needs one bounded follow-up",
+				evidenceRefs: ["evidence://release-gap"],
+			});
+			expect(() =>
+				manager.reopenGoal({ expectedRevision: reopened.revision, workingObjective: "again", reason: "again" }),
+			).toThrow("already active");
+		});
+
+		it("drains queued writers at the terminal boundary while a running worker finishes", async () => {
+			manager.initGoal("ship the release");
+			const running = await manager.spawn({ role: "worker", tier: "expert", task: "implement", writer: true });
+			const queued = await manager.spawn({ role: "worker", tier: "expert", task: "document", writer: true });
+			manager.completeGoal({ expectedRevision: 0 });
+
+			expect(manager.get(queued.id)).toMatchObject({
+				state: "interrupted",
+				stateBeforeStop: "queued",
+				result: expect.stringContaining("Refused because the session goal is complete"),
+			});
+			expect(manager.statusSnapshot().writerQueue).toEqual([]);
+			expect(manager.get(running.id).state).toBe("running");
+			transports[0].finish({ ok: true, summary: "implemented" });
+			await manager.waitFor([running.id], 1_000);
+			expect(manager.get(running.id).state).toBe("done");
+			await expect(manager.spawn({ role: "scout", tier: "expert", task: "fresh" })).rejects.toThrow("terminal");
+		});
+
+		it("does not cancel an admitted worker for an ordinary active-goal revision", async () => {
+			manager.initGoal("ship the release");
+			const worker = await manager.spawn({ role: "scout", tier: "expert", task: "verify" });
+			manager.reviseGoal({ workingObjective: "ship verified artifacts", expectedRevision: 0 });
+			expect(manager.get(worker.id).state).toBe("running");
+			transports[0].finish({ ok: true, summary: "verified" });
+			await manager.waitFor([worker.id], 1_000);
+			expect(manager.get(worker.id).state).toBe("done");
+		});
+
+		it("rejects an async pre-transport start across terminal and reopen, then admits fresh work", async () => {
+			let preparing = false;
+			let releasePrepare: (() => void) | undefined;
+			const prepareGate = new Promise<void>((resolve) => {
+				releasePrepare = resolve;
+			});
+			const created: FakeTransport[] = [];
+			const gated = new WorkerManager({
+				cwd: process.cwd(),
+				agentDir: "/nonexistent-agent-dir",
+				config,
+				channelAddress: "/tmp/neta-goal-race.sock",
+				onEvent: () => {},
+				prepareEnv: async () => {
+					preparing = true;
+					await prepareGate;
+					return {};
+				},
+				createTransport: (options) => {
+					const transport = new FakeTransport(options);
+					created.push(transport);
+					return transport;
+				},
+			});
+			try {
+				gated.initGoal("ship the release");
+				const stale = gated.spawn({ role: "scout", tier: "expert", task: "stale" });
+				await waitFor(() => preparing);
+				const complete = gated.completeGoal({ expectedRevision: 0 });
+				gated.reopenGoal({
+					expectedRevision: complete.revision,
+					workingObjective: "fresh",
+					reason: "new evidence",
+				});
+				releasePrepare?.();
+				await expect(stale).rejects.toThrow("terminal goal boundary");
+				expect(created).toHaveLength(0);
+				const fresh = await gated.spawn({ role: "scout", tier: "expert", task: "fresh" });
+				expect(fresh.state).toBe("running");
+			} finally {
+				await gated.dispose();
+				rmSync("/tmp/neta-goal-race.sock", { force: true });
+			}
+		});
+
+		it("does not revive a worker refused by a terminal goal after reopen", async () => {
+			manager.initGoal("ship the release");
+			const prior = await manager.spawn({ role: "scout", tier: "expert", task: "verify" });
+			transports[0].options.events.vendorSession("prior-session");
+			transports[0].finish({ ok: true, summary: "prior report" });
+			await manager.waitFor([prior.id], 1_000);
+			const complete = manager.completeGoal({ expectedRevision: 0 });
+			await expect(manager.steer(prior.id, "resume")).rejects.toThrow("terminal goal");
+			manager.reopenGoal({ expectedRevision: complete.revision, workingObjective: "fresh", reason: "follow-up" });
+			await expect(manager.steer(prior.id, "resume")).rejects.toThrow("delegate a fresh worker");
+			const fresh = await manager.spawn({ role: "scout", tier: "expert", task: "fresh" });
+			expect(fresh.state).toBe("running");
 		});
 
 		it("injects the current goal into worker turns and stops goal-impact discovery for resolution", async () => {

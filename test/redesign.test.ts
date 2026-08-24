@@ -114,6 +114,11 @@ describe("settled tool surface and revival", () => {
 		await waitFor(() => value.get(worker.id).state === "done");
 		const vendor = value.get(worker.id).vendorSessionId;
 		await value.steer(worker.id, "second");
+		expect(value.get(worker.id)).toMatchObject({
+			state: "running",
+			result: undefined,
+			laterFailure: undefined,
+		});
 		expect((await value.wait([worker.id], 5_000)).reason).toBe("completed");
 		expect(value.get(worker.id)).toMatchObject({ vendorSessionId: vendor, revivalCount: 1, result: "echo:second" });
 		await value.steer(worker.id, "FAIL third");

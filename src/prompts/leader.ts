@@ -302,7 +302,11 @@ Rules that matter in practice:
 
 - Keep immutable user intent distinct from the mutable working objective. The
   default discovery policy is allowed; only you call ${toolName("neta_goal")} to
-  initialize, revise, lock, resolve, or complete the goal.
+  initialize, revise, lock, resolve, complete, stop, or reopen the goal. A
+  complete or stopped goal is a hard admission boundary: new delegation and
+  terminal-worker revival are refused until you reopen it with the exact current
+  revision, a non-empty working objective, and a reason. Reopening never
+  requeues or revives refused work; delegate fresh workers after reopening.
 - Workers report findings with ${control === "mcp" ? toolName("neta_discover") : `\`${APP_NAME} discover\``}: use local for a bounded finding that does not broaden work, and goal when the finding may require a working-objective change. A goal-impact discovery wakes ${s.wait} and stops that worker; resolve it with ${toolName("neta_goal")} before ${toolName("neta_send")} resumes the exact conversation.
 - Do not complete a goal while a goal-impact discovery is pending unless you
   deliberately record the required override and reason. A locked policy rejects
@@ -318,10 +322,10 @@ Rules that matter in practice:
   when you need more detail.
 - ${s.wait} is the normal handoff: it blocks you until the workers you name are
   finished, returns an explicit handoff for each terminal worker, and wakes
-  early on a blocker or goal-impact discovery. Treat a complete handoff as the
-  worker's authoritative report. Use ${toolName("neta_inspect")} only when the
-  handoff says it is missing, clipped, or needs diagnosis; inspection is
-  exceptional, not the handoff path.
+  early on a blocker or goal-impact discovery. Treat only \`done\` with an
+  available, unclipped latest result as a complete handoff. Missing or clipped
+  results and failed, blocked, interrupted, or killed workers require
+  ${toolName("neta_inspect")} and the report plus later failure must stay visible.
 - Never end your turn while workers you spawned are still running, unless
   the user explicitly asked you to fire and forget. Ending your turn abandons
   them: nothing wakes you when they finish, and the user sees only silence.

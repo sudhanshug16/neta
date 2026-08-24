@@ -73,6 +73,30 @@ export function inspectHint(workerId: string): string {
 	return `expand: ${APP_NAME} inspect ${workerId}`;
 }
 
+export interface HandoffClassification {
+	status: "complete" | "missing" | "clipped" | "diagnostic";
+	text: string;
+}
+
+/** Classify the one authoritative terminal result used by MCP, socket, status and inspect. */
+export function classifyHandoff(
+	summary: Pick<WorkerSummary, "state" | "result" | "resultClipped" | "resultMissing" | "laterFailure">,
+	resultLimit = 3000,
+): HandoffClassification | undefined {
+	if (!["blocked", "done", "failed", "killed", "interrupted"].includes(summary.state)) return undefined;
+	const available = !summary.resultMissing && summary.result !== undefined && summary.result.trim() !== "";
+	const clipped = available && (summary.resultClipped === true || (summary.result?.length ?? 0) > resultLimit);
+	if (summary.state === "done") {
+		if (!available) return { status: "missing", text: "handoff: missing; inspect required" };
+		if (clipped) return { status: "clipped", text: "handoff: clipped; inspect available" };
+		return {
+			status: "complete",
+			text: `handoff: complete${summary.laterFailure ? "; later failure detected; inspect required" : ""}`,
+		};
+	}
+	return { status: "diagnostic", text: "handoff: inspect required" };
+}
+
 /**
  * The next action a status row should suggest. A live worker can be expanded
  * for context; a problematic terminal needs inspection for diagnosis. Clean
@@ -91,6 +115,7 @@ export function statusHint(summary: Pick<WorkerSummary, "id" | "state" | "laterF
 		summary.state === "blocked" ||
 		summary.state === "failed" ||
 		summary.state === "interrupted" ||
+		summary.state === "killed" ||
 		summary.laterFailure
 	) {
 		return `inspect: ${APP_NAME} inspect ${summary.id}`;
@@ -113,6 +138,8 @@ export function formatInspection(inspection: WorkerInspection, now = Date.now())
 		lines.push(`Worker view: headless — ${inspection.headlessReason}; inspection still works without a tab.`);
 	}
 	lines.push(`task: ${worker.task.replace(/\s+/g, " ").trim()}`);
+	const handoff = classifyHandoff(worker);
+	if (handoff) lines.push(handoff.text);
 	lines.push("");
 	if (inspection.droppedEntries > 0) {
 		lines.push(`… ${inspection.droppedEntries} earlier entries not shown (inspection cap)`);
@@ -279,17 +306,21 @@ function section(label: string, workers: WorkerSummary[], now: number): string[]
 function terminalSection(workers: WorkerSummary[], now: number): string[] {
 	const states = ["blocked", "failed", "interrupted", "done", "killed"] as const;
 	const counts = states.map((state) => `${state}=${workers.filter((worker) => worker.state === state).length}`);
-	const diagnostic = workers.filter((worker) => worker.state === "blocked" || worker.laterFailure);
+	const diagnostic = workers.filter((worker) => worker.state !== "done" || worker.laterFailure);
 	return [
 		"Terminal:",
 		`  counts: ${counts.join(" | ")}`,
 		...(diagnostic.length === 0
-			? ["  (no diagnostic rows; ordinary done/killed rows omitted)"]
-			: diagnostic.flatMap((worker) => {
+			? ["  (no diagnostic rows; ordinary clean done rows omitted)"]
+			: diagnostic.slice(0, DETAIL_ROW_LIMIT).flatMap((worker) => {
 					const line = `  ${formatWorkerSummary(worker, now)}`;
+					const handoff = classifyHandoff(worker);
 					const hint = statusHint(worker);
-					return [line, ...(hint ? [`    ${hint}`] : [])];
+					return [line, ...(handoff ? [`    ${handoff.text}`] : []), ...(hint ? [`    ${hint}`] : [])];
 				})),
+		...(diagnostic.length > DETAIL_ROW_LIMIT
+			? [`  ... ${diagnostic.length - DETAIL_ROW_LIMIT} diagnostic rows omitted`]
+			: []),
 	];
 }
 
@@ -321,7 +352,8 @@ export function formatWriterActivityNotice(
 function formatWriter(summary: WorkerSummary, now = Date.now()): string {
 	const name = clipDisplay(summary.name);
 	const displayName = name === clipDisplay(summary.role) ? name : `"${name}"`;
-	return `${summary.id} ${displayName} | ${formatWriterObjective(summary)} | ${formatWorkerDuration(summary, now)}`;
+	const handoff = classifyHandoff(summary);
+	return `${summary.id} ${displayName} | ${formatWriterObjective(summary)} | ${formatWorkerDuration(summary, now)}${handoff ? ` | ${handoff.text}` : ""}`;
 }
 
 /** Context prepended to a read-only task while writers may change the checkout. */
@@ -350,6 +382,7 @@ export function formatWriterStatus(snapshot: WorkerStatusSnapshot, now = Date.no
 			worker.state === "blocked" ||
 			worker.state === "failed" ||
 			worker.state === "interrupted" ||
+			worker.state === "killed" ||
 			worker.laterFailure,
 	);
 	const recent = [...finished].reverse();

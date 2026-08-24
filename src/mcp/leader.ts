@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { MAX_SAFE_TIMEOUT_MS, OUTPUT_LIMIT_BYTES, SPAWN_FAILURE_EXIT_CODE } from "../orchestrator/exec.ts";
 import type { WorkerManager } from "../orchestrator/manager.ts";
 import {
+	classifyHandoff,
 	formatInspection,
 	formatLastProgress,
 	formatNotePreview,
@@ -104,14 +105,8 @@ function statusReport(summaries: WorkerSummary[], maxResultChars = MAX_RESULT_CH
 			const progress = formatLastProgress(summary);
 			if (progress) lines.push(`  ${progress}`);
 			if (isTerminalState(summary.state)) {
-				const result = summary.result;
-				const hasResult = result !== undefined && result.length > 0;
-				const clipped = hasResult && result.length > MAX_RESULT_CHARS;
-				const handoff = [hasResult ? (clipped ? "clipped" : "complete") : "missing"];
-				if (summary.laterFailure) handoff.push("later failure detected", "inspect recommended");
-				else if (clipped) handoff.push("inspect available");
-				else if (!hasResult) handoff.push("inspect recommended");
-				lines.push(`  handoff: ${handoff.join("; ")}`);
+				const handoff = classifyHandoff(summary, MAX_RESULT_CHARS);
+				if (handoff) lines.push(`  ${handoff.text}`);
 			}
 			if (summary.result)
 				lines.push(`  result: ${clip(summary.result, Math.min(maxResultChars, MAX_RESULT_CHARS))}`);
@@ -305,13 +300,13 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 		{
 			name: "neta_goal",
 			description:
-				"Initialize or mutate the session goal with optimistic concurrency. Goal-impact discoveries remain pending until explicitly resolved; workers never revise the goal automatically.",
+				"Initialize, revise, reopen, or complete the session goal with optimistic concurrency. Goal-impact discoveries remain pending until explicitly resolved; workers never revise the goal automatically.",
 			inputSchema: {
 				type: "object",
 				properties: {
 					op: {
 						type: "string",
-						enum: ["init", "revise", "resolve-discovery", "set-discovery-policy", "complete", "stop"],
+						enum: ["init", "revise", "resolve-discovery", "set-discovery-policy", "complete", "stop", "reopen"],
 					},
 					originalIntent: { type: "string" },
 					workingObjective: { type: "string" },
@@ -372,6 +367,14 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 							evidenceRefs: optionalStringArray(args, "evidenceRefs"),
 						});
 						break;
+					case "reopen":
+						goal = manager.reopenGoal({
+							workingObjective: requireString(args, "workingObjective"),
+							expectedRevision: optionalNumber(args, "expectedRevision") as number,
+							reason: requireString(args, "reason"),
+							evidenceRefs: optionalStringArray(args, "evidenceRefs"),
+						});
+						break;
 					default:
 						throw new Error(`Unknown goal op "${op}".`);
 				}
@@ -414,6 +417,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 				}));
 				// Resolve the complete batch before the seed or first process: invalid input has no partial side effects.
 				manager.validateDelegation(requests);
+				const admissionGeneration = manager.delegationAdmission();
 				const plannedAssignments = manager.planAssignments(requests);
 				if (seed && team) manager.postToRoom(team, "leader", "leader", seed);
 				const results: Array<{ summary: WorkerSummary } | { failure: string }> = [];
@@ -421,7 +425,7 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 				for (const [index, request] of requests.entries()) {
 					const before = new Set(manager.list().map((worker) => worker.id));
 					try {
-						results.push({ summary: await manager.spawn(request) });
+						results.push({ summary: await manager.spawn(request, admissionGeneration) });
 					} catch (error) {
 						const failed = manager.list().find((worker) => !before.has(worker.id));
 						const message = error instanceof Error ? error.message : String(error);

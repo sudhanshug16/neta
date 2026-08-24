@@ -59,8 +59,8 @@ describe("leader prompt", () => {
 		const prompt = buildLeaderPrompt({ tiers: DEFAULT_TIERS, control: "mcp" });
 
 		expect(prompt).toContain("returns an explicit handoff for each terminal worker");
-		expect(prompt).toContain("Treat a complete handoff as the\n  worker's authoritative report");
-		expect(prompt).toContain("inspection is\n  exceptional, not the handoff path");
+		expect(prompt).toContain("Treat only `done` with an\n  available, unclipped latest result as a complete handoff");
+		expect(prompt).toContain("require\n  neta_inspect");
 	});
 
 	// The leader can only call what its host calls the tool. Naming the bare tool

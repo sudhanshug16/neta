@@ -101,6 +101,11 @@ export interface CheckpointWorker {
 	/** Start of the current writer-queue interval, when this worker is queued. */
 	queuedStartedAt?: number;
 	finalResult?: string;
+	/** Optional v6-compatible handoff diagnostics; old checkpoints omit them. */
+	resultClipped?: boolean;
+	resultMissing?: boolean;
+	/** Optional terminal-goal admission fence; old checkpoints omit it. */
+	terminalGoalRefused?: boolean;
 	substantiveResponse?: string;
 	lastResponse?: string;
 	/** A turn that failed after the report in `finalResult`; kept beside it, never over it. */
@@ -293,6 +298,9 @@ function validateWorker(value: unknown, path: string): void {
 			"activeStartedAt",
 			"queuedStartedAt",
 			"finalResult",
+			"resultClipped",
+			"resultMissing",
+			"terminalGoalRefused",
 			"substantiveResponse",
 			"lastResponse",
 			"laterFailure",
@@ -361,6 +369,9 @@ function validateWorker(value: unknown, path: string): void {
 		"cwd",
 	])
 		optional(worker[key], (item) => string(item, `${path}.${key}`));
+	optional(worker.resultClipped, (item) => boolean(item, `${path}.resultClipped`));
+	optional(worker.resultMissing, (item) => boolean(item, `${path}.resultMissing`));
+	optional(worker.terminalGoalRefused, (item) => boolean(item, `${path}.terminalGoalRefused`));
 	optional(worker.revivalCount, (item) => number(item, `${path}.revivalCount`));
 	optional(worker.nativeAttached, (item) => boolean(item, `${path}.nativeAttached`));
 	optional(worker.viewStatus, (item) => {

@@ -220,6 +220,10 @@ export interface WorkerSummary {
 	stateBeforeStop?: Exclude<WorkerState, "done" | "failed" | "killed" | "interrupted">;
 	/** Set once the worker reaches a terminal state. */
 	result?: string;
+	/** The result excerpt is clipped in this view; inspect can retrieve the full handoff. */
+	resultClipped?: boolean;
+	/** No substantive terminal result was published. */
+	resultMissing?: boolean;
 	/**
 	 * Something that failed after this worker had already reported — an automatic
 	 * writer notice, or a follow-up. Reported next to `result`, never instead of

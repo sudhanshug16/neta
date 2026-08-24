@@ -89,7 +89,10 @@ describe("formatStatusSnapshot", () => {
 			openNotes: notes,
 		});
 
-		for (const item of [...running, ...queued, ...waiting, ...blocked]) expect(status).toContain(item.id);
+		for (const item of [...running, ...queued, ...waiting]) expect(status).toContain(item.id);
+		for (const item of blocked.slice(0, 5)) expect(status).toContain(item.id);
+		for (const item of blocked.slice(5)) expect(status).not.toContain(item.id);
+		expect(status).toContain("... 2 diagnostic rows omitted");
 		for (const note of notes) expect(status).toContain(`${note.id} "${note.text}"`);
 		expect(status).not.toContain("worker rows omitted");
 		expect(status).not.toContain("note previews omitted");
@@ -206,9 +209,10 @@ describe("formatStatusSnapshot", () => {
 			expect(status).toContain(`expand: neta inspect ${id}`);
 		expect(status).toContain("ro-blocked");
 		expect(status).toContain("ro-later-failure");
-		for (const id of ["ro-failed", "ro-interrupted"]) expect(status).not.toContain(`inspect: neta inspect ${id}`);
+		for (const id of ["ro-failed", "ro-interrupted", "ro-killed"])
+			expect(status).toContain(`inspect: neta inspect ${id}`);
 		for (const id of ["ro-blocked", "ro-later-failure"]) expect(status).toContain(`inspect: neta inspect ${id}`);
-		for (const id of ["ro-done", "ro-killed"]) expect(status).not.toContain(`inspect ${id}`);
+		expect(status).not.toContain("inspect: neta inspect ro-done");
 	});
 
 	it("shows closed-worker counts and every open note with bounded fields", () => {
@@ -237,7 +241,17 @@ describe("formatStatusSnapshot", () => {
 		});
 
 		expect(rendered).toContain("counts: blocked=0 | failed=139 | interrupted=0 | done=279 | killed=139");
-		for (const id of terminal.map((item) => item.id)) expect(rendered).not.toContain(`  ${id} `);
+		for (const id of terminal
+			.filter((item) => item.state !== "done")
+			.slice(0, 5)
+			.map((item) => item.id))
+			expect(rendered).toContain(`  ${id} `);
+		for (const id of terminal
+			.filter((item) => item.state !== "done")
+			.slice(5)
+			.map((item) => item.id))
+			expect(rendered).not.toContain(`  ${id} `);
+		expect(rendered).toContain("... 273 diagnostic rows omitted");
 		expect(rendered).toContain("total: 150");
 		expect(rendered).not.toContain("note previews omitted");
 		expect(rendered).not.toContain("linked workers omitted");
