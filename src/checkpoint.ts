@@ -29,7 +29,6 @@ import {
 	writeV6CheckpointDelta,
 } from "./checkpoint-store.ts";
 import { VERSION } from "./config.ts";
-import { type OwnedFileLease, releaseOwnedFile, tryAcquireOwnedFile } from "./ownership.ts";
 import { assertCanonicalSessionId, isSessionLeaseAlive } from "./session.ts";
 import {
 	type Note,
@@ -731,17 +730,45 @@ export function writeCheckpointAtomic(input: SessionCheckpoint, agentDir: string
 	}
 }
 
+function processIsAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
 function acquireCheckpointLock(path: string): () => void {
 	const lockPath = `${path}.lock`;
 	const waitBuffer = new Int32Array(new SharedArrayBuffer(4));
-	let lease: OwnedFileLease | undefined;
+	let handle: number | undefined;
 	for (let attempt = 0; attempt < 10_000; attempt += 1) {
-		lease = tryAcquireOwnedFile(lockPath);
-		if (lease) break;
-		Atomics.wait(waitBuffer, 0, 0, 1);
+		try {
+			handle = openSync(lockPath, "wx", 0o600);
+			writeSync(handle, `${process.pid}\n`, undefined, "utf8");
+			break;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+			let ownerPid: number | undefined;
+			try {
+				const parsed = Number.parseInt(readFileSync(lockPath, "utf8"), 10);
+				if (Number.isInteger(parsed) && parsed > 0) ownerPid = parsed;
+			} catch {
+				// A just-created lock may not have its owner written yet.
+			}
+			if (ownerPid !== undefined && !processIsAlive(ownerPid)) {
+				rmSync(lockPath, { force: true });
+				continue;
+			}
+			Atomics.wait(waitBuffer, 0, 0, 1);
+		}
 	}
-	if (lease === undefined) throw new CheckpointError(`Could not acquire checkpoint lock for ${path}.`);
-	return () => releaseOwnedFile(lease);
+	if (handle === undefined) throw new CheckpointError(`Could not acquire checkpoint lock for ${path}.`);
+	return () => {
+		closeSync(handle as number);
+		rmSync(lockPath, { force: true });
+	};
 }
 
 function mergeCheckpointForAtomicWrite(

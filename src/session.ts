@@ -9,7 +9,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
 	existsSync,
 	lstatSync,
@@ -18,19 +18,13 @@ import {
 	readFileSync,
 	realpathSync,
 	rmSync,
+	statSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { getAgentDir } from "./config.ts";
 import { killSessionSpec } from "./mux/index.ts";
-import {
-	assertOwnedDirectoryHeld,
-	type OwnedDirectoryLease,
-	processStartIdentity,
-	releaseOwnedDirectory,
-	tryAcquireOwnedDirectory,
-} from "./ownership.ts";
 
 const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 /** Keep session/checkpoint path components to 128 ASCII bytes, below 255-byte filesystem limits. */
@@ -67,7 +61,10 @@ export interface SessionMux {
 	name: string;
 }
 
-export type SessionLock = OwnedDirectoryLease;
+export interface SessionLock {
+	path: string;
+	token: string;
+}
 
 export interface CheckpointClaim extends SessionLock {
 	readonly kind: "checkpoint-claim";
@@ -105,7 +102,8 @@ function checkpointClaimPath(id: string, agentDir: string): string {
 /** Fail closed if a caller's ownership proof was replaced or released. */
 export function assertSessionLockHeld(lock: SessionLock): void {
 	try {
-		assertOwnedDirectoryHeld(lock);
+		const owner = JSON.parse(readFileSync(lockOwnerPath(lock), "utf-8")) as { token?: unknown };
+		if (owner.token !== lock.token) throw new Error("ownership token changed");
 	} catch {
 		throw new Error(`Session lock is no longer held: ${lock.path}.`);
 	}
@@ -173,6 +171,10 @@ function lockPath(cwd: string, agentDir: string): string {
 	return join(sessionsDir(agentDir), "locks", key);
 }
 
+function lockOwnerPath(lock: SessionLock): string {
+	return join(lock.path, "owner.json");
+}
+
 /**
  * Acquire a directory-specific launch lock. mkdir is atomic, and the owner
  * token stops the launcher's later cleanup from releasing a successor's lock.
@@ -202,7 +204,11 @@ export function tryAcquireCheckpointClaim(id: string, agentDir: string = getAgen
 		const stat = lstatSync(path);
 		if (!stat.isDirectory() || stat.isSymbolicLink())
 			throw new Error(`Checkpoint claim is not a safe directory: ${path}.`);
-		const owner = lock.owner;
+		const owner = JSON.parse(readFileSync(lockOwnerPath(lock), "utf-8")) as {
+			pid?: unknown;
+			startedAt?: unknown;
+			token?: unknown;
+		};
 		if (typeof owner.pid !== "number" || !Number.isInteger(owner.pid) || typeof owner.token !== "string")
 			throw new Error(`Checkpoint claim owner is malformed: ${path}.`);
 		return Object.freeze({
@@ -244,41 +250,84 @@ export function assertCheckpointClaimHeld(claim: CheckpointClaim, id: string, ag
 	const expectedPath = checkpointClaimPath(id, canonical);
 	if (claim.agentDir !== canonical || claim.path !== expectedPath)
 		throw new Error(`Checkpoint claim does not authorize "${id}" in ${canonical}.`);
+	let owner: { pid?: unknown; startedAt?: unknown; token?: unknown };
+	let stat: ReturnType<typeof lstatSync>;
 	try {
-		assertOwnedDirectoryHeld(claim);
+		owner = JSON.parse(readFileSync(lockOwnerPath(claim), "utf-8")) as typeof owner;
+		stat = lstatSync(claim.path);
 	} catch {
 		throw new Error(`Checkpoint claim is no longer held for "${id}".`);
 	}
+	if (
+		!stat.isDirectory() ||
+		stat.isSymbolicLink() ||
+		stat.dev !== claim.inode.dev ||
+		stat.ino !== claim.inode.ino ||
+		owner.token !== claim.token ||
+		owner.pid !== claim.owner.pid ||
+		owner.startedAt !== claim.owner.startedAt
+	)
+		throw new Error(`Checkpoint claim is no longer held for "${id}".`);
 }
 
 function tryAcquireLockDirectory(path: string): SessionLock | undefined {
-	return tryAcquireOwnedDirectory(path, { processStartTime: processStartIdentity }) as SessionLock | undefined;
+	mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+	try {
+		mkdirSync(path, { recursive: false, mode: 0o700 });
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+			try {
+				const owner = JSON.parse(readFileSync(join(path, "owner.json"), "utf-8")) as {
+					pid?: unknown;
+					startedAt?: unknown;
+				};
+				const pid = owner.pid;
+				const startedAt = owner.startedAt;
+				const stale =
+					typeof pid === "number" &&
+					(!isAlive(pid) || (typeof startedAt === "string" && processStartTime(pid) !== startedAt));
+				if (stale) {
+					rmSync(path, { recursive: true, force: true });
+					return tryAcquireLockDirectory(path);
+				}
+			} catch {
+				// A process can die after mkdir but before it writes owner.json. Only
+				// reclaim that incomplete lock after its short creation window.
+				try {
+					if (Date.now() - statSync(path).mtimeMs > 5000) {
+						rmSync(path, { recursive: true, force: true });
+						return tryAcquireLockDirectory(path);
+					}
+				} catch {
+					// Another launcher released it; the next retry will acquire it.
+				}
+			}
+			return undefined;
+		}
+		throw error;
+	}
+	const lock = { path, token: randomBytes(16).toString("hex") };
+	writeFileSync(
+		lockOwnerPath(lock),
+		JSON.stringify({ pid: process.pid, startedAt: processStartTime(process.pid), token: lock.token }),
+		{
+			encoding: "utf-8",
+			mode: 0o600,
+		},
+	);
+	return lock;
 }
 
 /** Release only the lock created by this launch or its control-plane child. */
-export function releaseSessionLock(lock: SessionLock | { path: string; token: string } | undefined): void {
+export function releaseSessionLock(lock: SessionLock | undefined): void {
 	if (!lock) return;
-	if ("inode" in lock && "owner" in lock) {
-		releaseOwnedDirectory(lock);
-		return;
-	}
 	try {
-		const stat = lstatSync(lock.path);
-		const owner = JSON.parse(readFileSync(join(lock.path, "owner.json"), "utf8")) as {
-			pid?: unknown;
-			startedAt?: unknown;
-			token?: unknown;
-		};
-		if (!stat.isDirectory() || stat.isSymbolicLink() || owner.token !== lock.token || typeof owner.pid !== "number")
-			return;
-		releaseOwnedDirectory({
-			path: lock.path,
-			token: lock.token,
-			inode: { dev: Number(stat.dev), ino: Number(stat.ino) },
-			owner: { pid: owner.pid, ...(typeof owner.startedAt === "string" ? { startedAt: owner.startedAt } : {}) },
-		});
+		const owner = JSON.parse(readFileSync(lockOwnerPath(lock), "utf-8")) as { token?: unknown };
+		if (owner.token !== lock.token) return;
+		rmSync(lock.path, { recursive: true, force: true });
 	} catch {
-		// The lock is already gone or its proof is no longer readable.
+		// A crashed launcher or a control plane that already registered the session
+		// may have removed the lock. Either way, it is no longer ours to release.
 	}
 }
 
