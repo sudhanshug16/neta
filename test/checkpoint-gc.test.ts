@@ -129,6 +129,47 @@ describe("v6 offline reclamation", () => {
 		expect(result.deletedFiles).toBe(0);
 	});
 
+	it("retries dead reader preparation residue and skips live preparation residue", () => {
+		const deadStore = join(root(), "reader-prepared-dead");
+		writeV6Checkpoint(fixture("reader-prepared-dead"), deadStore);
+		const deadReaders = join(deadStore, "locks", "readers");
+		mkdirSync(deadReaders, { recursive: true });
+		const deadPath = join(deadReaders, "dead-reader");
+		const deadToken = "dead-reader-token";
+		const deadPrepared = join(deadReaders, `dead-reader.prepared.${process.pid}.${deadToken}`);
+		writeFileSync(
+			deadPrepared,
+			JSON.stringify({ pid: 4242, startedAt: "dead", token: deadToken, path: deadPath, kind: "directory" }),
+		);
+		const deadOrphan = join(deadStore, "blobs", `${hash("dead reader orphan\n")}.json`);
+		writeFileSync(deadOrphan, "dead reader orphan\n");
+		const recovered = reclaimV6StoreOffline(deadStore, proof, {
+			processIsAlive: () => false,
+			processStartTime: () => "dead",
+		});
+		expect(recovered.status).toBe("deleted");
+		expect(() => readFileSync(deadPrepared)).toThrow();
+		expect(() => readFileSync(deadOrphan)).toThrow();
+
+		const liveStore = join(root(), "reader-prepared-live");
+		writeV6Checkpoint(fixture("reader-prepared-live"), liveStore);
+		const liveReaders = join(liveStore, "locks", "readers");
+		mkdirSync(liveReaders, { recursive: true });
+		const livePath = join(liveReaders, "live-reader");
+		const liveToken = "live-reader-token";
+		const livePrepared = join(liveReaders, `live-reader.prepared.${process.pid}.${liveToken}`);
+		writeFileSync(
+			livePrepared,
+			JSON.stringify({ pid: 4242, startedAt: "live", token: liveToken, path: livePath, kind: "directory" }),
+		);
+		const liveResult = reclaimV6StoreOffline(liveStore, proof, {
+			processIsAlive: () => true,
+			processStartTime: () => "live",
+		});
+		expect(liveResult.status).toBe("skipped");
+		expect(readFileSync(livePrepared, "utf8")).toContain(liveToken);
+	});
+
 	it("revalidates a changed manifest or scan before deleting", () => {
 		const store = join(root(), "store");
 		writeV6Checkpoint(fixture("race"), store);
@@ -257,9 +298,9 @@ describe("v6 offline reclamation", () => {
 			processIsAlive: () => true,
 			processStartTime: () => "replacement-start",
 		});
-		expect(liveMismatch.status).toBe("skipped");
-		expect(liveMismatch.deletedFiles).toBe(0);
-		expect(readFileSync(liveMismatchOrphan, "utf8")).toBe("live mismatch orphan\n");
+		expect(liveMismatch.status).toBe("deleted");
+		expect(liveMismatch.deletedFiles).toBeGreaterThan(0);
+		expect(() => readFileSync(liveMismatchOrphan, "utf8")).toThrow();
 
 		const deadAmbiguousStore = join(root(), "dead-ambiguous");
 		writeV6Checkpoint(fixture("dead-ambiguous"), deadAmbiguousStore);

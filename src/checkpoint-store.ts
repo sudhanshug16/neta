@@ -32,6 +32,7 @@ import {
 	inspectOwnedDirectory,
 	type OwnedDirectoryLease,
 	reclaimOwnedDirectory,
+	recoverOwnedDirectory,
 	releaseOwnedDirectory,
 	tryAcquireOwnedDirectory,
 } from "./ownership.ts";
@@ -1530,7 +1531,18 @@ function gcScanLocks(storePath: string, options: V6GcOptions, maintenance: Owned
 		throw new CheckpointStoreError("v6 GC could not scan coordination locks.");
 	}
 	for (const entry of entries) {
-		if (entry.isSymbolicLink() || !entry.isDirectory() || ![V6_READERS_DIR, V6_MAINTENANCE_DIR].includes(entry.name))
+		if (entry.isSymbolicLink()) throw new CheckpointStoreError("v6 GC found an unexpected coordination entry.");
+		if (entry.isFile() && entry.name.startsWith(`${V6_MAINTENANCE_DIR}.prepared.`)) {
+			if (!recoverOwnedDirectory(v6MaintenancePath(storePath), options))
+				throw new CheckpointStoreError(`v6 GC found a live or ambiguous maintenance preparation: ${entry.name}.`);
+			continue;
+		}
+		if (entry.isDirectory() && entry.name.startsWith(`${V6_MAINTENANCE_DIR}.quarantine.`)) {
+			if (!recoverOwnedDirectory(v6MaintenancePath(storePath), options))
+				throw new CheckpointStoreError(`v6 GC found a live or ambiguous maintenance quarantine: ${entry.name}.`);
+			continue;
+		}
+		if (!entry.isDirectory() || ![V6_READERS_DIR, V6_MAINTENANCE_DIR].includes(entry.name))
 			throw new CheckpointStoreError("v6 GC found an unexpected coordination entry.");
 	}
 	const readersPath = v6ReadersPath(storePath);
@@ -1542,8 +1554,16 @@ function gcScanLocks(storePath: string, options: V6GcOptions, maintenance: Owned
 	}
 	for (const reader of readers) {
 		const readerPath = join(readersPath, reader.name);
-		if (reader.isSymbolicLink() || !reader.isDirectory())
+		if (reader.isSymbolicLink())
 			throw new CheckpointStoreError("v6 GC found an unexpected reader coordination entry.");
+		if (reader.isFile() && reader.name.includes(".prepared.")) {
+			const marker = reader.name.indexOf(".prepared.");
+			const canonical = join(readersPath, reader.name.slice(0, marker));
+			if (!recoverOwnedDirectory(canonical, options))
+				throw new CheckpointStoreError(`v6 GC found a live or ambiguous reader preparation: ${reader.name}.`);
+			continue;
+		}
+		if (!reader.isDirectory()) throw new CheckpointStoreError("v6 GC found an unexpected reader coordination entry.");
 		const inspected = inspectOwnedDirectory(readerPath);
 		if (inspected.state !== "owned" && inspected.state !== "legacy")
 			throw new CheckpointStoreError(`v6 GC found ambiguous reader coordination entry: ${reader.name}.`);
