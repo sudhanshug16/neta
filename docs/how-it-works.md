@@ -98,15 +98,13 @@ a hard 1-second deadline.
 The writer carries an explicit worker-only or structural lane. Worker-only
 changes reuse the manifest's state hash; spawn, queue, goal, note, room, lease,
 state-transition, discovery, shutdown, and terminal-completion changes carry a
-fresh structural snapshot. On `neta resume`, after the checkpoint claim,
-directory lock, and old-process death proof are held, Neta may perform one
-offline v6 mark/sweep. It validates the manifest and every transitively
-referenced blob, shard, and detail segment before deleting only recognized
-unreachable artifacts. A live reader, unreadable scan, unexpected entry,
-symlink, changed manifest, or missing proof makes reclamation skip or fail
-closed; the manifest is never rewritten. Operator stderr reports scan,
-candidate, deletion, and duration counters while worker-facing prompts and
-status remain semantic.
+fresh structural snapshot. Automatic v6 reclamation is intentionally deferred:
+resume and migration validate the published manifest and every transitively
+referenced blob, shard, and detail segment through a non-deleting path, but do
+not remove orphan artifacts, temporary manifests, old blobs, or other residue.
+Transient coordination residue is excluded when migration copies a staging
+tree. This keeps recovery retryable and preserves evidence for later operator
+maintenance.
 
 Hydration is inert: it creates no worker process, prompt, pane, callback, or
 scratch directory. `starting`, `running`, `waiting`, and `queued` workers become

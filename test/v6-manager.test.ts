@@ -641,6 +641,91 @@ describe("v6 manager integration", () => {
 		expect(transports).toHaveLength(0);
 	});
 
+	it("retains hydrated active logs through interruption and preserves archived terminals", async () => {
+		const root = mkdtempSync(join(tmpdir(), "neta-v6-active-log-recovery-"));
+		roots.push(root);
+		const agentDir = join(root, "agent");
+		const storePath = v6CheckpointStorePath("active-log-recovery", agentDir);
+		const activeLog = Array.from({ length: 128 }, (_, index) => ({
+			at: index + 5,
+			kind: index % 2 === 0 ? ("status" as const) : ("text" as const),
+			text: `event-${index}-${"x".repeat(256)}`,
+		}));
+		const terminal = {
+			id: "terminal",
+			name: "terminal",
+			role: "scout",
+			tier: "expert" as const,
+			backend: "codex",
+			writer: false,
+			task: "archived",
+			state: "done" as const,
+			startedAt: 1,
+			updatedAt: 2,
+			endedAt: 2,
+			finalResult: "done",
+			archived: true,
+			log: [],
+			logFirstIndex: 0,
+			logCursor: 0,
+			pendingBrief: [],
+		};
+		const active = {
+			id: "active",
+			name: "active",
+			role: "scout",
+			tier: "expert" as const,
+			backend: "codex",
+			writer: false,
+			task: "recover",
+			state: "running" as const,
+			startedAt: 3,
+			updatedAt: 6,
+			log: activeLog,
+			logFirstIndex: 4,
+			logCursor: 132,
+			pendingBrief: [],
+		};
+		writeV6Checkpoint({ ...checkpoint("active-log-recovery"), workers: [terminal, active] }, storePath);
+		const counters: V6ReadCounters = {};
+		const hydrated = readV6CheckpointMetadata(storePath, counters, { hydrateActiveDetails: true }).checkpoint;
+		expect(hydrated.workers.find((worker) => worker.id === "active")).toMatchObject({
+			log: activeLog,
+			logFirstIndex: 4,
+			logCursor: 132,
+		});
+		expect(counters.detailReads).toBe(1);
+		const manager = WorkerManager.hydrate(
+			{
+				cwd: process.cwd(),
+				agentDir,
+				config: fixtureBackendConfig(),
+				channelAddress: join(root, "channel.sock"),
+				onEvent: () => {},
+				checkpoint: {
+					id: "active-log-recovery",
+					leaderBackend: "codex",
+					writer: new CheckpointWriter(agentDir, () => {}, undefined, "v6"),
+				},
+				checkpointStorePath: storePath,
+			},
+			hydrated as Parameters<typeof WorkerManager.hydrate>[1],
+		);
+		expect(manager.get("active").state).toBe("interrupted");
+		expect(manager.tailLog("active", 4)).toMatchObject({ entries: activeLog, cursor: 132 });
+		expect(manager.tailLog("terminal").archived).toBe(true);
+		await manager.flushCheckpoint();
+		const persisted = readV6Checkpoint(storePath).checkpoint;
+		expect(persisted.workers.find((worker) => worker.id === "active")).toMatchObject({
+			state: "interrupted",
+			log: activeLog,
+			logFirstIndex: 4,
+			logCursor: 132,
+		});
+		expect(persisted.workers.find((worker) => worker.id === "terminal")?.archived).toBe(true);
+		await manager.dispose();
+	});
+
 	it("hydrates terminal identity for exact revival and preserves native ownership", async () => {
 		const root = mkdtempSync(join(tmpdir(), "neta-v6-terminal-identity-"));
 		roots.push(root);

@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
 import {
-	linkSync,
 	mkdirSync,
 	mkdtempSync,
 	readdirSync,
@@ -26,10 +25,11 @@ import {
 	CheckpointStoreError,
 	openCheckpointForHydration,
 	readV6Checkpoint,
+	readV6CheckpointMetadata,
 	readV6Manifest,
-	reclaimV6StoreOffline,
 	V6_FORMAT_VERSION,
 	type V6FaultEvent,
+	type V6ReadCounters,
 	v6CheckpointStorePath,
 	v6ManifestPath,
 	validateV6Manifest,
@@ -42,14 +42,6 @@ import {
 	tryAcquireCheckpointClaim,
 	tryAcquireSessionLock,
 } from "../src/session.ts";
-
-const offlineProof = {
-	checkpointClaimHeld: true as const,
-	directoryLockHeld: true as const,
-	processDeathProven: true as const,
-	noLiveManager: true as const,
-	shutdownProof: "recovery" as const,
-};
 
 function checkpoint(id: string): SessionCheckpoint {
 	return {
@@ -145,7 +137,12 @@ describe("normalized v6 checkpoint store", () => {
 		writeV6Checkpoint(checkpoint("authority"), store);
 		writeFileSync(join(store, "blobs", `${"a".repeat(64)}.json`), "orphan");
 		writeFileSync(join(store, "segments", "orphan.json"), "orphan");
+		const tempManifest = join(store, "manifest.json.4242.aaaaaaaaaaaa.tmp");
+		writeFileSync(tempManifest, readFileSync(v6ManifestPath(store)));
 		expect(readV6Checkpoint(store).checkpoint.id).toBe("authority");
+		expect(readFileSync(join(store, "blobs", `${"a".repeat(64)}.json`))).toEqual(Buffer.from("orphan"));
+		expect(readFileSync(join(store, "segments", "orphan.json"))).toEqual(Buffer.from("orphan"));
+		expect(readFileSync(tempManifest)).toBeTruthy();
 		const noManifest = join(root, "unpublished");
 		mkdirSync(join(noManifest, "blobs"), { recursive: true });
 		writeFileSync(join(noManifest, "blobs", `${"b".repeat(64)}.json`), "orphan");
@@ -193,7 +190,6 @@ describe("normalized v6 checkpoint store", () => {
 			expect(() => readCheckpoint(legacy.id, agentDir)).toThrow("v6 checkpoint root");
 			expect(() => openCheckpointForHydration(legacy.id, agentDir)).toThrow("v6 checkpoint root");
 			expect(() => listCheckpoints(agentDir)).toThrow("v6 checkpoint root");
-			expect(reclaimV6StoreOffline(v6CheckpointStorePath(legacy.id, agentDir), offlineProof).status).toBe("failed");
 			rmSync(root, { force: true });
 		}
 	});
@@ -220,45 +216,7 @@ describe("normalized v6 checkpoint store", () => {
 		expect(readV6Manifest(after).checksum).toBe(prior.checksum);
 		expect(readV6Checkpoint(after).checkpoint.updatedAt).toBe(11);
 		expect(readdirSync(after).filter((name) => name.startsWith("manifest.json.")).length).toBe(0);
-		const recovered = reclaimV6StoreOffline(after, offlineProof);
-		expect(recovered.status).toBe("deleted");
 		expect(readV6Checkpoint(after).checkpoint.updatedAt).toBe(11);
-	});
-
-	it("fails closed on arbitrary, malformed, symlink, and hardlink manifest temps", () => {
-		const root = temp();
-		const cases = [
-			{ name: "arbitrary", entry: "manifest.json.not-a-runtime-temp.tmp", kind: "file" as const },
-			{ name: "malformed", entry: "manifest.json.4242.aaaaaaaaaaaa.tmp", kind: "malformed" as const },
-			{ name: "symlink", entry: "manifest.json.4242.bbbbbbbbbbbb.tmp", kind: "symlink" as const },
-			{ name: "hardlink", entry: "manifest.json.4242.cccccccccccc.tmp", kind: "hardlink" as const },
-		];
-		for (const item of cases) {
-			const store = join(root, item.name);
-			writeV6Checkpoint(checkpoint(item.name), store);
-			const orphan = join(store, "blobs", `${"d".repeat(64)}.json`);
-			writeFileSync(orphan, "orphan");
-			const entry = join(store, item.entry);
-			if (item.kind === "symlink") symlinkSync(v6ManifestPath(store), entry);
-			else if (item.kind === "hardlink") linkSync(v6ManifestPath(store), entry);
-			else writeFileSync(entry, item.kind === "malformed" ? "{broken" : "arbitrary");
-			const result = reclaimV6StoreOffline(store, offlineProof);
-			expect(result.status).toBe("failed");
-			expect(result.deletedFiles).toBe(0);
-			expect(readFileSync(orphan, "utf8")).toBe("orphan");
-		}
-	});
-
-	it("removes a valid crash-left manifest temp during the next exclusive GC", () => {
-		const root = temp();
-		const store = join(root, "crash-temp");
-		writeV6Checkpoint(checkpoint("crash-temp"), store);
-		const tempPath = join(store, "manifest.json.4242.dddddddddddd.tmp");
-		writeFileSync(tempPath, readFileSync(v6ManifestPath(store)));
-		const result = reclaimV6StoreOffline(store, offlineProof);
-		expect(result.status).toBe("deleted");
-		expect(() => readFileSync(tempPath)).toThrow();
-		expect(readV6Checkpoint(store).checkpoint.id).toBe("crash-temp");
 	});
 
 	it("fails closed on a corrupt manifest, referenced blob, or required segment", () => {
@@ -341,9 +299,48 @@ describe("normalized v6 checkpoint store", () => {
 
 		// A resumed MCP child arrives after publication and is read-only even when
 		// the legacy input remains present.
+		const migratedStore = v6CheckpointStorePath(legacy.id, agentDir);
+		const orphan = join(migratedStore, "blobs", `${"e".repeat(64)}.json`);
+		const tempManifest = join(migratedStore, "manifest.json.4242.aaaaaaaaaaaa.tmp");
+		writeFileSync(orphan, "orphan");
+		writeFileSync(tempManifest, readFileSync(v6ManifestPath(migratedStore)));
 		const child = openCheckpointForHydration(legacy.id, agentDir);
 		expect(child.id).toBe(legacy.id);
-		expect(readV6Checkpoint(v6CheckpointStorePath(legacy.id, agentDir)).checkpoint.id).toBe(legacy.id);
+		expect(readV6Checkpoint(migratedStore).checkpoint.id).toBe(legacy.id);
+		expect(readFileSync(orphan, "utf8")).toBe("orphan");
+		expect(readFileSync(tempManifest)).toBeTruthy();
+	});
+
+	it("hydrates migrated active details while keeping terminal details lazy", () => {
+		const agentDir = temp();
+		const legacy = checkpoint("active-log");
+		const activeLog = [
+			{ at: 5, kind: "status" as const, text: "first" },
+			{ at: 6, kind: "text" as const, text: "second" },
+		];
+		const active = legacy.workers.find((worker) => worker.id === "rw2");
+		if (!active) throw new Error("expected active worker");
+		const migrated = {
+			...legacy,
+			workers: legacy.workers.map((worker) =>
+				worker.id === active.id ? { ...worker, log: activeLog, logFirstIndex: 4, logCursor: 6 } : worker,
+			),
+		};
+		writeCheckpointAtomic(migrated, agentDir);
+		const claim = tryAcquireCheckpointClaim(migrated.id, agentDir);
+		if (!claim) throw new Error("expected migration claim");
+		const hydrated = openCheckpointForHydration(migrated.id, agentDir, claim);
+		const hydratedActive = hydrated.workers.find((worker) => worker.id === active.id);
+		expect(hydratedActive?.log).toEqual(activeLog);
+		expect(hydratedActive).toMatchObject({ logFirstIndex: 4, logCursor: 6 });
+		releaseSessionLock(claim);
+
+		const counters: V6ReadCounters = {};
+		const metadata = readV6CheckpointMetadata(v6CheckpointStorePath(migrated.id, agentDir), counters, {
+			hydrateActiveDetails: true,
+		});
+		expect(metadata.checkpoint.workers.find((worker) => worker.id === active.id)?.log).toEqual(activeLog);
+		expect(counters.detailReads).toBe(1);
 	});
 
 	it("releases the outer claim after migration failure so a later resume retries", () => {

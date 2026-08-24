@@ -5,7 +5,6 @@ import { CheckpointWriter, emptySessionCheckpoint, type SessionCheckpoint } from
 import {
 	readV6CheckpointMetadata,
 	readV6Manifest,
-	reclaimV6StoreOffline,
 	type V6CheckpointDelta,
 	type V6ReadCounters,
 	type V6WriteCounters,
@@ -112,20 +111,12 @@ try {
 	const reads: V6ReadCounters = {};
 	readV6CheckpointMetadata(afterStore, reads);
 	const stateHashAfter = readV6Manifest(afterStore).state;
-	const gc = reclaimV6StoreOffline(afterStore, {
-		checkpointClaimHeld: true,
-		directoryLockHeld: true,
-		processDeathProven: true,
-		noLiveManager: true,
-		shutdownProof: "recovery",
-	});
 	const beforeBytes = bytesIn(beforeStore);
 	const afterBytes = bytesIn(afterStore);
 	console.log(JSON.stringify({
 		fixture: { terminalWorkers: TERMINAL_WORKERS, activeWorkers: 1, telemetryMutations: TELEMETRY_MUTATIONS },
 		before: { ms: beforeRun.ms, rssDelta: beforeRun.rssDelta, bytesWritten: beforeCounters.writtenBytes ?? 0, bytesSerialized: beforeCounters.serializedBytes ?? 0, terminalShardWrites: beforeCounters.terminalShardWrites ?? 0 },
 		after: { ms: afterRun.ms, rssDelta: afterRun.rssDelta, materializations, manifests: afterCounters.manifestWrites ?? 0, stateWrites: afterCounters.stateWrites ?? 0, stateHashReuses: afterCounters.stateHashReuses ?? 0, stateHashStable: stateHashBefore === stateHashAfter, newArtifacts: (afterCounters.activeArtifactWrites ?? 0) + (afterCounters.activeDetailWrites ?? 0), bytesWritten: afterCounters.writtenBytes ?? 0, bytesSerialized: afterCounters.serializedBytes ?? 0, detailReads: reads.detailReads ?? 0, terminalDetailReads: reads.terminalDetailReads ?? 0, terminalShardWrites: afterCounters.terminalShardWrites ?? 0, terminalIndexEntriesVisited: afterCounters.terminalIndexEntriesVisited ?? 0, rssUnder512MiB: process.memoryUsage().rss < 512 * 1024 * 1024 },
-		gc: { status: gc.status, scannedFiles: gc.scannedFiles, scannedBytes: gc.scannedBytes, candidateFiles: gc.candidateFiles, candidateBytes: gc.candidateBytes, deletedFiles: gc.deletedFiles, deletedBytes: gc.deletedBytes, durationMs: gc.durationMs, reason: gc.reason },
 		storeBytes: { before: beforeBytes, after: afterBytes },
 	}, null, 2));
 } finally {
