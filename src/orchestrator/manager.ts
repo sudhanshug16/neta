@@ -1403,39 +1403,60 @@ export class WorkerManager implements ChannelHandler {
 	async startAdmittedWorker(workerId: string): Promise<WorkerSummary> {
 		const record = this.require(workerId);
 		if (record.state === "queued") return this.summarize(record);
-		const backend = this.options.config.resolve(record.tier, record.backend, record.writer);
-		const runtimeEnv = record.preparedRuntimeEnv ?? {};
-		const roleText = record.preparedRoleText ?? loadRoleText(record.role, record.cwd, this.options.agentDir);
-		if (!roleText) throw new Error(`Unknown role "${record.role}".`);
-		record.preparedRuntimeEnv = undefined;
-		record.preparedRoleText = undefined;
-		const activeWriter = this.activeWriter ? this.workers.get(this.activeWriter) : undefined;
-		const writerContext = record.writer
-			? undefined
-			: formatWriterContext(
-					activeWriter ? this.summarize(activeWriter) : undefined,
-					this.writerQueue.flatMap((queuedId) => {
-						const queued = this.workers.get(queuedId);
-						return queued ? [this.summarize(queued)] : [];
-					}),
-				);
-		const goalContext = this.goalPromptContext();
-		const assignedTask = goalContext ? `${goalContext}\n\n---\n\n# Assigned task\n\n${record.task}` : record.task;
-		const task = writerContext ? `${writerContext}\n\n---\n\n${assignedTask}` : assignedTask;
-		await this.startWorker(
-			record,
-			backend,
-			runtimeEnv,
-			[
-				roleText.trim(),
-				"",
-				workingAgreement({ tier: record.tier, writer: record.writer, room: record.room, binary: APP_NAME }),
-				"",
-				`Your scratch directory (outside the repository) is ${record.scratchDir}. Use it for notes and throwaway files.`,
-			].join("\n"),
-			task,
-		);
-		return this.summarize(record);
+		// Admission has already published this record and reserved its writer slot.
+		// Claim a generation before any setup that can throw so a terminalization or
+		// revival racing this startup cannot be mistaken for this attempt.
+		const generation = ++this.startGeneration;
+		record.startGeneration = generation;
+		try {
+			const backend = this.options.config.resolve(record.tier, record.backend, record.writer);
+			const runtimeEnv = record.preparedRuntimeEnv ?? {};
+			const roleText = record.preparedRoleText ?? loadRoleText(record.role, record.cwd, this.options.agentDir);
+			if (!roleText) throw new Error(`Unknown role "${record.role}".`);
+			record.preparedRuntimeEnv = undefined;
+			record.preparedRoleText = undefined;
+			const activeWriter = this.activeWriter ? this.workers.get(this.activeWriter) : undefined;
+			const writerContext = record.writer
+				? undefined
+				: formatWriterContext(
+						activeWriter ? this.summarize(activeWriter) : undefined,
+						this.writerQueue.flatMap((queuedId) => {
+							const queued = this.workers.get(queuedId);
+							return queued ? [this.summarize(queued)] : [];
+						}),
+					);
+			const goalContext = this.goalPromptContext();
+			const assignedTask = goalContext ? `${goalContext}\n\n---\n\n# Assigned task\n\n${record.task}` : record.task;
+			const task = writerContext ? `${writerContext}\n\n---\n\n${assignedTask}` : assignedTask;
+			await this.startWorker(
+				record,
+				backend,
+				runtimeEnv,
+				[
+					roleText.trim(),
+					"",
+					workingAgreement({ tier: record.tier, writer: record.writer, room: record.room, binary: APP_NAME }),
+					"",
+					`Your scratch directory (outside the repository) is ${record.scratchDir}. Use it for notes and throwaway files.`,
+				].join("\n"),
+				task,
+				generation,
+			);
+			return this.summarize(record);
+		} catch (error) {
+			// Backend resolution and every other pre-transport step happens after
+			// admission, so it must leave no starting record or held writer slot.
+			// Exact identity and generation checks protect a successor from a late
+			// failure if another lifecycle path already terminalized or revived it.
+			if (
+				this.workers.get(workerId) === record &&
+				record.startGeneration === generation &&
+				record.state === "starting"
+			) {
+				await this.finish(record, "failed", error instanceof Error ? error.message : String(error));
+			}
+			throw error;
+		}
 	}
 
 	async spawn(request: SpawnRequest, admissionGeneration?: number): Promise<WorkerSummary> {
@@ -1599,8 +1620,8 @@ export class WorkerManager implements ChannelHandler {
 		runtimeEnv: Record<string, string>,
 		systemPrompt: string,
 		task: string,
+		generation = ++this.startGeneration,
 	): Promise<void> {
-		const generation = ++this.startGeneration;
 		record.startGeneration = generation;
 		let driver: WorkerTransportDriver | undefined;
 		let stoppedExactDriver = false;

@@ -360,7 +360,7 @@ describe("WorkerManager", () => {
 	});
 
 	it("does not archive the prior batch when backend resolution rejects the next spawn", async () => {
-		const first = await manager.spawn({ role: "scout", tier: "expert", task: "a" });
+		const first = await manager.spawn({ role: "scout", tier: "expert", backend: "codex", task: "a" });
 		transports[0].finish({ ok: true, summary: "found it" });
 		await manager.waitFor([first.id], 5000);
 		class FailingConfig extends NetaConfig {
@@ -369,10 +369,109 @@ describe("WorkerManager", () => {
 			}
 		}
 		manager.configure({ cwd: process.cwd(), agentDir: "/nonexistent-agent-dir", config: new FailingConfig() });
-		await expect(manager.spawn({ role: "scout", tier: "expert", task: "b" })).rejects.toThrow(
+		await expect(manager.spawn({ role: "scout", tier: "expert", backend: "codex", task: "b" })).rejects.toThrow(
 			/backend resolution failed/,
 		);
 		expect(manager.tailLog(first.id).archived).toBe(false);
+	});
+
+	it("finalizes an admitted writer resolution failure and continues the team", async () => {
+		class RejectingConfig extends NetaConfig {
+			rejectCodex = false;
+
+			resolve(tier: Parameters<NetaConfig["resolve"]>[0], backend: string, writer = false) {
+				if (this.rejectCodex && backend === "codex") throw new Error("admitted backend resolution failed");
+				return super.resolve(tier, backend, writer);
+			}
+		}
+
+		const teamConfig = new RejectingConfig({
+			backends: {
+				claude: { detect: "bun", command: process.execPath, args: [] },
+				codex: { detect: "bun", command: process.execPath, args: [] },
+				opencode: { detect: "bun", command: process.execPath, args: [] },
+			},
+		});
+		const teamTransports: FakeTransport[] = [];
+		let holdNextStart = false;
+		const teamManager = new WorkerManager({
+			cwd: process.cwd(),
+			agentDir: "/nonexistent-agent-dir",
+			config: teamConfig,
+			channelAddress: "/tmp/neta-test-admitted-failure.sock",
+			onEvent: () => {},
+			createTransport: (options) => {
+				const transport = new FakeTransport(options, holdNextStart);
+				holdNextStart = false;
+				teamTransports.push(transport);
+				return transport;
+			},
+		});
+		try {
+			const prior = await teamManager.spawn({ role: "scout", tier: "expert", backend: "claude", task: "prior" });
+			teamTransports[0].finish({ ok: true, summary: "prior done" });
+			await teamManager.waitFor([prior.id], 5_000);
+			holdNextStart = true;
+
+			const requests = [
+				{ role: "worker", tier: "expert" as const, backend: "codex", task: "fail", writer: true, room: "team" },
+				{ role: "worker", tier: "expert" as const, backend: "claude", task: "queued", writer: true, room: "team" },
+				{ role: "scout", tier: "expert" as const, backend: "opencode", task: "later", room: "team" },
+			];
+			const admissionGeneration = teamManager.delegationAdmission();
+			const prepared = await teamManager.prepareDelegationBatch(requests, admissionGeneration);
+			const [failingId, queuedId, laterId] = teamManager.admitDelegationBatch(prepared, admissionGeneration);
+			teamConfig.rejectCodex = true;
+
+			const waiting = teamManager.waitFor([failingId], 5_000);
+			await expect(teamManager.startAdmittedWorker(failingId)).rejects.toThrow(/admitted backend resolution failed/);
+			const [failed] = await waiting;
+			expect(failed?.state).toBe("failed");
+			expect(teamManager.tailLog(prior.id).archived).toBe(false);
+
+			await waitFor(() => teamManager.get(queuedId).state === "starting");
+			expect(teamManager.statusSnapshot().writerSlot?.id).toBe(queuedId);
+			await expect(teamManager.startAdmittedWorker(laterId)).resolves.toMatchObject({ state: "running" });
+			expect(teamTransports).toHaveLength(3);
+			teamTransports[1].releaseStart();
+			await waitFor(() => teamManager.get(queuedId).state === "running");
+			expect(teamManager.tailLog(prior.id).archived).toBe(false);
+		} finally {
+			await teamManager.dispose();
+			rmSync("/tmp/neta-test-admitted-failure.sock", { force: true });
+		}
+	});
+
+	it("does not double-finalize when the goal terminalizes during admitted startup", async () => {
+		manager.initGoal("ship the team");
+		class TerminalizingConfig extends NetaConfig {
+			terminalize = false;
+
+			resolve(tier: Parameters<NetaConfig["resolve"]>[0], backend: string, writer = false) {
+				if (this.terminalize) {
+					manager.completeGoal({ expectedRevision: 0 });
+					throw new Error("resolution raced goal completion");
+				}
+				return super.resolve(tier, backend, writer);
+			}
+		}
+		const terminalizingConfig = new TerminalizingConfig();
+		manager.configure({ cwd: process.cwd(), agentDir: "/nonexistent-agent-dir", config: terminalizingConfig });
+		const admissionGeneration = manager.delegationAdmission();
+		const prepared = await manager.prepareDelegationBatch(
+			[{ role: "worker", tier: "expert", backend: "codex", task: "race", writer: true }],
+			admissionGeneration,
+		);
+		const [workerId] = manager.admitDelegationBatch(prepared, admissionGeneration);
+		terminalizingConfig.terminalize = true;
+		const waiting = manager.waitFor([workerId], 5_000);
+
+		await expect(manager.startAdmittedWorker(workerId)).rejects.toThrow(/resolution raced goal completion/);
+		const [interrupted] = await waiting;
+		expect(interrupted?.state).toBe("interrupted");
+		expect(interrupted?.result).toContain("Refused because the session goal is complete");
+		expect(manager.statusSnapshot().writerSlot).toBeUndefined();
+		expect(events.filter((event) => event.type === "failed")).toHaveLength(0);
 	});
 
 	it("leaves a batch alone while any of it is still running", async () => {
