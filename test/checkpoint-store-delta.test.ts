@@ -1,19 +1,19 @@
-import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CheckpointWriter, type CheckpointWorker, emptySessionCheckpoint } from "../src/checkpoint.ts";
+import { type CheckpointWorker, CheckpointWriter, emptySessionCheckpoint } from "../src/checkpoint.ts";
 import {
 	readV6CheckpointMetadata,
 	readV6Manifest,
 	TERMINAL_INDEX_SHARD_COUNT,
 	type V6CheckpointDelta,
 	type V6WriteCounters,
+	v6CheckpointStorePath,
 	v6ManifestPath,
 	writeV6Checkpoint,
 	writeV6CheckpointDelta,
-	v6CheckpointStorePath,
 } from "../src/checkpoint-store.ts";
 
 function worker(id: string, state: CheckpointWorker["state"] = "running", payload = "small"): CheckpointWorker {
@@ -125,6 +125,34 @@ describe("v6 delta checkpoint store", () => {
 		).toHaveLength(1);
 	});
 
+	it("atomically tombstones a revived worker's terminal index entry", () => {
+		const root = temp();
+		const store = join(root, "store");
+		const terminal = worker("revived", "done", "old task");
+		writeV6Checkpoint(checkpoint("revive", [terminal]), store);
+		const revived: CheckpointWorker = {
+			...terminal,
+			state: "running",
+			endedAt: undefined,
+			finalResult: undefined,
+			updatedAt: 20,
+		};
+		const { workers: _workers, ...state } = { ...checkpoint("revive", []), updatedAt: 20 };
+		writeV6CheckpointDelta(
+			{
+				id: "revive",
+				lane: "structural",
+				state,
+				workers: [{ worker: revived, terminal: false, removeTerminalIndex: true }],
+			},
+			store,
+		);
+		const persisted = readV6CheckpointMetadata(store).checkpoint.workers;
+		expect(persisted).toHaveLength(1);
+		expect(persisted[0]).toMatchObject({ id: "revived", state: "running" });
+		expect(readV6Manifest(store).activeWorkers.map((item) => item.id)).toEqual(["revived"]);
+	});
+
 	it("reuses the state hash for worker-only deltas and changes it for structural deltas", () => {
 		const root = temp();
 		const store = join(root, "store");
@@ -186,8 +214,16 @@ describe("v6 delta checkpoint store", () => {
 		const writer = new CheckpointWriter(root, () => {}, undefined, "v6");
 		const first = worker("ro1");
 		const second = worker("ro2");
-		writer.scheduleDeferredDelta(() => ({ id: "merge", lane: "worker", workers: [{ worker: first, terminal: false }] }));
-		writer.scheduleDeferredDelta(() => ({ id: "merge", lane: "worker", workers: [{ worker: second, terminal: false }] }));
+		writer.scheduleDeferredDelta(() => ({
+			id: "merge",
+			lane: "worker",
+			workers: [{ worker: first, terminal: false }],
+		}));
+		writer.scheduleDeferredDelta(() => ({
+			id: "merge",
+			lane: "worker",
+			workers: [{ worker: second, terminal: false }],
+		}));
 		const { workers: _workers, ...state } = { ...source, updatedAt: 9 };
 		writer.scheduleDelta({ id: "merge", lane: "structural", state, workers: [] });
 		await writer.dispose();
@@ -195,7 +231,11 @@ describe("v6 delta checkpoint store", () => {
 		expect(persisted.workers.map((item) => item.id).sort()).toEqual(["ro1", "ro2"]);
 
 		const latest = { ...first, task: "latest", updatedAt: 10 };
-		writer.scheduleDeferredDelta(() => ({ id: "merge", lane: "worker", workers: [{ worker: first, terminal: false }] }));
+		writer.scheduleDeferredDelta(() => ({
+			id: "merge",
+			lane: "worker",
+			workers: [{ worker: first, terminal: false }],
+		}));
 		writer.scheduleDelta({ id: "merge", lane: "worker", workers: [{ worker: latest, terminal: false }] });
 		await writer.flush();
 		expect(readV6CheckpointMetadata(store).checkpoint.workers.find((item) => item.id === "ro1")?.task).toBe("latest");

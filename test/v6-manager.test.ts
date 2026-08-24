@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CheckpointWriter, emptySessionCheckpoint } from "../src/checkpoint.ts";
@@ -9,6 +9,7 @@ import {
 	readV6Manifest,
 	type V6ReadCounters,
 	v6CheckpointStorePath,
+	v6ManifestPath,
 	writeV6Checkpoint,
 } from "../src/checkpoint-store.ts";
 import { TERMINAL_HOT_STATE_MAX_BYTES, WorkerManager } from "../src/orchestrator/manager.ts";
@@ -18,6 +19,8 @@ import { fixtureBackendConfig } from "./helpers.ts";
 
 class Driver implements WorkerTransportDriver {
 	readonly options: TransportOptions;
+	started = false;
+	killed = false;
 	private resolve: ((outcome: PromptOutcome) => void) | undefined;
 
 	constructor(options: TransportOptions) {
@@ -25,6 +28,7 @@ class Driver implements WorkerTransportDriver {
 	}
 
 	async start(): Promise<void> {
+		this.started = true;
 		this.options.events.vendorSession(`vendor-${this.options.workerId}`);
 	}
 
@@ -34,7 +38,9 @@ class Driver implements WorkerTransportDriver {
 		});
 	}
 
-	async kill(): Promise<void> {}
+	async kill(): Promise<void> {
+		this.killed = true;
+	}
 
 	cancel(): boolean {
 		return false;
@@ -123,11 +129,103 @@ describe("v6 manager integration", () => {
 		expect(
 			readV6CheckpointMetadata(storePath).checkpoint.workers.find((item) => item.id === summary.id)?.archived,
 		).toBe(true);
-		expect(
-			readV6Checkpoint(storePath).checkpoint.workers.find((item) => item.id === summary.id)?.finalResult,
-		).toBe("exact terminal result");
+		expect(readV6Checkpoint(storePath).checkpoint.workers.find((item) => item.id === summary.id)?.finalResult).toBe(
+			"exact terminal result",
+		);
 		driver?.finish({ ok: true, summary: "next result" });
 		await manager.wait([next.id], 1_000);
+		await manager.dispose();
+	});
+
+	it("publishes archive markers only after startup and rolls back when archive publication fails", async () => {
+		const root = mkdtempSync(join(tmpdir(), "neta-v6-archive-race-"));
+		roots.push(root);
+		const agentDir = join(root, "agent");
+		const storePath = v6CheckpointStorePath("archive-race", agentDir);
+		writeV6Checkpoint(checkpoint("archive-race"), storePath);
+		let faultInjected = false;
+		const writer = new CheckpointWriter(agentDir, () => {}, undefined, "v6", {
+			fail: (event) => {
+				if (event.type !== "manifest-rename") return;
+				const next = JSON.parse(readFileSync(event.from, "utf8")) as {
+					activeWorkers?: Array<{ id: string }>;
+					terminalIndexShards?: string[];
+				};
+				const current = JSON.parse(readFileSync(v6ManifestPath(storePath), "utf8")) as {
+					terminalIndexShards?: string[];
+				};
+				const isArchiveCommit =
+					next.activeWorkers?.some((worker) => worker.id === "ro2") === true &&
+					next.terminalIndexShards?.some((hash, index) => hash !== current.terminalIndexShards?.[index]) === true;
+				if (isArchiveCommit && !faultInjected) {
+					faultInjected = true;
+					throw new Error("archive publication fault");
+				}
+			},
+		});
+		const drivers: Driver[] = [];
+		const manager = new WorkerManager({
+			cwd: process.cwd(),
+			agentDir,
+			config: fixtureBackendConfig(),
+			channelAddress: join(root, "channel.sock"),
+			onEvent: () => {},
+			checkpoint: { id: "archive-race", leaderBackend: "codex", writer },
+			checkpointStorePath: storePath,
+			createTransport: (options) => {
+				const driver = new Driver(options);
+				drivers.push(driver);
+				return driver;
+			},
+		});
+		const first = await manager.spawn({ role: "scout", tier: "expert", task: "first" });
+		drivers[0]?.finish({ ok: true, summary: "first result" });
+		await manager.wait([first.id], 1_000);
+		await expect(manager.spawn({ role: "scout", tier: "expert", task: "second" })).rejects.toThrow(
+			/Archive publication failed/,
+		);
+		expect(drivers).toHaveLength(2);
+		expect(drivers[1]?.started).toBe(true);
+		expect(drivers[1]?.killed).toBe(true);
+		expect(manager.tailLog(first.id).archived).toBe(false);
+		expect(manager.get("ro2").state).toBe("failed");
+		const persisted = readV6CheckpointMetadata(storePath).checkpoint.workers;
+		expect(persisted.find((worker) => worker.id === first.id)?.archived).toBe(false);
+		expect(persisted.find((worker) => worker.id === "ro2")?.state).toBe("failed");
+		await manager.dispose();
+	});
+
+	it("leaves the prior terminal batch unarchived when the new transport fails to start", async () => {
+		const root = mkdtempSync(join(tmpdir(), "neta-v6-startup-archive-"));
+		roots.push(root);
+		const agentDir = join(root, "agent");
+		const storePath = v6CheckpointStorePath("startup-archive", agentDir);
+		writeV6Checkpoint(checkpoint("startup-archive"), storePath);
+		const writer = new CheckpointWriter(agentDir, () => {}, undefined, "v6");
+		const drivers: Driver[] = [];
+		const manager = new WorkerManager({
+			cwd: process.cwd(),
+			agentDir,
+			config: fixtureBackendConfig(),
+			channelAddress: join(root, "channel.sock"),
+			onEvent: () => {},
+			checkpoint: { id: "startup-archive", leaderBackend: "codex", writer },
+			checkpointStorePath: storePath,
+			createTransport: (options) => {
+				const driver = new Driver(options);
+				if (drivers.length === 1) driver.start = async () => Promise.reject(new Error("startup failed"));
+				drivers.push(driver);
+				return driver;
+			},
+		});
+		const first = await manager.spawn({ role: "scout", tier: "expert", task: "first" });
+		drivers[0]?.finish({ ok: true, summary: "first result" });
+		await manager.wait([first.id], 1_000);
+
+		await expect(manager.spawn({ role: "scout", tier: "expert", task: "second" })).rejects.toThrow("startup failed");
+		const persisted = readV6CheckpointMetadata(storePath).checkpoint.workers;
+		expect(persisted.find((worker) => worker.id === first.id)?.archived).toBe(false);
+		expect(persisted.find((worker) => worker.id === "ro2")?.state).toBe("failed");
 		await manager.dispose();
 	});
 
@@ -172,6 +270,9 @@ describe("v6 manager integration", () => {
 		const resumed = await manager.steer(worker.id, "continue");
 		expect(resumed.worker.state).toBe("running");
 		expect(manager.get(worker.id)).toMatchObject({ activeMs: 9_000, activeStartedAt: 20_000 });
+		const revivedPersisted = readV6CheckpointMetadata(storePath).checkpoint.workers;
+		expect(revivedPersisted).toHaveLength(1);
+		expect(revivedPersisted[0]).toMatchObject({ id: worker.id, state: "running" });
 		expect(manager.status()).toContain("active 9s");
 
 		now = 23_000;
@@ -356,7 +457,11 @@ describe("v6 manager integration", () => {
 				config: fixtureBackendConfig(),
 				channelAddress: join(root, "channel.sock"),
 				onEvent: () => {},
-				checkpoint: { id: "identity", leaderBackend: "fake", writer: new CheckpointWriter(agentDir, () => {}, undefined, "v6") },
+				checkpoint: {
+					id: "identity",
+					leaderBackend: "fake",
+					writer: new CheckpointWriter(agentDir, () => {}, undefined, "v6"),
+				},
 				checkpointStorePath: storePath,
 				createTransport: (options) => {
 					const driver = new Driver(options);
@@ -385,7 +490,11 @@ describe("v6 manager integration", () => {
 				config: fixtureBackendConfig(),
 				channelAddress: join(root, "attach.channel.sock"),
 				onEvent: () => {},
-				checkpoint: { id: "owned", leaderBackend: "fake", writer: new CheckpointWriter(agentDir, () => {}, undefined, "v6") },
+				checkpoint: {
+					id: "owned",
+					leaderBackend: "fake",
+					writer: new CheckpointWriter(agentDir, () => {}, undefined, "v6"),
+				},
 				checkpointStorePath: ownedStorePath,
 				panes: {
 					open: () => ({ opened: true }),

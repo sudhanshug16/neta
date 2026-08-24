@@ -121,6 +121,8 @@ export interface V6WorkerDelta {
 	worker: CheckpointWorker;
 	/** A terminal delta publishes the immutable terminal artifacts and index entry. */
 	terminal: boolean;
+	/** A revived worker replaces its prior terminal index entry with this active ref. */
+	removeTerminalIndex?: boolean;
 }
 
 export type V6CheckpointDelta =
@@ -473,7 +475,6 @@ const V6_LOCKS_DIR = "locks";
 const V6_READERS_DIR = "readers";
 const V6_MAINTENANCE_DIR = "maintenance";
 const V6_MAINTENANCE_RECLAIM_DIR = "maintenance-reclaim";
-const V6_STALE_MAINTENANCE_MS = 5_000;
 const LOCAL_PROCESS_START = `${Math.floor(Date.now() - process.uptime() * 1_000)}`;
 
 function v6ReadersPath(storePath: string): string {
@@ -982,6 +983,12 @@ export function writeV6CheckpointDelta(delta: V6CheckpointDelta, storePath: stri
 			terminalUpdates.set(bucket, updates);
 		} else {
 			activeById.set(deltaWorker.worker.id, refs.active);
+			if (deltaWorker.removeTerminalIndex) {
+				const bucket = bucketForWorker(deltaWorker.worker.id);
+				const updates = terminalUpdates.get(bucket) ?? new Map<string, V6TerminalIndexEntry | undefined>();
+				updates.set(deltaWorker.worker.id, undefined);
+				terminalUpdates.set(bucket, updates);
+			}
 		}
 	}
 	for (const [bucket, updates] of terminalUpdates) {
@@ -1127,7 +1134,12 @@ function readAllTerminalEntries(
 export function readV6TerminalWorkerRefs(storePath: string, counters?: V6ReadCounters): Map<string, V6WorkerRef> {
 	return withV6ReadLock(storePath, () => {
 		const manifest = readV6Manifest(storePath, counters);
-		return new Map(readAllTerminalEntries(storePath, manifest, counters).map((entry) => [entry.id, entry.ref]));
+		const activeIds = new Set(manifest.activeWorkers.map((worker) => worker.id));
+		return new Map(
+			readAllTerminalEntries(storePath, manifest, counters)
+				.filter((entry) => !activeIds.has(entry.id))
+				.map((entry) => [entry.id, entry.ref]),
+		);
 	});
 }
 
@@ -1156,6 +1168,7 @@ export function readV6CheckpointMetadata(
 		const manifest = readV6Manifest(storePath, counters);
 		const stateObject = readState(storePath, manifest, counters);
 		const workers: CheckpointWorker[] = [];
+		const activeIds = new Set(manifest.activeWorkers.map((worker) => worker.id));
 		for (const reference of manifest.activeWorkers) {
 			const active = readBlob(storePath, reference.active, "active", reference.id, counters);
 			workers.push({
@@ -1165,8 +1178,13 @@ export function readV6CheckpointMetadata(
 				logCursor: typeof active.logCursor === "number" ? active.logCursor : 0,
 			});
 		}
-		for (const entry of readAllTerminalEntries(storePath, manifest, counters))
+		for (const entry of readAllTerminalEntries(storePath, manifest, counters)) {
+			// A pre-fix manifest could briefly contain both refs for a revived worker.
+			// The active ref is the newer authoritative state; do not hydrate the stale
+			// terminal summary as a second worker or let it win on restart.
+			if (activeIds.has(entry.id)) continue;
 			workers.push(summaryWorker(entry.summary));
+		}
 		const checkpoint = { ...stateObject, workers, schemaVersion: 5 } as unknown as SessionCheckpoint;
 		try {
 			const validated = validateCheckpoint(checkpoint);
@@ -1440,7 +1458,7 @@ function gcPathPresent(path: string): boolean {
 		lstatSync(path);
 		return true;
 	} catch (error) {
-		return (error as NodeJS.ErrnoException).code !== "ENOENT" ? true : false;
+		return (error as NodeJS.ErrnoException).code !== "ENOENT";
 	}
 }
 
@@ -1483,7 +1501,11 @@ function claimV6Maintenance(storePath: string, options: V6GcOptions): boolean {
 	} catch {
 		return false;
 	}
-	if (!gcDirectory(locks) || !gcDirectory(v6ReadersPath(storePath)) || gcPathPresent(v6MaintenanceReclaimPath(storePath)))
+	if (
+		!gcDirectory(locks) ||
+		!gcDirectory(v6ReadersPath(storePath)) ||
+		gcPathPresent(v6MaintenanceReclaimPath(storePath))
+	)
 		return false;
 	try {
 		mkdirSync(v6MaintenancePath(storePath), { recursive: false, mode: 0o700 });
@@ -1493,11 +1515,10 @@ function claimV6Maintenance(storePath: string, options: V6GcOptions): boolean {
 			rmSync(v6MaintenancePath(storePath), { recursive: true, force: true });
 			return false;
 		}
-		writeFileSync(
-			v6MaintenanceOwnerPath(storePath),
-			JSON.stringify({ pid: process.pid, startedAt }),
-			{ encoding: "utf8", mode: 0o600 },
-		);
+		writeFileSync(v6MaintenanceOwnerPath(storePath), JSON.stringify({ pid: process.pid, startedAt }), {
+			encoding: "utf8",
+			mode: 0o600,
+		});
 		return true;
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "EEXIST") return false;
@@ -1513,30 +1534,17 @@ function claimV6Maintenance(storePath: string, options: V6GcOptions): boolean {
 	}
 	try {
 		const ownerRecord = readMaintenanceOwner(storePath);
-		if (ownerRecord.present) {
-			if (!ownerRecord.owner) return false;
-			const owner = ownerRecord.owner;
-			const actualStartedAt = gcProcessStartTime(owner.pid, options.processStartTime);
-			const liveMatchingOwner =
-				gcProcessIsAlive(owner.pid, options.processIsAlive) &&
-				actualStartedAt !== undefined &&
-				actualStartedAt === owner.startedAt;
-			if (liveMatchingOwner) return false;
-			// A live process with an unavailable or different identity is ambiguous;
-			// never steal it merely because signal 0 says otherwise.
-			if (gcProcessIsAlive(owner.pid, options.processIsAlive) && actualStartedAt === undefined) return false;
-			if (gcProcessIsAlive(owner.pid, options.processIsAlive) && actualStartedAt === owner.startedAt) return false;
-		} else {
-			let ageMs: number;
-			try {
-				ageMs = Date.now() - lstatSync(v6MaintenancePath(storePath)).mtimeMs;
-			} catch {
-				return false;
-			}
-			// A crash before owner.json was written is recoverable only after the
-			// bounded startup window; malformed metadata remains ambiguous.
-			if (ageMs < V6_STALE_MAINTENANCE_MS) return false;
-		}
+		if (!ownerRecord.present || !ownerRecord.owner) return false;
+		const owner = ownerRecord.owner;
+		// Take the liveness observation once and treat every live PID as owned. A
+		// different or unavailable start identity is replacement-risk, not proof
+		// that this maintenance directory is abandoned.
+		if (gcProcessIsAlive(owner.pid, options.processIsAlive)) return false;
+		// Death alone is insufficient: without the recorded start identity we
+		// cannot prove this directory belonged to the dead process rather than a
+		// recycled PID or malformed residue.
+		const actualStartedAt = gcProcessStartTime(owner.pid, options.processStartTime);
+		if (actualStartedAt === undefined || actualStartedAt !== owner.startedAt) return false;
 		rmSync(v6MaintenancePath(storePath), { recursive: true, force: true });
 		mkdirSync(v6MaintenancePath(storePath), { recursive: false, mode: 0o700 });
 		if (!gcDirectory(v6MaintenancePath(storePath))) return false;
@@ -1545,11 +1553,10 @@ function claimV6Maintenance(storePath: string, options: V6GcOptions): boolean {
 			rmSync(v6MaintenancePath(storePath), { recursive: true, force: true });
 			return false;
 		}
-		writeFileSync(
-			v6MaintenanceOwnerPath(storePath),
-			JSON.stringify({ pid: process.pid, startedAt }),
-			{ encoding: "utf8", mode: 0o600 },
-		);
+		writeFileSync(v6MaintenanceOwnerPath(storePath), JSON.stringify({ pid: process.pid, startedAt }), {
+			encoding: "utf8",
+			mode: 0o600,
+		});
 		return true;
 	} finally {
 		if (reclaimClaimed) rmSync(v6MaintenanceReclaimPath(storePath), { recursive: true, force: true });
@@ -1586,7 +1593,7 @@ function gcScanLocks(storePath: string): void {
 	for (const reader of readers) {
 		if (reader.isSymbolicLink() || !reader.isDirectory())
 			throw new CheckpointStoreError("v6 GC found an unexpected reader coordination entry.");
-		}
+	}
 	if (existsSync(v6MaintenanceReclaimPath(storePath))) {
 		let reclaimEntries: Dirent[];
 		try {
@@ -1714,6 +1721,7 @@ export function readV6Checkpoint(storePath: string, counters?: V6ReadCounters): 
 		const terminalEntries = readAllTerminalEntries(storePath, manifest, counters);
 		const workers: CheckpointWorker[] = [];
 		const warnings: V6ReadWarning[] = [];
+		const activeIds = new Set(manifest.activeWorkers.map((worker) => worker.id));
 		for (const reference of manifest.activeWorkers) {
 			const active = readBlob(storePath, reference.active, "active", reference.id, counters);
 			const details = reference.detailSegments.flatMap((segment) =>
@@ -1727,6 +1735,7 @@ export function readV6Checkpoint(storePath: string, counters?: V6ReadCounters): 
 			});
 		}
 		for (const entry of terminalEntries) {
+			if (activeIds.has(entry.id)) continue;
 			const active = readBlob(storePath, entry.ref.active, "active", entry.id, counters);
 			const terminal = readBlob(storePath, entry.ref.terminal, "terminal", entry.id, counters);
 			const outcome = readBlob(storePath, entry.ref.outcome, "outcome", entry.id, counters);

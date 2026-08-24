@@ -223,7 +223,7 @@ describe("v6 offline reclamation", () => {
 		expect(
 			reclaimV6StoreOffline(store, proof, {
 				processIsAlive: () => false,
-				processStartTime: () => undefined,
+				processStartTime: () => "dead-start",
 			}).status,
 		).toBe("deleted");
 		expect(() => readFileSync(staleOrphan)).toThrow();
@@ -244,6 +244,54 @@ describe("v6 offline reclamation", () => {
 		expect(live.status).toBe("skipped");
 		expect(readFileSync(liveOrphan, "utf8")).toBe("live orphan\n");
 
+		const liveMismatchStore = join(root(), "live-mismatch");
+		writeV6Checkpoint(fixture("live-mismatch"), liveMismatchStore);
+		mkdirSync(join(liveMismatchStore, "locks", "maintenance"), { recursive: true });
+		writeFileSync(
+			join(liveMismatchStore, "locks", "maintenance", "owner.json"),
+			JSON.stringify({ pid: 4242, startedAt: "recorded-start" }),
+		);
+		const liveMismatchOrphan = join(liveMismatchStore, "blobs", `${hash("live mismatch orphan\n")}.json`);
+		writeFileSync(liveMismatchOrphan, "live mismatch orphan\n");
+		const liveMismatch = reclaimV6StoreOffline(liveMismatchStore, proof, {
+			processIsAlive: () => true,
+			processStartTime: () => "replacement-start",
+		});
+		expect(liveMismatch.status).toBe("skipped");
+		expect(liveMismatch.deletedFiles).toBe(0);
+		expect(readFileSync(liveMismatchOrphan, "utf8")).toBe("live mismatch orphan\n");
+
+		const deadAmbiguousStore = join(root(), "dead-ambiguous");
+		writeV6Checkpoint(fixture("dead-ambiguous"), deadAmbiguousStore);
+		mkdirSync(join(deadAmbiguousStore, "locks", "maintenance"), { recursive: true });
+		writeFileSync(
+			join(deadAmbiguousStore, "locks", "maintenance", "owner.json"),
+			JSON.stringify({ pid: 4242, startedAt: "recorded-start" }),
+		);
+		const deadAmbiguousOrphan = join(deadAmbiguousStore, "blobs", `${hash("dead ambiguous orphan\n")}.json`);
+		writeFileSync(deadAmbiguousOrphan, "dead ambiguous orphan\n");
+		const deadAmbiguous = reclaimV6StoreOffline(deadAmbiguousStore, proof, {
+			processIsAlive: () => false,
+			processStartTime: () => undefined,
+		});
+		expect(deadAmbiguous.status).toBe("skipped");
+		expect(deadAmbiguous.deletedFiles).toBe(0);
+		expect(readFileSync(deadAmbiguousOrphan, "utf8")).toBe("dead ambiguous orphan\n");
+
+		const malformedStore = join(root(), "malformed");
+		writeV6Checkpoint(fixture("malformed"), malformedStore);
+		mkdirSync(join(malformedStore, "locks", "maintenance"), { recursive: true });
+		writeFileSync(join(malformedStore, "locks", "maintenance", "owner.json"), "{not-json");
+		const malformedOrphan = join(malformedStore, "blobs", `${hash("malformed orphan\n")}.json`);
+		writeFileSync(malformedOrphan, "malformed orphan\n");
+		const malformed = reclaimV6StoreOffline(malformedStore, proof, {
+			processIsAlive: () => false,
+			processStartTime: () => "dead-start",
+		});
+		expect(malformed.status).toBe("skipped");
+		expect(malformed.deletedFiles).toBe(0);
+		expect(readFileSync(malformedOrphan, "utf8")).toBe("malformed orphan\n");
+
 		const replacementStore = join(root(), "replacement");
 		writeV6Checkpoint(fixture("replacement"), replacementStore);
 		mkdirSync(join(replacementStore, "locks", "maintenance"), { recursive: true });
@@ -256,7 +304,7 @@ describe("v6 offline reclamation", () => {
 		writeFileSync(replacementOrphan, "replacement orphan\n");
 		const guarded = reclaimV6StoreOffline(replacementStore, proof, {
 			processIsAlive: () => false,
-			processStartTime: () => undefined,
+			processStartTime: () => "dead-start",
 		});
 		expect(guarded.status).toBe("skipped");
 		expect(readFileSync(replacementOrphan, "utf8")).toBe("replacement orphan\n");

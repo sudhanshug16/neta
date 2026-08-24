@@ -250,6 +250,8 @@ interface WorkerRecord {
 	terminalOutcomeLoaded?: boolean;
 	/** Bounded public summary retained after immutable terminal artifacts publish. */
 	terminalSummary?: TerminalHotSummary;
+	/** Set for one durable delta when a terminal conversation is revived. */
+	terminalIndexNeedsRemoval?: boolean;
 	/** Cumulative wall time admitted to run, excluding writer queue delay. */
 	activeMs: number;
 	/** Cumulative wall time spent in the writer queue. */
@@ -649,6 +651,7 @@ export class WorkerManager implements ChannelHandler {
 				nativeAttached: worker.nativeAttached,
 				...timing,
 				terminalOutcomeLoaded: !options.checkpointStorePath || !isTerminalState(worker.state),
+				terminalIndexNeedsRemoval: wasActive && Boolean(options.checkpointStorePath),
 			};
 			if (options.checkpointStorePath && !wasActive && isTerminalState(worker.state)) {
 				manager.evictTerminalRecord(
@@ -745,27 +748,39 @@ export class WorkerManager implements ChannelHandler {
 
 	/** Typed bounded persistence input. It never contains the manager's worker map. */
 	checkpointDelta(record?: WorkerRecord, lane: V6CheckpointDeltaLane = "structural"): V6CheckpointDelta {
+		return this.checkpointDeltaForWorkers(record ? [record] : [], lane);
+	}
+
+	private checkpointDeltaForWorkers(
+		records: readonly WorkerRecord[],
+		lane: V6CheckpointDeltaLane = "structural",
+	): V6CheckpointDelta {
 		const checkpoint = this.options.checkpoint;
 		if (!checkpoint) throw new Error("This manager has no durable checkpoint configured.");
-		if (record) record.updatedAt = Date.now();
-		const includeEvictedTerminalOutcome = record?.terminalSummary !== undefined && isTerminalState(record.state);
-		if (includeEvictedTerminalOutcome) this.loadTerminalOutcome(record);
-		const worker = record
-			? { worker: this.checkpointWorkerSnapshot(record, includeEvictedTerminalOutcome), terminal: isTerminalState(record.state) }
-			: undefined;
-		if (includeEvictedTerminalOutcome) this.releaseTerminalOutcome(record);
+		const workers = records.map((record) => {
+			record.updatedAt = Date.now();
+			const includeEvictedTerminalOutcome = record.terminalSummary !== undefined && isTerminalState(record.state);
+			if (includeEvictedTerminalOutcome) this.loadTerminalOutcome(record);
+			const delta = {
+				worker: this.checkpointWorkerSnapshot(record, includeEvictedTerminalOutcome),
+				terminal: isTerminalState(record.state),
+				...(record.terminalIndexNeedsRemoval ? { removeTerminalIndex: true } : {}),
+			};
+			if (includeEvictedTerminalOutcome) this.releaseTerminalOutcome(record);
+			return delta;
+		});
 		if (lane === "worker") {
 			return {
 				id: checkpoint.id,
 				lane,
-				workers: worker ? [worker] : [],
+				workers,
 			};
 		}
 		return {
 			id: checkpoint.id,
 			lane,
 			state: this.checkpointStateSnapshot(),
-			workers: worker ? [worker] : [],
+			workers,
 		};
 	}
 
@@ -1158,20 +1173,13 @@ export class WorkerManager implements ChannelHandler {
 			}
 			throw error;
 		}
-		// Archive only after assignment, backend policy, environment preparation,
-		// and scratch-directory startup validation all succeeded. Each terminal
-		// record is persisted as a worker delta even though its hot state is evicted.
-		const existing = [...this.workers.values()];
-		if (existing.length > 0 && existing.every((record) => isTerminalState(record.state))) {
-			for (const record of existing) {
-				record.archived = true;
-				record.updatedAt = Date.now();
-				this.checkpointChanged(record, "immediate", "worker");
-			}
-			// Room views close with the batch they belonged to; a room joined again
-			// later gets a fresh pane.
-			this.roomPanesOpened.clear();
-		}
+		// Archive only after transport startup and every remaining setup step have
+		// succeeded. Until then the prior terminal batch stays exactly as it was.
+		const priorTerminalWorkers = [...this.workers.values()];
+		const archiveBatch =
+			priorTerminalWorkers.length > 0 && priorTerminalWorkers.every((record) => isTerminalState(record.state))
+				? priorTerminalWorkers
+				: [];
 		const shouldQueue = writer && this.activeWriter !== id;
 		if (writer && !this.activeWriter) this.activeWriter = id;
 		const recordNow = this.now();
@@ -1247,7 +1255,6 @@ export class WorkerManager implements ChannelHandler {
 		}
 
 		// Non-queued path: start immediately
-		record.driver = this.createWorkerTransport(record, backend, runtimeEnv, systemPrompt);
 		if (writer) {
 			record.headAtStart = gitHead(this.options.cwd);
 			this.lastWriterBackend = backend.name;
@@ -1261,7 +1268,28 @@ export class WorkerManager implements ChannelHandler {
 		}
 
 		try {
+			record.driver = this.createWorkerTransport(record, backend, runtimeEnv, systemPrompt);
 			await record.driver.start();
+			this.setState(record, "running");
+			if (writer) this.notifyReadOnlyWorkers(record, "started");
+			const activeWriter = this.activeWriter ? this.workers.get(this.activeWriter) : undefined;
+			const writerContext = writer
+				? undefined
+				: formatWriterContext(
+						activeWriter ? this.summarize(activeWriter) : undefined,
+						this.writerQueue.flatMap((workerId) => {
+							const queued = this.workers.get(workerId);
+							return queued ? [this.summarize(queued)] : [];
+						}),
+					);
+			const goalContext = this.goalPromptContext();
+			const assignedTask = goalContext
+				? `${goalContext}\n\n---\n\n# Assigned task\n\n${request.task}`
+				: request.task;
+			const task = writerContext ? `${writerContext}\n\n---\n\n${assignedTask}` : assignedTask;
+			const firstPrompt = this.withPendingBrief(record, task);
+			this.enqueue(record, firstPrompt.message, false, firstPrompt.leaderMessages);
+			await this.openWorkerView(record);
 		} catch (error) {
 			for (const message of record.pendingBriefLeaderMessages) {
 				this.appendLog(
@@ -1273,27 +1301,55 @@ export class WorkerManager implements ChannelHandler {
 			await this.finish(record, "failed", error instanceof Error ? error.message : String(error));
 			throw error;
 		}
-
-		this.setState(record, "running");
-		if (writer) this.notifyReadOnlyWorkers(record, "started");
-		const activeWriter = this.activeWriter ? this.workers.get(this.activeWriter) : undefined;
-		const writerContext = writer
-			? undefined
-			: formatWriterContext(
-					activeWriter ? this.summarize(activeWriter) : undefined,
-					this.writerQueue.flatMap((workerId) => {
-						const queued = this.workers.get(workerId);
-						return queued ? [this.summarize(queued)] : [];
-					}),
-				);
-		const goalContext = this.goalPromptContext();
-		const assignedTask = goalContext ? `${goalContext}\n\n---\n\n# Assigned task\n\n${request.task}` : request.task;
-		const task = writerContext ? `${writerContext}\n\n---\n\n${assignedTask}` : assignedTask;
-		const firstPrompt = this.withPendingBrief(record, task);
-		this.enqueue(record, firstPrompt.message, false, firstPrompt.leaderMessages);
-		await this.openWorkerView(record);
-		this.checkpointChanged();
+		try {
+			await this.publishSpawnBatch(record, archiveBatch);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			await this.finish(record, "failed", message);
+			throw error;
+		}
 		return this.summarize(record);
+	}
+
+	private async publishSpawnBatch(record: WorkerRecord, priorTerminalWorkers: readonly WorkerRecord[]): Promise<void> {
+		if (priorTerminalWorkers.length === 0) {
+			this.checkpointChanged();
+			return;
+		}
+		const priorState = priorTerminalWorkers.map((prior) => ({
+			record: prior,
+			archived: prior.archived,
+			updatedAt: prior.updatedAt,
+		}));
+		for (const prior of priorTerminalWorkers) {
+			prior.archived = true;
+			prior.updatedAt = this.now();
+		}
+		this.checkpointChangedMany([...priorTerminalWorkers, record]);
+		await this.flushCheckpoint();
+		const persistenceError = this.options.checkpoint?.writer.lastError;
+		if (!persistenceError) {
+			// Room views close with the batch they belonged to; a room joined again
+			// later gets a fresh pane. This follows durable publication, not intent.
+			this.roomPanesOpened.clear();
+			return;
+		}
+
+		// The new transport is not allowed to outlive an archive publication error.
+		// Restore the prior in-memory markers and publish the rollback together with
+		// the failed-attempt record's current state before the caller cleans it up.
+		for (const prior of priorState) {
+			prior.record.archived = prior.archived;
+			prior.record.updatedAt = prior.updatedAt;
+		}
+		this.checkpointChangedMany([...priorTerminalWorkers, record]);
+		await this.flushCheckpoint();
+		const rollbackError = this.options.checkpoint?.writer.lastError;
+		if (rollbackError)
+			throw new Error(
+				`Archive publication failed (${persistenceError.message}) and rollback failed (${rollbackError.message}).`,
+			);
+		throw new Error(`Archive publication failed: ${persistenceError.message}`);
 	}
 
 	/**
@@ -1493,6 +1549,7 @@ export class WorkerManager implements ChannelHandler {
 	private async resumeRecord(record: WorkerRecord, message: string): Promise<SteerResult> {
 		this.beginActive(record);
 		const priorState = record.revivalFromState ?? (record.state as "blocked" | "done" | "failed");
+		const priorTerminalSummary = record.terminalSummary;
 		const prior = {
 			state: priorState,
 			endedAt: record.endedAt,
@@ -1525,6 +1582,32 @@ export class WorkerManager implements ChannelHandler {
 			// A successful revival returns this record to live state. The old bounded
 			// terminal summary must not mask its new active interval in public views.
 			record.terminalSummary = undefined;
+			record.terminalIndexNeedsRemoval = Boolean(this.options.checkpointStorePath);
+			record.finishing = undefined;
+			record.killReason = undefined;
+			record.endedAt = undefined;
+			record.archived = false;
+			record.unsafeToPrompt = undefined;
+			record.pendingQuestion = undefined;
+			record.pendingDiscoveryId = undefined;
+			record.blockedTurn = undefined;
+			record.revivalFromState = undefined;
+			record.revivalPreviousQueuedBehind = undefined;
+			record.revivalMessage = undefined;
+			record.queuedBehind = undefined;
+			record.revivalCount += 1;
+			record.headlessReason = "resumed headlessly in a fresh ACP process";
+			record.queue = Promise.resolve();
+			record.queuedPrompts = 0;
+			this.setState(record, "running");
+			// Revival is a state replacement, not telemetry. Publish the active ref and
+			// tombstone the old terminal index before handing the live conversation back
+			// to the leader, so a restart cannot hydrate a stale done row as well.
+			await this.flushCheckpoint();
+			const persistenceError = this.options.checkpoint?.writer.lastError;
+			if (persistenceError)
+				throw new Error(`Revived worker ${record.id} was not durably published: ${persistenceError.message}`);
+			record.terminalIndexNeedsRemoval = undefined;
 		} catch (error) {
 			this.freezeTiming(record);
 			await record.driver?.kill().catch(() => {});
@@ -1533,6 +1616,8 @@ export class WorkerManager implements ChannelHandler {
 				record.processGroupId = undefined;
 			}
 			record.driver = undefined;
+			record.terminalSummary = priorTerminalSummary;
+			record.terminalIndexNeedsRemoval = undefined;
 			record.state = prior.state;
 			record.endedAt = prior.endedAt;
 			record.result = prior.result;
@@ -1551,23 +1636,6 @@ export class WorkerManager implements ChannelHandler {
 			throw error;
 		}
 
-		record.finishing = undefined;
-		record.killReason = undefined;
-		record.endedAt = undefined;
-		record.archived = false;
-		record.unsafeToPrompt = undefined;
-		record.pendingQuestion = undefined;
-		record.pendingDiscoveryId = undefined;
-		record.blockedTurn = undefined;
-		record.revivalFromState = undefined;
-		record.revivalPreviousQueuedBehind = undefined;
-		record.revivalMessage = undefined;
-		record.queuedBehind = undefined;
-		record.revivalCount += 1;
-		record.headlessReason = "resumed headlessly in a fresh ACP process";
-		record.queue = Promise.resolve();
-		record.queuedPrompts = 0;
-		this.setState(record, "running");
 		this.appendLog(
 			record,
 			"status",
@@ -2642,6 +2710,17 @@ export class WorkerManager implements ChannelHandler {
 		if (scheduleLane === "deferred")
 			checkpoint.writer.scheduleDeferredDelta(() => this.checkpointDelta(record, mutationLane), checkpoint.id);
 		else checkpoint.writer.scheduleDelta(this.checkpointDelta(record, mutationLane));
+	}
+
+	/** Queue one manifest update for a new worker and every terminal record it archives. */
+	private checkpointChangedMany(records: readonly WorkerRecord[]): void {
+		const checkpoint = this.options.checkpoint;
+		if (!checkpoint) return;
+		if (!checkpoint.writer.isV6 && !this.options.checkpointStorePath) {
+			checkpoint.writer.schedule(this.checkpointSnapshot());
+			return;
+		}
+		checkpoint.writer.scheduleDelta(this.checkpointDeltaForWorkers(records));
 	}
 
 	/** One transport shape for immediate and dequeued workers, including crash-recovery registration. */
