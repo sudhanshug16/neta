@@ -29,7 +29,12 @@ import {
 	writeV6Checkpoint,
 	writeV6CheckpointUpdate,
 } from "../src/checkpoint-store.ts";
-import { releaseSessionLock, tryAcquireCheckpointClaim } from "../src/session.ts";
+import {
+	type CheckpointClaim,
+	releaseSessionLock,
+	tryAcquireCheckpointClaim,
+	tryAcquireSessionLock,
+} from "../src/session.ts";
 
 const offlineProof = {
 	checkpointClaimHeld: true as const,
@@ -243,6 +248,35 @@ describe("normalized v6 checkpoint store", () => {
 		const before = readFileSync(legacyPath);
 		expect(() => openCheckpointForHydration(legacy.id, agentDir)).toThrow("outer checkpoint claim");
 		expect(() => statSync(v6CheckpointStorePath(legacy.id, agentDir))).toThrow();
+		const directoryLock = tryAcquireSessionLock(agentDir, agentDir);
+		if (!directoryLock) throw new Error("expected the generic directory lock");
+		expect(() => openCheckpointForHydration(legacy.id, agentDir, directoryLock as never)).toThrow(
+			"Invalid checkpoint claim",
+		);
+		expect(() => statSync(v6CheckpointStorePath(legacy.id, agentDir))).toThrow();
+		releaseSessionLock(directoryLock);
+		const wrongId = tryAcquireCheckpointClaim("another-id", agentDir);
+		if (!wrongId) throw new Error("expected the wrong-id claim");
+		expect(() => openCheckpointForHydration(legacy.id, agentDir, wrongId)).toThrow("Invalid checkpoint claim");
+		expect(() => statSync(v6CheckpointStorePath(legacy.id, agentDir))).toThrow();
+		releaseSessionLock(wrongId);
+		const otherAgentDir = temp();
+		const wrongAgent = tryAcquireCheckpointClaim(legacy.id, otherAgentDir);
+		if (!wrongAgent) throw new Error("expected the wrong-agent claim");
+		expect(() => openCheckpointForHydration(legacy.id, agentDir, wrongAgent)).toThrow("does not authorize");
+		expect(() => statSync(v6CheckpointStorePath(legacy.id, agentDir))).toThrow();
+		releaseSessionLock(wrongAgent);
+		const validClaim = tryAcquireCheckpointClaim(legacy.id, agentDir);
+		if (!validClaim) throw new Error("expected the exact claim");
+		for (const tampered of [
+			{ ...validClaim, path: join(agentDir, "sessions", "claims", "other") },
+			{ ...validClaim, token: "tampered" },
+			{ ...validClaim, inode: { ...validClaim.inode, ino: validClaim.inode.ino + 1 } },
+		] as CheckpointClaim[]) {
+			expect(() => openCheckpointForHydration(legacy.id, agentDir, tampered)).toThrow();
+			expect(() => statSync(v6CheckpointStorePath(legacy.id, agentDir))).toThrow();
+		}
+		releaseSessionLock(validClaim);
 
 		const claim = tryAcquireCheckpointClaim(legacy.id, agentDir);
 		expect(claim).toBeDefined();

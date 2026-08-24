@@ -12,6 +12,7 @@ import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
 	existsSync,
+	lstatSync,
 	mkdirSync,
 	readdirSync,
 	readFileSync,
@@ -24,6 +25,9 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { getAgentDir } from "./config.ts";
 import { killSessionSpec } from "./mux/index.ts";
+
+const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+declare const checkpointClaimBrand: unique symbol;
 
 export interface SessionRecord {
 	id: string;
@@ -58,6 +62,36 @@ export interface SessionMux {
 export interface SessionLock {
 	path: string;
 	token: string;
+}
+
+export interface CheckpointClaim extends SessionLock {
+	readonly kind: "checkpoint-claim";
+	readonly id: string;
+	readonly agentDir: string;
+	readonly inode: { readonly dev: number; readonly ino: number };
+	readonly owner: { readonly pid: number; readonly startedAt?: string };
+	readonly [checkpointClaimBrand]: true;
+}
+
+/** The only ids that may become session-owned path components. */
+export function assertCanonicalSessionId(id: string, label = "session id"): void {
+	if (typeof id !== "string" || !SESSION_ID_PATTERN.test(id)) throw new Error(`Invalid ${label} "${String(id)}".`);
+}
+
+function canonicalAgentDir(agentDir: string): string {
+	const supplied = lstatSync(agentDir);
+	if (supplied.isSymbolicLink())
+		throw new Error(`The Neta directory is a symlink, not a canonical directory: ${agentDir}.`);
+	const canonical = realpathSync(agentDir);
+	const stat = lstatSync(canonical);
+	if (!stat.isDirectory() || stat.isSymbolicLink())
+		throw new Error(`The Neta directory is not a safe directory: ${canonical}.`);
+	return canonical;
+}
+
+function checkpointClaimPath(id: string, agentDir: string): string {
+	assertCanonicalSessionId(id, "checkpoint id");
+	return join(agentDir, "sessions", "claims", id);
 }
 
 /** Fail closed if a caller's ownership proof was replaced or released. */
@@ -140,8 +174,83 @@ export function tryAcquireSessionLock(cwd: string, agentDir: string = getAgentDi
  * managers over one checkpoint — including the case where the checkpoint's
  * recorded directory is not the directory either command was typed in.
  */
-export function tryAcquireCheckpointClaim(id: string, agentDir: string = getAgentDir()): SessionLock | undefined {
-	return tryAcquireLockDirectory(join(sessionsDir(agentDir), "claims", basename(id)));
+export function tryAcquireCheckpointClaim(id: string, agentDir: string = getAgentDir()): CheckpointClaim | undefined {
+	// This check must precede even agent-dir canonicalization and parent creation:
+	// malformed input is not allowed to inspect, reclaim, or create any session
+	// state. In particular, basename() is never a validation boundary.
+	assertCanonicalSessionId(id, "checkpoint id");
+	const canonical = canonicalAgentDir(agentDir);
+	const path = checkpointClaimPath(id, canonical);
+	const lock = tryAcquireLockDirectory(path);
+	if (!lock) return undefined;
+	try {
+		const stat = lstatSync(path);
+		if (!stat.isDirectory() || stat.isSymbolicLink())
+			throw new Error(`Checkpoint claim is not a safe directory: ${path}.`);
+		const owner = JSON.parse(readFileSync(lockOwnerPath(lock), "utf-8")) as {
+			pid?: unknown;
+			startedAt?: unknown;
+			token?: unknown;
+		};
+		if (typeof owner.pid !== "number" || !Number.isInteger(owner.pid) || typeof owner.token !== "string")
+			throw new Error(`Checkpoint claim owner is malformed: ${path}.`);
+		return Object.freeze({
+			...lock,
+			kind: "checkpoint-claim" as const,
+			id,
+			agentDir: canonical,
+			inode: { dev: stat.dev, ino: stat.ino },
+			owner: {
+				pid: owner.pid,
+				...(typeof owner.startedAt === "string" ? { startedAt: owner.startedAt } : {}),
+			},
+		}) as CheckpointClaim;
+	} catch (error) {
+		releaseSessionLock(lock);
+		throw error;
+	}
+}
+
+/** Validate the exact capability and prove that its directory still belongs to its owner. */
+export function assertCheckpointClaimHeld(claim: CheckpointClaim, id: string, agentDir: string): void {
+	assertCanonicalSessionId(id, "checkpoint id");
+	if (
+		!claim ||
+		claim.kind !== "checkpoint-claim" ||
+		claim.id !== id ||
+		typeof claim.agentDir !== "string" ||
+		typeof claim.path !== "string" ||
+		typeof claim.token !== "string" ||
+		!claim.inode ||
+		typeof claim.inode.dev !== "number" ||
+		typeof claim.inode.ino !== "number" ||
+		!claim.owner ||
+		typeof claim.owner.pid !== "number"
+	) {
+		throw new Error(`Invalid checkpoint claim for "${id}".`);
+	}
+	const canonical = canonicalAgentDir(agentDir);
+	const expectedPath = checkpointClaimPath(id, canonical);
+	if (claim.agentDir !== canonical || claim.path !== expectedPath)
+		throw new Error(`Checkpoint claim does not authorize "${id}" in ${canonical}.`);
+	let owner: { pid?: unknown; startedAt?: unknown; token?: unknown };
+	let stat: ReturnType<typeof lstatSync>;
+	try {
+		owner = JSON.parse(readFileSync(lockOwnerPath(claim), "utf-8")) as typeof owner;
+		stat = lstatSync(claim.path);
+	} catch {
+		throw new Error(`Checkpoint claim is no longer held for "${id}".`);
+	}
+	if (
+		!stat.isDirectory() ||
+		stat.isSymbolicLink() ||
+		stat.dev !== claim.inode.dev ||
+		stat.ino !== claim.inode.ino ||
+		owner.token !== claim.token ||
+		owner.pid !== claim.owner.pid ||
+		owner.startedAt !== claim.owner.startedAt
+	)
+		throw new Error(`Checkpoint claim is no longer held for "${id}".`);
 }
 
 function tryAcquireLockDirectory(path: string): SessionLock | undefined {
@@ -224,7 +333,8 @@ export function isSessionAlive(record: Pick<SessionRecord, "pid">): boolean {
 /** One session record by manager id, whether or not its process is still alive. */
 export function readSessionRecord(id: string, agentDir: string = getAgentDir()): SessionRecord | undefined {
 	try {
-		const record = JSON.parse(readFileSync(join(sessionsDir(agentDir), `${basename(id)}.json`), "utf8")) as
+		assertCanonicalSessionId(id, "session id");
+		const record = JSON.parse(readFileSync(join(sessionsDir(agentDir), `${id}.json`), "utf8")) as
 			| SessionRecord
 			| undefined;
 		return record && record.id === id ? record : undefined;
@@ -379,7 +489,8 @@ function hasDeletedCwd(record: SessionRecord): boolean {
 }
 
 function stoppedMarkerPath(id: string, agentDir: string): string {
-	return join(sessionsDir(agentDir), "stopped", `${basename(id)}.json`);
+	assertCanonicalSessionId(id, "session id");
+	return join(sessionsDir(agentDir), "stopped", `${id}.json`);
 }
 
 export function writeStoppedMarker(marker: SessionStoppedMarker, agentDir: string = getAgentDir()): void {
@@ -451,6 +562,7 @@ function tearDownSession(
 }
 
 export function writeSessionRecord(record: SessionRecord, agentDir: string = getAgentDir()): string {
+	assertCanonicalSessionId(record.id, "session id");
 	const dir = sessionsDir(agentDir);
 	mkdirSync(dir, { recursive: true, mode: 0o700 });
 	const path = join(dir, `${record.id}.json`);
@@ -459,6 +571,7 @@ export function writeSessionRecord(record: SessionRecord, agentDir: string = get
 }
 
 export function removeSessionRecord(id: string, agentDir: string = getAgentDir()): void {
+	assertCanonicalSessionId(id, "session id");
 	rmSync(join(sessionsDir(agentDir), `${id}.json`), { force: true });
 }
 

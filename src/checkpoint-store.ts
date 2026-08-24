@@ -28,7 +28,7 @@ import {
 import { dirname, join, resolve } from "node:path";
 import type { CheckpointWorker, HydratableCheckpoint, SessionCheckpoint } from "./checkpoint.ts";
 import { readCheckpoint, validateCheckpoint } from "./checkpoint.ts";
-import { assertSessionLockHeld, isSessionLeaseAlive, processStartTime, type SessionLock } from "./session.ts";
+import { assertCheckpointClaimHeld, type CheckpointClaim, isSessionLeaseAlive, processStartTime } from "./session.ts";
 import { isTerminalState, type WorkerState } from "./types.ts";
 
 export const CHECKPOINT_STORE_FORMAT_VERSION = 6 as const;
@@ -1835,9 +1835,9 @@ export function readV6CheckpointState(storePath: string): SessionCheckpoint {
 	return readV6Checkpoint(storePath).checkpoint;
 }
 
-function migrateV5ToV6(id: string, agentDir: string, claim: SessionLock, hooks?: V6FaultHooks): V6MigrationResult {
+function migrateV5ToV6(id: string, agentDir: string, claim: CheckpointClaim, hooks?: V6FaultHooks): V6MigrationResult {
 	const paths = canonicalMigrationPaths(id, agentDir);
-	assertSessionLockHeld(claim);
+	assertCheckpointClaimHeld(claim, id, paths.agentDir);
 	if (storePathPresent(paths.storePath)) {
 		if (!manifestExists(paths.storePath))
 			throw new CheckpointStoreError(
@@ -1848,6 +1848,7 @@ function migrateV5ToV6(id: string, agentDir: string, claim: SessionLock, hooks?:
 		return { storePath: paths.storePath, published: true, alreadyMigrated: true };
 	}
 	const legacy = readCheckpoint(id, paths.agentDir);
+	assertCheckpointClaimHeld(claim, id, paths.agentDir);
 	if (!storePathPresent(paths.parent)) {
 		mkdirSync(paths.parent, { recursive: false, mode: 0o700 });
 	}
@@ -1856,14 +1857,14 @@ function migrateV5ToV6(id: string, agentDir: string, claim: SessionLock, hooks?:
 		throw new CheckpointStoreError(`The v6 migration parent is not a safe directory: ${paths.parent}.`);
 	if (storePathPresent(paths.storePath))
 		throw new CheckpointStoreError(`The v6 migration destination appeared before publication: ${paths.storePath}.`);
-	cleanupMigrationStaging(paths.parent, id, claim);
+	cleanupMigrationStaging(paths.parent, id, paths.agentDir, claim);
 	const staging = join(paths.parent, `.${id}.${process.pid}.${claim.token}.staging`);
 	let fallbackStaging: string | undefined;
 	try {
 		const manifest = writeV6Checkpoint(legacy, staging, hooks);
 		publishManifest(staging, manifest, hooks);
 		gcValidateReferences(staging, manifest);
-		assertSessionLockHeld(claim);
+		assertCheckpointClaimHeld(claim, id, paths.agentDir);
 		fail(hooks, { type: "store-rename", from: staging, to: paths.storePath });
 		renameSync(staging, paths.storePath);
 		fsyncDirectory(paths.parent, "manifest-parent-fsync", hooks);
@@ -1871,7 +1872,7 @@ function migrateV5ToV6(id: string, agentDir: string, claim: SessionLock, hooks?:
 	} catch (error) {
 		const code = (error as NodeJS.ErrnoException).code;
 		if (!["EXDEV", "EPERM", "EACCES", "ENOTSUP", "EINVAL"].includes(code ?? "")) {
-			removeMigrationStagingBestEffort(staging, paths.parent, id, claim);
+			removeMigrationStagingBestEffort(staging, paths.parent, id, paths.agentDir, claim);
 			throw error;
 		}
 		try {
@@ -1884,17 +1885,17 @@ function migrateV5ToV6(id: string, agentDir: string, claim: SessionLock, hooks?:
 				throw new CheckpointStoreError(
 					`The v6 migration destination appeared before publication: ${paths.storePath}.`,
 				);
-			removeMigrationStaging(staging, paths.parent, id, claim);
+			removeMigrationStaging(staging, paths.parent, id, paths.agentDir, claim);
 			// The fallback staging directory is complete, validated, and fsynced. Its
 			// same-parent rename is the one point at which the destination appears.
-			assertSessionLockHeld(claim);
+			assertCheckpointClaimHeld(claim, id, paths.agentDir);
 			renameSync(fallbackStaging, paths.storePath);
 			fallbackStaging = undefined;
 			fsyncDirectory(paths.parent, "manifest-parent-fsync", hooks);
 			return { storePath: paths.storePath, published: true, alreadyMigrated: false };
 		} catch (fallbackError) {
-			removeMigrationStagingBestEffort(fallbackStaging, paths.parent, id, claim);
-			removeMigrationStagingBestEffort(staging, paths.parent, id, claim);
+			removeMigrationStagingBestEffort(fallbackStaging, paths.parent, id, paths.agentDir, claim);
+			removeMigrationStagingBestEffort(staging, paths.parent, id, paths.agentDir, claim);
 			throw fallbackError;
 		}
 	}
@@ -1986,8 +1987,8 @@ function validateMigrationStagingTree(path: string): void {
 	}
 }
 
-function cleanupMigrationStaging(parent: string, id: string, claim: SessionLock): void {
-	assertSessionLockHeld(claim);
+function cleanupMigrationStaging(parent: string, id: string, agentDir: string, claim: CheckpointClaim): void {
+	assertCheckpointClaimHeld(claim, id, agentDir);
 	try {
 		const parentStat = lstatSync(parent);
 		if (parentStat.isSymbolicLink() || !parentStat.isDirectory())
@@ -2019,7 +2020,7 @@ function cleanupMigrationStaging(parent: string, id: string, claim: SessionLock)
 		owned.push({ path, dev: stat.dev, ino: stat.ino });
 	}
 	for (const staging of owned) {
-		assertSessionLockHeld(claim);
+		assertCheckpointClaimHeld(claim, id, agentDir);
 		const current = lstatSync(staging.path);
 		if (
 			current.isSymbolicLink() ||
@@ -2033,9 +2034,15 @@ function cleanupMigrationStaging(parent: string, id: string, claim: SessionLock)
 	if (owned.length > 0) fsyncDirectory(parent, "manifest-parent-fsync", undefined);
 }
 
-function removeMigrationStaging(path: string | undefined, parent: string, id: string, claim: SessionLock): void {
+function removeMigrationStaging(
+	path: string | undefined,
+	parent: string,
+	id: string,
+	agentDir: string,
+	claim: CheckpointClaim,
+): void {
 	if (!path) return;
-	assertSessionLockHeld(claim);
+	assertCheckpointClaimHeld(claim, id, agentDir);
 	const name = path.slice(parent.length + 1);
 	if (
 		dirname(path) !== parent ||
@@ -2058,10 +2065,11 @@ function removeMigrationStagingBestEffort(
 	path: string | undefined,
 	parent: string,
 	id: string,
-	claim: SessionLock,
+	agentDir: string,
+	claim: CheckpointClaim,
 ): void {
 	try {
-		removeMigrationStaging(path, parent, id, claim);
+		removeMigrationStaging(path, parent, id, agentDir, claim);
 	} catch {
 		// The original migration error is authoritative. A failed ownership check
 		// leaves residue for a later retry rather than risking another owner's tree.
@@ -2092,13 +2100,18 @@ export function readAuthoritativeCheckpoint(id: string, agentDir: string): Sessi
 export function openCheckpointForHydration(
 	id: string,
 	agentDir: string,
-	checkpointClaim?: SessionLock,
+	checkpointClaim?: CheckpointClaim,
 	hooks?: V6FaultHooks,
 ): HydratableCheckpoint {
 	const paths = canonicalMigrationPaths(id, agentDir);
 	if (!storePathPresent(paths.storePath)) {
 		if (!checkpointClaim)
 			throw new CheckpointStoreError(`Checkpoint "${id}" requires its outer checkpoint claim before v6 migration.`);
+		try {
+			assertCheckpointClaimHeld(checkpointClaim, id, paths.agentDir);
+		} catch (error) {
+			throw new CheckpointStoreError(error instanceof Error ? error.message : String(error));
+		}
 		migrateV5ToV6(id, paths.agentDir, checkpointClaim, hooks);
 	}
 	const checkpoint = readV6CheckpointMetadata(paths.storePath).checkpoint;

@@ -201,6 +201,17 @@ afterEach(() => {
 });
 
 describe("resume refuses rather than guesses", () => {
+	it("rejects malformed checkpoint ids without touching existing session state", async () => {
+		const agentDir = scratch("neta-resume-home-");
+		const sessions = join(agentDir, "sessions");
+		mkdirSync(sessions, { recursive: true });
+		writeFileSync(join(sessions, "sentinel.json"), "sentinel\n");
+		const before = readdirSync(sessions).map((name) => [name, readFileSync(join(sessions, name), "utf8")]);
+		for (const checkpointId of ["..", ".", "/", "a/b", join(tmpdir(), "absolute"), "", " ", "%2e%2e", "a\\b", "a∕b"])
+			await expect(resumeLeader({ checkpointId, agentDir, extraArgs: [] })).rejects.toThrow();
+		expect(readdirSync(sessions).map((name) => [name, readFileSync(join(sessions, name), "utf8")])).toEqual(before);
+	});
+
 	it("refuses a session whose manager is still live, and changes nothing", async () => {
 		const agentDir = scratch("neta-resume-home-");
 		const cwd = scratch("neta-resume-repo-");

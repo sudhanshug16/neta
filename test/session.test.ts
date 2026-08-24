@@ -1,6 +1,15 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,6 +26,7 @@ import {
 	removeSessionRecord,
 	type SessionRecord,
 	sweepStaleSessions,
+	tryAcquireCheckpointClaim,
 	tryAcquireSessionLock,
 	writeSessionRecord,
 } from "../src/session.ts";
@@ -295,6 +305,25 @@ describe("session registry", () => {
 			releaseSessionLock(first);
 		}
 		expect(tryAcquireSessionLock(workspace, dir)).toBeDefined();
+	});
+
+	it("rejects malformed checkpoint ids before touching the populated sessions directory", () => {
+		const dir = agentDir();
+		const claim = tryAcquireCheckpointClaim("valid-id", dir);
+		if (!claim) throw new Error("expected the valid checkpoint claim");
+		const before = readdirSync(join(dir, "sessions", "claims", "valid-id")).map((entry) => [
+			entry,
+			readFileSync(join(dir, "sessions", "claims", "valid-id", entry)),
+		]);
+		for (const id of ["..", ".", "/", "a/b", join(tmpdir(), "absolute"), "", " ", "%2e%2e", "a\\b", "a∕b"])
+			expect(() => tryAcquireCheckpointClaim(id, dir)).toThrow();
+		expect(
+			readdirSync(join(dir, "sessions", "claims", "valid-id")).map((entry) => [
+				entry,
+				readFileSync(join(dir, "sessions", "claims", "valid-id", entry)),
+			]),
+		).toEqual(before);
+		releaseSessionLock(claim);
 	});
 
 	describe("finding the session a command means", () => {
