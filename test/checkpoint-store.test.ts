@@ -1,6 +1,16 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+	linkSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { checkpointPath, newCheckpointBase, type SessionCheckpoint, writeCheckpointAtomic } from "../src/checkpoint.ts";
@@ -9,12 +19,24 @@ import {
 	CheckpointStoreError,
 	migrateV5ToV6,
 	readV6Checkpoint,
+	readV6Manifest,
+	reclaimV6StoreOffline,
 	V6_FORMAT_VERSION,
 	type V6FaultEvent,
 	v6CheckpointStorePath,
+	v6ManifestPath,
 	validateV6Manifest,
 	writeV6Checkpoint,
+	writeV6CheckpointUpdate,
 } from "../src/checkpoint-store.ts";
+
+const offlineProof = {
+	checkpointClaimHeld: true as const,
+	directoryLockHeld: true as const,
+	processDeathProven: true as const,
+	noLiveManager: true as const,
+	shutdownProof: "recovery" as const,
+};
 
 function checkpoint(id: string): SessionCheckpoint {
 	return {
@@ -117,7 +139,7 @@ describe("normalized v6 checkpoint store", () => {
 		expect(() => readV6Checkpoint(noManifest)).toThrow("No published v6 manifest");
 	});
 
-	it("has atomic manifest fault boundaries before and after rename", () => {
+	it("cleans failed manifest temps while preserving the prior authority", () => {
 		const root = temp();
 		const before = join(root, "before");
 		const failBefore = (event: V6FaultEvent): void => {
@@ -125,13 +147,59 @@ describe("normalized v6 checkpoint store", () => {
 		};
 		expect(() => writeV6Checkpoint(checkpoint("before"), before, { fail: failBefore })).toThrow("before rename");
 		expect(() => readV6Checkpoint(before)).toThrow("No published v6 manifest");
+		expect(readdirSync(before).filter((name) => name.startsWith("manifest.json.")).length).toBe(0);
 
 		const after = join(root, "after");
+		writeV6Checkpoint(checkpoint("after"), after);
+		const prior = readV6Manifest(after);
 		const failAfter = (event: V6FaultEvent): void => {
-			if (event.type === "manifest-parent-fsync") throw new Error("after rename");
+			if (event.type === "manifest-fsync") throw new Error("manifest temp fsync");
 		};
-		expect(() => writeV6Checkpoint(checkpoint("after"), after, { fail: failAfter })).toThrow("after rename");
-		expect(readV6Checkpoint(after).checkpoint.id).toBe("after");
+		expect(() =>
+			writeV6CheckpointUpdate({ ...checkpoint("after"), updatedAt: 12 }, after, { fail: failAfter }),
+		).toThrow("manifest temp fsync");
+		expect(readV6Manifest(after).checksum).toBe(prior.checksum);
+		expect(readV6Checkpoint(after).checkpoint.updatedAt).toBe(11);
+		expect(readdirSync(after).filter((name) => name.startsWith("manifest.json.")).length).toBe(0);
+		const recovered = reclaimV6StoreOffline(after, offlineProof);
+		expect(recovered.status).toBe("deleted");
+		expect(readV6Checkpoint(after).checkpoint.updatedAt).toBe(11);
+	});
+
+	it("fails closed on arbitrary, malformed, symlink, and hardlink manifest temps", () => {
+		const root = temp();
+		const cases = [
+			{ name: "arbitrary", entry: "manifest.json.not-a-runtime-temp.tmp", kind: "file" as const },
+			{ name: "malformed", entry: "manifest.json.4242.aaaaaaaaaaaa.tmp", kind: "malformed" as const },
+			{ name: "symlink", entry: "manifest.json.4242.bbbbbbbbbbbb.tmp", kind: "symlink" as const },
+			{ name: "hardlink", entry: "manifest.json.4242.cccccccccccc.tmp", kind: "hardlink" as const },
+		];
+		for (const item of cases) {
+			const store = join(root, item.name);
+			writeV6Checkpoint(checkpoint(item.name), store);
+			const orphan = join(store, "blobs", `${"d".repeat(64)}.json`);
+			writeFileSync(orphan, "orphan");
+			const entry = join(store, item.entry);
+			if (item.kind === "symlink") symlinkSync(v6ManifestPath(store), entry);
+			else if (item.kind === "hardlink") linkSync(v6ManifestPath(store), entry);
+			else writeFileSync(entry, item.kind === "malformed" ? "{broken" : "arbitrary");
+			const result = reclaimV6StoreOffline(store, offlineProof);
+			expect(result.status).toBe("failed");
+			expect(result.deletedFiles).toBe(0);
+			expect(readFileSync(orphan, "utf8")).toBe("orphan");
+		}
+	});
+
+	it("removes a valid crash-left manifest temp during the next exclusive GC", () => {
+		const root = temp();
+		const store = join(root, "crash-temp");
+		writeV6Checkpoint(checkpoint("crash-temp"), store);
+		const tempPath = join(store, "manifest.json.4242.dddddddddddd.tmp");
+		writeFileSync(tempPath, readFileSync(v6ManifestPath(store)));
+		const result = reclaimV6StoreOffline(store, offlineProof);
+		expect(result.status).toBe("deleted");
+		expect(() => readFileSync(tempPath)).toThrow();
+		expect(readV6Checkpoint(store).checkpoint.id).toBe("crash-temp");
 	});
 
 	it("fails closed on a corrupt manifest, referenced blob, or required segment", () => {
@@ -222,22 +290,43 @@ describe("normalized v6 checkpoint store", () => {
 		expect(readFileSync(legacyPath)).toEqual(completeBefore);
 		expect(readV6Checkpoint(completeAfterBoundaryFault).checkpoint.id).toBe("migration");
 
-		const priorAuthority = join(agentDir, "prior-authority");
+		const copyFailureTarget = join(agentDir, "copy-failure");
+		let copyFailed = false;
 		expect(() =>
-			migrateV5ToV6("migration", agentDir, priorAuthority, {
+			migrateV5ToV6("migration", agentDir, copyFailureTarget, {
 				fail: (event) => {
 					if (event.type === "store-rename") {
 						const error = new Error("cross device") as NodeJS.ErrnoException;
 						error.code = "EXDEV";
 						throw error;
 					}
-					if (event.type === "manifest-rename" && event.to === join(priorAuthority, "manifest.json"))
-						throw new Error("crash before fallback publication");
+					if (event.type === "artifact-write" && event.path.includes(".fallback.staging") && !copyFailed) {
+						copyFailed = true;
+						throw new Error("fallback copy failed");
+					}
 				},
 			}),
-		).toThrow("crash before fallback publication");
+		).toThrow("fallback copy failed");
 		expect(readFileSync(legacyPath)).toEqual(completeBefore);
-		expect(() => readV6Checkpoint(priorAuthority)).toThrow("No published v6 manifest");
+		expect(() => readV6Checkpoint(copyFailureTarget)).toThrow("No published v6 manifest");
+		expect(migrateV5ToV6("migration", agentDir, copyFailureTarget).alreadyMigrated).toBe(false);
+		expect(readV6Checkpoint(copyFailureTarget).checkpoint.id).toBe("migration");
+
+		const ambiguousTarget = join(agentDir, "ambiguous");
+		mkdirSync(ambiguousTarget, { recursive: true });
+		const marker = join(ambiguousTarget, "marker");
+		writeFileSync(marker, "preserve");
+		expect(() => migrateV5ToV6("migration", agentDir, ambiguousTarget)).toThrow(
+			"already exists without a valid manifest",
+		);
+		expect(readFileSync(marker, "utf8")).toBe("preserve");
+
+		const crashStaging = join(agentDir, "checkpoints-v6", ".migration.4242.eeeeeeeeeeee.fallback.staging");
+		mkdirSync(crashStaging, { recursive: true });
+		writeFileSync(join(crashStaging, "partial"), "partial");
+		const recoveredTarget = join(agentDir, "checkpoints-v6", "recovered-staging");
+		expect(migrateV5ToV6("migration", agentDir, recoveredTarget).published).toBe(true);
+		expect(() => statSync(crashStaging)).toThrow();
 	});
 
 	it("rejects malformed manifest sequence and unsupported format", () => {

@@ -34,6 +34,7 @@ export const CHECKPOINT_STORE_FORMAT_VERSION = 6 as const;
 export const V6_FORMAT_VERSION = CHECKPOINT_STORE_FORMAT_VERSION;
 export const V6_MANIFEST_FILE = "manifest.json";
 export const TERMINAL_INDEX_SHARD_COUNT = 64 as const;
+const V6_MANIFEST_TEMP_PATTERN = /^manifest\.json\.[1-9][0-9]*\.[a-f0-9]{12}\.tmp$/;
 
 type BlobKind = "active" | "terminal" | "outcome";
 
@@ -776,8 +777,17 @@ function publishManifest(
 		fail(hooks, { type: "manifest-rename", from: temporary, to: path });
 		renameSync(temporary, path);
 		fsyncDirectory(storePath, "manifest-parent-fsync", hooks);
-	} finally {
-		// A failed publication leaves the temp file as a recoverable diagnostic.
+	} catch (error) {
+		// The published manifest remains authoritative when a pre-rename write or
+		// post-rename directory sync fails. Remove only this attempt's exact temp;
+		// never let best-effort cleanup hide the publication error.
+		try {
+			unlinkSync(temporary);
+		} catch {
+			// The rename may already have consumed the temp, or cleanup may itself
+			// be unavailable. The original publication error is the useful one.
+		}
+		throw error;
 	}
 }
 
@@ -1426,6 +1436,25 @@ function gcScanSegments(path: string): { files: string[]; bytes: number } {
 	return { files, bytes };
 }
 
+function gcScanManifestTemp(path: string, name: string): { path: string; bytes: number } {
+	let stat: ReturnType<typeof lstatSync>;
+	try {
+		stat = lstatSync(path);
+	} catch {
+		throw new CheckpointStoreError(`v6 GC could not read manifest temp ${name}.`);
+	}
+	if (!stat.isFile() || stat.nlink !== 1)
+		throw new CheckpointStoreError(`v6 GC found an unsafe manifest temp ${name}.`);
+	let bytes: Buffer;
+	try {
+		bytes = readFileSync(path);
+	} catch {
+		throw new CheckpointStoreError(`v6 GC could not read manifest temp ${name}.`);
+	}
+	validateV6Manifest(parseJson(bytes, path));
+	return { path, bytes: stat.size };
+}
+
 interface V6MaintenanceOwner {
 	pid: number;
 	startedAt: string;
@@ -1620,7 +1649,14 @@ function gcScanArtifacts(storePath: string): { files: string[]; bytes: number } 
 		throw new CheckpointStoreError("v6 GC could not scan the store root.");
 	}
 	const expected = new Set([V6_MANIFEST_FILE, "blobs", "shards", "segments", V6_LOCKS_DIR]);
+	const manifestTemps: { path: string; bytes: number }[] = [];
 	for (const entry of rootEntries) {
+		if (entry.name !== V6_MANIFEST_FILE && V6_MANIFEST_TEMP_PATTERN.test(entry.name)) {
+			if (entry.isSymbolicLink() || !entry.isFile())
+				throw new CheckpointStoreError("v6 GC found an unsafe manifest temp.");
+			manifestTemps.push(gcScanManifestTemp(join(storePath, entry.name), entry.name));
+			continue;
+		}
 		if (entry.isSymbolicLink() || !expected.has(entry.name))
 			throw new CheckpointStoreError("v6 GC found an unexpected store entry.");
 		if (entry.name === V6_MANIFEST_FILE) {
@@ -1635,8 +1671,8 @@ function gcScanArtifacts(storePath: string): { files: string[]; bytes: number } 
 	const segments = gcScanSegments(join(storePath, "segments"));
 	gcScanLocks(storePath);
 	return {
-		files: [...blobs.files, ...shards.files, ...segments.files],
-		bytes: blobs.bytes + shards.bytes + segments.bytes,
+		files: [...blobs.files, ...shards.files, ...segments.files, ...manifestTemps.map((temp) => temp.path)],
+		bytes: blobs.bytes + shards.bytes + segments.bytes + manifestTemps.reduce((total, temp) => total + temp.bytes, 0),
 	};
 }
 
@@ -1804,38 +1840,129 @@ export function migrateV5ToV6(
 	targetStorePath = v6CheckpointStorePath(id, agentDir),
 	hooks?: V6FaultHooks,
 ): V6MigrationResult {
+	safePart(id, "checkpoint id");
 	if (manifestExists(targetStorePath)) {
 		const published = readV6Checkpoint(targetStorePath);
 		if (published.manifest.id !== id) throw new CheckpointStoreError(`Published v6 store id does not match "${id}".`);
 		return { storePath: targetStorePath, published: true, alreadyMigrated: true };
 	}
 	const legacy = readCheckpoint(id, agentDir);
-	const parent = join(targetStorePath, "..");
+	const parent = dirname(targetStorePath);
 	mkdirSync(parent, { recursive: true, mode: 0o700 });
+	if (gcPathPresent(targetStorePath))
+		throw new CheckpointStoreError(
+			`The v6 migration destination already exists without a valid manifest: ${targetStorePath}.`,
+		);
+	cleanupMigrationStaging(parent, id);
 	const staging = join(parent, `.${id}.${process.pid}.${randomBytes(6).toString("hex")}.staging`);
-	const manifest = writeV6Checkpoint(legacy, staging, hooks);
-	publishManifest(staging, manifest, hooks);
+	let fallbackStaging: string | undefined;
 	try {
+		const manifest = writeV6Checkpoint(legacy, staging, hooks);
+		publishManifest(staging, manifest, hooks);
+		gcValidateReferences(staging, manifest);
 		fail(hooks, { type: "store-rename", from: staging, to: targetStorePath });
 		renameSync(staging, targetStorePath);
 		fsyncDirectory(parent, "manifest-parent-fsync", hooks);
 		return { storePath: targetStorePath, published: true, alreadyMigrated: false };
 	} catch (error) {
 		const code = (error as NodeJS.ErrnoException).code;
-		if (!["EXDEV", "EPERM", "EACCES", "ENOTSUP", "EINVAL"].includes(code ?? "")) throw error;
-		mkdirSync(targetStorePath, { recursive: true, mode: 0o700 });
-		for (const directory of ["blobs", "segments", "shards"])
-			mkdirSync(join(targetStorePath, directory), { recursive: true, mode: 0o700 });
-		copyTreeWithoutManifest(staging, targetStorePath, hooks);
-		publishManifest(targetStorePath, manifest, hooks);
-		fsyncDirectory(parent, "manifest-parent-fsync", hooks);
-		return { storePath: targetStorePath, published: true, alreadyMigrated: false };
+		if (!["EXDEV", "EPERM", "EACCES", "ENOTSUP", "EINVAL"].includes(code ?? "")) {
+			removeMigrationStagingBestEffort(staging, parent);
+			throw error;
+		}
+		try {
+			const manifest = readV6ManifestUnlocked(staging);
+			fallbackStaging = join(parent, `.${id}.${process.pid}.${randomBytes(6).toString("hex")}.fallback.staging`);
+			copyTreeWithoutManifest(staging, fallbackStaging, hooks);
+			publishManifest(fallbackStaging, manifest, hooks);
+			gcValidateReferences(fallbackStaging, manifest);
+			if (gcPathPresent(targetStorePath))
+				throw new CheckpointStoreError(
+					`The v6 migration destination appeared before publication: ${targetStorePath}.`,
+				);
+			removeMigrationStaging(staging, parent);
+			// The fallback staging directory is complete, validated, and fsynced. Its
+			// same-parent rename is the one point at which the destination appears.
+			renameSync(fallbackStaging, targetStorePath);
+			fallbackStaging = undefined;
+			fsyncDirectory(parent, "manifest-parent-fsync", hooks);
+			return { storePath: targetStorePath, published: true, alreadyMigrated: false };
+		} catch (fallbackError) {
+			removeMigrationStagingBestEffort(fallbackStaging, parent);
+			removeMigrationStagingBestEffort(staging, parent);
+			throw fallbackError;
+		}
+	}
+}
+
+function migrationStagingName(name: string, id: string): boolean {
+	const prefix = `.${id}.`;
+	const suffix = ".staging";
+	if (!name.startsWith(prefix) || !name.endsWith(suffix)) return false;
+	const middle = name.slice(prefix.length, -suffix.length);
+	return /^[1-9][0-9]*\.[a-f0-9]{12}(?:\.fallback)?$/.test(middle);
+}
+
+function cleanupMigrationStaging(parent: string, id: string): void {
+	let entries: Dirent[];
+	try {
+		entries = readdirSync(parent, { withFileTypes: true });
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+		throw new CheckpointStoreError(`Could not scan v6 migration staging in ${parent}.`);
+	}
+	const stale = entries.filter((entry) => migrationStagingName(entry.name, id));
+	for (const entry of stale)
+		if (entry.isSymbolicLink() || !entry.isDirectory())
+			throw new CheckpointStoreError(`Found an unsafe v6 migration staging entry ${entry.name}.`);
+	for (const entry of stale) validateMigrationStagingTree(join(parent, entry.name));
+	for (const entry of stale) rmSync(join(parent, entry.name), { recursive: true, force: false });
+	if (stale.length > 0) fsyncDirectory(parent, "manifest-parent-fsync", undefined);
+}
+
+function validateMigrationStagingTree(path: string): void {
+	let entries: Dirent[];
+	try {
+		entries = readdirSync(path, { withFileTypes: true });
+	} catch {
+		throw new CheckpointStoreError(`Could not scan v6 migration staging ${path}.`);
+	}
+	for (const entry of entries) {
+		const entryPath = join(path, entry.name);
+		if (entry.isSymbolicLink()) throw new CheckpointStoreError(`Found a symlink in v6 migration staging ${path}.`);
+		let stat: ReturnType<typeof lstatSync>;
+		try {
+			stat = lstatSync(entryPath);
+		} catch {
+			throw new CheckpointStoreError(`Could not inspect v6 migration staging ${entryPath}.`);
+		}
+		if (stat.isDirectory()) {
+			validateMigrationStagingTree(entryPath);
+			continue;
+		}
+		if (!stat.isFile() || stat.nlink !== 1)
+			throw new CheckpointStoreError(`Found an unsafe entry in v6 migration staging ${entryPath}.`);
+	}
+}
+
+function removeMigrationStaging(path: string | undefined, parent: string): void {
+	if (!path) return;
+	rmSync(path, { recursive: true, force: false });
+	fsyncDirectory(parent, "manifest-parent-fsync", undefined);
+}
+
+function removeMigrationStagingBestEffort(path: string | undefined, parent: string): void {
+	try {
+		removeMigrationStaging(path, parent);
+	} catch {
+		// The original migration error is authoritative. A recognized staging
+		// residue is handled deterministically by the next exclusive migration.
 	}
 }
 
 function copyTreeWithoutManifest(source: string, destination: string, hooks: V6FaultHooks | undefined): void {
 	for (const name of readdirSync(source)) {
-		if (name === V6_MANIFEST_FILE) continue;
+		if (name === V6_MANIFEST_FILE || name === V6_LOCKS_DIR) continue;
 		const sourcePath = join(source, name);
 		const destinationPath = join(destination, name);
 		if (statSync(sourcePath).isDirectory()) {
