@@ -356,6 +356,20 @@ describe("WorkerManager", () => {
 		expect(manager.tailLog(first.id).archived).toBe(true);
 	});
 
+	it("does not archive the prior batch when backend resolution rejects the next spawn", async () => {
+		const first = await manager.spawn({ role: "scout", tier: "expert", task: "a" });
+		transports[0].finish({ ok: true, summary: "found it" });
+		await manager.waitFor([first.id], 5000);
+		class FailingConfig extends NetaConfig {
+			resolve(): never {
+				throw new Error("backend resolution failed");
+			}
+		}
+		manager.configure({ cwd: process.cwd(), agentDir: "/nonexistent-agent-dir", config: new FailingConfig() });
+		await expect(manager.spawn({ role: "scout", tier: "expert", task: "b" })).rejects.toThrow(/backend resolution failed/);
+		expect(manager.tailLog(first.id).archived).toBe(false);
+	});
+
 	it("leaves a batch alone while any of it is still running", async () => {
 		const first = await manager.spawn({ role: "scout", tier: "expert", task: "a" });
 

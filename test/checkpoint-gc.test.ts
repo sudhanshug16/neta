@@ -7,6 +7,7 @@ import { emptySessionCheckpoint } from "../src/checkpoint.ts";
 import {
 	readV6Checkpoint,
 	readV6Manifest,
+	readV6WorkerRef,
 	reclaimV6StoreOffline,
 	v6ManifestPath,
 	writeV6Checkpoint,
@@ -144,5 +145,120 @@ describe("v6 offline reclamation", () => {
 		expect(result.deletedFiles).toBe(0);
 		expect(readFileSync(orphanPath, "utf8")).toBe("race orphan\n");
 		expect(readFileSync(v6ManifestPath(store), "utf8")).toContain(manifest.checksum);
+	});
+
+	it("does not block resume or erase unrelated evidence when optional terminal detail is missing or corrupt", () => {
+		const store = join(root(), "store");
+		writeV6Checkpoint(
+			{
+				...fixture("optional"),
+				workers: [
+					{
+						...fixture("optional").workers[0],
+						id: "terminal",
+						state: "done" as const,
+						endedAt: 3,
+						finalResult: "complete",
+						log: [{ at: 3, kind: "progress" as const, text: "terminal evidence" }],
+					},
+				],
+			},
+			store,
+		);
+		const reference = readV6WorkerRef(store, "terminal");
+		const segment = reference?.terminalDetailSegments[0];
+		if (!segment) throw new Error("terminal optional segment fixture missing");
+		const segmentPath = segment.path
+			? join(store, "segments", segment.path)
+			: join(store, "segments", "terminal", "terminal-0.json");
+		unlinkSync(segmentPath);
+		const orphanPath = join(store, "blobs", `${hash("unrelated\n")}.json`);
+		writeFileSync(orphanPath, "unrelated\n");
+		const result = reclaimV6StoreOffline(store, proof);
+		expect(result.status).toBe("deleted");
+		expect(() => readFileSync(orphanPath)).toThrow();
+		expect(readV6Checkpoint(store).warnings).toHaveLength(1);
+		expect(readV6Checkpoint(store).checkpoint.id).toBe("optional");
+
+		const corruptStore = join(root(), "corrupt");
+		writeV6Checkpoint(
+			{
+				...fixture("corrupt-optional"),
+				workers: [
+					{
+						...fixture("corrupt-optional").workers[0],
+						id: "terminal",
+						state: "done" as const,
+						endedAt: 3,
+						finalResult: "complete",
+						log: [{ at: 3, kind: "progress" as const, text: "terminal evidence" }],
+					},
+				],
+			},
+			corruptStore,
+		);
+		const corruptReference = readV6WorkerRef(corruptStore, "terminal");
+		const corruptSegment = corruptReference?.terminalDetailSegments[0];
+		if (!corruptSegment) throw new Error("corrupt optional segment fixture missing");
+		const corruptPath = corruptSegment.path
+			? join(corruptStore, "segments", corruptSegment.path)
+			: join(corruptStore, "segments", "terminal", "terminal-0.json");
+		writeFileSync(corruptPath, "corrupt\n");
+		const corruptResult = reclaimV6StoreOffline(corruptStore, proof);
+		expect(corruptResult.status).toBe("deleted");
+		expect(readFileSync(corruptPath, "utf8")).toBe("corrupt\n");
+		expect(readV6Checkpoint(corruptStore).terminalDetailCorrupt).toBe(true);
+	});
+
+	it("recovers crashed maintenance, never steals a live owner, and respects replacement claims", () => {
+		const store = join(root(), "stale");
+		writeV6Checkpoint(fixture("stale"), store);
+		mkdirSync(join(store, "locks", "maintenance"), { recursive: true });
+		writeFileSync(
+			join(store, "locks", "maintenance", "owner.json"),
+			JSON.stringify({ pid: 4242, startedAt: "dead-start" }),
+		);
+		const staleOrphan = join(store, "blobs", `${hash("stale orphan\n")}.json`);
+		writeFileSync(staleOrphan, "stale orphan\n");
+		expect(
+			reclaimV6StoreOffline(store, proof, {
+				processIsAlive: () => false,
+				processStartTime: () => undefined,
+			}).status,
+		).toBe("deleted");
+		expect(() => readFileSync(staleOrphan)).toThrow();
+
+		const liveStore = join(root(), "live");
+		writeV6Checkpoint(fixture("live"), liveStore);
+		mkdirSync(join(liveStore, "locks", "maintenance"), { recursive: true });
+		writeFileSync(
+			join(liveStore, "locks", "maintenance", "owner.json"),
+			JSON.stringify({ pid: 4242, startedAt: "live-start" }),
+		);
+		const liveOrphan = join(liveStore, "blobs", `${hash("live orphan\n")}.json`);
+		writeFileSync(liveOrphan, "live orphan\n");
+		const live = reclaimV6StoreOffline(liveStore, proof, {
+			processIsAlive: () => true,
+			processStartTime: () => "live-start",
+		});
+		expect(live.status).toBe("skipped");
+		expect(readFileSync(liveOrphan, "utf8")).toBe("live orphan\n");
+
+		const replacementStore = join(root(), "replacement");
+		writeV6Checkpoint(fixture("replacement"), replacementStore);
+		mkdirSync(join(replacementStore, "locks", "maintenance"), { recursive: true });
+		mkdirSync(join(replacementStore, "locks", "maintenance-reclaim"));
+		writeFileSync(
+			join(replacementStore, "locks", "maintenance", "owner.json"),
+			JSON.stringify({ pid: 4242, startedAt: "dead-start" }),
+		);
+		const replacementOrphan = join(replacementStore, "blobs", `${hash("replacement orphan\n")}.json`);
+		writeFileSync(replacementOrphan, "replacement orphan\n");
+		const guarded = reclaimV6StoreOffline(replacementStore, proof, {
+			processIsAlive: () => false,
+			processStartTime: () => undefined,
+		});
+		expect(guarded.status).toBe("skipped");
+		expect(readFileSync(replacementOrphan, "utf8")).toBe("replacement orphan\n");
 	});
 });

@@ -21,12 +21,13 @@ import {
 	rmSync,
 	statSync,
 	unlinkSync,
+	writeFileSync,
 	writeSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
 import type { CheckpointWorker, HydratableCheckpoint, SessionCheckpoint } from "./checkpoint.ts";
 import { readCheckpoint, validateCheckpoint } from "./checkpoint.ts";
-import { isSessionLeaseAlive } from "./session.ts";
+import { isSessionLeaseAlive, processStartTime } from "./session.ts";
 import { isTerminalState, type WorkerState } from "./types.ts";
 
 export const CHECKPOINT_STORE_FORMAT_VERSION = 6 as const;
@@ -80,6 +81,15 @@ export interface V6TerminalSummary {
 	activeStartedAt?: number;
 	queuedStartedAt?: number;
 	stateBeforeStop?: "starting" | "running" | "waiting" | "queued";
+	/** Optional identity and ownership fields needed for safe attach/revival. */
+	cwd?: string;
+	vendorSessionId?: string;
+	model?: string;
+	modelId?: string;
+	mode?: string;
+	agentInfo?: string;
+	nativeAttached?: boolean;
+	archived?: boolean;
 }
 
 export interface V6TerminalIndexEntry {
@@ -329,6 +339,14 @@ function validateSummary(value: unknown, path: string): V6TerminalSummary {
 			"activeStartedAt",
 			"queuedStartedAt",
 			"stateBeforeStop",
+			"cwd",
+			"vendorSessionId",
+			"model",
+			"modelId",
+			"mode",
+			"agentInfo",
+			"nativeAttached",
+			"archived",
 		],
 		path,
 	);
@@ -354,6 +372,12 @@ function validateSummary(value: unknown, path: string): V6TerminalSummary {
 		}
 	}
 	if (summary.stateBeforeStop !== undefined) string(summary.stateBeforeStop, `${path}.stateBeforeStop`);
+	for (const key of ["cwd", "vendorSessionId", "model", "modelId", "mode", "agentInfo"] as const)
+		if (summary[key] !== undefined) string(summary[key], `${path}.${key}`);
+	if (summary.nativeAttached !== undefined && typeof summary.nativeAttached !== "boolean")
+		throw new CheckpointStoreError(`Corrupt v6 ${path}.nativeAttached: expected a boolean.`);
+	if (summary.archived !== undefined && typeof summary.archived !== "boolean")
+		throw new CheckpointStoreError(`Corrupt v6 ${path}.archived: expected a boolean.`);
 	return summary as unknown as V6TerminalSummary;
 }
 
@@ -448,6 +472,9 @@ export function v6ManifestPath(storePath: string): string {
 const V6_LOCKS_DIR = "locks";
 const V6_READERS_DIR = "readers";
 const V6_MAINTENANCE_DIR = "maintenance";
+const V6_MAINTENANCE_RECLAIM_DIR = "maintenance-reclaim";
+const V6_STALE_MAINTENANCE_MS = 5_000;
+const LOCAL_PROCESS_START = `${Math.floor(Date.now() - process.uptime() * 1_000)}`;
 
 function v6ReadersPath(storePath: string): string {
 	return join(storePath, V6_LOCKS_DIR, V6_READERS_DIR);
@@ -455,6 +482,14 @@ function v6ReadersPath(storePath: string): string {
 
 function v6MaintenancePath(storePath: string): string {
 	return join(storePath, V6_LOCKS_DIR, V6_MAINTENANCE_DIR);
+}
+
+function v6MaintenanceReclaimPath(storePath: string): string {
+	return join(storePath, V6_LOCKS_DIR, V6_MAINTENANCE_RECLAIM_DIR);
+}
+
+function v6MaintenanceOwnerPath(storePath: string): string {
+	return join(v6MaintenancePath(storePath), "owner.json");
 }
 
 function withV6ReadLock<T>(storePath: string, read: () => T): T {
@@ -685,6 +720,16 @@ function terminalSummary(worker: CheckpointWorker): V6TerminalSummary {
 		activeStartedAt: worker.activeStartedAt,
 		queuedStartedAt: worker.queuedStartedAt,
 		stateBeforeStop: worker.stateBeforeStop,
+		cwd: worker.cwd,
+		vendorSessionId: worker.vendorSessionId,
+		model: clipped(worker.model),
+		modelId: worker.modelId,
+		mode: clipped(worker.mode),
+		agentInfo: clipped(worker.agentInfo),
+		nativeAttached: worker.nativeAttached,
+		// Explicit false is the new format; summaryWorker defaults omitted old
+		// markers to false for archived-marker compatibility.
+		archived: worker.archived ?? false,
 	};
 }
 
@@ -1057,6 +1102,14 @@ function summaryWorker(summary: V6TerminalSummary): CheckpointWorker {
 		logCursor: 0,
 		pendingBrief: [],
 		stateBeforeStop: summary.stateBeforeStop,
+		cwd: summary.cwd,
+		vendorSessionId: summary.vendorSessionId,
+		model: summary.model,
+		modelId: summary.modelId,
+		mode: summary.mode,
+		agentInfo: summary.agentInfo,
+		nativeAttached: summary.nativeAttached,
+		archived: summary.archived ?? false,
 	};
 }
 
@@ -1171,6 +1224,9 @@ export interface V6OfflineOwnershipProof {
 export interface V6GcOptions {
 	/** Test seam for a manifest-change race immediately before deletion. */
 	beforeDelete?: () => void;
+	/** Test seams for process-identity ownership races. */
+	processIsAlive?: (pid: number) => boolean;
+	processStartTime?: (pid: number) => string | undefined;
 }
 
 export interface V6GcResult {
@@ -1236,6 +1292,29 @@ function gcValidateSegment(
 	return path;
 }
 
+function gcMarkOptionalSegment(
+	storePath: string,
+	workerId: string,
+	segment: V6DetailSegmentRef,
+	terminal: boolean,
+	marked: Set<string>,
+): void {
+	const path = segmentFile(storePath, workerId, segment, terminal);
+	try {
+		marked.add(gcValidateSegment(storePath, workerId, segment, terminal));
+	} catch {
+		// Terminal detail is optional in normal reads. Preserve an existing regular
+		// artifact even when corrupt so GC cannot erase evidence a later diagnostic
+		// may need; a missing optional segment is simply not reachable on disk.
+		try {
+			gcRegularFile(path, `optional detail segment ${workerId}/${segment.sequence}`);
+			marked.add(path);
+		} catch (error) {
+			if (existsSync(path)) throw error;
+		}
+	}
+}
+
 function gcValidateBlob(storePath: string, ref: V6BlobRef, workerId: string): string {
 	const path = blobPath(storePath, ref.sha256);
 	object(parseJson(gcVerifiedBytes(path, ref.sha256, `${ref.kind} blob ${workerId}`), path), `${ref.kind} blob`);
@@ -1253,8 +1332,10 @@ function gcValidateReferences(storePath: string, manifest: V6Manifest): Set<stri
 		marked.add(gcValidateBlob(storePath, reference.active, reference.id));
 		for (const segment of reference.detailSegments)
 			marked.add(gcValidateSegment(storePath, reference.id, segment, false));
-		for (const segment of reference.terminalDetailSegments)
-			marked.add(gcValidateSegment(storePath, reference.id, segment, true));
+		for (const segment of reference.terminalDetailSegments) {
+			if (segment.optional) gcMarkOptionalSegment(storePath, reference.id, segment, true, marked);
+			else marked.add(gcValidateSegment(storePath, reference.id, segment, true));
+		}
 		if (terminal) {
 			if (!reference.terminal || !reference.outcome)
 				throw new CheckpointStoreError(`v6 GC found incomplete terminal refs for ${reference.id}.`);
@@ -1327,6 +1408,158 @@ function gcScanSegments(path: string): { files: string[]; bytes: number } {
 	return { files, bytes };
 }
 
+interface V6MaintenanceOwner {
+	pid: number;
+	startedAt: string;
+}
+
+function gcProcessIsAlive(pid: number, override?: (pid: number) => boolean): boolean {
+	if (override) return override(pid);
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
+function gcProcessStartTime(pid: number, override?: (pid: number) => string | undefined): string | undefined {
+	return override?.(pid) ?? processStartTime(pid) ?? (pid === process.pid ? LOCAL_PROCESS_START : undefined);
+}
+
+function gcDirectory(path: string): boolean {
+	try {
+		return lstatSync(path).isDirectory();
+	} catch {
+		return false;
+	}
+}
+
+function gcPathPresent(path: string): boolean {
+	try {
+		lstatSync(path);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code !== "ENOENT" ? true : false;
+	}
+}
+
+function readMaintenanceOwner(storePath: string): { owner?: V6MaintenanceOwner; present: boolean } {
+	try {
+		const stat = lstatSync(v6MaintenanceOwnerPath(storePath));
+		if (!stat.isFile()) return { present: true };
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return { present: false };
+		return { present: true };
+	}
+	let bytes: string;
+	try {
+		bytes = readFileSync(v6MaintenanceOwnerPath(storePath), "utf8");
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return { present: false };
+		return { present: true };
+	}
+	try {
+		const parsed = JSON.parse(bytes) as { pid?: unknown; startedAt?: unknown };
+		if (!Number.isInteger(parsed.pid) || (parsed.pid as number) <= 1 || typeof parsed.startedAt !== "string")
+			return { present: true };
+		return { present: true, owner: { pid: parsed.pid as number, startedAt: parsed.startedAt } };
+	} catch {
+		return { present: true };
+	}
+}
+
+/**
+ * Claim maintenance, recovering only a provably stale owner. The separate
+ * reclaim directory closes the replacement race: while it exists, another
+ * caller cannot remove and recreate the maintenance directory underneath a
+ * stale-owner check.
+ */
+function claimV6Maintenance(storePath: string, options: V6GcOptions): boolean {
+	const locks = join(storePath, V6_LOCKS_DIR);
+	try {
+		mkdirSync(locks, { recursive: true, mode: 0o700 });
+		mkdirSync(v6ReadersPath(storePath), { recursive: true, mode: 0o700 });
+	} catch {
+		return false;
+	}
+	if (!gcDirectory(locks) || !gcDirectory(v6ReadersPath(storePath)) || gcPathPresent(v6MaintenanceReclaimPath(storePath)))
+		return false;
+	try {
+		mkdirSync(v6MaintenancePath(storePath), { recursive: false, mode: 0o700 });
+		if (!gcDirectory(v6MaintenancePath(storePath))) return false;
+		const startedAt = gcProcessStartTime(process.pid, options.processStartTime);
+		if (!startedAt) {
+			rmSync(v6MaintenancePath(storePath), { recursive: true, force: true });
+			return false;
+		}
+		writeFileSync(
+			v6MaintenanceOwnerPath(storePath),
+			JSON.stringify({ pid: process.pid, startedAt }),
+			{ encoding: "utf8", mode: 0o600 },
+		);
+		return true;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "EEXIST") return false;
+	}
+
+	let reclaimClaimed = false;
+	try {
+		mkdirSync(v6MaintenanceReclaimPath(storePath), { recursive: false, mode: 0o700 });
+		if (!gcDirectory(v6MaintenanceReclaimPath(storePath))) return false;
+		reclaimClaimed = true;
+	} catch {
+		return false;
+	}
+	try {
+		const ownerRecord = readMaintenanceOwner(storePath);
+		if (ownerRecord.present) {
+			if (!ownerRecord.owner) return false;
+			const owner = ownerRecord.owner;
+			const actualStartedAt = gcProcessStartTime(owner.pid, options.processStartTime);
+			const liveMatchingOwner =
+				gcProcessIsAlive(owner.pid, options.processIsAlive) &&
+				actualStartedAt !== undefined &&
+				actualStartedAt === owner.startedAt;
+			if (liveMatchingOwner) return false;
+			// A live process with an unavailable or different identity is ambiguous;
+			// never steal it merely because signal 0 says otherwise.
+			if (gcProcessIsAlive(owner.pid, options.processIsAlive) && actualStartedAt === undefined) return false;
+			if (gcProcessIsAlive(owner.pid, options.processIsAlive) && actualStartedAt === owner.startedAt) return false;
+		} else {
+			let ageMs: number;
+			try {
+				ageMs = Date.now() - lstatSync(v6MaintenancePath(storePath)).mtimeMs;
+			} catch {
+				return false;
+			}
+			// A crash before owner.json was written is recoverable only after the
+			// bounded startup window; malformed metadata remains ambiguous.
+			if (ageMs < V6_STALE_MAINTENANCE_MS) return false;
+		}
+		rmSync(v6MaintenancePath(storePath), { recursive: true, force: true });
+		mkdirSync(v6MaintenancePath(storePath), { recursive: false, mode: 0o700 });
+		if (!gcDirectory(v6MaintenancePath(storePath))) return false;
+		const startedAt = gcProcessStartTime(process.pid, options.processStartTime);
+		if (!startedAt) {
+			rmSync(v6MaintenancePath(storePath), { recursive: true, force: true });
+			return false;
+		}
+		writeFileSync(
+			v6MaintenanceOwnerPath(storePath),
+			JSON.stringify({ pid: process.pid, startedAt }),
+			{ encoding: "utf8", mode: 0o600 },
+		);
+		return true;
+	} finally {
+		if (reclaimClaimed) rmSync(v6MaintenanceReclaimPath(storePath), { recursive: true, force: true });
+	}
+}
+
+function releaseV6Maintenance(storePath: string): void {
+	rmSync(v6MaintenancePath(storePath), { recursive: true, force: true });
+}
+
 function gcScanLocks(storePath: string): void {
 	const locksPath = join(storePath, V6_LOCKS_DIR);
 	let entries: Dirent[];
@@ -1336,7 +1569,11 @@ function gcScanLocks(storePath: string): void {
 		throw new CheckpointStoreError("v6 GC could not scan coordination locks.");
 	}
 	for (const entry of entries) {
-		if (entry.isSymbolicLink() || !entry.isDirectory() || ![V6_READERS_DIR, V6_MAINTENANCE_DIR].includes(entry.name))
+		if (
+			entry.isSymbolicLink() ||
+			!entry.isDirectory() ||
+			![V6_READERS_DIR, V6_MAINTENANCE_DIR, V6_MAINTENANCE_RECLAIM_DIR].includes(entry.name)
+		)
 			throw new CheckpointStoreError("v6 GC found an unexpected coordination entry.");
 	}
 	const readersPath = v6ReadersPath(storePath);
@@ -1346,9 +1583,20 @@ function gcScanLocks(storePath: string): void {
 	} catch {
 		throw new CheckpointStoreError("v6 GC could not scan reader coordination.");
 	}
-	for (const reader of readers)
+	for (const reader of readers) {
 		if (reader.isSymbolicLink() || !reader.isDirectory())
 			throw new CheckpointStoreError("v6 GC found an unexpected reader coordination entry.");
+		}
+	if (existsSync(v6MaintenanceReclaimPath(storePath))) {
+		let reclaimEntries: Dirent[];
+		try {
+			reclaimEntries = readdirSync(v6MaintenanceReclaimPath(storePath), { withFileTypes: true });
+		} catch {
+			throw new CheckpointStoreError("v6 GC could not scan maintenance reclamation coordination.");
+		}
+		if (reclaimEntries.length > 0)
+			throw new CheckpointStoreError("v6 GC found an unexpected maintenance reclamation entry.");
+	}
 }
 
 function gcScanArtifacts(storePath: string): { files: string[]; bytes: number } {
@@ -1409,14 +1657,8 @@ export function reclaimV6StoreOffline(
 	)
 		return gcResult("skipped", "offline ownership, process-death, or shutdown proof is absent", startedAt, empty);
 	if (!existsSync(v6ManifestPath(storePath))) return gcResult("skipped", "no published v6 manifest", startedAt, empty);
-	const maintenance = v6MaintenancePath(storePath);
-	try {
-		mkdirSync(join(storePath, V6_LOCKS_DIR), { recursive: true, mode: 0o700 });
-		mkdirSync(v6ReadersPath(storePath), { recursive: true, mode: 0o700 });
-		mkdirSync(maintenance, { recursive: false, mode: 0o700 });
-	} catch {
+	if (!claimV6Maintenance(storePath, options))
 		return gcResult("skipped", "exclusive maintenance ownership is unavailable", startedAt, empty);
-	}
 	try {
 		let readers: string[];
 		try {
@@ -1461,7 +1703,7 @@ export function reclaimV6StoreOffline(
 	} catch (error) {
 		return gcResult("failed", error instanceof Error ? error.message : String(error), startedAt, counts);
 	} finally {
-		rmSync(maintenance, { recursive: true, force: true });
+		releaseV6Maintenance(storePath);
 	}
 }
 

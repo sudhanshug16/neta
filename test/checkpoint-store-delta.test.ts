@@ -1,8 +1,9 @@
+import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type CheckpointWorker, emptySessionCheckpoint } from "../src/checkpoint.ts";
+import { CheckpointWriter, type CheckpointWorker, emptySessionCheckpoint } from "../src/checkpoint.ts";
 import {
 	readV6CheckpointMetadata,
 	readV6Manifest,
@@ -12,6 +13,7 @@ import {
 	v6ManifestPath,
 	writeV6Checkpoint,
 	writeV6CheckpointDelta,
+	v6CheckpointStorePath,
 } from "../src/checkpoint-store.ts";
 
 function worker(id: string, state: CheckpointWorker["state"] = "running", payload = "small"): CheckpointWorker {
@@ -174,5 +176,80 @@ describe("v6 delta checkpoint store", () => {
 		const bucketHash = manifest.terminalIndexShards.find((hash) => hash !== firstHash) ?? firstHash;
 		writeFileSync(join(store, "shards", `${bucketHash}.json`), "corrupt");
 		expect(() => readV6CheckpointMetadata(store)).toThrow(/terminal shard/);
+	});
+
+	it("merges deferred workers, preserves them across structural updates, and flushes shutdown writes", async () => {
+		const root = temp();
+		const store = v6CheckpointStorePath("merge", root);
+		const source = checkpoint("merge", []);
+		writeV6Checkpoint(source, store);
+		const writer = new CheckpointWriter(root, () => {}, undefined, "v6");
+		const first = worker("ro1");
+		const second = worker("ro2");
+		writer.scheduleDeferredDelta(() => ({ id: "merge", lane: "worker", workers: [{ worker: first, terminal: false }] }));
+		writer.scheduleDeferredDelta(() => ({ id: "merge", lane: "worker", workers: [{ worker: second, terminal: false }] }));
+		const { workers: _workers, ...state } = { ...source, updatedAt: 9 };
+		writer.scheduleDelta({ id: "merge", lane: "structural", state, workers: [] });
+		await writer.dispose();
+		const persisted = readV6CheckpointMetadata(store).checkpoint;
+		expect(persisted.workers.map((item) => item.id).sort()).toEqual(["ro1", "ro2"]);
+
+		const latest = { ...first, task: "latest", updatedAt: 10 };
+		writer.scheduleDeferredDelta(() => ({ id: "merge", lane: "worker", workers: [{ worker: first, terminal: false }] }));
+		writer.scheduleDelta({ id: "merge", lane: "worker", workers: [{ worker: latest, terminal: false }] });
+		await writer.flush();
+		expect(readV6CheckpointMetadata(store).checkpoint.workers.find((item) => item.id === "ro1")?.task).toBe("latest");
+	});
+
+	it("round-trips archived terminal markers and treats an omitted old marker as false", () => {
+		const root = temp();
+		const store = join(root, "store");
+		const terminal = worker("terminal", "done");
+		writeV6Checkpoint(checkpoint("archive", [terminal]), store);
+		expect(readV6CheckpointMetadata(store).checkpoint.workers[0]?.archived).toBe(false);
+		const canonical = (value: unknown) => `${JSON.stringify(value)}\n`;
+		const digest = (value: unknown) => createHash("sha256").update(canonical(value)).digest("hex");
+		const manifest = readV6Manifest(store);
+		const bucket = manifest.terminalIndexShards.findIndex((shardHash) => {
+			const shard = JSON.parse(readFileSync(join(store, "shards", `${shardHash}.json`), "utf8")) as {
+				entries: Array<{ id: string }>;
+			};
+			return shard.entries.some((entry) => entry.id === "terminal");
+		});
+		if (bucket < 0) throw new Error("archived terminal shard fixture missing");
+		const oldShardHash = manifest.terminalIndexShards[bucket];
+		if (!oldShardHash) throw new Error("archived terminal shard hash missing");
+		const oldShard = JSON.parse(readFileSync(join(store, "shards", `${oldShardHash}.json`), "utf8")) as {
+			formatVersion: 6;
+			bucket: number;
+			entries: Array<{ id: string; ref: unknown; summary: Record<string, unknown> }>;
+		};
+		const unsignedShard = {
+			formatVersion: 6 as const,
+			bucket,
+			entries: oldShard.entries.map((entry) => {
+				const { archived: _archived, ...summary } = entry.summary;
+				return { ...entry, summary };
+			}),
+		};
+		const oldShardBytes = { ...unsignedShard, checksum: digest(unsignedShard) };
+		const oldCompatibleHash = digest(oldShardBytes);
+		writeFileSync(join(store, "shards", `${oldCompatibleHash}.json`), canonical(oldShardBytes));
+		const terminalIndexShards = [...manifest.terminalIndexShards];
+		terminalIndexShards[bucket] = oldCompatibleHash;
+		const unsignedManifest = {
+			formatVersion: 6 as const,
+			id: manifest.id,
+			state: manifest.state,
+			activeWorkers: manifest.activeWorkers,
+			terminalIndexShards,
+		};
+		writeFileSync(v6ManifestPath(store), canonical({ ...unsignedManifest, checksum: digest(unsignedManifest) }));
+		expect(readV6CheckpointMetadata(store).checkpoint.workers[0]?.archived).toBe(false);
+		writeV6CheckpointDelta(
+			{ id: "archive", lane: "worker", workers: [{ worker: { ...terminal, archived: true }, terminal: true }] },
+			store,
+		);
+		expect(readV6CheckpointMetadata(store).checkpoint.workers[0]?.archived).toBe(true);
 	});
 });

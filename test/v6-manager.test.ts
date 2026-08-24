@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CheckpointWriter, emptySessionCheckpoint } from "../src/checkpoint.ts";
 import {
+	readV6Checkpoint,
 	readV6CheckpointMetadata,
 	readV6Manifest,
 	type V6ReadCounters,
@@ -117,6 +118,16 @@ describe("v6 manager integration", () => {
 		const inspection = manager.inspect(summary.id);
 		expect(inspection.entries.map((entry) => entry.text)).toContain("durable terminal detail");
 		expect((counters.detailReads ?? 0) > detailReadsBeforeStatus).toBe(true);
+		const next = await manager.spawn({ role: "scout", tier: "expert", task: "next" });
+		await manager.flushCheckpoint();
+		expect(
+			readV6CheckpointMetadata(storePath).checkpoint.workers.find((item) => item.id === summary.id)?.archived,
+		).toBe(true);
+		expect(
+			readV6Checkpoint(storePath).checkpoint.workers.find((item) => item.id === summary.id)?.finalResult,
+		).toBe("exact terminal result");
+		driver?.finish({ ok: true, summary: "next result" });
+		await manager.wait([next.id], 1_000);
 		await manager.dispose();
 	});
 
@@ -305,5 +316,106 @@ describe("v6 manager integration", () => {
 		);
 		expect(manager.get("ro1").state).toBe("interrupted");
 		expect(transports).toHaveLength(0);
+	});
+
+	it("hydrates terminal identity for exact revival and preserves native ownership", async () => {
+		const root = mkdtempSync(join(tmpdir(), "neta-v6-terminal-identity-"));
+		roots.push(root);
+		const agentDir = join(root, "agent");
+		const storePath = v6CheckpointStorePath("identity", agentDir);
+		const terminal = {
+			id: "ro1",
+			name: "worker",
+			role: "scout",
+			tier: "expert" as const,
+			backend: "claude",
+			writer: false,
+			task: "original",
+			cwd: process.cwd(),
+			state: "done" as const,
+			startedAt: 1,
+			updatedAt: 2,
+			endedAt: 2,
+			finalResult: "done",
+			vendorSessionId: "vendor-original",
+			modelId: "model-original",
+			model: "model-original",
+			nativeAttached: false,
+			log: [],
+			logFirstIndex: 0,
+			logCursor: 0,
+			pendingBrief: [],
+		};
+		writeV6Checkpoint({ ...checkpoint("identity"), workers: [terminal] }, storePath);
+		const hydrated = readV6CheckpointMetadata(storePath).checkpoint as Parameters<typeof WorkerManager.hydrate>[1];
+		const resumedDrivers: Driver[] = [];
+		const manager = WorkerManager.hydrate(
+			{
+				cwd: process.cwd(),
+				agentDir,
+				config: fixtureBackendConfig(),
+				channelAddress: join(root, "channel.sock"),
+				onEvent: () => {},
+				checkpoint: { id: "identity", leaderBackend: "fake", writer: new CheckpointWriter(agentDir, () => {}, undefined, "v6") },
+				checkpointStorePath: storePath,
+				createTransport: (options) => {
+					const driver = new Driver(options);
+					resumedDrivers.push(driver);
+					return driver;
+				},
+			},
+			hydrated,
+		);
+		await manager.steer("ro1", "continue");
+		expect(resumedDrivers[0]?.options.resumeSessionId).toBe("vendor-original");
+		expect(resumedDrivers[0]?.options.model).toBe("model-original");
+		resumedDrivers[0]?.finish({ ok: true, summary: "resumed" });
+		await manager.wait(["ro1"], 1_000);
+		await manager.dispose();
+
+		const ownedStorePath = v6CheckpointStorePath("owned", agentDir);
+		writeV6Checkpoint(
+			{ ...checkpoint("owned"), workers: [{ ...terminal, id: "ro2", nativeAttached: false }] },
+			ownedStorePath,
+		);
+		const attachManager = WorkerManager.hydrate(
+			{
+				cwd: process.cwd(),
+				agentDir,
+				config: fixtureBackendConfig(),
+				channelAddress: join(root, "attach.channel.sock"),
+				onEvent: () => {},
+				checkpoint: { id: "owned", leaderBackend: "fake", writer: new CheckpointWriter(agentDir, () => {}, undefined, "v6") },
+				checkpointStorePath: ownedStorePath,
+				panes: {
+					open: () => ({ opened: true }),
+					openRoom: () => ({ opened: true }),
+					attach: () => ({ opened: true }),
+				},
+			},
+			readV6CheckpointMetadata(ownedStorePath).checkpoint as Parameters<typeof WorkerManager.hydrate>[1],
+		);
+		await attachManager.reopenWorkerTui("ro2");
+		await attachManager.flushCheckpoint();
+		expect(readV6CheckpointMetadata(ownedStorePath).checkpoint.workers[0]?.nativeAttached).toBe(true);
+		await attachManager.dispose();
+		const owned = WorkerManager.hydrate(
+			{
+				cwd: process.cwd(),
+				agentDir,
+				config: fixtureBackendConfig(),
+				channelAddress: join(root, "owned.channel.sock"),
+				onEvent: () => {},
+				checkpoint: {
+					id: "owned",
+					leaderBackend: "fake",
+					writer: new CheckpointWriter(agentDir, () => {}, undefined, "v6"),
+				},
+				checkpointStorePath: ownedStorePath,
+			},
+			readV6CheckpointMetadata(ownedStorePath).checkpoint as Parameters<typeof WorkerManager.hydrate>[1],
+		);
+		await expect(owned.reopenWorkerTui("ro2")).rejects.toThrow(/native client/);
+		await owned.dispose();
 	});
 });

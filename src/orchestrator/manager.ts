@@ -510,6 +510,8 @@ export class WorkerManager implements ChannelHandler {
 	private readonly tiers: Tier[];
 	private goal: SessionGoal | undefined;
 	private readonly terminalRefs = new Map<string, V6WorkerRef>();
+	/** Native clients opened by this manager; hydrated ownership is deliberately not local proof. */
+	private readonly nativeAttachmentsOpened = new Set<string>();
 
 	constructor(options: WorkerManagerOptions) {
 		this.options = options;
@@ -746,25 +748,24 @@ export class WorkerManager implements ChannelHandler {
 		const checkpoint = this.options.checkpoint;
 		if (!checkpoint) throw new Error("This manager has no durable checkpoint configured.");
 		if (record) record.updatedAt = Date.now();
-		const persistedTerminal = record?.terminalSummary !== undefined && isTerminalState(record.state);
+		const includeEvictedTerminalOutcome = record?.terminalSummary !== undefined && isTerminalState(record.state);
+		if (includeEvictedTerminalOutcome) this.loadTerminalOutcome(record);
+		const worker = record
+			? { worker: this.checkpointWorkerSnapshot(record, includeEvictedTerminalOutcome), terminal: isTerminalState(record.state) }
+			: undefined;
+		if (includeEvictedTerminalOutcome) this.releaseTerminalOutcome(record);
 		if (lane === "worker") {
 			return {
 				id: checkpoint.id,
 				lane,
-				workers:
-					record && !persistedTerminal
-						? [{ worker: this.checkpointWorkerSnapshot(record), terminal: isTerminalState(record.state) }]
-						: [],
+				workers: worker ? [worker] : [],
 			};
 		}
 		return {
 			id: checkpoint.id,
 			lane,
 			state: this.checkpointStateSnapshot(),
-			workers:
-				record && !persistedTerminal
-					? [{ worker: this.checkpointWorkerSnapshot(record), terminal: isTerminalState(record.state) }]
-					: [],
+			workers: worker ? [worker] : [],
 		};
 	}
 
@@ -803,7 +804,7 @@ export class WorkerManager implements ChannelHandler {
 		};
 	}
 
-	private checkpointWorkerSnapshot(record: WorkerRecord): CheckpointWorker {
+	private checkpointWorkerSnapshot(record: WorkerRecord, includeTerminalOutcome = false): CheckpointWorker {
 		const terminalSummary = record.terminalSummary;
 		const terminal = terminalSummary !== undefined;
 		return {
@@ -825,14 +826,14 @@ export class WorkerManager implements ChannelHandler {
 			queuedMs: record.queuedMs,
 			activeStartedAt: record.activeStartedAt,
 			queuedStartedAt: record.queuedStartedAt,
-			finalResult: terminal ? undefined : record.result,
-			substantiveResponse: terminal ? undefined : record.substantiveResponse,
-			lastResponse: terminal ? undefined : record.lastResponse,
-			laterFailure: terminal ? undefined : record.laterFailure,
-			log: terminal ? [] : record.log.map((entry) => ({ ...entry })),
+			finalResult: terminal && !includeTerminalOutcome ? undefined : record.result,
+			substantiveResponse: terminal && !includeTerminalOutcome ? undefined : record.substantiveResponse,
+			lastResponse: terminal && !includeTerminalOutcome ? undefined : record.lastResponse,
+			laterFailure: terminal && !includeTerminalOutcome ? undefined : record.laterFailure,
+			log: terminal && !includeTerminalOutcome ? [] : record.log.map((entry) => ({ ...entry })),
 			logFirstIndex: record.logFirstIndex,
 			logCursor: record.logCursor,
-			pendingQuestion: terminal ? undefined : record.pendingQuestion,
+			pendingQuestion: terminal && !includeTerminalOutcome ? undefined : record.pendingQuestion,
 			lastProgress: record.lastProgress ? { ...record.lastProgress } : undefined,
 			usage: record.usage ? { ...record.usage } : undefined,
 			vendorSessionId: record.vendorSessionId,
@@ -1135,20 +1136,6 @@ export class WorkerManager implements ChannelHandler {
 		if (!roleText) {
 			throw new Error(`Unknown role "${request.role}". Available roles: ${roleNames().join(", ")}.`);
 		}
-		// Starting a batch while the last one is finished means the last one has
-		// been read, or never will be: let those views close so a long session
-		// does not bury the leader in the tabs of workers that ended an hour ago.
-		const existing = [...this.workers.values()];
-		if (existing.length > 0 && existing.every((record) => isTerminalState(record.state))) {
-			for (const record of existing) {
-				record.archived = true;
-				record.updatedAt = Date.now();
-			}
-			// Room views close with the batch they belonged to; a room joined again
-			// later gets a fresh pane.
-			this.roomPanesOpened.clear();
-		}
-
 		const backendName = this.computeBackendAssignment(request, {
 			cursors: this.spreadCursors,
 			lastWriterBackend: this.lastWriterBackend,
@@ -1170,6 +1157,20 @@ export class WorkerManager implements ChannelHandler {
 				void this.dequeueNextWriter();
 			}
 			throw error;
+		}
+		// Archive only after assignment, backend policy, environment preparation,
+		// and scratch-directory startup validation all succeeded. Each terminal
+		// record is persisted as a worker delta even though its hot state is evicted.
+		const existing = [...this.workers.values()];
+		if (existing.length > 0 && existing.every((record) => isTerminalState(record.state))) {
+			for (const record of existing) {
+				record.archived = true;
+				record.updatedAt = Date.now();
+				this.checkpointChanged(record, "immediate", "worker");
+			}
+			// Room views close with the batch they belonged to; a room joined again
+			// later gets a fresh pane.
+			this.roomPanesOpened.clear();
 		}
 		const shouldQueue = writer && this.activeWriter !== id;
 		if (writer && !this.activeWriter) this.activeWriter = id;
@@ -1797,6 +1798,11 @@ export class WorkerManager implements ChannelHandler {
 				`Worker ${workerId} is still active (${record.state}); refusing to open a second client on the same session.`,
 			);
 		}
+		if (record.nativeAttached && !this.nativeAttachmentsOpened.has(workerId)) {
+			throw new Error(
+				`Worker ${workerId} was opened in a native client; exclusive ownership of its session cannot be proven. Close it and delegate a fresh worker.`,
+			);
+		}
 		const summary = this.summarize(record);
 		// A worker with no tab is exactly the case a reader most needs a way into,
 		// so none of these refusals is a dead end: each one names what still works
@@ -1824,6 +1830,7 @@ export class WorkerManager implements ChannelHandler {
 			);
 		}
 		record.nativeAttached = true;
+		this.nativeAttachmentsOpened.add(workerId);
 		this.checkpointChanged(record, "immediate", "worker");
 		return summary;
 	}
