@@ -22,18 +22,24 @@ import {
 	rmSync,
 	statSync,
 	unlinkSync,
-	writeFileSync,
 	writeSync,
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import type { CheckpointWorker, HydratableCheckpoint, SessionCheckpoint } from "./checkpoint.ts";
 import { readCheckpoint, validateCheckpoint } from "./checkpoint.ts";
 import {
+	assertOwnedDirectoryHeld,
+	inspectOwnedDirectory,
+	type OwnedDirectoryLease,
+	reclaimOwnedDirectory,
+	releaseOwnedDirectory,
+	tryAcquireOwnedDirectory,
+} from "./ownership.ts";
+import {
 	assertCheckpointClaimHeld,
 	type CheckpointClaim,
 	isSessionLeaseAlive,
 	MAX_CANONICAL_SESSION_ID_LENGTH,
-	processStartTime,
 } from "./session.ts";
 import { isTerminalState, type WorkerState } from "./types.ts";
 
@@ -542,8 +548,6 @@ export function v6StorePresence(storePath: string): "absent" | "published" {
 const V6_LOCKS_DIR = "locks";
 const V6_READERS_DIR = "readers";
 const V6_MAINTENANCE_DIR = "maintenance";
-const V6_MAINTENANCE_RECLAIM_DIR = "maintenance-reclaim";
-const LOCAL_PROCESS_START = `${Math.floor(Date.now() - process.uptime() * 1_000)}`;
 
 function v6ReadersPath(storePath: string): string {
 	return join(storePath, V6_LOCKS_DIR, V6_READERS_DIR);
@@ -553,22 +557,12 @@ function v6MaintenancePath(storePath: string): string {
 	return join(storePath, V6_LOCKS_DIR, V6_MAINTENANCE_DIR);
 }
 
-function v6MaintenanceReclaimPath(storePath: string): string {
-	return join(storePath, V6_LOCKS_DIR, V6_MAINTENANCE_RECLAIM_DIR);
-}
-
-function v6MaintenanceOwnerPath(storePath: string): string {
-	return join(v6MaintenancePath(storePath), "owner.json");
-}
-
 function withV6ReadLock<T>(storePath: string, read: () => T): T {
 	if (v6StorePresence(storePath) === "absent") return read();
 	const readers = v6ReadersPath(storePath);
-	mkdirSync(readers, { recursive: true, mode: 0o700 });
 	const tokenPath = join(readers, `${process.pid}-${randomBytes(8).toString("hex")}`);
-	try {
-		mkdirSync(tokenPath, { recursive: false, mode: 0o700 });
-	} catch {
+	const token = tryAcquireOwnedDirectory(tokenPath);
+	if (!token) {
 		throw new CheckpointStoreError(`Could not claim a v6 read slot for ${storePath}.`);
 	}
 	try {
@@ -576,13 +570,7 @@ function withV6ReadLock<T>(storePath: string, read: () => T): T {
 			throw new CheckpointStoreError(`v6 store maintenance is in progress for ${storePath}.`);
 		return read();
 	} finally {
-		try {
-			// This is one exact, process-owned reader token; stale tokens are safe
-			// because maintenance treats them as a reason to skip.
-			rmSync(tokenPath, { recursive: true, force: true });
-		} catch {
-			// A stale token makes future maintenance skip rather than race a reader.
-		}
+		releaseOwnedDirectory(token);
 	}
 }
 
@@ -1517,148 +1505,23 @@ function gcScanManifestTemp(path: string, name: string): { path: string; bytes: 
 	return { path, bytes: stat.size };
 }
 
-interface V6MaintenanceOwner {
-	pid: number;
-	startedAt: string;
-}
-
-function gcProcessIsAlive(pid: number, override?: (pid: number) => boolean): boolean {
-	if (override) return override(pid);
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		return (error as NodeJS.ErrnoException).code === "EPERM";
-	}
-}
-
-function gcProcessStartTime(pid: number, override?: (pid: number) => string | undefined): string | undefined {
-	return override?.(pid) ?? processStartTime(pid) ?? (pid === process.pid ? LOCAL_PROCESS_START : undefined);
-}
-
-function gcDirectory(path: string): boolean {
-	try {
-		return lstatSync(path).isDirectory();
-	} catch {
-		return false;
-	}
-}
-
-function gcPathPresent(path: string): boolean {
-	try {
-		lstatSync(path);
-		return true;
-	} catch (error) {
-		return (error as NodeJS.ErrnoException).code !== "ENOENT";
-	}
-}
-
-function readMaintenanceOwner(storePath: string): { owner?: V6MaintenanceOwner; present: boolean } {
-	try {
-		const stat = lstatSync(v6MaintenanceOwnerPath(storePath));
-		if (!stat.isFile()) return { present: true };
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return { present: false };
-		return { present: true };
-	}
-	let bytes: string;
-	try {
-		bytes = readFileSync(v6MaintenanceOwnerPath(storePath), "utf8");
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return { present: false };
-		return { present: true };
-	}
-	try {
-		const parsed = JSON.parse(bytes) as { pid?: unknown; startedAt?: unknown };
-		if (!Number.isInteger(parsed.pid) || (parsed.pid as number) <= 1 || typeof parsed.startedAt !== "string")
-			return { present: true };
-		return { present: true, owner: { pid: parsed.pid as number, startedAt: parsed.startedAt } };
-	} catch {
-		return { present: true };
-	}
-}
-
-/**
- * Claim maintenance, recovering only a provably stale owner. The separate
- * reclaim directory closes the replacement race: while it exists, another
- * caller cannot remove and recreate the maintenance directory underneath a
- * stale-owner check.
- */
-function claimV6Maintenance(storePath: string, options: V6GcOptions): boolean {
+/** Claim maintenance with the shared exact-entry ownership protocol. */
+function claimV6Maintenance(storePath: string, options: V6GcOptions): OwnedDirectoryLease | undefined {
 	const locks = join(storePath, V6_LOCKS_DIR);
 	try {
 		mkdirSync(locks, { recursive: true, mode: 0o700 });
 		mkdirSync(v6ReadersPath(storePath), { recursive: true, mode: 0o700 });
 	} catch {
-		return false;
+		return undefined;
 	}
-	if (
-		!gcDirectory(locks) ||
-		!gcDirectory(v6ReadersPath(storePath)) ||
-		gcPathPresent(v6MaintenanceReclaimPath(storePath))
-	)
-		return false;
-	try {
-		mkdirSync(v6MaintenancePath(storePath), { recursive: false, mode: 0o700 });
-		if (!gcDirectory(v6MaintenancePath(storePath))) return false;
-		const startedAt = gcProcessStartTime(process.pid, options.processStartTime);
-		if (!startedAt) {
-			rmSync(v6MaintenancePath(storePath), { recursive: true, force: true });
-			return false;
-		}
-		writeFileSync(v6MaintenanceOwnerPath(storePath), JSON.stringify({ pid: process.pid, startedAt }), {
-			encoding: "utf8",
-			mode: 0o600,
-		});
-		return true;
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== "EEXIST") return false;
-	}
-
-	let reclaimClaimed = false;
-	try {
-		mkdirSync(v6MaintenanceReclaimPath(storePath), { recursive: false, mode: 0o700 });
-		if (!gcDirectory(v6MaintenanceReclaimPath(storePath))) return false;
-		reclaimClaimed = true;
-	} catch {
-		return false;
-	}
-	try {
-		const ownerRecord = readMaintenanceOwner(storePath);
-		if (!ownerRecord.present || !ownerRecord.owner) return false;
-		const owner = ownerRecord.owner;
-		// Take the liveness observation once and treat every live PID as owned. A
-		// different or unavailable start identity is replacement-risk, not proof
-		// that this maintenance directory is abandoned.
-		if (gcProcessIsAlive(owner.pid, options.processIsAlive)) return false;
-		// Death alone is insufficient: without the recorded start identity we
-		// cannot prove this directory belonged to the dead process rather than a
-		// recycled PID or malformed residue.
-		const actualStartedAt = gcProcessStartTime(owner.pid, options.processStartTime);
-		if (actualStartedAt === undefined || actualStartedAt !== owner.startedAt) return false;
-		rmSync(v6MaintenancePath(storePath), { recursive: true, force: true });
-		mkdirSync(v6MaintenancePath(storePath), { recursive: false, mode: 0o700 });
-		if (!gcDirectory(v6MaintenancePath(storePath))) return false;
-		const startedAt = gcProcessStartTime(process.pid, options.processStartTime);
-		if (!startedAt) {
-			rmSync(v6MaintenancePath(storePath), { recursive: true, force: true });
-			return false;
-		}
-		writeFileSync(v6MaintenanceOwnerPath(storePath), JSON.stringify({ pid: process.pid, startedAt }), {
-			encoding: "utf8",
-			mode: 0o600,
-		});
-		return true;
-	} finally {
-		if (reclaimClaimed) rmSync(v6MaintenanceReclaimPath(storePath), { recursive: true, force: true });
-	}
+	return tryAcquireOwnedDirectory(v6MaintenancePath(storePath), {
+		processIsAlive: options.processIsAlive,
+		processStartTime: options.processStartTime,
+	});
 }
 
-function releaseV6Maintenance(storePath: string): void {
-	rmSync(v6MaintenancePath(storePath), { recursive: true, force: true });
-}
-
-function gcScanLocks(storePath: string): void {
+function gcScanLocks(storePath: string, options: V6GcOptions, maintenance: OwnedDirectoryLease): void {
+	assertOwnedDirectoryHeld(maintenance);
 	const locksPath = join(storePath, V6_LOCKS_DIR);
 	let entries: Dirent[];
 	try {
@@ -1667,11 +1530,7 @@ function gcScanLocks(storePath: string): void {
 		throw new CheckpointStoreError("v6 GC could not scan coordination locks.");
 	}
 	for (const entry of entries) {
-		if (
-			entry.isSymbolicLink() ||
-			!entry.isDirectory() ||
-			![V6_READERS_DIR, V6_MAINTENANCE_DIR, V6_MAINTENANCE_RECLAIM_DIR].includes(entry.name)
-		)
+		if (entry.isSymbolicLink() || !entry.isDirectory() || ![V6_READERS_DIR, V6_MAINTENANCE_DIR].includes(entry.name))
 			throw new CheckpointStoreError("v6 GC found an unexpected coordination entry.");
 	}
 	const readersPath = v6ReadersPath(storePath);
@@ -1682,22 +1541,22 @@ function gcScanLocks(storePath: string): void {
 		throw new CheckpointStoreError("v6 GC could not scan reader coordination.");
 	}
 	for (const reader of readers) {
+		const readerPath = join(readersPath, reader.name);
 		if (reader.isSymbolicLink() || !reader.isDirectory())
 			throw new CheckpointStoreError("v6 GC found an unexpected reader coordination entry.");
-	}
-	if (existsSync(v6MaintenanceReclaimPath(storePath))) {
-		let reclaimEntries: Dirent[];
-		try {
-			reclaimEntries = readdirSync(v6MaintenanceReclaimPath(storePath), { withFileTypes: true });
-		} catch {
-			throw new CheckpointStoreError("v6 GC could not scan maintenance reclamation coordination.");
-		}
-		if (reclaimEntries.length > 0)
-			throw new CheckpointStoreError("v6 GC found an unexpected maintenance reclamation entry.");
+		const inspected = inspectOwnedDirectory(readerPath);
+		if (inspected.state !== "owned" && inspected.state !== "legacy")
+			throw new CheckpointStoreError(`v6 GC found ambiguous reader coordination entry: ${reader.name}.`);
+		if (!reclaimOwnedDirectory(readerPath, options))
+			throw new CheckpointStoreError(`v6 GC found a live or ambiguous reader token: ${reader.name}.`);
 	}
 }
 
-function gcScanArtifacts(storePath: string): { files: string[]; bytes: number } {
+function gcScanArtifacts(
+	storePath: string,
+	options: V6GcOptions,
+	maintenance: OwnedDirectoryLease,
+): { files: string[]; bytes: number } {
 	try {
 		if (!lstatSync(storePath).isDirectory()) throw new CheckpointStoreError("v6 GC store root is not a directory.");
 	} catch (error) {
@@ -1731,7 +1590,7 @@ function gcScanArtifacts(storePath: string): { files: string[]; bytes: number } 
 	const blobs = gcScanDirectory(join(storePath, "blobs"), /^[a-f0-9]{64}\.json$/, "blobs");
 	const shards = gcScanDirectory(join(storePath, "shards"), /^[a-f0-9]{64}\.json$/, "shards");
 	const segments = gcScanSegments(join(storePath, "segments"));
-	gcScanLocks(storePath);
+	gcScanLocks(storePath, options, maintenance);
 	return {
 		files: [...blobs.files, ...shards.files, ...segments.files, ...manifestTemps.map((temp) => temp.path)],
 		bytes: blobs.bytes + shards.bytes + segments.bytes + manifestTemps.reduce((total, temp) => total + temp.bytes, 0),
@@ -1768,19 +1627,22 @@ export function reclaimV6StoreOffline(
 	)
 		return gcResult("skipped", "offline ownership, process-death, or shutdown proof is absent", startedAt, empty);
 	if (presence === "absent") return gcResult("skipped", "no published v6 manifest", startedAt, empty);
-	if (!claimV6Maintenance(storePath, options))
-		return gcResult("skipped", "exclusive maintenance ownership is unavailable", startedAt, empty);
+	const maintenance = claimV6Maintenance(storePath, options);
+	if (!maintenance) return gcResult("skipped", "exclusive maintenance ownership is unavailable", startedAt, empty);
 	try {
-		let readers: string[];
 		try {
-			readers = readdirSync(v6ReadersPath(storePath));
-		} catch {
-			return gcResult("skipped", "reader coordination scan was unreadable", startedAt, empty);
+			gcScanLocks(storePath, options, maintenance);
+		} catch (error) {
+			return gcResult(
+				"skipped",
+				error instanceof Error ? error.message : "reader coordination is ambiguous",
+				startedAt,
+				empty,
+			);
 		}
-		if (readers.length > 0) return gcResult("skipped", "a v6 reader is still active", startedAt, empty);
 		const manifest = readV6ManifestUnlocked(storePath);
 		const marked = gcValidateReferences(storePath, manifest);
-		const scan = gcScanArtifacts(storePath);
+		const scan = gcScanArtifacts(storePath, options, maintenance);
 		const candidates = scan.files.filter((path) => !marked.has(path));
 		const candidateBytes = candidates.reduce((total, path) => total + statSync(path).size, 0);
 		counts = {
@@ -1792,16 +1654,26 @@ export function reclaimV6StoreOffline(
 			deletedBytes: 0,
 		};
 		options.beforeDelete?.();
+		try {
+			assertOwnedDirectoryHeld(maintenance);
+		} catch {
+			return gcResult("skipped", "exclusive maintenance ownership changed before deletion", startedAt, counts);
+		}
 		if (readV6ManifestUnlocked(storePath).checksum !== manifest.checksum)
 			return gcResult("skipped", "manifest changed before deletion", startedAt, counts);
 		gcValidateReferences(storePath, manifest);
-		const rescan = gcScanArtifacts(storePath);
+		const rescan = gcScanArtifacts(storePath, options, maintenance);
 		if (
 			rescan.bytes !== scan.bytes ||
 			rescan.files.length !== scan.files.length ||
 			rescan.files.some((path) => !scan.files.includes(path))
 		)
 			return gcResult("skipped", "v6 store changed before deletion", startedAt, counts);
+		try {
+			assertOwnedDirectoryHeld(maintenance);
+		} catch {
+			return gcResult("skipped", "exclusive maintenance ownership changed before deletion", startedAt, counts);
+		}
 		for (const path of candidates) {
 			const size = statSync(path).size;
 			unlinkSync(path);
@@ -1814,7 +1686,10 @@ export function reclaimV6StoreOffline(
 	} catch (error) {
 		return gcResult("failed", error instanceof Error ? error.message : String(error), startedAt, counts);
 	} finally {
-		releaseV6Maintenance(storePath);
+		releaseOwnedDirectory(maintenance, {
+			processIsAlive: options.processIsAlive,
+			processStartTime: options.processStartTime,
+		});
 	}
 }
 
