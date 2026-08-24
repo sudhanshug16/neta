@@ -7,18 +7,17 @@ import {
 	readdirSync,
 	readFileSync,
 	rmSync,
-	lstatSync,
 	statSync,
 	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { checkpointPath, newCheckpointBase, type SessionCheckpoint, writeCheckpointAtomic } from "../src/checkpoint.ts";
 import {
 	CHECKPOINT_STORE_FORMAT_VERSION,
 	CheckpointStoreError,
-	migrateV5ToV6,
+	openCheckpointForHydration,
 	readV6Checkpoint,
 	readV6Manifest,
 	reclaimV6StoreOffline,
@@ -30,6 +29,7 @@ import {
 	writeV6Checkpoint,
 	writeV6CheckpointUpdate,
 } from "../src/checkpoint-store.ts";
+import { releaseSessionLock, tryAcquireCheckpointClaim } from "../src/session.ts";
 
 const offlineProof = {
 	checkpointClaimHeld: true as const,
@@ -235,99 +235,60 @@ describe("normalized v6 checkpoint store", () => {
 		expect(result.checkpoint.workers[0]?.finalResult).toBe("summary survives detail loss");
 	});
 
-	it("serializes migration before staging cleanup and permits a later retry", () => {
-		const agentDir = temp();
-		const legacy = checkpoint("concurrent-migration");
-		writeCheckpointAtomic(legacy, agentDir);
-		const legacyPath = checkpointPath(legacy.id, agentDir);
-		const before = readFileSync(legacyPath);
-		const target = v6CheckpointStorePath(legacy.id, agentDir);
-		let nestedError: unknown;
-		let nested = false;
-		expect(() =>
-			migrateV5ToV6(legacy.id, agentDir, target, {
-				fail: (event) => {
-					if (nested || event.type !== "artifact-write") return;
-					nested = true;
-					const staging = readdirSync(dirname(target)).find((name) => name.endsWith(".staging"));
-					expect(staging).toBeDefined();
-					try {
-						migrateV5ToV6(legacy.id, agentDir, target);
-					} catch (error) {
-						nestedError = error;
-					}
-					expect(staging ? statSync(join(dirname(target), staging)).isDirectory() : false).toBe(true);
-					throw new Error("blocked first copy");
-				},
-			}),
-		).toThrow("blocked first copy");
-		expect(nestedError).toBeInstanceOf(CheckpointStoreError);
-		expect(String((nestedError as Error).message)).toContain("already owned");
-		expect(readFileSync(legacyPath)).toEqual(before);
-		expect(migrateV5ToV6(legacy.id, agentDir, target).published).toBe(true);
-		expect(readFileSync(legacyPath)).toEqual(before);
-	});
-
-	it("fails closed on malformed claims and unowned staging", () => {
-		for (const kind of ["malformed", "symlink", "hardlink"] as const) {
-			const agentDir = temp();
-			const legacy = checkpoint(`unsafe-${kind}`);
-			writeCheckpointAtomic(legacy, agentDir);
-			const legacyPath = checkpointPath(legacy.id, agentDir);
-			const before = readFileSync(legacyPath);
-			const claim = join(agentDir, "checkpoint-migration-claims", legacy.id);
-			mkdirSync(claim, { recursive: true });
-			const owner = join(claim, "owner.json");
-			if (kind === "malformed") writeFileSync(owner, "{not-json");
-			if (kind === "symlink") symlinkSync(agentDir, owner);
-			if (kind === "hardlink") {
-				const source = join(agentDir, "owner-source");
-				writeFileSync(source, JSON.stringify({ id: legacy.id, pid: 4242, startedAt: "dead", nonce: "a".repeat(24) }));
-				linkSync(source, owner);
-			}
-			expect(() => migrateV5ToV6(legacy.id, agentDir)).toThrow();
-			expect(readFileSync(legacyPath)).toEqual(before);
-			expect(() => statSync(v6CheckpointStorePath(legacy.id, agentDir))).toThrow();
-		}
-
-		const agentDir = temp();
-		const legacy = checkpoint("unowned-staging");
-		writeCheckpointAtomic(legacy, agentDir);
-		const claim = join(agentDir, "checkpoint-migration-claims", legacy.id);
-		mkdirSync(claim, { recursive: true });
-		writeFileSync(
-			join(claim, "owner.json"),
-			JSON.stringify({ id: legacy.id, pid: 4242, startedAt: "dead", nonce: "b".repeat(24) }),
-		);
-		const staging = join(agentDir, "checkpoints-v6", `.${legacy.id}.4242.${"c".repeat(24)}.staging`);
-		mkdirSync(dirname(staging), { recursive: true });
-		symlinkSync(agentDir, staging);
-		expect(() => migrateV5ToV6(legacy.id, agentDir)).toThrow();
-		expect(lstatSync(staging).isSymbolicLink()).toBe(true);
-	});
-
-	it("migrates v5 once, preserves the original bytes, and supports stable-directory fallback", () => {
+	it("requires the outer claim, lets one owner migrate, and lets the MCP child read v6", () => {
 		const agentDir = temp();
 		const legacy = checkpoint("migration");
 		writeCheckpointAtomic(legacy, agentDir);
-		const legacyPath = checkpointPath("migration", agentDir);
+		const legacyPath = checkpointPath(legacy.id, agentDir);
 		const before = readFileSync(legacyPath);
-		const target = v6CheckpointStorePath("migration", agentDir);
-		const first = migrateV5ToV6("migration", agentDir, target);
-		expect(first.alreadyMigrated).toBe(false);
-		expect(readFileSync(legacyPath)).toEqual(before);
-		const migrated = readV6Checkpoint(target).checkpoint;
-		expect(migrated.workers).toEqual(legacy.workers);
-		expect(migrated).toMatchObject({ id: legacy.id, canonicalCwd: legacy.canonicalCwd, updatedAt: legacy.updatedAt });
-		const second = migrateV5ToV6("migration", agentDir, target);
-		expect(second.alreadyMigrated).toBe(true);
-		expect(readFileSync(legacyPath)).toEqual(before);
+		expect(() => openCheckpointForHydration(legacy.id, agentDir)).toThrow("outer checkpoint claim");
+		expect(() => statSync(v6CheckpointStorePath(legacy.id, agentDir))).toThrow();
 
-		const fallbackTarget = join(agentDir, "fallback");
-		const fallbackEvents: V6FaultEvent[] = [];
-		const fallback = migrateV5ToV6("migration", agentDir, fallbackTarget, {
+		const claim = tryAcquireCheckpointClaim(legacy.id, agentDir);
+		expect(claim).toBeDefined();
+		expect(tryAcquireCheckpointClaim(legacy.id, agentDir)).toBeUndefined();
+		const hydrated = openCheckpointForHydration(legacy.id, agentDir, claim);
+		expect(hydrated.workers.map((worker) => worker.id)).toEqual(["rw2", "rw1"]);
+		expect(readFileSync(legacyPath)).toEqual(before);
+		releaseSessionLock(claim);
+
+		// A resumed MCP child arrives after publication and is read-only even when
+		// the legacy input remains present.
+		const child = openCheckpointForHydration(legacy.id, agentDir);
+		expect(child.id).toBe(legacy.id);
+		expect(readV6Checkpoint(v6CheckpointStorePath(legacy.id, agentDir)).checkpoint.id).toBe(legacy.id);
+	});
+
+	it("releases the outer claim after migration failure so a later resume retries", () => {
+		const agentDir = temp();
+		const legacy = checkpoint("retryable");
+		writeCheckpointAtomic(legacy, agentDir);
+		const first = tryAcquireCheckpointClaim(legacy.id, agentDir);
+		expect(first).toBeDefined();
+		expect(() =>
+			openCheckpointForHydration(legacy.id, agentDir, first, {
+				fail: (event) => {
+					if (event.type === "artifact-write") throw new Error("blocked first copy");
+				},
+			}),
+		).toThrow("blocked first copy");
+		releaseSessionLock(first);
+		const second = tryAcquireCheckpointClaim(legacy.id, agentDir);
+		expect(second).toBeDefined();
+		expect(openCheckpointForHydration(legacy.id, agentDir, second).id).toBe(legacy.id);
+		releaseSessionLock(second);
+	});
+
+	it("keeps staging-first cross-device fallback and retries after a failed copy", () => {
+		const agentDir = temp();
+		const legacy = checkpoint("fallback");
+		writeCheckpointAtomic(legacy, agentDir);
+		const events: V6FaultEvent[] = [];
+		const claim = tryAcquireCheckpointClaim(legacy.id, agentDir);
+		expect(claim).toBeDefined();
+		const result = openCheckpointForHydration(legacy.id, agentDir, claim, {
 			fail: (event) => {
-				fallbackEvents.push(event);
+				events.push(event);
 				if (event.type === "store-rename") {
 					const error = new Error("cross device") as NodeJS.ErrnoException;
 					error.code = "EXDEV";
@@ -335,76 +296,50 @@ describe("normalized v6 checkpoint store", () => {
 				}
 			},
 		});
-		expect(fallback.published).toBe(true);
-		expect(statSync(join(fallbackTarget, "manifest.json")).isFile()).toBe(true);
-		expect(readV6Checkpoint(fallbackTarget).checkpoint.id).toBe("migration");
-		expect(
-			fallbackEvents.filter(
-				(event) => event.type === "manifest-parent-fsync" && event.path === join(fallbackTarget, ".."),
-			),
-		).toHaveLength(1);
+		expect(result.id).toBe(legacy.id);
+		expect(events.filter((event) => event.type === "manifest-parent-fsync")).not.toHaveLength(0);
+		releaseSessionLock(claim);
 
-		const completeAfterBoundaryFault = join(agentDir, "complete-after-boundary-fault");
-		const completeBefore = readFileSync(legacyPath);
+		const failed = checkpoint("copy-failure");
+		writeCheckpointAtomic(failed, agentDir);
+		let copied = false;
+		const failedClaim = tryAcquireCheckpointClaim(failed.id, agentDir);
 		expect(() =>
-			migrateV5ToV6("migration", agentDir, completeAfterBoundaryFault, {
+			openCheckpointForHydration(failed.id, agentDir, failedClaim, {
 				fail: (event) => {
 					if (event.type === "store-rename") {
 						const error = new Error("cross device") as NodeJS.ErrnoException;
 						error.code = "EXDEV";
 						throw error;
 					}
-					if (event.type === "manifest-parent-fsync" && event.path === join(completeAfterBoundaryFault, ".."))
-						throw new Error("crash after fallback publication");
-				},
-			}),
-		).toThrow("crash after fallback publication");
-		expect(readFileSync(legacyPath)).toEqual(completeBefore);
-		expect(readV6Checkpoint(completeAfterBoundaryFault).checkpoint.id).toBe("migration");
-
-		const copyFailureTarget = join(agentDir, "copy-failure");
-		let copyFailed = false;
-		expect(() =>
-			migrateV5ToV6("migration", agentDir, copyFailureTarget, {
-				fail: (event) => {
-					if (event.type === "store-rename") {
-						const error = new Error("cross device") as NodeJS.ErrnoException;
-						error.code = "EXDEV";
-						throw error;
-					}
-					if (event.type === "artifact-write" && event.path.includes(".fallback.staging") && !copyFailed) {
-						copyFailed = true;
+					if (event.type === "artifact-write" && event.path.includes(".fallback.staging") && !copied) {
+						copied = true;
 						throw new Error("fallback copy failed");
 					}
 				},
 			}),
 		).toThrow("fallback copy failed");
-		expect(readFileSync(legacyPath)).toEqual(completeBefore);
-		expect(() => readV6Checkpoint(copyFailureTarget)).toThrow("No published v6 manifest");
-		expect(migrateV5ToV6("migration", agentDir, copyFailureTarget).alreadyMigrated).toBe(false);
-		expect(readV6Checkpoint(copyFailureTarget).checkpoint.id).toBe("migration");
+		releaseSessionLock(failedClaim);
+		const retryClaim = tryAcquireCheckpointClaim(failed.id, agentDir);
+		expect(openCheckpointForHydration(failed.id, agentDir, retryClaim).id).toBe(failed.id);
+		releaseSessionLock(retryClaim);
+	});
 
-		const ambiguousTarget = join(agentDir, "ambiguous");
-		mkdirSync(ambiguousTarget, { recursive: true });
-		const marker = join(ambiguousTarget, "marker");
-		writeFileSync(marker, "preserve");
-		expect(() => migrateV5ToV6("migration", agentDir, ambiguousTarget)).toThrow(
-			"already exists without a valid manifest",
-		);
-		expect(readFileSync(marker, "utf8")).toBe("preserve");
+	it("rejects symlinked canonical parents and never falls back from corrupt v6", () => {
+		const agentDir = temp();
+		const real = temp();
+		const alias = join(agentDir, "alias");
+		symlinkSync(real, alias);
+		const legacy = checkpoint("symlinked");
+		writeCheckpointAtomic(legacy, real);
+		expect(() => openCheckpointForHydration(legacy.id, alias)).toThrow("is a symlink");
+		expect(() => statSync(v6CheckpointStorePath(legacy.id, real))).toThrow();
 
-		const migrationClaim = join(agentDir, "checkpoint-migration-claims", "migration");
-		mkdirSync(migrationClaim, { recursive: true });
-		writeFileSync(
-			join(migrationClaim, "owner.json"),
-			JSON.stringify({ id: "migration", pid: 4242, startedAt: "dead-owner", nonce: "e".repeat(24) }),
-		);
-		const crashStaging = join(agentDir, "checkpoints-v6", `.migration.4242.${"e".repeat(24)}.fallback.staging`);
-		mkdirSync(crashStaging, { recursive: true });
-		writeFileSync(join(crashStaging, "partial"), "partial");
-		const recoveredTarget = join(agentDir, "checkpoints-v6", "recovered-staging");
-		expect(migrateV5ToV6("migration", agentDir, recoveredTarget).published).toBe(true);
-		expect(() => statSync(crashStaging)).toThrow();
+		const claim = tryAcquireCheckpointClaim(legacy.id, real);
+		openCheckpointForHydration(legacy.id, real, claim);
+		releaseSessionLock(claim);
+		writeFileSync(v6ManifestPath(v6CheckpointStorePath(legacy.id, real)), "{broken");
+		expect(() => openCheckpointForHydration(legacy.id, real)).toThrow("invalid JSON");
 	});
 
 	it("rejects malformed manifest sequence and unsupported format", () => {

@@ -60,6 +60,16 @@ export interface SessionLock {
 	token: string;
 }
 
+/** Fail closed if a caller's ownership proof was replaced or released. */
+export function assertSessionLockHeld(lock: SessionLock): void {
+	try {
+		const owner = JSON.parse(readFileSync(lockOwnerPath(lock), "utf-8")) as { token?: unknown };
+		if (owner.token !== lock.token) throw new Error("ownership token changed");
+	} catch {
+		throw new Error(`Session lock is no longer held: ${lock.path}.`);
+	}
+}
+
 /** Identity captured when a detached ACP group is created, before crash recovery can ever reap it. */
 export interface SessionWorkerGroup {
 	pgid: number;

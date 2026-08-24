@@ -290,19 +290,20 @@ export async function launchLeader(options: LaunchOptions): Promise<number> {
 export async function resumeLeader(options: ResumeOptions): Promise<number> {
 	const agentDir = options.agentDir ?? getAgentDir();
 	const write = options.write ?? ((line: string) => process.stderr.write(`${line}\n`));
-	const checkpoint = openCheckpointForHydration(options.checkpointId, agentDir);
-	const cwd = requireCheckpointCwd(checkpoint);
-
-	// Two claims, because they answer different questions: the checkpoint claim
-	// stops a second `neta resume <id>`, and the directory lock stops a plain
-	// `neta` in the same directory from racing it.
-	const claim = tryAcquireCheckpointClaim(checkpoint.id, agentDir);
+	// Acquire the checkpoint claim before hydration. V5 migration is part of
+	// hydration and must be serialized before it can inspect or mutate storage.
+	const claim = tryAcquireCheckpointClaim(options.checkpointId, agentDir);
 	if (!claim) {
 		throw new LaunchError(
-			`Another \`${APP_NAME} resume ${checkpoint.id}\` is already running. Wait for it, or check \`${APP_NAME} sessions --all\`.`,
+			`Another \`${APP_NAME} resume ${options.checkpointId}\` is already running. Wait for it, or check \`${APP_NAME} sessions --all\`.`,
 		);
 	}
 	try {
+		const checkpoint = openCheckpointForHydration(options.checkpointId, agentDir, claim);
+		const cwd = requireCheckpointCwd(checkpoint);
+
+		// The checkpoint claim stops a second resume, and the directory lock stops
+		// a plain `neta` in the saved working directory from racing it.
 		const lock = tryAcquireSessionLock(cwd, agentDir);
 		if (!lock) {
 			throw new LaunchError(`Another Neta launch holds the lock for ${cwd}. Try again in a moment.`);
