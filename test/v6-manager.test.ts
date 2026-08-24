@@ -15,12 +15,14 @@ import {
 import { TERMINAL_HOT_STATE_MAX_BYTES, WorkerManager } from "../src/orchestrator/manager.ts";
 import type { PromptOutcome, TransportOptions, WorkerTransportDriver } from "../src/orchestrator/transport.ts";
 import type { WorkerEvent } from "../src/types.ts";
-import { fixtureBackendConfig } from "./helpers.ts";
+import { fixtureBackendConfig, waitFor } from "./helpers.ts";
 
 class Driver implements WorkerTransportDriver {
 	readonly options: TransportOptions;
 	started = false;
 	killed = false;
+	private startGate: Promise<void> | undefined;
+	private releaseStartGate: (() => void) | undefined;
 	private resolve: ((outcome: PromptOutcome) => void) | undefined;
 
 	constructor(options: TransportOptions) {
@@ -30,6 +32,17 @@ class Driver implements WorkerTransportDriver {
 	async start(): Promise<void> {
 		this.started = true;
 		this.options.events.vendorSession(`vendor-${this.options.workerId}`);
+		await this.startGate;
+	}
+
+	holdStart(): void {
+		this.startGate = new Promise<void>((resolve) => {
+			this.releaseStartGate = resolve;
+		});
+	}
+
+	releaseStart(): void {
+		this.releaseStartGate?.();
 	}
 
 	prompt(): Promise<PromptOutcome> {
@@ -189,6 +202,9 @@ describe("v6 manager integration", () => {
 		expect(drivers[1]?.killed).toBe(true);
 		expect(manager.tailLog(first.id).archived).toBe(false);
 		expect(manager.get("ro2").state).toBe("failed");
+		drivers[1]?.options.events.log("status", "later telemetry succeeds");
+		await writer.flush();
+		expect(writer.lastError).toBeUndefined();
 		const persisted = readV6CheckpointMetadata(storePath).checkpoint.workers;
 		expect(persisted.find((worker) => worker.id === first.id)?.archived).toBe(false);
 		expect(persisted.find((worker) => worker.id === "ro2")?.state).toBe("failed");
@@ -226,6 +242,212 @@ describe("v6 manager integration", () => {
 		const persisted = readV6CheckpointMetadata(storePath).checkpoint.workers;
 		expect(persisted.find((worker) => worker.id === first.id)?.archived).toBe(false);
 		expect(persisted.find((worker) => worker.id === "ro2")?.state).toBe("failed");
+		await manager.dispose();
+	});
+
+	it("publishes the archive for a queued writer through the same start path", async () => {
+		const root = mkdtempSync(join(tmpdir(), "neta-v6-queued-archive-"));
+		roots.push(root);
+		const agentDir = join(root, "agent");
+		const storePath = v6CheckpointStorePath("queued-archive", agentDir);
+		writeV6Checkpoint(checkpoint("queued-archive"), storePath);
+		const writer = new CheckpointWriter(agentDir, () => {}, undefined, "v6");
+		const drivers: Driver[] = [];
+		const manager = new WorkerManager({
+			cwd: process.cwd(),
+			agentDir,
+			config: fixtureBackendConfig(),
+			channelAddress: join(root, "channel.sock"),
+			onEvent: () => {},
+			checkpoint: { id: "queued-archive", leaderBackend: "codex", writer },
+			checkpointStorePath: storePath,
+			createTransport: (options) => {
+				const driver = new Driver(options);
+				drivers.push(driver);
+				return driver;
+			},
+		});
+		const first = await manager.spawn({ role: "worker", tier: "expert", task: "first", writer: true });
+		const queued = await manager.spawn({ role: "worker", tier: "expert", task: "queued", writer: true });
+		drivers[0]?.finish({ ok: true, summary: "first result" });
+		await manager.wait([first.id], 1_000);
+		await waitFor(() => manager.get(queued.id).state === "running");
+		await writer.flush();
+		expect(
+			readV6CheckpointMetadata(storePath).checkpoint.workers.find((item) => item.id === first.id)?.archived,
+		).toBe(true);
+		drivers[1]?.finish({ ok: true, summary: "queued result" });
+		await manager.wait([queued.id], 1_000);
+		await manager.dispose();
+	});
+
+	it("rolls back a queued writer archive failure and closes its transport", async () => {
+		const root = mkdtempSync(join(tmpdir(), "neta-v6-queued-archive-fault-"));
+		roots.push(root);
+		const agentDir = join(root, "agent");
+		const storePath = v6CheckpointStorePath("queued-archive-fault", agentDir);
+		writeV6Checkpoint(checkpoint("queued-archive-fault"), storePath);
+		let faultInjected = false;
+		const writer = new CheckpointWriter(agentDir, () => {}, undefined, "v6", {
+			fail: (event) => {
+				if (event.type !== "manifest-rename" || faultInjected) return;
+				const next = JSON.parse(readFileSync(event.from, "utf8")) as {
+					activeWorkers?: Array<{ id: string }>;
+					terminalIndexShards?: string[];
+				};
+				const archived = next.terminalIndexShards?.some((hash) => {
+					const shard = JSON.parse(readFileSync(join(storePath, "shards", `${hash}.json`), "utf8")) as {
+						entries?: Array<{ summary?: { id?: string; archived?: boolean } }>;
+					};
+					return shard.entries?.some((entry) => entry.summary?.id === "rw1" && entry.summary.archived === true);
+				});
+				if (next.activeWorkers?.some((worker) => worker.id === "rw2") && archived) {
+					faultInjected = true;
+					throw new Error("queued archive fault");
+				}
+			},
+		});
+		const drivers: Driver[] = [];
+		const manager = new WorkerManager({
+			cwd: process.cwd(),
+			agentDir,
+			config: fixtureBackendConfig(),
+			channelAddress: join(root, "channel.sock"),
+			onEvent: () => {},
+			checkpoint: { id: "queued-archive-fault", leaderBackend: "codex", writer },
+			checkpointStorePath: storePath,
+			createTransport: (options) => {
+				const driver = new Driver(options);
+				drivers.push(driver);
+				return driver;
+			},
+		});
+		const first = await manager.spawn({ role: "worker", tier: "expert", task: "first", writer: true });
+		const queued = await manager.spawn({ role: "worker", tier: "expert", task: "queued", writer: true });
+		drivers[0]?.finish({ ok: true, summary: "first result" });
+		await manager.wait([first.id], 1_000);
+		await waitFor(() => manager.get(queued.id).state === "failed");
+		expect(drivers[1]?.killed).toBe(true);
+		expect(
+			readV6CheckpointMetadata(storePath).checkpoint.workers.find((item) => item.id === first.id)?.archived,
+		).toBe(false);
+		await manager.dispose();
+	});
+
+	it("recomputes archive candidates after a worker finishes during transport startup", async () => {
+		const root = mkdtempSync(join(tmpdir(), "neta-v6-finish-startup-"));
+		roots.push(root);
+		const agentDir = join(root, "agent");
+		const storePath = v6CheckpointStorePath("finish-startup", agentDir);
+		writeV6Checkpoint(checkpoint("finish-startup"), storePath);
+		const writer = new CheckpointWriter(agentDir, () => {}, undefined, "v6");
+		const drivers: Driver[] = [];
+		const manager = new WorkerManager({
+			cwd: process.cwd(),
+			agentDir,
+			config: fixtureBackendConfig(),
+			channelAddress: join(root, "channel.sock"),
+			onEvent: () => {},
+			checkpoint: { id: "finish-startup", leaderBackend: "codex", writer },
+			checkpointStorePath: storePath,
+			createTransport: (options) => {
+				const driver = new Driver(options);
+				if (drivers.length === 1) driver.holdStart();
+				drivers.push(driver);
+				return driver;
+			},
+		});
+		const first = await manager.spawn({ role: "scout", tier: "expert", task: "first" });
+		const secondSpawn = manager.spawn({ role: "scout", tier: "expert", task: "second" });
+		await waitFor(() => drivers.length === 2);
+		drivers[0]?.finish({ ok: true, summary: "first result" });
+		await manager.wait([first.id], 1_000);
+		drivers[1]?.releaseStart();
+		await secondSpawn;
+		await writer.flush();
+		expect(
+			readV6CheckpointMetadata(storePath).checkpoint.workers.find((item) => item.id === first.id)?.archived,
+		).toBe(true);
+		drivers[1]?.finish({ ok: true, summary: "second result" });
+		await manager.wait(["ro2"], 1_000);
+		await manager.dispose();
+	});
+
+	it("does not archive a worker revived during transport startup", async () => {
+		const root = mkdtempSync(join(tmpdir(), "neta-v6-revive-startup-"));
+		roots.push(root);
+		const agentDir = join(root, "agent");
+		const storePath = v6CheckpointStorePath("revive-startup", agentDir);
+		writeV6Checkpoint(checkpoint("revive-startup"), storePath);
+		const writer = new CheckpointWriter(agentDir, () => {}, undefined, "v6");
+		const drivers: Driver[] = [];
+		const manager = new WorkerManager({
+			cwd: process.cwd(),
+			agentDir,
+			config: fixtureBackendConfig(),
+			channelAddress: join(root, "channel.sock"),
+			onEvent: () => {},
+			checkpoint: { id: "revive-startup", leaderBackend: "codex", writer },
+			checkpointStorePath: storePath,
+			createTransport: (options) => {
+				const driver = new Driver(options);
+				if (drivers.length === 1) driver.holdStart();
+				drivers.push(driver);
+				return driver;
+			},
+		});
+		const first = await manager.spawn({ role: "scout", tier: "expert", task: "first" });
+		drivers[0]?.finish({ ok: true, summary: "first result" });
+		await manager.wait([first.id], 1_000);
+		const secondSpawn = manager.spawn({ role: "scout", tier: "expert", task: "second" });
+		await waitFor(() => drivers.length === 2);
+		const revived = await manager.steer(first.id, "continue exact session");
+		expect(revived.worker.state).toBe("running");
+		drivers[1]?.releaseStart();
+		await secondSpawn;
+		await writer.flush();
+		expect(
+			readV6CheckpointMetadata(storePath).checkpoint.workers.find((item) => item.id === first.id)?.archived,
+		).toBe(false);
+		drivers[2]?.finish({ ok: true, summary: "revived result" });
+		drivers[1]?.finish({ ok: true, summary: "second result" });
+		await manager.wait([first.id, "ro2"], 1_000);
+		await manager.dispose();
+	});
+
+	it("wakes terminal waiters when a deferred checkpoint factory throws", async () => {
+		const root = mkdtempSync(join(tmpdir(), "neta-v6-terminal-factory-"));
+		roots.push(root);
+		const agentDir = join(root, "agent");
+		const storePath = v6CheckpointStorePath("terminal-factory", agentDir);
+		writeV6Checkpoint(checkpoint("terminal-factory"), storePath);
+		const writer = new CheckpointWriter(agentDir, () => {}, undefined, "v6");
+		const drivers: Driver[] = [];
+		const manager = new WorkerManager({
+			cwd: process.cwd(),
+			agentDir,
+			config: fixtureBackendConfig(),
+			channelAddress: join(root, "channel.sock"),
+			onEvent: () => {},
+			checkpoint: { id: "terminal-factory", leaderBackend: "codex", writer },
+			checkpointStorePath: storePath,
+			createTransport: (options) => {
+				const driver = new Driver(options);
+				drivers.push(driver);
+				return driver;
+			},
+		});
+		const worker = await manager.spawn({ role: "scout", tier: "expert", task: "finish" });
+		const bad = writer.scheduleDeferredDelta(() => {
+			throw new Error("terminal deferred factory fault");
+		}, "terminal-factory");
+		drivers[0]?.finish({ ok: true, summary: "terminal result" });
+		await manager.wait([worker.id], 1_000);
+		expect(manager.get(worker.id).state).toBe("done");
+		await expect(bad).rejects.toThrow("terminal deferred factory fault");
+		const valid = writer.scheduleDelta({ id: "terminal-factory", lane: "worker", workers: [] });
+		await valid;
+		await writer.flush();
 		await manager.dispose();
 	});
 

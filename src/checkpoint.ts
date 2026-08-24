@@ -792,7 +792,14 @@ export const CHECKPOINT_HARD_DEADLINE_MS = 1_000;
 
 type CheckpointSnapshotFactory = () => SessionCheckpoint;
 type CheckpointDeltaFactory = () => V6CheckpointDelta;
-type PendingDelta = { sequence: number; factory: CheckpointDeltaFactory; checkpointId?: string };
+
+interface WriteTicket {
+	promise: Promise<void>;
+	resolve: () => void;
+	reject: (error: Error) => void;
+}
+
+type PendingDelta = { sequence: number; factory: CheckpointDeltaFactory; checkpointId?: string; ticket: WriteTicket };
 
 export interface CheckpointWriterTimers {
 	setTimeout(callback: () => void, delayMs: number): unknown;
@@ -807,8 +814,10 @@ const REAL_CHECKPOINT_TIMERS: CheckpointWriterTimers = {
 /** Serialized, coalesced writes. Errors are reported but never escape into live orchestration. */
 export class CheckpointWriter {
 	private pendingImmediate: SessionCheckpoint | undefined;
+	private pendingImmediateTicket: WriteTicket | undefined;
 	private pendingDeferred: CheckpointSnapshotFactory | undefined;
 	private pendingDeferredId: string | undefined;
+	private pendingDeferredTicket: WriteTicket | undefined;
 	private pendingDeltas: PendingDelta[] = [];
 	private deltaSequence = 0;
 	private writing: Promise<void> | undefined;
@@ -844,25 +853,55 @@ export class CheckpointWriter {
 		return this.format === "v6";
 	}
 
-	schedule(checkpoint: SessionCheckpoint): void {
+	private ticket(): WriteTicket {
+		let resolve!: () => void;
+		let reject!: (error: Error) => void;
+		const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+			resolve = resolvePromise;
+			reject = rejectPromise;
+		});
+		// Most callers intentionally schedule best-effort telemetry without awaiting
+		// it. Marking the returned promise handled keeps a failed telemetry write
+		// from becoming an unhandled rejection while callers that need durability
+		// can still await the same promise.
+		void promise.catch(() => {});
+		return { promise, resolve, reject };
+	}
+
+	private superseded(ticket: WriteTicket | undefined): void {
+		ticket?.reject(new Error("Checkpoint write was superseded before it could be saved."));
+	}
+
+	schedule(checkpoint: SessionCheckpoint): Promise<void> {
 		this.cancelDeferredTimers();
+		this.superseded(this.pendingDeferredTicket);
 		this.pendingDeferred = undefined;
 		this.pendingDeferredId = undefined;
+		this.pendingDeferredTicket = undefined;
+		this.superseded(this.pendingImmediateTicket);
+		const ticket = this.ticket();
 		this.pendingImmediate = structuredClone(checkpoint);
+		this.pendingImmediateTicket = ticket;
 		this.start();
+		return ticket.promise;
 	}
 
 	/** Queue a bounded v6 delta. Worker deltas are merged by id before persistence. */
-	scheduleDelta(delta: V6CheckpointDelta): void {
+	scheduleDelta(delta: V6CheckpointDelta): Promise<void> {
 		this.cancelDeferredTimers();
-		this.pendingDeltas.push({ sequence: ++this.deltaSequence, factory: () => delta, checkpointId: delta.id });
+		const ticket = this.ticket();
+		this.pendingDeltas.push({ sequence: ++this.deltaSequence, factory: () => delta, checkpointId: delta.id, ticket });
 		this.start();
+		return ticket.promise;
 	}
 
 	/** Queue telemetry without materializing the manager's large checkpoint yet. */
-	scheduleDeferred(snapshot: CheckpointSnapshotFactory, checkpointId?: string): void {
+	scheduleDeferred(snapshot: CheckpointSnapshotFactory, checkpointId?: string): Promise<void> {
+		this.superseded(this.pendingDeferredTicket);
+		const ticket = this.ticket();
 		this.pendingDeferred = snapshot;
 		this.pendingDeferredId = checkpointId;
+		this.pendingDeferredTicket = ticket;
 		if (this.deferredTimer !== undefined) this.timers.clearTimeout(this.deferredTimer);
 		this.deferredTimer = this.timers.setTimeout(() => {
 			this.deferredTimer = undefined;
@@ -878,11 +917,13 @@ export class CheckpointWriter {
 				this.start();
 			}, CHECKPOINT_HARD_DEADLINE_MS);
 		}
+		return ticket.promise;
 	}
 
 	/** Queue a bounded v6 delta factory under the same 100ms/1s coalescing rules. */
-	scheduleDeferredDelta(delta: CheckpointDeltaFactory, checkpointId?: string): void {
-		this.pendingDeltas.push({ sequence: ++this.deltaSequence, factory: delta, checkpointId });
+	scheduleDeferredDelta(delta: CheckpointDeltaFactory, checkpointId?: string): Promise<void> {
+		const ticket = this.ticket();
+		this.pendingDeltas.push({ sequence: ++this.deltaSequence, factory: delta, checkpointId, ticket });
 		if (this.deferredTimer !== undefined) this.timers.clearTimeout(this.deferredTimer);
 		this.deferredTimer = this.timers.setTimeout(() => {
 			this.deferredTimer = undefined;
@@ -898,6 +939,7 @@ export class CheckpointWriter {
 				this.start();
 			}, CHECKPOINT_HARD_DEADLINE_MS);
 		}
+		return ticket.promise;
 	}
 
 	private cancelDeferredTimers(): void {
@@ -911,25 +953,26 @@ export class CheckpointWriter {
 		if (this.writing) return;
 		this.writing = Promise.resolve()
 			.then(() => {
-				while (
-					this.pendingImmediate ||
-					this.pendingDeferred ||
-					this.pendingDeltas.length > 0
-				) {
+				while (this.pendingImmediate || this.pendingDeferred || this.pendingDeltas.length > 0) {
 					const immediate = this.pendingImmediate;
 					this.pendingImmediate = undefined;
+					const immediateTicket = this.pendingImmediateTicket;
+					this.pendingImmediateTicket = undefined;
 					const deferred = this.pendingDeferred;
 					this.pendingDeferred = undefined;
+					const deferredTicket = this.pendingDeferredTicket;
+					this.pendingDeferredTicket = undefined;
 					const deltas = this.pendingDeltas.splice(0).sort((left, right) => left.sequence - right.sequence);
+					const tickets = [
+						...(immediateTicket ? [immediateTicket] : []),
+						...(deferredTicket ? [deferredTicket] : []),
+						...deltas.map((pending) => pending.ticket),
+					];
 					let mergedDelta: V6CheckpointDelta | undefined;
-					for (const pending of deltas) mergedDelta = mergeCheckpointDeltas(mergedDelta, pending.factory());
-					const checkpointId =
-						immediate?.id ??
-						this.pendingDeferredId ??
-						deltas.at(-1)?.checkpointId ??
-						"unknown";
+					const checkpointId = immediate?.id ?? this.pendingDeferredId ?? deltas.at(-1)?.checkpointId ?? "unknown";
 					this.pendingDeferredId = undefined;
 					try {
+						for (const pending of deltas) mergedDelta = mergeCheckpointDeltas(mergedDelta, pending.factory());
 						const checkpoint = immediate ?? deferred?.();
 						const delta = mergedDelta;
 						if (!checkpoint && !delta) continue;
@@ -943,27 +986,23 @@ export class CheckpointWriter {
 							writeCheckpointAtomic(checkpoint, this.agentDir);
 						}
 						this.lastError = undefined;
+						for (const ticket of tickets) ticket.resolve();
 					} catch (error) {
 						this.lastError = error instanceof Error ? error : new Error(String(error));
 						this.report(`checkpoint ${checkpointId} was not saved: ${this.lastError.message}`);
+						for (const ticket of tickets) ticket.reject(this.lastError);
 					}
 				}
 			})
 			.finally(() => {
 				this.writing = undefined;
-				if (this.pendingImmediate || this.pendingDeferred || this.pendingDeltas.length > 0)
-					this.start();
+				if (this.pendingImmediate || this.pendingDeferred || this.pendingDeltas.length > 0) this.start();
 			});
 	}
 
 	async flush(): Promise<void> {
 		this.cancelDeferredTimers();
-		while (
-			this.writing ||
-			this.pendingImmediate ||
-			this.pendingDeferred ||
-			this.pendingDeltas.length > 0
-		) {
+		while (this.writing || this.pendingImmediate || this.pendingDeferred || this.pendingDeltas.length > 0) {
 			this.start();
 			const writing = this.writing;
 			if (writing) await writing;
@@ -992,8 +1031,13 @@ export class CheckpointWriter {
 		// out of order.
 		this.cancelDeferredTimers();
 		this.pendingImmediate = undefined;
+		this.superseded(this.pendingImmediateTicket);
+		this.pendingImmediateTicket = undefined;
 		this.pendingDeferred = undefined;
+		this.superseded(this.pendingDeferredTicket);
 		this.pendingDeferredId = undefined;
+		this.pendingDeferredTicket = undefined;
+		for (const pending of this.pendingDeltas) this.superseded(pending.ticket);
 		this.pendingDeltas = [];
 		await this.writing;
 		if (this.format === "v6") throw new Error("v6 checkpoint writers require writeDurableDelta.");

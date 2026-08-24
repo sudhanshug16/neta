@@ -241,6 +241,33 @@ describe("v6 delta checkpoint store", () => {
 		expect(readV6CheckpointMetadata(store).checkpoint.workers.find((item) => item.id === "ro1")?.task).toBe("latest");
 	});
 
+	it("captures a throwing deferred factory on its ticket and continues with the next valid write", async () => {
+		const root = temp();
+		const store = v6CheckpointStorePath("factory", root);
+		const source = checkpoint("factory", []);
+		writeV6Checkpoint(source, store);
+		const reports: string[] = [];
+		const writer = new CheckpointWriter(root, (message) => reports.push(message), undefined, "v6");
+		const failed = writer.scheduleDeferredDelta(() => {
+			throw new Error("deferred factory fault");
+		}, "factory");
+
+		await expect(failed).rejects.toThrow("deferred factory fault");
+		await expect(writer.flush()).resolves.toBeUndefined();
+		expect(writer.lastError?.message).toBe("deferred factory fault");
+		expect(reports).toEqual(["checkpoint factory was not saved: deferred factory fault"]);
+
+		const next = worker("ro1");
+		const { workers: _workers, ...state } = { ...source, updatedAt: 2 };
+		await writer.scheduleDelta({
+			id: "factory",
+			lane: "structural",
+			state,
+			workers: [{ worker: next, terminal: false }],
+		});
+		expect(readV6CheckpointMetadata(store).checkpoint.workers.map((item) => item.id)).toEqual(["ro1"]);
+	});
+
 	it("round-trips archived terminal markers and treats an omitted old marker as false", () => {
 		const root = temp();
 		const store = join(root, "store");

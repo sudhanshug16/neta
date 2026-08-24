@@ -174,6 +174,8 @@ interface WorkerRecord {
 	lastResponse?: string;
 	/** A turn that failed after this worker had already reported; never replaces the report. */
 	laterFailure?: string;
+	/** Startup generation used to reject a stale async transport commit. */
+	startGeneration?: number;
 	scratchDir?: string;
 	/** Capability token for this worker's channel requests. */
 	channelToken?: string;
@@ -514,6 +516,9 @@ export class WorkerManager implements ChannelHandler {
 	private readonly terminalRefs = new Map<string, V6WorkerRef>();
 	/** Native clients opened by this manager; hydrated ownership is deliberately not local proof. */
 	private readonly nativeAttachmentsOpened = new Set<string>();
+	/** Serializes the archive linearization point without blocking transport startup. */
+	private archiveCommit: Promise<void> = Promise.resolve();
+	private startGeneration = 0;
 
 	constructor(options: WorkerManagerOptions) {
 		this.options = options;
@@ -1173,13 +1178,6 @@ export class WorkerManager implements ChannelHandler {
 			}
 			throw error;
 		}
-		// Archive only after transport startup and every remaining setup step have
-		// succeeded. Until then the prior terminal batch stays exactly as it was.
-		const priorTerminalWorkers = [...this.workers.values()];
-		const archiveBatch =
-			priorTerminalWorkers.length > 0 && priorTerminalWorkers.every((record) => isTerminalState(record.state))
-				? priorTerminalWorkers
-				: [];
 		const shouldQueue = writer && this.activeWriter !== id;
 		if (writer && !this.activeWriter) this.activeWriter = id;
 		const recordNow = this.now();
@@ -1267,89 +1265,127 @@ export class WorkerManager implements ChannelHandler {
 			this.roomDebaterBackends.set(request.room, roomBackends);
 		}
 
-		try {
-			record.driver = this.createWorkerTransport(record, backend, runtimeEnv, systemPrompt);
-			await record.driver.start();
-			this.setState(record, "running");
-			if (writer) this.notifyReadOnlyWorkers(record, "started");
-			const activeWriter = this.activeWriter ? this.workers.get(this.activeWriter) : undefined;
-			const writerContext = writer
-				? undefined
-				: formatWriterContext(
-						activeWriter ? this.summarize(activeWriter) : undefined,
-						this.writerQueue.flatMap((workerId) => {
-							const queued = this.workers.get(workerId);
-							return queued ? [this.summarize(queued)] : [];
-						}),
-					);
-			const goalContext = this.goalPromptContext();
-			const assignedTask = goalContext
-				? `${goalContext}\n\n---\n\n# Assigned task\n\n${request.task}`
-				: request.task;
-			const task = writerContext ? `${writerContext}\n\n---\n\n${assignedTask}` : assignedTask;
-			const firstPrompt = this.withPendingBrief(record, task);
-			this.enqueue(record, firstPrompt.message, false, firstPrompt.leaderMessages);
-			await this.openWorkerView(record);
-		} catch (error) {
-			for (const message of record.pendingBriefLeaderMessages) {
-				this.appendLog(
-					record,
-					"error",
-					`Leader message was not delivered because the worker failed to start: ${message}`,
+		const activeWriter = this.activeWriter ? this.workers.get(this.activeWriter) : undefined;
+		const writerContext = writer
+			? undefined
+			: formatWriterContext(
+					activeWriter ? this.summarize(activeWriter) : undefined,
+					this.writerQueue.flatMap((workerId) => {
+						const queued = this.workers.get(workerId);
+						return queued ? [this.summarize(queued)] : [];
+					}),
 				);
-			}
-			await this.finish(record, "failed", error instanceof Error ? error.message : String(error));
-			throw error;
-		}
-		try {
-			await this.publishSpawnBatch(record, archiveBatch);
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			await this.finish(record, "failed", message);
-			throw error;
-		}
+		const goalContext = this.goalPromptContext();
+		const assignedTask = goalContext ? `${goalContext}\n\n---\n\n# Assigned task\n\n${request.task}` : request.task;
+		const task = writerContext ? `${writerContext}\n\n---\n\n${assignedTask}` : assignedTask;
+		await this.startWorker(record, backend, runtimeEnv, systemPrompt, task);
 		return this.summarize(record);
 	}
 
-	private async publishSpawnBatch(record: WorkerRecord, priorTerminalWorkers: readonly WorkerRecord[]): Promise<void> {
-		if (priorTerminalWorkers.length === 0) {
-			this.checkpointChanged();
-			return;
+	private async startWorker(
+		record: WorkerRecord,
+		backend: ResolvedBackend,
+		runtimeEnv: Record<string, string>,
+		systemPrompt: string,
+		task: string,
+	): Promise<void> {
+		const generation = ++this.startGeneration;
+		record.startGeneration = generation;
+		let driver: WorkerTransportDriver | undefined;
+		try {
+			driver = this.createWorkerTransport(record, backend, runtimeEnv, systemPrompt);
+			record.driver = driver;
+			await driver.start();
+			if (record.driver !== driver || isTerminalState(record.state))
+				throw new Error(`Worker ${record.id} startup was superseded before it could commit.`);
+			this.setState(record, "running");
+			if (record.writer) this.notifyReadOnlyWorkers(record, "started");
+			const firstPrompt = this.withPendingBrief(record, task);
+			this.enqueue(record, firstPrompt.message, false, firstPrompt.leaderMessages);
+			await this.openWorkerView(record);
+			await this.publishSpawnBatch(record, generation, driver);
+		} catch (error) {
+			if (record.driver === driver && !isTerminalState(record.state)) {
+				for (const message of record.pendingBriefLeaderMessages) {
+					this.appendLog(
+						record,
+						"error",
+						`Leader message was not delivered because the worker failed to start: ${message}`,
+					);
+				}
+				await this.finish(record, "failed", error instanceof Error ? error.message : String(error));
+			}
+			throw error;
 		}
-		const priorState = priorTerminalWorkers.map((prior) => ({
-			record: prior,
-			archived: prior.archived,
-			updatedAt: prior.updatedAt,
-		}));
-		for (const prior of priorTerminalWorkers) {
-			prior.archived = true;
-			prior.updatedAt = this.now();
-		}
-		this.checkpointChangedMany([...priorTerminalWorkers, record]);
-		await this.flushCheckpoint();
-		const persistenceError = this.options.checkpoint?.writer.lastError;
-		if (!persistenceError) {
-			// Room views close with the batch they belonged to; a room joined again
-			// later gets a fresh pane. This follows durable publication, not intent.
-			this.roomPanesOpened.clear();
-			return;
-		}
+	}
 
-		// The new transport is not allowed to outlive an archive publication error.
-		// Restore the prior in-memory markers and publish the rollback together with
-		// the failed-attempt record's current state before the caller cleans it up.
-		for (const prior of priorState) {
-			prior.record.archived = prior.archived;
-			prior.record.updatedAt = prior.updatedAt;
+	private async serializeArchiveCommit<T>(operation: () => Promise<T>): Promise<T> {
+		const prior = this.archiveCommit;
+		let release!: () => void;
+		this.archiveCommit = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		await prior;
+		try {
+			return await operation();
+		} finally {
+			release();
 		}
-		this.checkpointChangedMany([...priorTerminalWorkers, record]);
-		await this.flushCheckpoint();
-		const rollbackError = this.options.checkpoint?.writer.lastError;
-		if (rollbackError)
-			throw new Error(
-				`Archive publication failed (${persistenceError.message}) and rollback failed (${rollbackError.message}).`,
+	}
+
+	private async publishSpawnBatch(
+		record: WorkerRecord,
+		generation: number,
+		driver: WorkerTransportDriver,
+	): Promise<void> {
+		await this.serializeArchiveCommit(async () => {
+			if (record.driver !== driver || record.startGeneration !== generation || isTerminalState(record.state))
+				throw new Error(`Worker ${record.id} startup was superseded before archive publication.`);
+			const priorTerminalWorkers = [...this.workers.values()].filter(
+				(candidate) => candidate !== record && isTerminalState(candidate.state),
 			);
-		throw new Error(`Archive publication failed: ${persistenceError.message}`);
+			if (priorTerminalWorkers.length === 0) {
+				this.checkpointChanged(record);
+				return;
+			}
+			const allPriorWorkers = [...this.workers.values()].filter((candidate) => candidate !== record);
+			if (!allPriorWorkers.every((candidate) => isTerminalState(candidate.state))) {
+				this.checkpointChanged(record);
+				return;
+			}
+			const priorState = priorTerminalWorkers.map((prior) => ({
+				record: prior,
+				archived: prior.archived,
+				updatedAt: prior.updatedAt,
+			}));
+			for (const prior of priorTerminalWorkers) {
+				prior.archived = true;
+				prior.updatedAt = this.now();
+			}
+			const archiveWrite = this.checkpointChangedMany([...priorTerminalWorkers, record]);
+			try {
+				await archiveWrite;
+				// Room views close with the batch they belonged to; a room joined again
+				// later gets a fresh pane. This follows durable publication, not intent.
+				this.roomPanesOpened.clear();
+				return;
+			} catch (error) {
+				const persistenceError = error instanceof Error ? error : new Error(String(error));
+				for (const prior of priorState) {
+					prior.record.archived = prior.archived;
+					prior.record.updatedAt = prior.updatedAt;
+				}
+				try {
+					await this.checkpointChangedMany([...priorTerminalWorkers, record]);
+				} catch (rollbackError) {
+					const rollback = rollbackError instanceof Error ? rollbackError : new Error(String(rollbackError));
+					throw new Error(
+						`Archive publication failed (${persistenceError.message}) and rollback failed (${rollback.message}).`,
+					);
+				}
+				throw new Error(`Archive publication failed: ${persistenceError.message}`);
+			}
+		});
 	}
 
 	/**
@@ -1603,10 +1639,7 @@ export class WorkerManager implements ChannelHandler {
 			// Revival is a state replacement, not telemetry. Publish the active ref and
 			// tombstone the old terminal index before handing the live conversation back
 			// to the leader, so a restart cannot hydrate a stale done row as well.
-			await this.flushCheckpoint();
-			const persistenceError = this.options.checkpoint?.writer.lastError;
-			if (persistenceError)
-				throw new Error(`Revived worker ${record.id} was not durably published: ${persistenceError.message}`);
+			await this.checkpointChanged(record);
 			record.terminalIndexNeedsRemoval = undefined;
 		} catch (error) {
 			this.freezeTiming(record);
@@ -2698,29 +2731,30 @@ export class WorkerManager implements ChannelHandler {
 		record?: WorkerRecord,
 		scheduleLane: "immediate" | "deferred" = "immediate",
 		mutationLane: V6CheckpointDeltaLane = "structural",
-	): void {
+	): Promise<void> | undefined {
 		const checkpoint = this.options.checkpoint;
-		if (!checkpoint) return;
+		if (!checkpoint) return undefined;
 		if (!checkpoint.writer.isV6 && !this.options.checkpointStorePath) {
 			if (scheduleLane === "deferred")
-				checkpoint.writer.scheduleDeferred(() => this.checkpointSnapshot(), checkpoint.id);
-			else checkpoint.writer.schedule(this.checkpointSnapshot());
-			return;
+				return checkpoint.writer.scheduleDeferred(() => this.checkpointSnapshot(), checkpoint.id);
+			return checkpoint.writer.schedule(this.checkpointSnapshot());
 		}
 		if (scheduleLane === "deferred")
-			checkpoint.writer.scheduleDeferredDelta(() => this.checkpointDelta(record, mutationLane), checkpoint.id);
-		else checkpoint.writer.scheduleDelta(this.checkpointDelta(record, mutationLane));
+			return checkpoint.writer.scheduleDeferredDelta(
+				() => this.checkpointDelta(record, mutationLane),
+				checkpoint.id,
+			);
+		return checkpoint.writer.scheduleDelta(this.checkpointDelta(record, mutationLane));
 	}
 
 	/** Queue one manifest update for a new worker and every terminal record it archives. */
-	private checkpointChangedMany(records: readonly WorkerRecord[]): void {
+	private checkpointChangedMany(records: readonly WorkerRecord[]): Promise<void> | undefined {
 		const checkpoint = this.options.checkpoint;
-		if (!checkpoint) return;
+		if (!checkpoint) return undefined;
 		if (!checkpoint.writer.isV6 && !this.options.checkpointStorePath) {
-			checkpoint.writer.schedule(this.checkpointSnapshot());
-			return;
+			return checkpoint.writer.schedule(this.checkpointSnapshot());
 		}
-		checkpoint.writer.scheduleDelta(this.checkpointDeltaForWorkers(records));
+		return checkpoint.writer.scheduleDelta(this.checkpointDeltaForWorkers(records));
 	}
 
 	/** One transport shape for immediate and dequeued workers, including crash-recovery registration. */
@@ -3043,26 +3077,56 @@ export class WorkerManager implements ChannelHandler {
 			// A preserved report ends "done"; the thing that went wrong after it
 			// still has to be visible in the log, not only on the summary.
 			if (options.failure && state === "done") this.appendLog(record, "error", options.failure);
-			this.checkpointChanged(record);
+			const terminalWrite = this.checkpointChanged(record);
 			// Terminal publication is the linearization point: the complete result and
 			// its immutable detail segment must be durable before any event wakes wait.
 			record.terminalOutcomeLoaded = true;
-			await this.flushCheckpoint();
-			const persistenceError = this.options.checkpoint?.writer.lastError;
-			if (persistenceError) {
-				throw new Error(`Terminal result for ${record.id} was not durably published: ${persistenceError.message}`);
-			}
-			if (this.options.checkpointStorePath) {
-				const publishedRef = readV6WorkerRef(
-					this.options.checkpointStorePath,
-					record.id,
-					this.options.checkpointReadCounters,
-				);
-				if (publishedRef) this.terminalRefs.set(record.id, publishedRef);
+			let persistenceError: Error | undefined;
+			try {
+				await terminalWrite;
+				if (this.options.checkpointStorePath) {
+					const publishedRef = readV6WorkerRef(
+						this.options.checkpointStorePath,
+						record.id,
+						this.options.checkpointReadCounters,
+					);
+					if (publishedRef) this.terminalRefs.set(record.id, publishedRef);
+				}
+			} catch (error) {
+				persistenceError = error instanceof Error ? error : new Error(String(error));
+				this.appendLog(record, "error", `Terminal result was not durably published: ${persistenceError.message}`);
 			}
 
-			const event: WorkerEvent | undefined =
-				state === "done"
+			if (!persistenceError && this.options.checkpointStorePath && isTerminalState(state)) {
+				this.evictTerminalRecord(
+					record,
+					terminalHotSummary({
+						id: record.id,
+						name: record.name,
+						role: record.role,
+						tier: record.tier,
+						backend: record.backend,
+						room: record.room,
+						writer: record.writer,
+						task: record.task,
+						result,
+						laterFailure: record.laterFailure,
+						pendingQuestion: record.pendingQuestion,
+						lastProgress: record.lastProgress,
+						state,
+						startedAt: record.startedAt,
+						endedAt: record.endedAt,
+						activeMs: record.activeMs,
+						queuedMs: record.queuedMs,
+						activeStartedAt: record.activeStartedAt,
+						queuedStartedAt: record.queuedStartedAt,
+						stateBeforeStop: record.stateBeforeStop,
+					}),
+				);
+			}
+			const event: WorkerEvent | undefined = persistenceError
+				? undefined
+				: state === "done"
 					? {
 							type: "done",
 							workerId: record.id,
@@ -3081,33 +3145,6 @@ export class WorkerManager implements ChannelHandler {
 										: { type: "blocked", workerId: record.id, question: record.pendingQuestion ?? result };
 								})()
 							: undefined;
-			if (this.options.checkpointStorePath && isTerminalState(state)) {
-				this.evictTerminalRecord(
-					record,
-					terminalHotSummary({
-						id: record.id,
-						name: record.name,
-						role: record.role,
-						tier: record.tier,
-						backend: record.backend,
-						writer: record.writer,
-						room: record.room,
-						task: record.task,
-						result,
-						laterFailure: record.laterFailure,
-						pendingQuestion: record.pendingQuestion,
-						lastProgress: record.lastProgress,
-						state,
-						startedAt: record.startedAt,
-						endedAt: record.endedAt,
-						activeMs: record.activeMs,
-						queuedMs: record.queuedMs,
-						activeStartedAt: record.activeStartedAt,
-						queuedStartedAt: record.queuedStartedAt,
-						stateBeforeStop: record.stateBeforeStop,
-					}),
-				);
-			}
 			if (event) this.options.onEvent(event);
 
 			const wasActiveWriter = this.activeWriter === record.id;
@@ -3221,25 +3258,16 @@ export class WorkerManager implements ChannelHandler {
 				`Your scratch directory (outside the repository) is ${record.scratchDir ?? "unavailable"}. Use it for notes and throwaway files.`,
 			].join("\n");
 
-			record.driver = this.createWorkerTransport(record, backend, runtimeEnv, systemPrompt);
 			record.headAtStart = gitHead(this.options.cwd);
 			this.lastWriterBackend = backend.name;
 			this.setState(record, "starting");
 			this.appendLog(record, "status", "Dequeued and starting...");
-			await record.driver.start();
+			await this.startWorker(record, backend, runtimeEnv, systemPrompt, fullTask);
 		} catch (error) {
-			await this.finish(record, "failed", error instanceof Error ? error.message : String(error));
+			if (!isTerminalState(record.state))
+				await this.finish(record, "failed", error instanceof Error ? error.message : String(error));
 			return;
 		}
-
-		this.setState(record, "running");
-		this.notifyReadOnlyWorkers(record, "started");
-
-		// Enqueue task with staleness guard and any pending messages delivered together
-		const firstPrompt = this.withPendingBrief(record, fullTask);
-		this.enqueue(record, firstPrompt.message, false, firstPrompt.leaderMessages);
-
-		await this.openWorkerView(record);
 	}
 
 	/** A missing pane is visible in the delegate result; it never blocks the worker. */

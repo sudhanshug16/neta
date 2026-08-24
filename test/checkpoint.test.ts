@@ -436,7 +436,7 @@ describe("durable session checkpoints", () => {
 		const reports: string[] = [];
 		const writer = new CheckpointWriter(blockedAgentDir, (message) => reports.push(message));
 
-		expect(() => writer.schedule(emptyCheckpoint("write-failure", process.cwd()))).not.toThrow();
+		writer.schedule(emptyCheckpoint("write-failure", process.cwd()));
 		await expect(writer.flush()).resolves.toBeUndefined();
 		expect(writer.lastError).toBeInstanceOf(Error);
 		expect(reports[0]).toContain("checkpoint write-failure was not saved");
