@@ -586,6 +586,54 @@ describe("v6 manager integration", () => {
 		}
 	});
 
+	it("queues a revived writer without exposing its evicted report, then preserves it on failure", async () => {
+		const root = mkdtempSync(join(tmpdir(), "neta-v6-queued-revival-"));
+		roots.push(root);
+		const agentDir = join(root, "agent");
+		const storePath = v6CheckpointStorePath("queued-revival", agentDir);
+		writeV6Checkpoint(checkpoint("queued-revival"), storePath);
+		const writer = new CheckpointWriter(agentDir, () => {}, undefined, "v6");
+		const drivers: Driver[] = [];
+		const manager = new WorkerManager({
+			cwd: process.cwd(),
+			agentDir,
+			config: fixtureBackendConfig(),
+			channelAddress: join(root, "channel.sock"),
+			onEvent: () => {},
+			checkpoint: { id: "queued-revival", leaderBackend: "codex", writer },
+			checkpointStorePath: storePath,
+			createTransport: (options) => {
+				const driver = new Driver(options);
+				drivers.push(driver);
+				return driver;
+			},
+		});
+		const report = `queued authoritative report\n${"detail ".repeat(400)}`;
+		const target = await manager.spawn({ role: "worker", tier: "expert", task: "target", writer: true });
+		drivers[0]?.options.events.vendorSession("target-session");
+		drivers[0]?.finish({ ok: true, summary: report });
+		await manager.wait([target.id], 1_000);
+		const holder = await manager.spawn({ role: "worker", tier: "expert", task: "holder", writer: true });
+		const queued = await manager.steer(target.id, "resume queued target");
+		expect(queued.worker).toMatchObject({ state: "queued", result: undefined, laterFailure: undefined });
+		expect(manager.inspect(target.id).worker).toMatchObject({ state: "queued", result: undefined });
+
+		drivers[1]?.finish({ ok: true, summary: "holder done" });
+		await manager.wait([holder.id], 1_000);
+		await waitFor(() => drivers.length === 3);
+		drivers[2]?.finish({ ok: false, summary: "queued follow-up failed" });
+		await manager.wait([target.id], 1_000);
+		expect(manager.get(target.id)).toMatchObject({
+			state: "failed",
+			result: expect.stringContaining(report),
+			laterFailure: expect.stringContaining("queued follow-up failed"),
+		});
+		const reference = readV6WorkerRef(storePath, target.id);
+		if (!reference) throw new Error("queued revival terminal reference missing");
+		expect(readV6WorkerOutcome(storePath, reference).finalResult).toContain(report);
+		await manager.dispose();
+	});
+
 	it("bounds terminal hot state for large outcomes and many terminal workers", async () => {
 		const root = mkdtempSync(join(tmpdir(), "neta-v6-bounded-"));
 		roots.push(root);

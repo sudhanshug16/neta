@@ -169,7 +169,45 @@ describe("leader MCP redesign", () => {
 		expect(manager.roomTranscript("review")).toEqual([]);
 	});
 
-	it("rolls back a team seed when the goal terminalizes during gated admission", async () => {
+	it("commits every team record and seed before any transport starts", async () => {
+		let atomic!: WorkerManager;
+		const starts: Array<{ workers: number; seed: string[] }> = [];
+		atomic = new WorkerManager({
+			cwd: process.cwd(),
+			agentDir: "/nonexistent-agent-dir",
+			config: fixtureBackendConfig(),
+			channelAddress: "/tmp/neta-mcp-atomic-team.sock",
+			onEvent: () => {},
+			createTransport: (options) => {
+				starts.push({
+					workers: atomic.list().length,
+					seed: atomic.roomTranscript("atomic-room").map((post) => post.text),
+				});
+				return new FakeTransport(options);
+			},
+		});
+		try {
+			const tool = leaderTools(atomic).find((candidate) => candidate.name === "neta_delegate");
+			if (!tool) throw new Error("neta_delegate was not registered");
+			await tool.run({
+				team: "atomic-room",
+				seed: "visible before start",
+				workers: [
+					{ role: "scout", tier: "expert", task: "one" },
+					{ role: "reviewer", tier: "expert", task: "two" },
+				],
+			});
+			expect(starts).toEqual([
+				{ workers: 2, seed: ["visible before start"] },
+				{ workers: 2, seed: ["visible before start"] },
+			]);
+		} finally {
+			await atomic.dispose();
+			rmSync("/tmp/neta-mcp-atomic-team.sock", { force: true });
+		}
+	});
+
+	it("leaves no team state when the goal terminalizes during gated preflight", async () => {
 		let prepareCalls = 0;
 		const gated = new WorkerManager({
 			cwd: process.cwd(),
@@ -179,7 +217,7 @@ describe("leader MCP redesign", () => {
 			onEvent: () => {},
 			prepareEnv: async () => {
 				prepareCalls += 1;
-				if (prepareCalls === 1) gated.completeGoal({ expectedRevision: 0 });
+				if (prepareCalls === 2) gated.completeGoal({ expectedRevision: 0 });
 				return {};
 			},
 			createTransport: (options) => new FakeTransport(options),
@@ -188,11 +226,16 @@ describe("leader MCP redesign", () => {
 			gated.initGoal("ship the release");
 			const tool = leaderTools(gated).find((candidate) => candidate.name === "neta_delegate");
 			if (!tool) throw new Error("neta_delegate was not registered");
-			await tool.run({
-				team: "race-room",
-				seed: "must not remain",
-				workers: [{ role: "scout", tier: "expert", task: "race" }],
-			});
+			await expect(
+				tool.run({
+					team: "race-room",
+					seed: "must not remain",
+					workers: [
+						{ role: "scout", tier: "expert", task: "first" },
+						{ role: "reviewer", tier: "expert", task: "second" },
+					],
+				}),
+			).rejects.toThrow("Session goal is terminal");
 			expect(gated.roomTranscript("race-room")).toEqual([]);
 			expect(gated.list()).toHaveLength(0);
 		} finally {

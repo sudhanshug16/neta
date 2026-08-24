@@ -254,6 +254,9 @@ interface WorkerRecord {
 	headAtStart?: string;
 	/** Detached ACP process group, for startup cleanup after a manager crash. */
 	processGroupId?: number;
+	/** Prepared team admission inputs retained until this worker starts. */
+	preparedRoleText?: string;
+	preparedRuntimeEnv?: Record<string, string>;
 	/** Why this worker has no visible mux tab. */
 	headlessReason?: string;
 	/** Truthful non-headless status while a launched view is being reconciled. */
@@ -290,10 +293,12 @@ interface WorkerRecord {
 type LegacyPaneOpenOutcome = { opened: true } | { opened: false; reason: string };
 type WorkerPaneOutcome = PaneOpenOutcome | LegacyPaneOpenOutcome;
 
-export interface TeamSeedAdmission {
-	room: string;
-	seed: RoomPost;
-	previousPosts: RoomPost[] | undefined;
+interface PreparedDelegation {
+	request: SpawnRequest;
+	roleText: string;
+	backend: ResolvedBackend;
+	runtimeEnv: Record<string, string>;
+	scratchDir: string;
 }
 
 /** Opens a pane per worker, when a multiplexer is running. */
@@ -1272,6 +1277,167 @@ export class WorkerManager implements ChannelHandler {
 		}
 	}
 
+	/** Prepare every team member before the batch can publish any worker or room state. */
+	async prepareDelegationBatch(
+		requests: readonly SpawnRequest[],
+		admissionGeneration = this.delegationAdmission(),
+	): Promise<PreparedDelegation[]> {
+		this.validateDelegation(requests);
+		const assignments = this.planAssignments([...requests]);
+		const prepared: PreparedDelegation[] = [];
+		try {
+			for (const [index, request] of requests.entries()) {
+				this.assertGoalAdmitsNewWork(admissionGeneration);
+				const assignment = assignments[index];
+				if (!assignment) throw new Error("Delegation planning produced an incomplete batch.");
+				const roleText = loadRoleText(request.role, this.options.cwd, this.options.agentDir);
+				if (!roleText) throw new Error(`Unknown role "${request.role}".`);
+				const backend = this.options.config.resolve(request.tier, assignment.backend, assignment.writer);
+				assertClaudeModelAllowed(backend.claudeLineage, backend.model, `runtime ${request.tier} assignment`);
+				const runtimeEnv = (await this.options.prepareEnv?.()) ?? {};
+				const scratchDir = await mkdtemp(join(tmpdir(), `neta-${request.role}-batch-`));
+				prepared.push({ request, roleText, backend, runtimeEnv, scratchDir });
+				this.assertGoalAdmitsNewWork(admissionGeneration);
+			}
+			return prepared;
+		} catch (error) {
+			await Promise.all(
+				prepared.map((item) => rm(item.scratchDir, { recursive: true, force: true }).catch(() => {})),
+			);
+			throw error;
+		}
+	}
+
+	/** Synchronously publish all prepared worker records; no transport starts in this method. */
+	admitDelegationBatch(prepared: readonly PreparedDelegation[], admissionGeneration: number): string[] {
+		if (prepared.length === 0) throw new Error("Cannot admit an empty delegation batch.");
+		this.assertGoalAdmitsNewWork(admissionGeneration);
+		const simulatedState = {
+			cursors: new Map(this.spreadCursors),
+			lastWriterBackend: this.lastWriterBackend,
+			roomDebaterBackends: new Map(
+				[...this.roomDebaterBackends.entries()].map(([room, backends]) => [room, [...backends]]),
+			),
+		};
+		for (const item of prepared) {
+			const backendName = this.computeBackendAssignment(item.request, simulatedState);
+			if (backendName !== item.backend.name)
+				throw new Error(
+					`Delegation assignment changed before commit for ${item.request.role}/${item.request.tier}.`,
+				);
+			if (item.request.writer) simulatedState.lastWriterBackend = item.backend.name;
+		}
+		this.spreadCursors = simulatedState.cursors;
+		this.lastWriterBackend = simulatedState.lastWriterBackend;
+		this.roomDebaterBackends.clear();
+		for (const [room, backends] of simulatedState.roomDebaterBackends) this.roomDebaterBackends.set(room, backends);
+		const ids: string[] = [];
+		for (const item of prepared) {
+			this.assertGoalAdmitsNewWork(admissionGeneration);
+			const { request, backend } = item;
+			const writer = request.writer ?? false;
+			const id = `${writer ? "rw" : "ro"}${++this.counter}`;
+			const reservedWriterSlot = writer && !this.activeWriter;
+			if (reservedWriterSlot) this.activeWriter = id;
+			const shouldQueue = writer && this.activeWriter !== id;
+			const recordNow = this.now();
+			const record: WorkerRecord = {
+				id,
+				name: (request.name ?? request.role).trim() || request.role,
+				role: request.role,
+				tier: request.tier,
+				backend: backend.name,
+				writer,
+				room: request.room,
+				task: request.task,
+				cwd: this.options.cwd,
+				state: shouldQueue ? "queued" : "starting",
+				startedAt: recordNow,
+				updatedAt: recordNow,
+				scratchDir: item.scratchDir,
+				channelToken: randomBytes(16).toString("hex"),
+				admissionGeneration,
+				preparedRoleText: item.roleText,
+				preparedRuntimeEnv: item.runtimeEnv,
+				log: [],
+				logFirstIndex: 0,
+				logCursor: 0,
+				queue: Promise.resolve(),
+				queuedPrompts: 0,
+				turnCounter: 0,
+				steeredTurns: new Set<number>(),
+				interruptedTurns: new Set<number>(),
+				cancelDispatches: new Map<number, Promise<boolean>>(),
+				waiters: [],
+				driver: undefined as unknown as WorkerTransportDriver,
+				noteId: request.note,
+				pendingBrief: [],
+				pendingBriefLeaderMessages: [],
+				revivalCount: 0,
+				activeMs: 0,
+				queuedMs: 0,
+				...(shouldQueue ? { queuedStartedAt: recordNow } : { activeStartedAt: recordNow }),
+			};
+			this.workers.set(id, record);
+			this.checkpointChanged(record);
+			if (request.room) this.ensureRoom(request.room);
+			if (record.noteId) this.notes.get(record.noteId)?.workers.push({ workerId: id, state: record.state });
+			if (shouldQueue) {
+				this.writerQueue.push(id);
+				this.writerQueueHistory.push({ workerId: id, action: "queued", at: recordNow });
+				record.queuedBehind = this.activeWriter;
+				this.appendLog(
+					record,
+					"status",
+					`Queued behind ${this.activeWriter} (${this.workers.get(this.activeWriter ?? "")?.role ?? "unknown"}). Will start automatically.`,
+				);
+			} else if (writer) {
+				record.headAtStart = gitHead(this.options.cwd);
+			}
+			ids.push(id);
+		}
+		return ids;
+	}
+
+	/** Start one synchronously admitted worker after the team seed is visible. */
+	async startAdmittedWorker(workerId: string): Promise<WorkerSummary> {
+		const record = this.require(workerId);
+		if (record.state === "queued") return this.summarize(record);
+		const backend = this.options.config.resolve(record.tier, record.backend, record.writer);
+		const runtimeEnv = record.preparedRuntimeEnv ?? {};
+		const roleText = record.preparedRoleText ?? loadRoleText(record.role, record.cwd, this.options.agentDir);
+		if (!roleText) throw new Error(`Unknown role "${record.role}".`);
+		record.preparedRuntimeEnv = undefined;
+		record.preparedRoleText = undefined;
+		const activeWriter = this.activeWriter ? this.workers.get(this.activeWriter) : undefined;
+		const writerContext = record.writer
+			? undefined
+			: formatWriterContext(
+					activeWriter ? this.summarize(activeWriter) : undefined,
+					this.writerQueue.flatMap((queuedId) => {
+						const queued = this.workers.get(queuedId);
+						return queued ? [this.summarize(queued)] : [];
+					}),
+				);
+		const goalContext = this.goalPromptContext();
+		const assignedTask = goalContext ? `${goalContext}\n\n---\n\n# Assigned task\n\n${record.task}` : record.task;
+		const task = writerContext ? `${writerContext}\n\n---\n\n${assignedTask}` : assignedTask;
+		await this.startWorker(
+			record,
+			backend,
+			runtimeEnv,
+			[
+				roleText.trim(),
+				"",
+				workingAgreement({ tier: record.tier, writer: record.writer, room: record.room, binary: APP_NAME }),
+				"",
+				`Your scratch directory (outside the repository) is ${record.scratchDir}. Use it for notes and throwaway files.`,
+			].join("\n"),
+			task,
+		);
+		return this.summarize(record);
+	}
+
 	async spawn(request: SpawnRequest, admissionGeneration?: number): Promise<WorkerSummary> {
 		// First, before the writer-slot reservation, the batch archive sweep, the
 		// worker counter, or the scratch directory: a refused spawn must leave the
@@ -1722,11 +1888,26 @@ export class WorkerManager implements ChannelHandler {
 			throw new Error(`Worker ${record.id} has no recorded vendor session id; delegate a fresh worker.`);
 		}
 		if (record.writer && this.activeWriter && this.activeWriter !== record.id) {
+			// A queued revival is already a public state replacement. Resolve the full
+			// terminal outcome before dropping its bounded hot summary so a later
+			// startup/follow-up failure can preserve the substantive report.
+			this.loadTerminalOutcome(record);
+			const priorResult = record.result ?? record.substantiveResponse;
 			record.revivalFromState = record.state as "blocked" | "done" | "failed";
 			record.revivalAdmissionGeneration = admissionGeneration;
 			record.revivalPreviousQueuedBehind = record.queuedBehind;
 			record.revivalMessage = message;
-			record.state = "queued";
+			record.terminalSummary = undefined;
+			record.terminalIndexNeedsRemoval = Boolean(this.options.checkpointStorePath);
+			record.result = undefined;
+			record.resultMissing = undefined;
+			record.resultClipped = undefined;
+			record.lastResponse = undefined;
+			record.laterFailure = undefined;
+			// Keep the authoritative report private until the revived turn publishes.
+			record.substantiveResponse = priorResult;
+			record.endedAt = undefined;
+			this.setState(record, "queued");
 			record.activeStartedAt = undefined;
 			const queuedAt = this.now();
 			record.queuedStartedAt = queuedAt;
@@ -1770,7 +1951,7 @@ export class WorkerManager implements ChannelHandler {
 		// authoritative outcome while the record is still terminal, before the
 		// active-state fence clears the public handoff.
 		this.loadTerminalOutcome(record);
-		const priorResult = record.result;
+		const priorResult = record.result ?? record.substantiveResponse;
 		const reservedWriter = record.writer && !this.activeWriter;
 		if (reservedWriter) this.activeWriter = record.id;
 		// This is the revival linearization point. Every public surface now sees a
@@ -2367,29 +2548,6 @@ export class WorkerManager implements ChannelHandler {
 	roomTranscript(room: string, tail?: number): RoomPost[] {
 		const posts = this.rooms.get(room) ?? [];
 		return tail && tail > 0 ? posts.slice(-tail) : posts;
-	}
-
-	/** Reserve a seed with an exact rollback snapshot until a team admits a worker. */
-	beginTeamSeed(room: string, text: string): TeamSeedAdmission {
-		const previousPosts = this.rooms.get(room)?.map((post) => ({ ...post }));
-		const seed = { at: Date.now(), from: "leader", label: "leader", text };
-		this.ensureRoom(room).push(seed);
-		this.checkpointChanged();
-		for (const watcher of [...(this.roomWatchers.get(room) ?? [])]) watcher();
-		return { room, seed, previousPosts };
-	}
-
-	/** Remove only a seed that is still the final post of an unadmitted batch. */
-	rollbackTeamSeed(admission: TeamSeedAdmission): void {
-		const current = this.rooms.get(admission.room);
-		if (!current || current.length === 0 || current[current.length - 1] !== admission.seed) return;
-		if (admission.previousPosts === undefined) this.rooms.delete(admission.room);
-		else
-			this.rooms.set(
-				admission.room,
-				admission.previousPosts.map((post) => ({ ...post })),
-			);
-		this.checkpointChanged();
 	}
 
 	/**
@@ -3501,10 +3659,10 @@ export class WorkerManager implements ChannelHandler {
 			// waited. Every preparation failure becomes the worker's honest result.
 			const backend = this.options.config.resolve(record.tier, record.backend, true);
 			assertClaudeModelAllowed(backend.claudeLineage, backend.model, `runtime ${record.tier} assignment`);
-			const runtimeEnv = (await this.options.prepareEnv?.()) ?? {};
+			const runtimeEnv = record.preparedRuntimeEnv ?? (await this.options.prepareEnv?.()) ?? {};
 			if (this.disposed || record.state !== "queued") return;
 			this.assertGoalAdmitsNewWork(record.admissionGeneration ?? this.goalLifecycleGeneration);
-			const roleText = loadRoleText(record.role, this.options.cwd, this.options.agentDir);
+			const roleText = record.preparedRoleText ?? loadRoleText(record.role, this.options.cwd, this.options.agentDir);
 			const systemPrompt = [
 				roleText?.trim() ?? "",
 				"",
@@ -3512,6 +3670,8 @@ export class WorkerManager implements ChannelHandler {
 				"",
 				`Your scratch directory (outside the repository) is ${record.scratchDir ?? "unavailable"}. Use it for notes and throwaway files.`,
 			].join("\n");
+			record.preparedRuntimeEnv = undefined;
+			record.preparedRoleText = undefined;
 
 			record.headAtStart = gitHead(this.options.cwd);
 			this.lastWriterBackend = backend.name;

@@ -419,33 +419,35 @@ export function leaderTools(manager: WorkerManager): McpTool[] {
 				manager.validateDelegation(requests);
 				const admissionGeneration = manager.delegationAdmission();
 				const plannedAssignments = manager.planAssignments(requests);
-				const teamSeed = seed && team ? manager.beginTeamSeed(team, seed) : undefined;
+				const prepared = team ? await manager.prepareDelegationBatch(requests, admissionGeneration) : undefined;
+				const admittedIds = team ? manager.admitDelegationBatch(prepared ?? [], admissionGeneration) : undefined;
+				if (seed && team) manager.postToRoom(team, "leader", "leader", seed);
 				const results: Array<{ summary: WorkerSummary } | { failure: string }> = [];
 				const startupFailures = new Map<string, string>();
-				let admittedWorkers = 0;
-				try {
-					for (const [index, request] of requests.entries()) {
-						const before = new Set(manager.list().map((worker) => worker.id));
-						try {
-							results.push({ summary: await manager.spawn(request, admissionGeneration) });
-							admittedWorkers += 1;
-						} catch (error) {
-							const failed = manager.list().find((worker) => !before.has(worker.id));
-							const message = error instanceof Error ? error.message : String(error);
-							if (!failed) {
-								const assignment = plannedAssignments[index];
-								const holder = request.writer ? manager.statusSnapshot().writerSlot?.id : undefined;
-								results.push({
-									failure: `unallocated: ${(request.name ?? request.role).trim() || request.role} (${request.role}/${request.tier}) -> ${assignment.backend} (${request.writer ? "writer" : "read-only"}, startup failed${holder ? `; writer holder: ${holder}` : ""})\n  Startup failure: ${message}`,
-								});
-								continue;
-							}
-							results.push({ summary: failed });
-							startupFailures.set(failed.id, message);
+				for (const [index, request] of requests.entries()) {
+					const before = new Set(manager.list().map((worker) => worker.id));
+					try {
+						results.push({
+							summary: team
+								? await manager.startAdmittedWorker(admittedIds?.[index] ?? "")
+								: await manager.spawn(request, admissionGeneration),
+						});
+					} catch (error) {
+						const failed = manager
+							.list()
+							.find((worker) => (team ? worker.id === admittedIds?.[index] : !before.has(worker.id)));
+						const message = error instanceof Error ? error.message : String(error);
+						if (!failed) {
+							const assignment = plannedAssignments[index];
+							const holder = request.writer ? manager.statusSnapshot().writerSlot?.id : undefined;
+							results.push({
+								failure: `unallocated: ${(request.name ?? request.role).trim() || request.role} (${request.role}/${request.tier}) -> ${assignment.backend} (${request.writer ? "writer" : "read-only"}, startup failed${holder ? `; writer holder: ${holder}` : ""})\n  Startup failure: ${message}`,
+							});
+							continue;
 						}
+						results.push({ summary: failed });
+						startupFailures.set(failed.id, message);
 					}
-				} finally {
-					if (teamSeed && admittedWorkers === 0) manager.rollbackTeamSeed(teamSeed);
 				}
 				const assignments = results.map((result) => {
 					if ("failure" in result) return result.failure;
