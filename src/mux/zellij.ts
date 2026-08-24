@@ -467,7 +467,6 @@ export class ZellijAdapter implements MuxAdapter {
 			created = this.run("zellij", newTabArgs(title, spec, cwd, targetSession), {
 				env: { ...this.env, ...spec.env },
 			});
-			after = this.run("zellij", listTabPanesArgs(targetSession));
 		} catch (error) {
 			return {
 				status: "failed",
@@ -477,14 +476,33 @@ export class ZellijAdapter implements MuxAdapter {
 		}
 		const createdError = zellijCommandError(created);
 		if (createdError) return { status: "failed", reason: createdError.message, identity };
+		try {
+			after = this.run("zellij", listTabPanesArgs(targetSession));
+		} catch (error) {
+			return {
+				status: "unconfirmed",
+				reason: `zellij: view launched; tab listing verification unavailable (${error instanceof Error ? error.message : String(error)})`,
+				identity,
+			};
+		}
 		const afterError = zellijCommandError(after);
-		if (afterError) return { status: "failed", reason: afterError.message, identity };
+		if (afterError)
+			return {
+				status: "unconfirmed",
+				reason: `zellij: view launched; tab listing verification unavailable (${afterError.message})`,
+				identity,
+			};
 		let opened: ZellijTab | undefined;
 		try {
 			opened = await waitForOpenedZellijTab(before.stdout, after.stdout, title, targetSession, this.run);
 		} catch (error) {
-			return { status: "failed", reason: error instanceof Error ? error.message : String(error), identity };
+			return {
+				status: "unconfirmed",
+				reason: `zellij: view launched; tab listing verification unavailable (${error instanceof Error ? error.message : String(error)})`,
+				identity,
+			};
 		}
+		const openedIdentity = opened ? paneIdentity(targetSession, title, before.stdout, opened.id) : identity;
 
 		// new-tab always focuses the new tab. Restore the exact stable id belonging
 		// to the calling pane, then verify active state because actions can report
@@ -496,17 +514,26 @@ export class ZellijAdapter implements MuxAdapter {
 			focused = this.run("zellij", listTabsArgs(targetSession));
 		} catch (error) {
 			return {
-				status: "failed",
-				reason: `zellij: ${error instanceof Error ? error.message : String(error)}`,
-				identity,
+				status: "unconfirmed",
+				reason: `zellij: view launched; focus verification unavailable (${error instanceof Error ? error.message : String(error)})`,
+				identity: openedIdentity,
 			};
 		}
 		const restoreError = zellijCommandError(restoredFocus);
-		if (restoreError) return { status: "failed", reason: restoreError.message, identity };
+		if (restoreError)
+			return {
+				status: "unconfirmed",
+				reason: `zellij: view launched; focus restoration unavailable (${restoreError.message})`,
+				identity: openedIdentity,
+			};
 		const focusedError = zellijCommandError(focused);
-		if (focusedError) return { status: "failed", reason: focusedError.message, identity };
+		if (focusedError)
+			return {
+				status: "unconfirmed",
+				reason: `zellij: view launched; focus verification unavailable (${focusedError.message})`,
+				identity: openedIdentity,
+			};
 		const restored = zellijFocusRestored(focused.stdout, originalTab.id);
-		const openedIdentity = opened ? paneIdentity(targetSession, title, before.stdout, opened.id) : identity;
 		if (!opened || !restored)
 			return {
 				status: "unconfirmed",
@@ -525,10 +552,14 @@ export class ZellijAdapter implements MuxAdapter {
 			try {
 				listed = this.run("zellij", listTabPanesArgs(identity.sessionName));
 			} catch (error) {
-				return { status: "failed", reason: `zellij: ${error instanceof Error ? error.message : String(error)}` };
+				return {
+					status: "failed",
+					reason: `zellij: ${error instanceof Error ? error.message : String(error)}`,
+					identity,
+				};
 			}
 			const listedError = zellijCommandError(listed);
-			if (listedError) return { status: "failed", reason: listedError.message };
+			if (listedError) return { status: "failed", reason: listedError.message, identity };
 			const found = listedTab(listed.stdout, identity);
 			if (found) return { status: "opened", identity: { ...identity, tabId: found.id } };
 			if (attempt === ZELLIJ_RECONCILE_ATTEMPTS - 1) break;

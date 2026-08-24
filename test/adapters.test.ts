@@ -249,7 +249,7 @@ describe("Codex adapter", () => {
 			scratchDir: "/tmp/ro1",
 		});
 
-		expect(outcome).toEqual({ opened: true });
+		expect(outcome).toEqual({ status: "opened" });
 		expect(target).toBe("neta-s1");
 	});
 

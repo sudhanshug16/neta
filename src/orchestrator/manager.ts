@@ -609,6 +609,8 @@ export class WorkerManager implements ChannelHandler {
 					timing.queuedStartedAt = undefined;
 				}
 			}
+			const recoveredViewStatus = worker.viewStatus ? ("verification-unavailable" as const) : undefined;
+			const recoveredViewReason = worker.viewStatus ? "view was not reattached during recovery" : undefined;
 			const record: WorkerRecord = {
 				id: worker.id,
 				name: worker.name,
@@ -654,9 +656,9 @@ export class WorkerManager implements ChannelHandler {
 				pendingBrief: [...worker.pendingBrief],
 				pendingBriefLeaderMessages: [],
 				headAtStart: worker.headAtStart,
-				headlessReason: worker.headlessReason,
-				viewStatus: worker.viewStatus,
-				viewReason: worker.viewReason,
+				headlessReason: worker.viewStatus ? undefined : worker.headlessReason,
+				viewStatus: recoveredViewStatus,
+				viewReason: recoveredViewReason,
 				revivalCount: worker.revivalCount ?? 0,
 				nativeAttached: worker.nativeAttached,
 				...timing,
@@ -1346,8 +1348,9 @@ export class WorkerManager implements ChannelHandler {
 		driver: WorkerTransportDriver,
 	): Promise<void> {
 		await this.serializeArchiveCommit(async () => {
-			if (record.driver !== driver || record.startGeneration !== generation || isTerminalState(record.state))
+			if (record.driver !== driver || record.startGeneration !== generation)
 				throw new Error(`Worker ${record.id} startup was superseded before archive publication.`);
+			if (isTerminalState(record.state)) return;
 			const priorTerminalWorkers = [...this.workers.values()].filter(
 				(candidate) => candidate !== record && isTerminalState(candidate.state),
 			);
@@ -3334,7 +3337,13 @@ export class WorkerManager implements ChannelHandler {
 	private async cleanupStalePane(outcome: PaneOpenOutcome): Promise<void> {
 		const identity = outcome.identity;
 		if (!identity || identity.tabId === undefined || !this.options.panes?.close) return;
-		await this.options.panes.close({ ...identity });
+		try {
+			await this.options.panes.close({ ...identity });
+		} catch {
+			// A stale result must never affect the revived worker. The close adapter
+			// performs its own exact identity check; an inability to close leaves the
+			// tab untouched and is intentionally not promoted into worker state.
+		}
 	}
 
 	private async reconcileWorkerView(
@@ -3398,6 +3407,10 @@ export class WorkerManager implements ChannelHandler {
 		}
 		const rawOutcome = await this.options.panes?.open(this.summarize(record));
 		const outcome = rawOutcome ? this.paneOutcome(rawOutcome) : undefined;
+		if (!this.currentViewGeneration(record, generation)) {
+			if (outcome) await this.cleanupStalePane(outcome);
+			return;
+		}
 		if (outcome?.status === "failed" || (!outcome && this.options.headlessReason)) {
 			const reason =
 				outcome?.status === "failed" ? outcome.reason : (this.options.headlessReason ?? "headless mode");
@@ -3422,6 +3435,11 @@ export class WorkerManager implements ChannelHandler {
 		) {
 			this.roomPanesOpening.add(record.room);
 			const roomOutcome = this.paneOutcome(await this.options.panes.openRoom(record.room));
+			if (!this.currentViewGeneration(record, generation)) {
+				this.roomPanesOpening.delete(record.room);
+				await this.cleanupStalePane(roomOutcome);
+				return;
+			}
 			if (roomOutcome.status === "opened") {
 				this.roomPanesOpening.delete(record.room);
 				this.roomPanesOpened.add(record.room);

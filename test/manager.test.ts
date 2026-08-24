@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NETA_SOCKET_ENV, NETA_WORKER_ENV, NETA_WORKER_TOKEN_ENV } from "../src/channel/protocol.ts";
 import { leaderTools } from "../src/mcp/leader.ts";
+import type { PaneIdentity, PaneOpenOutcome } from "../src/mux/types.ts";
 import { WorkerManager } from "../src/orchestrator/manager.ts";
 import type { PromptOutcome, TransportOptions, WorkerTransportDriver } from "../src/orchestrator/transport.ts";
 import { NetaConfig } from "../src/settings.ts";
@@ -1115,6 +1116,192 @@ describe("WorkerManager", () => {
 			await new Promise((resolve) => setTimeout(resolve, 0));
 			expect(closed).toEqual([{ mux: "zellij", sessionName: "s1", title: "ro1 scout", tabId: 41 }]);
 			expect(paneManager.get("ro1").viewStatus).toBe("verification-pending");
+		} finally {
+			await paneManager.dispose();
+			rmSync(socket, { force: true });
+		}
+	});
+
+	it.each([
+		[
+			"opened",
+			{
+				status: "opened",
+				identity: { mux: "zellij", sessionName: "s1", title: "ro1 scout", tabId: 41 },
+			},
+		],
+		[
+			"unconfirmed",
+			{
+				status: "unconfirmed",
+				reason: "listing delayed",
+				identity: { mux: "zellij", sessionName: "s1", title: "ro1 scout" },
+			},
+		],
+		["failed", { status: "failed", reason: "new-tab failed" }],
+	] as const)("ignores a stale initial pane result: %s", async (_label, paneOutcome) => {
+		const socket = `/tmp/neta-stale-initial-${_label}.sock`;
+		writeFileSync(socket, "");
+		let transport: FakeTransport | undefined;
+		let resolveOpen: ((outcome: PaneOpenOutcome) => void) | undefined;
+		let roomOpens = 0;
+		const closed: PaneIdentity[] = [];
+		const paneManager = new WorkerManager({
+			cwd: process.cwd(),
+			agentDir: "/nonexistent-agent-dir",
+			config,
+			channelAddress: socket,
+			onEvent: () => {},
+			createTransport: (options) => {
+				transport = new FakeTransport(options);
+				return transport;
+			},
+			panes: {
+				open: () =>
+					new Promise((resolve) => {
+						resolveOpen = resolve;
+					}),
+				openRoom: () => {
+					roomOpens += 1;
+					return { status: "opened" };
+				},
+				close: async (identity) => {
+					closed.push(identity);
+					return { status: "closed" };
+				},
+			},
+		});
+		try {
+			const spawn = paneManager.spawn({ role: "scout", tier: "expert", task: "stale initial view", room: "room-1" });
+			for (let attempt = 0; attempt < 100 && !transport?.prompts.length; attempt += 1) await flush();
+			expect(transport?.prompts).toHaveLength(1);
+			transport?.finish({ ok: true, summary: "worker finished before view result" });
+			await paneManager.waitFor(["ro1"], 5000);
+			resolveOpen?.(paneOutcome);
+			const summary = await spawn;
+
+			expect(summary.state).toBe("done");
+			expect(summary.headlessReason).toBeUndefined();
+			expect(summary.viewStatus).toBeUndefined();
+			expect(roomOpens).toBe(0);
+			const expectedClosed =
+				"identity" in paneOutcome && "tabId" in paneOutcome.identity ? [paneOutcome.identity] : [];
+			expect(closed).toEqual(expectedClosed);
+		} finally {
+			await paneManager.dispose();
+			rmSync(socket, { force: true });
+		}
+	});
+
+	it("does not apply a pane result after disposal", async () => {
+		const socket = "/tmp/neta-disposed-initial-pane.sock";
+		writeFileSync(socket, "");
+		let transport: FakeTransport | undefined;
+		let resolveOpen: ((outcome: PaneOpenOutcome) => void) | undefined;
+		const closed: PaneIdentity[] = [];
+		const paneManager = new WorkerManager({
+			cwd: process.cwd(),
+			agentDir: "/nonexistent-agent-dir",
+			config,
+			channelAddress: socket,
+			onEvent: () => {},
+			createTransport: (options) => {
+				transport = new FakeTransport(options);
+				return transport;
+			},
+			panes: {
+				open: () =>
+					new Promise((resolve) => {
+						resolveOpen = resolve;
+					}),
+				openRoom: () => ({ status: "opened" }),
+				close: async (identity) => {
+					closed.push(identity);
+					return { status: "closed" };
+				},
+			},
+		});
+		try {
+			const spawn = paneManager.spawn({
+				role: "scout",
+				tier: "expert",
+				task: "dispose while opening",
+				room: "room-1",
+			});
+			for (let attempt = 0; attempt < 100 && !transport?.prompts.length; attempt += 1) await flush();
+			expect(transport?.prompts).toHaveLength(1);
+			await paneManager.dispose();
+			const identity = { mux: "zellij" as const, sessionName: "s1", title: "ro1 scout", tabId: 41 };
+			resolveOpen?.({ status: "opened", identity });
+			const summary = await spawn;
+
+			expect(summary.state).toBe("interrupted");
+			expect(summary.headlessReason).toBeUndefined();
+			expect(summary.viewStatus).toBeUndefined();
+			expect(closed).toEqual([identity]);
+		} finally {
+			rmSync(socket, { force: true });
+		}
+	});
+
+	it("does not let a revived worker inherit a stale initial pane result", async () => {
+		const socket = "/tmp/neta-revived-initial-pane.sock";
+		writeFileSync(socket, "");
+		const localTransports: FakeTransport[] = [];
+		let resolveOpen: ((outcome: PaneOpenOutcome) => void) | undefined;
+		let roomOpens = 0;
+		const closed: PaneIdentity[] = [];
+		const paneManager = new WorkerManager({
+			cwd: process.cwd(),
+			agentDir: "/nonexistent-agent-dir",
+			config,
+			channelAddress: socket,
+			onEvent: () => {},
+			createTransport: (options) => {
+				const transport = new FakeTransport(options);
+				localTransports.push(transport);
+				return transport;
+			},
+			panes: {
+				open: () =>
+					new Promise((resolve) => {
+						resolveOpen = resolve;
+					}),
+				openRoom: () => {
+					roomOpens += 1;
+					return { status: "opened" };
+				},
+				close: async (identity) => {
+					closed.push(identity);
+					return { status: "closed" };
+				},
+			},
+		});
+		try {
+			const spawn = paneManager.spawn({
+				role: "scout",
+				tier: "expert",
+				task: "revive while opening",
+				room: "room-1",
+			});
+			for (let attempt = 0; attempt < 100 && !localTransports[0]?.prompts.length; attempt += 1) await flush();
+			expect(localTransports[0]?.prompts).toHaveLength(1);
+			localTransports[0]?.options.events.vendorSession("session-1");
+			localTransports[0]?.finish({ ok: true, summary: "finished before revival" });
+			await paneManager.waitFor(["ro1"], 5000);
+			const resumed = await paneManager.steer("ro1", "continue the exact session");
+			expect(resumed.worker.state).toBe("running");
+
+			const identity = { mux: "zellij" as const, sessionName: "s1", title: "ro1 scout", tabId: 41 };
+			resolveOpen?.({ status: "opened", identity });
+			await expect(spawn).rejects.toThrow("startup was superseded");
+			expect(paneManager.get("ro1")).toMatchObject({
+				state: "running",
+				headlessReason: "resumed headlessly in a fresh ACP process",
+				viewStatus: undefined,
+			});
+			expect(roomOpens).toBe(0);
+			expect(closed).toEqual([identity]);
 		} finally {
 			await paneManager.dispose();
 			rmSync(socket, { force: true });

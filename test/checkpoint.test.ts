@@ -317,6 +317,84 @@ describe("durable session checkpoints", () => {
 		await hydrated.dispose();
 	});
 
+	it("recovers a persisted pending view as unavailable without reopening it", async () => {
+		const agentDir = tempDir("neta-checkpoint-view-");
+		const cwd = tempDir("neta-checkpoint-view-repo-");
+		const socket = "/tmp/neta-checkpoint-view.sock";
+		writeFileSync(socket, "");
+		let openedPanes = 0;
+		let reconciliations = 0;
+		const manager = new WorkerManager({
+			cwd,
+			agentDir,
+			config: fixtureBackendConfig(),
+			channelAddress: socket,
+			onEvent: () => {},
+			createTransport: (options) => new FakeTransport(options),
+			panes: {
+				open: () => ({
+					status: "unconfirmed",
+					reason: "listing delayed",
+					identity: { mux: "zellij", sessionName: "s1", title: "ro1 scout" },
+				}),
+				openRoom: () => ({ status: "opened" }),
+				reconcile: () => {
+					reconciliations += 1;
+					return new Promise<never>(() => {});
+				},
+			},
+			checkpoint: {
+				id: "pending-view",
+				leaderBackend: "codex",
+				writer: new CheckpointWriter(agentDir),
+			},
+		});
+		try {
+			const worker = await manager.spawn({ role: "scout", tier: "expert", task: "pending view" });
+			expect(worker.viewStatus).toBe("verification-pending");
+			await manager.flushCheckpoint();
+			const checkpoint = readCheckpointForHydration("pending-view", agentDir);
+			expect(checkpoint.workers[0]?.viewStatus).toBe("verification-pending");
+
+			const hydrated = WorkerManager.hydrate(
+				{
+					cwd,
+					agentDir,
+					config: fixtureBackendConfig(),
+					channelAddress: "/tmp/neta-checkpoint-view-recovered.sock",
+					onEvent: () => {},
+					createTransport: (options) => new FakeTransport(options),
+					panes: {
+						open: () => {
+							openedPanes += 1;
+							return { status: "opened" };
+						},
+						openRoom: () => ({ status: "opened" }),
+						reconcile: () => {
+							reconciliations += 1;
+							return { status: "opened" };
+						},
+					},
+					checkpoint: { id: "pending-view", leaderBackend: "codex", writer: new CheckpointWriter(agentDir) },
+				},
+				checkpoint,
+			);
+
+			expect(hydrated.get(worker.id)).toMatchObject({
+				state: "interrupted",
+				viewStatus: "verification-unavailable",
+				viewReason: "view was not reattached during recovery",
+				headlessReason: undefined,
+			});
+			expect(openedPanes).toBe(0);
+			expect(reconciliations).toBe(1);
+			await hydrated.dispose();
+		} finally {
+			await manager.dispose();
+			rmSync(socket, { force: true });
+		}
+	});
+
 	it("fails closed on malformed nested goal data", () => {
 		const checkpoint = emptyCheckpoint("bad-goal", process.cwd());
 		expect(() => validateCheckpoint({ ...checkpoint, goal: { originalIntent: "x" } })).toThrow(

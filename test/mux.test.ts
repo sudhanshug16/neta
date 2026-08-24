@@ -451,6 +451,56 @@ describe("zellij", () => {
 		});
 	});
 
+	it("keeps a launched tab unconfirmed when the post-launch listing fails", async () => {
+		const before = JSON.stringify([{ id: 41, is_plugin: false, tab_id: 7, tab_name: "user-work" }]);
+		let call = 0;
+		const adapter = new ZellijAdapter(
+			() => {
+				call += 1;
+				if (call === 3) throw new Error("older zellij cannot list tabs");
+				return call === 1 ? { status: 0, stdout: before } : { status: 0, stdout: "8\n" };
+			},
+			{ ZELLIJ: "0", ZELLIJ_SESSION_NAME: "s1", ZELLIJ_PANE_ID: "41" },
+		);
+
+		const outcome = await adapter.openPane("ro1 auth", { command: "neta", args: [] }, "/repo");
+		expect(outcome).toMatchObject({
+			status: "unconfirmed",
+			reason: "zellij: view launched; tab listing verification unavailable (older zellij cannot list tabs)",
+			identity: { mux: "zellij", sessionName: "s1", title: "ro1 auth", beforeTabIds: [7] },
+		});
+	});
+
+	it("keeps an exact tab identity when an older Zellij lacks focus restoration", async () => {
+		const before = JSON.stringify([{ id: 41, is_plugin: false, tab_id: 7, tab_name: "user-work" }]);
+		const after = JSON.stringify([
+			{ id: 41, is_plugin: false, tab_id: 7, tab_name: "user-work" },
+			{ id: 42, is_plugin: false, tab_id: 8, tab_name: "ro1 auth" },
+		]);
+		let call = 0;
+		const adapter = new ZellijAdapter(
+			() => {
+				call += 1;
+				if (call === 4) return { status: 1, stdout: "", stderr: "unknown action go-to-tab-by-id" };
+				return (
+					[
+						{ status: 0, stdout: before },
+						{ status: 0, stdout: "8\n" },
+						{ status: 0, stdout: after },
+					][call - 1] ?? { status: 0, stdout: "" }
+				);
+			},
+			{ ZELLIJ: "0", ZELLIJ_SESSION_NAME: "s1", ZELLIJ_PANE_ID: "41" },
+		);
+
+		const outcome = await adapter.openPane("ro1 auth", { command: "neta", args: [] }, "/repo");
+		expect(outcome).toMatchObject({
+			status: "unconfirmed",
+			reason: "zellij: view launched; focus restoration unavailable (zellij: unknown action go-to-tab-by-id)",
+			identity: { mux: "zellij", sessionName: "s1", title: "ro1 auth", tabId: 8, beforeTabIds: [7] },
+		});
+	});
+
 	it("returns false when Zellij reports success but no stable tab was added", async () => {
 		const before = JSON.stringify([{ id: 41, is_plugin: false, tab_id: 7, tab_name: "user-work" }]);
 		const responses = [
