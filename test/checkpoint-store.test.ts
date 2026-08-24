@@ -27,6 +27,7 @@ import {
 	readV6Checkpoint,
 	readV6CheckpointMetadata,
 	readV6Manifest,
+	readV6WorkerDetails,
 	V6_FORMAT_VERSION,
 	type V6FaultEvent,
 	type V6ReadCounters,
@@ -239,6 +240,40 @@ describe("normalized v6 checkpoint store", () => {
 		expect(() => readV6Checkpoint(segmentStore)).toThrow("Corrupt referenced v6 detail segment");
 	});
 
+	it("validates published terminal artifacts before resume while keeping large detail lazy", () => {
+		const agentDir = temp();
+		const source = checkpoint("resume-validation");
+		const terminal = source.workers.find((worker) => worker.id === "rw1");
+		if (!terminal) throw new Error("expected terminal worker");
+		const largeLog = Array.from({ length: 256 }, (_, index) => ({
+			at: index + 1,
+			kind: index % 2 === 0 ? ("status" as const) : ("text" as const),
+			text: `terminal-${index}-${"x".repeat(256)}`,
+		}));
+		const large = { ...source, workers: [{ ...terminal, log: largeLog }] };
+		const largeStore = v6CheckpointStorePath(large.id, agentDir);
+		const largeManifest = writeV6Checkpoint(large, largeStore);
+		const hydrated = openCheckpointForHydration(large.id, agentDir);
+		expect(hydrated.workers[0]?.log).toEqual([]);
+		const counters: V6ReadCounters = {};
+		expect(readV6CheckpointMetadata(largeStore, counters).checkpoint.workers[0]?.log).toEqual([]);
+		expect(counters.detailReads ?? 0).toBe(0);
+		const terminalRef = largeManifest.workers[0];
+		if (!terminalRef) throw new Error("expected terminal reference");
+		expect(readV6WorkerDetails(largeStore, terminalRef)).toEqual(largeLog);
+
+		for (const kind of ["terminal", "outcome"] as const) {
+			const corrupt = checkpoint(`resume-corrupt-${kind}`);
+			const store = v6CheckpointStorePath(corrupt.id, agentDir);
+			const manifest = writeV6Checkpoint(corrupt, store);
+			const reference = manifest.workers.find((worker) => worker.id === "rw1");
+			const blob = reference?.[kind];
+			if (!blob) throw new Error(`expected ${kind} blob reference`);
+			writeFileSync(join(store, "blobs", `${blob.sha256}.json`), "tampered");
+			expect(() => openCheckpointForHydration(corrupt.id, agentDir)).toThrow("v6 validation found corrupt");
+		}
+	});
+
 	it("keeps terminal summary visible while reporting optional terminal-detail corruption", () => {
 		const root = temp();
 		const store = join(root, "store");
@@ -406,6 +441,34 @@ describe("normalized v6 checkpoint store", () => {
 		releaseSessionLock(failedClaim);
 		const retryClaim = tryAcquireCheckpointClaim(failed.id, agentDir);
 		expect(openCheckpointForHydration(failed.id, agentDir, retryClaim).id).toBe(failed.id);
+		releaseSessionLock(retryClaim);
+	});
+
+	it("keeps a published migration retryable when the parent fsync fails after rename", () => {
+		const agentDir = temp();
+		const legacy = checkpoint("post-publish-fsync");
+		writeCheckpointAtomic(legacy, agentDir);
+		const legacyBytes = readFileSync(checkpointPath(legacy.id, agentDir));
+		const claim = tryAcquireCheckpointClaim(legacy.id, agentDir);
+		if (!claim) throw new Error("expected migration claim");
+		let failed = false;
+		expect(() =>
+			openCheckpointForHydration(legacy.id, agentDir, claim, {
+				fail: (event) => {
+					if (event.type !== "manifest-parent-fsync" || !event.path.endsWith("/checkpoints-v6") || failed) return;
+					failed = true;
+					const error = new Error("parent fsync fault") as NodeJS.ErrnoException;
+					error.code = "EACCES";
+					throw error;
+				},
+			}),
+		).toThrow("parent fsync fault");
+		expect(readV6Checkpoint(v6CheckpointStorePath(legacy.id, agentDir)).checkpoint.id).toBe(legacy.id);
+		expect(readFileSync(checkpointPath(legacy.id, agentDir))).toEqual(legacyBytes);
+		releaseSessionLock(claim);
+		const retryClaim = tryAcquireCheckpointClaim(legacy.id, agentDir);
+		if (!retryClaim) throw new Error("expected retry claim");
+		expect(openCheckpointForHydration(legacy.id, agentDir, retryClaim).id).toBe(legacy.id);
 		releaseSessionLock(retryClaim);
 	});
 

@@ -854,6 +854,32 @@ function workerRefs(
 	contentAddressed = true,
 ): { active: V6ActiveWorkerRef; terminal?: V6TerminalIndexEntry } {
 	const worker = delta.worker;
+	let priorTerminal: V6WorkerRef | undefined;
+	if (delta.terminal && worker.log.length === 0) {
+		try {
+			priorTerminal = readV6WorkerRef(storePath, worker.id);
+		} catch (error) {
+			if (!(error instanceof CheckpointStoreError) || !error.message.startsWith("No published v6 manifest"))
+				throw error;
+		}
+	}
+	let preservedDetails: V6DetailSegmentRef[] | undefined;
+	let preservedTerminalDetails: V6DetailSegmentRef[] | undefined;
+	if (priorTerminal && worker.log.length === 0) {
+		const priorActive = readBlob(storePath, priorTerminal.active, "active", worker.id);
+		const sameGeneration =
+			priorActive.id === worker.id &&
+			priorActive.startedAt === worker.startedAt &&
+			(priorActive.revivalCount ?? 0) === (worker.revivalCount ?? 0);
+		if (sameGeneration && !delta.removeTerminalIndex) {
+			preservedDetails = priorTerminal.detailSegments;
+			preservedTerminalDetails = priorTerminal.terminalDetailSegments;
+		} else if (!delta.removeTerminalIndex) {
+			throw new CheckpointStoreError(
+				`Terminal worker ${worker.id} changed generation without an explicit detail replacement.`,
+			);
+		}
+	}
 	const activeBuilt = artifact(contentAddressed ? activeWorker(worker) : worker);
 	const activePath = blobPath(storePath, activeBuilt.sha256);
 	const activeWrote = writeImmutable(activePath, activeBuilt.bytes, hooks);
@@ -862,7 +888,7 @@ function workerRefs(
 	const details =
 		worker.log.length > 0
 			? [writeSegment(storePath, worker.id, 0, worker.log, false, hooks, false, contentAddressed)]
-			: [];
+			: (preservedDetails ?? []);
 	const active: V6ActiveWorkerRef = {
 		id: worker.id,
 		active: { kind: "active", sha256: activeBuilt.sha256 },
@@ -881,7 +907,7 @@ function workerRefs(
 	const terminalDetails =
 		worker.log.length > 0
 			? [writeSegment(storePath, worker.id, 0, worker.log, true, hooks, true, contentAddressed)]
-			: [];
+			: (preservedTerminalDetails ?? []);
 	const ref: V6WorkerRef & { terminal: V6BlobRef; outcome: V6BlobRef } = {
 		...active,
 		terminal: { kind: "terminal", sha256: terminalBuilt.sha256 },
@@ -1438,6 +1464,16 @@ function migrateV5ToV6(id: string, agentDir: string, claim: CheckpointClaim, hoo
 		fsyncDirectory(paths.parent, "manifest-parent-fsync", hooks);
 		return { storePath: paths.storePath, published: true, alreadyMigrated: false };
 	} catch (error) {
+		// The destination rename is the publication point. A parent-directory fsync
+		// can fail after it, leaving a valid destination and no staging tree to copy.
+		// Validate what is now authoritative, then preserve the original durability
+		// error for the caller; a later retry will recognize the published store.
+		if (storePathPresent(paths.storePath)) {
+			const published = readV6ManifestUnlocked(paths.storePath);
+			if (published.id !== id) throw new CheckpointStoreError(`Published v6 store id does not match "${id}".`);
+			validateV6References(paths.storePath, published);
+			throw error;
+		}
 		const code = (error as NodeJS.ErrnoException).code;
 		if (!["EXDEV", "EPERM", "EACCES", "ENOTSUP", "EINVAL"].includes(code ?? "")) throw error;
 		const manifest = readV6ManifestUnlocked(staging);
@@ -1607,6 +1643,8 @@ export function openCheckpointForHydration(
 		}
 		migrateV5ToV6(id, paths.agentDir, checkpointClaim, hooks);
 	}
+	const manifest = readV6Manifest(paths.storePath);
+	validateV6References(paths.storePath, manifest);
 	const checkpoint = readV6CheckpointMetadata(paths.storePath, undefined, { hydrateActiveDetails: true }).checkpoint;
 	if (checkpoint.liveLease && isSessionLeaseAlive(checkpoint.liveLease, agentDir))
 		throw new CheckpointStoreError(

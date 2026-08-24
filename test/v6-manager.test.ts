@@ -7,6 +7,8 @@ import {
 	readV6Checkpoint,
 	readV6CheckpointMetadata,
 	readV6Manifest,
+	readV6WorkerDetails,
+	readV6WorkerRef,
 	type V6ReadCounters,
 	v6CheckpointStorePath,
 	v6ManifestPath,
@@ -137,6 +139,14 @@ describe("v6 manager integration", () => {
 		const inspection = manager.inspect(summary.id);
 		expect(inspection.entries.map((entry) => entry.text)).toContain("durable terminal detail");
 		expect((counters.detailReads ?? 0) > detailReadsBeforeStatus).toBe(true);
+		const publishedBeforeDrain = readV6WorkerRef(storePath, summary.id);
+		if (!publishedBeforeDrain) throw new Error("expected published terminal reference");
+		const durableDetails = readV6WorkerDetails(storePath, publishedBeforeDrain);
+		expect(manager.drainLog(summary.id)).toEqual([]);
+		await writer.flush();
+		const publishedAfterDrain = readV6WorkerRef(storePath, summary.id);
+		if (!publishedAfterDrain) throw new Error("expected terminal reference after deferred drain");
+		expect(readV6WorkerDetails(storePath, publishedAfterDrain)).toEqual(durableDetails);
 		const next = await manager.spawn({ role: "scout", tier: "expert", task: "next" });
 		await manager.flushCheckpoint();
 		expect(
@@ -145,6 +155,9 @@ describe("v6 manager integration", () => {
 		expect(readV6Checkpoint(storePath).checkpoint.workers.find((item) => item.id === summary.id)?.finalResult).toBe(
 			"exact terminal result",
 		);
+		const archivedRef = readV6WorkerRef(storePath, summary.id);
+		if (!archivedRef) throw new Error("expected archived terminal reference");
+		expect(readV6WorkerDetails(storePath, archivedRef)).toEqual(durableDetails);
 		driver?.finish({ ok: true, summary: "next result" });
 		await manager.wait([next.id], 1_000);
 		await manager.dispose();
