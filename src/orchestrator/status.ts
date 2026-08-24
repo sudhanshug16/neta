@@ -88,10 +88,12 @@ export function classifyHandoff(
 	const clipped = available && (summary.resultClipped === true || (summary.result?.length ?? 0) > resultLimit);
 	if (summary.state === "done") {
 		if (!available) return { status: "missing", text: "handoff: missing; inspect required" };
-		if (clipped) return { status: "clipped", text: "handoff: clipped; inspect available" };
+		if (clipped) return { status: "clipped", text: "handoff: clipped; inspect required" };
+		if (summary.laterFailure)
+			return { status: "diagnostic", text: "handoff: inspect required; later failure detected" };
 		return {
 			status: "complete",
-			text: `handoff: complete${summary.laterFailure ? "; later failure detected; inspect required" : ""}`,
+			text: "handoff: complete",
 		};
 	}
 	return { status: "diagnostic", text: "handoff: inspect required" };
@@ -102,7 +104,9 @@ export function classifyHandoff(
  * for context; a problematic terminal needs inspection for diagnosis. Clean
  * terminal outcomes already have their handoff and should stay quiet.
  */
-export function statusHint(summary: Pick<WorkerSummary, "id" | "state" | "laterFailure">): string | undefined {
+export function statusHint(
+	summary: Pick<WorkerSummary, "id" | "state" | "resultClipped" | "resultMissing" | "laterFailure">,
+): string | undefined {
 	if (
 		summary.state === "starting" ||
 		summary.state === "running" ||
@@ -116,6 +120,8 @@ export function statusHint(summary: Pick<WorkerSummary, "id" | "state" | "laterF
 		summary.state === "failed" ||
 		summary.state === "interrupted" ||
 		summary.state === "killed" ||
+		summary.resultClipped ||
+		summary.resultMissing ||
 		summary.laterFailure
 	) {
 		return `inspect: ${APP_NAME} inspect ${summary.id}`;
@@ -306,7 +312,9 @@ function section(label: string, workers: WorkerSummary[], now: number): string[]
 function terminalSection(workers: WorkerSummary[], now: number): string[] {
 	const states = ["blocked", "failed", "interrupted", "done", "killed"] as const;
 	const counts = states.map((state) => `${state}=${workers.filter((worker) => worker.state === state).length}`);
-	const diagnostic = workers.filter((worker) => worker.state !== "done" || worker.laterFailure);
+	const diagnostic = workers.filter(
+		(worker) => worker.state !== "done" || worker.resultClipped || worker.resultMissing || worker.laterFailure,
+	);
 	return [
 		"Terminal:",
 		`  counts: ${counts.join(" | ")}`,
@@ -383,6 +391,8 @@ export function formatWriterStatus(snapshot: WorkerStatusSnapshot, now = Date.no
 			worker.state === "failed" ||
 			worker.state === "interrupted" ||
 			worker.state === "killed" ||
+			worker.resultClipped ||
+			worker.resultMissing ||
 			worker.laterFailure,
 	);
 	const recent = [...finished].reverse();

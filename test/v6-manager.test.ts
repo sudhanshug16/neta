@@ -8,6 +8,7 @@ import {
 	readV6CheckpointMetadata,
 	readV6Manifest,
 	readV6WorkerDetails,
+	readV6WorkerOutcome,
 	readV6WorkerRef,
 	type V6ReadCounters,
 	v6CheckpointStorePath,
@@ -519,6 +520,70 @@ describe("v6 manager integration", () => {
 		drivers[1]?.finish({ ok: true, summary: "second" });
 		await manager.wait([worker.id], 1_000);
 		await manager.dispose();
+	});
+
+	it("revival failure preserves the full durable report after hot eviction and hydration", async () => {
+		const root = mkdtempSync(join(tmpdir(), "neta-v6-revival-report-"));
+		roots.push(root);
+		const agentDir = join(root, "agent");
+		const storePath = v6CheckpointStorePath("revival-report", agentDir);
+		writeV6Checkpoint(checkpoint("revival-report"), storePath);
+		const writer = new CheckpointWriter(agentDir, () => {}, undefined, "v6");
+		const drivers: Driver[] = [];
+		const manager = new WorkerManager({
+			cwd: process.cwd(),
+			agentDir,
+			config: fixtureBackendConfig(),
+			channelAddress: join(root, "channel.sock"),
+			onEvent: () => {},
+			checkpoint: { id: "revival-report", leaderBackend: "codex", writer },
+			checkpointStorePath: storePath,
+			createTransport: (options) => {
+				const driver = new Driver(options);
+				drivers.push(driver);
+				return driver;
+			},
+		});
+		const report = `authoritative report\n${"detail ".repeat(400)}`;
+		const worker = await manager.spawn({ role: "scout", tier: "expert", task: "revive report" });
+		drivers[0]?.options.events.vendorSession("durable-session");
+		drivers[0]?.finish({ ok: true, summary: report });
+		await manager.wait([worker.id], 1_000);
+		const firstRef = readV6WorkerRef(storePath, worker.id);
+		if (!firstRef) throw new Error("first terminal reference missing");
+		expect(readV6WorkerOutcome(storePath, firstRef).finalResult).toBe(report);
+
+		await manager.steer(worker.id, "continue exact session");
+		drivers[1]?.finish({ ok: false, summary: "backend failed after report" });
+		await manager.wait([worker.id], 1_000);
+		expect(manager.get(worker.id)).toMatchObject({
+			state: "failed",
+			result: report,
+			laterFailure: expect.stringContaining("backend failed after report"),
+		});
+		expect(manager.status()).toContain("handoff: inspect required");
+		expect(manager.inspect(worker.id).worker.result).toBe(report);
+		expect((await manager.wait([worker.id], 1_000)).workers[0]?.result).toBe(report);
+
+		await manager.flushCheckpoint();
+		const hydrated = WorkerManager.hydrate(
+			{
+				cwd: process.cwd(),
+				agentDir,
+				config: fixtureBackendConfig(),
+				channelAddress: join(root, "hydrated.sock"),
+				onEvent: () => {},
+				checkpointStorePath: storePath,
+				createTransport: (options) => new Driver(options),
+			},
+			readV6CheckpointMetadata(storePath).checkpoint as Parameters<typeof WorkerManager.hydrate>[1],
+		);
+		try {
+			expect(hydrated.get(worker.id)).toMatchObject({ state: "failed", result: report });
+		} finally {
+			await hydrated.dispose();
+			await manager.dispose();
+		}
 	});
 
 	it("bounds terminal hot state for large outcomes and many terminal workers", async () => {

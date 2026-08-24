@@ -290,6 +290,12 @@ interface WorkerRecord {
 type LegacyPaneOpenOutcome = { opened: true } | { opened: false; reason: string };
 type WorkerPaneOutcome = PaneOpenOutcome | LegacyPaneOpenOutcome;
 
+export interface TeamSeedAdmission {
+	room: string;
+	seed: RoomPost;
+	previousPosts: RoomPost[] | undefined;
+}
+
 /** Opens a pane per worker, when a multiplexer is running. */
 export interface WorkerPaneHost {
 	open(worker: WorkerSummary): WorkerPaneOutcome | Promise<WorkerPaneOutcome>;
@@ -469,7 +475,7 @@ function terminalHotSummary(input: {
 		room: terminalTextPreview(input.room),
 		taskPreview: terminalTextPreview(input.task) ?? "",
 		resultPreview: terminalTextPreview(input.result),
-		resultClipped: input.result !== undefined && input.result.replace(/\s+/g, " ").trim().length > 512,
+		resultClipped: input.result !== undefined && input.result.trim().length > 512,
 		resultMissing: input.result === undefined || input.result.trim() === "",
 		terminalGoalRefused: input.terminalGoalRefused,
 		laterFailurePreview: terminalTextPreview(input.laterFailure),
@@ -1431,6 +1437,17 @@ export class WorkerManager implements ChannelHandler {
 		const generation = ++this.startGeneration;
 		record.startGeneration = generation;
 		let driver: WorkerTransportDriver | undefined;
+		let stoppedExactDriver = false;
+		const stopExactDriver = async (): Promise<void> => {
+			if (!driver || stoppedExactDriver || record.driver !== driver) return;
+			stoppedExactDriver = true;
+			driver.markTerminal();
+			await driver.kill().catch(() => {});
+			if (record.driver === driver) {
+				record.driver = undefined;
+				record.transportStarted = undefined;
+			}
+		};
 		try {
 			this.assertStartAdmitted(record, generation);
 			driver = this.createWorkerTransport(record, backend, runtimeEnv, systemPrompt);
@@ -1448,7 +1465,9 @@ export class WorkerManager implements ChannelHandler {
 			await this.openWorkerView(record, generation);
 			await this.publishSpawnBatch(record, generation, driver);
 		} catch (error) {
-			if (record.driver === driver && !isTerminalState(record.state)) {
+			const ownedDriver = record.driver === driver;
+			await stopExactDriver();
+			if (ownedDriver && !isTerminalState(record.state)) {
 				for (const message of record.pendingBriefLeaderMessages) {
 					this.appendLog(
 						record,
@@ -1747,25 +1766,50 @@ export class WorkerManager implements ChannelHandler {
 		const generation = ++this.startGeneration;
 		record.startGeneration = generation;
 		this.assertGoalAdmitsNewWork(admissionGeneration);
-		this.beginActive(record);
-		const priorState = record.revivalFromState ?? (record.state as "blocked" | "done" | "failed");
-		const priorTerminalSummary = record.terminalSummary;
-		const prior = {
-			state: priorState,
-			endedAt: record.endedAt,
-			result: record.result,
-			pendingQuestion: record.pendingQuestion,
-			archived: record.archived,
-			unsafeToPrompt: record.unsafeToPrompt,
-			queuedBehind: record.revivalPreviousQueuedBehind,
-			substantiveResponse: record.substantiveResponse,
-			lastResponse: record.lastResponse,
-			laterFailure: record.laterFailure,
-			transportStarted: record.transportStarted,
-		};
+		// Terminal v6 records retain only a bounded hot preview. Resolve the
+		// authoritative outcome while the record is still terminal, before the
+		// active-state fence clears the public handoff.
+		this.loadTerminalOutcome(record);
+		const priorResult = record.result;
 		const reservedWriter = record.writer && !this.activeWriter;
 		if (reservedWriter) this.activeWriter = record.id;
+		// This is the revival linearization point. Every public surface now sees a
+		// fresh nonterminal worker with no stale terminal result, even while startup
+		// awaits filesystem, settings, or vendor-session work.
+		this.beginActive(record);
+		record.terminalSummary = undefined;
+		record.terminalIndexNeedsRemoval = Boolean(this.options.checkpointStorePath);
+		record.finishing = undefined;
+		record.killReason = undefined;
+		record.endedAt = undefined;
+		record.substantiveResponse = priorResult;
+		record.result = undefined;
+		record.resultMissing = undefined;
+		record.resultClipped = undefined;
+		record.lastResponse = undefined;
+		record.laterFailure = undefined;
+		record.archived = false;
+		record.unsafeToPrompt = undefined;
+		record.pendingQuestion = undefined;
+		record.pendingDiscoveryId = undefined;
+		record.blockedTurn = undefined;
+		record.revivalFromState = undefined;
+		record.revivalPreviousQueuedBehind = undefined;
+		record.revivalMessage = undefined;
+		record.revivalAdmissionGeneration = undefined;
+		record.queuedBehind = undefined;
+		record.transportStarted = undefined;
+		record.driver = undefined;
+		record.revivalCount += 1;
+		record.headlessReason = "resumed headlessly in a fresh ACP process";
+		record.viewStatus = undefined;
+		record.viewReason = undefined;
+		record.queue = Promise.resolve();
+		record.queuedPrompts = 0;
+		this.setState(record, "starting");
+		const startupFence = this.checkpointChanged(record, "immediate", "structural");
 		try {
+			await startupFence;
 			record.scratchDir ??= await mkdtemp(join(tmpdir(), `neta-${record.id}-resume-`));
 			record.channelToken ??= randomBytes(16).toString("hex");
 			const configuredBackend = this.options.config.resolve(record.tier, record.backend, record.writer);
@@ -1786,37 +1830,8 @@ export class WorkerManager implements ChannelHandler {
 			this.assertGoalAdmitsNewWork(admissionGeneration);
 			await record.driver.start();
 			record.transportStarted = true;
-			// A successful revival returns this record to live state. The old bounded
-			// terminal summary must not mask its new active interval in public views.
-			record.terminalSummary = undefined;
-			record.terminalIndexNeedsRemoval = Boolean(this.options.checkpointStorePath);
-			record.finishing = undefined;
-			record.killReason = undefined;
-			record.endedAt = undefined;
-			// The old terminal report remains private so a failed follow-up can
-			// explain what it failed after; public live state starts empty.
-			record.substantiveResponse = prior.result;
-			record.result = undefined;
-			record.resultMissing = undefined;
-			record.resultClipped = undefined;
-			record.lastResponse = undefined;
-			record.laterFailure = undefined;
-			record.archived = false;
-			record.unsafeToPrompt = undefined;
-			record.pendingQuestion = undefined;
-			record.pendingDiscoveryId = undefined;
-			record.blockedTurn = undefined;
-			record.revivalFromState = undefined;
-			record.revivalPreviousQueuedBehind = undefined;
-			record.revivalMessage = undefined;
-			record.revivalAdmissionGeneration = undefined;
-			record.queuedBehind = undefined;
-			record.revivalCount += 1;
-			record.headlessReason = "resumed headlessly in a fresh ACP process";
-			record.viewStatus = undefined;
-			record.viewReason = undefined;
-			record.queue = Promise.resolve();
-			record.queuedPrompts = 0;
+			this.assertGoalAdmitsNewWork(admissionGeneration);
+			if (isTerminalState(record.state)) throw new Error(`Worker ${record.id} startup was superseded.`);
 			this.setState(record, "running");
 			// Revival is a state replacement, not telemetry. Publish the active ref and
 			// tombstone the old terminal index before handing the live conversation back
@@ -1825,34 +1840,30 @@ export class WorkerManager implements ChannelHandler {
 			record.terminalIndexNeedsRemoval = undefined;
 		} catch (error) {
 			this.freezeTiming(record);
-			await record.driver?.kill().catch(() => {});
+			const driver = record.driver;
+			if (driver) {
+				driver.markTerminal();
+				await driver.kill().catch(() => {});
+				if (record.driver === driver) record.driver = undefined;
+			}
 			if (record.processGroupId !== undefined) {
 				this.options.onWorkerProcessGroup?.(record.id, undefined);
 				record.processGroupId = undefined;
 			}
-			record.driver = undefined;
-			record.terminalSummary = priorTerminalSummary;
-			record.terminalIndexNeedsRemoval = undefined;
-			record.state = prior.state;
-			record.endedAt = prior.endedAt;
-			record.result = prior.result;
-			record.substantiveResponse = prior.substantiveResponse;
-			record.lastResponse = prior.lastResponse;
-			record.laterFailure = prior.laterFailure;
-			record.transportStarted = prior.transportStarted;
-			record.pendingQuestion = prior.pendingQuestion;
-			record.archived = prior.archived;
-			record.unsafeToPrompt = prior.unsafeToPrompt;
-			record.queuedBehind = prior.queuedBehind;
-			record.revivalFromState = undefined;
-			record.revivalPreviousQueuedBehind = undefined;
-			record.revivalMessage = undefined;
-			record.revivalAdmissionGeneration = undefined;
+			if (!isTerminalState(record.state)) {
+				const startupFailure = `Exact-session resume failed: ${error instanceof Error ? error.message : String(error)}`;
+				await this.finish(
+					record,
+					"failed",
+					priorResult ?? startupFailure,
+					priorResult ? { failure: startupFailure } : {},
+				);
+			}
 			if (reservedWriter && this.activeWriter === record.id) {
 				this.activeWriter = undefined;
 				void this.dequeueNextWriter();
 			}
-			this.checkpointChanged(record);
+			if (isTerminalState(record.state)) this.checkpointChanged(record);
 			throw error;
 		}
 
@@ -2356,6 +2367,29 @@ export class WorkerManager implements ChannelHandler {
 	roomTranscript(room: string, tail?: number): RoomPost[] {
 		const posts = this.rooms.get(room) ?? [];
 		return tail && tail > 0 ? posts.slice(-tail) : posts;
+	}
+
+	/** Reserve a seed with an exact rollback snapshot until a team admits a worker. */
+	beginTeamSeed(room: string, text: string): TeamSeedAdmission {
+		const previousPosts = this.rooms.get(room)?.map((post) => ({ ...post }));
+		const seed = { at: Date.now(), from: "leader", label: "leader", text };
+		this.ensureRoom(room).push(seed);
+		this.checkpointChanged();
+		for (const watcher of [...(this.roomWatchers.get(room) ?? [])]) watcher();
+		return { room, seed, previousPosts };
+	}
+
+	/** Remove only a seed that is still the final post of an unadmitted batch. */
+	rollbackTeamSeed(admission: TeamSeedAdmission): void {
+		const current = this.rooms.get(admission.room);
+		if (!current || current.length === 0 || current[current.length - 1] !== admission.seed) return;
+		if (admission.previousPosts === undefined) this.rooms.delete(admission.room);
+		else
+			this.rooms.set(
+				admission.room,
+				admission.previousPosts.map((post) => ({ ...post })),
+			);
+		this.checkpointChanged();
 	}
 
 	/**
@@ -3275,7 +3309,7 @@ export class WorkerManager implements ChannelHandler {
 			if (this.goal?.status !== undefined && this.goal.status !== "active") record.terminalGoalRefused = true;
 			record.result = result;
 			record.resultMissing = result.trim() === "";
-			record.resultClipped = result.replace(/\s+/g, " ").trim().length > CHANNEL_RESULT_LIMIT;
+			record.resultClipped = result.trim().length > CHANNEL_RESULT_LIMIT;
 			record.lastResponse ??= result;
 			if (options.failure) record.laterFailure = options.failure;
 			this.checkpointChanged(record);

@@ -132,6 +132,16 @@ describe("normalized v6 checkpoint store", () => {
 		expect(() => writeV6Checkpoint(checkpoint("deterministic"), join(root, "store"))).toThrow("already exists");
 	});
 
+	it("does not mark a short multiline v5 result clipped during v6 migration", () => {
+		const store = join(temp(), "store");
+		const source = checkpoint("multiline");
+		const first = source.workers[0];
+		if (!first) throw new Error("terminal fixture missing");
+		writeV6Checkpoint({ ...source, workers: [{ ...first, finalResult: "line one\nline two\nline three" }] }, store);
+		const migrated = readV6CheckpointMetadata(store).checkpoint.workers[0];
+		expect(migrated?.resultClipped).toBe(false);
+	});
+
 	it("publishes only through the manifest and ignores unreferenced orphans", () => {
 		const root = temp();
 		const store = join(root, "store");

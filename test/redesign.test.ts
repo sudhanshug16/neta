@@ -189,10 +189,10 @@ describe("settled tool surface and revival", () => {
 		const before = rejecting.get(terminal.id);
 		await expect(rejecting.steer(terminal.id, "again")).rejects.toThrow("failed to start an ACP session");
 		expect(rejecting.get(terminal.id)).toMatchObject({
-			state: before.state,
+			state: "failed",
 			result: before.result,
-			endedAt: before.endedAt,
-			revivalCount: 0,
+			laterFailure: expect.stringContaining("Exact-session resume failed"),
+			revivalCount: 1,
 		});
 	});
 });

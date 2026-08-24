@@ -740,8 +740,7 @@ function terminalSummary(worker: CheckpointWorker): V6TerminalSummary {
 		taskPreview: clipped(worker.task) ?? "",
 		resultPreview: clipped(worker.finalResult),
 		resultClipped:
-			worker.resultClipped === true ||
-			(worker.finalResult !== undefined && clipped(worker.finalResult) !== worker.finalResult),
+			worker.resultClipped === true || (worker.finalResult !== undefined && worker.finalResult.trim().length > 512),
 		resultMissing:
 			worker.resultMissing === true || worker.finalResult === undefined || worker.finalResult.trim() === "",
 		terminalGoalRefused: worker.terminalGoalRefused,

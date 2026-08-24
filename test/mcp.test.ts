@@ -169,6 +169,38 @@ describe("leader MCP redesign", () => {
 		expect(manager.roomTranscript("review")).toEqual([]);
 	});
 
+	it("rolls back a team seed when the goal terminalizes during gated admission", async () => {
+		let prepareCalls = 0;
+		const gated = new WorkerManager({
+			cwd: process.cwd(),
+			agentDir: "/nonexistent-agent-dir",
+			config: fixtureBackendConfig(),
+			channelAddress: "/tmp/neta-mcp-seed-race.sock",
+			onEvent: () => {},
+			prepareEnv: async () => {
+				prepareCalls += 1;
+				if (prepareCalls === 1) gated.completeGoal({ expectedRevision: 0 });
+				return {};
+			},
+			createTransport: (options) => new FakeTransport(options),
+		});
+		try {
+			gated.initGoal("ship the release");
+			const tool = leaderTools(gated).find((candidate) => candidate.name === "neta_delegate");
+			if (!tool) throw new Error("neta_delegate was not registered");
+			await tool.run({
+				team: "race-room",
+				seed: "must not remain",
+				workers: [{ role: "scout", tier: "expert", task: "race" }],
+			});
+			expect(gated.roomTranscript("race-room")).toEqual([]);
+			expect(gated.list()).toHaveLength(0);
+		} finally {
+			await gated.dispose();
+			rmSync("/tmp/neta-mcp-seed-race.sock", { force: true });
+		}
+	});
+
 	it("collects a middle runtime startup failure and still attempts the full team", async () => {
 		failStartAt = 2;
 		const result = await call("neta_delegate", {
@@ -257,7 +289,7 @@ describe("leader MCP redesign", () => {
 		transports[0].finish({ ok: true, summary: "x".repeat(3_001) });
 
 		const rendered = body(await waiting);
-		expect(rendered).toContain("handoff: clipped; inspect available");
+		expect(rendered).toContain("handoff: clipped; inspect required");
 		expect(rendered).toContain("… 1 more characters");
 		expect(rendered).not.toContain("transcript output is not the handoff");
 	});

@@ -17,6 +17,7 @@ class FakeTransport implements WorkerTransportDriver {
 	readonly prompts: string[] = [];
 	started = false;
 	killed = false;
+	killCount = 0;
 	markedTerminal = false;
 	private pending: Array<(outcome: PromptOutcome) => void> = [];
 	private killGate: Promise<void> | undefined;
@@ -51,6 +52,7 @@ class FakeTransport implements WorkerTransportDriver {
 
 	async kill(): Promise<void> {
 		this.killed = true;
+		this.killCount += 1;
 		this.killStartedResolve?.();
 		const killGate = this.killGate;
 		this.killGate = undefined;
@@ -1305,6 +1307,49 @@ describe("WorkerManager", () => {
 		} finally {
 			await paneManager.dispose();
 			rmSync(socket, { force: true });
+		}
+	});
+
+	it("publishes a fresh nonterminal handoff while revival startup is gated", async () => {
+		let holdResumeStart = false;
+		const gatedTransports: FakeTransport[] = [];
+		const gated = new WorkerManager({
+			cwd: process.cwd(),
+			agentDir: "/nonexistent-agent-dir",
+			config,
+			channelAddress: "/tmp/neta-revival-freshness.sock",
+			onEvent: () => {},
+			createTransport: (options) => {
+				const transport = new FakeTransport(options, holdResumeStart);
+				gatedTransports.push(transport);
+				return transport;
+			},
+		});
+		try {
+			const original = await gated.spawn({ role: "scout", tier: "expert", task: "report" });
+			gatedTransports[0]?.options.events.vendorSession("resume-session");
+			gatedTransports[0]?.finish({ ok: true, summary: "old terminal handoff" });
+			await gated.waitFor([original.id], 1_000);
+			holdResumeStart = true;
+
+			const revival = gated.steer(original.id, "continue exact session");
+			await waitFor(() => gatedTransports.length === 2);
+			expect(gated.get(original.id)).toMatchObject({
+				state: "starting",
+				result: undefined,
+				laterFailure: undefined,
+			});
+			expect(gated.status()).toContain("starting");
+			expect((await gated.wait([original.id], 1)).workers[0]?.result).toBeUndefined();
+
+			gatedTransports[1]?.releaseStart();
+			expect((await revival).worker.state).toBe("running");
+			gatedTransports[1]?.finish({ ok: true, summary: "new terminal handoff" });
+			await gated.waitFor([original.id], 1_000);
+			expect(gated.get(original.id)).toMatchObject({ state: "done", result: "new terminal handoff" });
+		} finally {
+			await gated.dispose();
+			rmSync("/tmp/neta-revival-freshness.sock", { force: true });
 		}
 	});
 
@@ -2747,6 +2792,34 @@ describe("WorkerManager", () => {
 			} finally {
 				await gated.dispose();
 				rmSync("/tmp/neta-goal-race.sock", { force: true });
+			}
+		});
+
+		it("kills exactly the gated transport that resolves after goal terminalization", async () => {
+			const gated = new WorkerManager({
+				cwd: process.cwd(),
+				agentDir: "/nonexistent-agent-dir",
+				config,
+				channelAddress: "/tmp/neta-goal-start-leak.sock",
+				onEvent: () => {},
+				createTransport: (options) => {
+					const transport = new FakeTransport(options, true);
+					transports.push(transport);
+					return transport;
+				},
+			});
+			try {
+				gated.initGoal("ship the release");
+				const starting = gated.spawn({ role: "scout", tier: "expert", task: "leak race" });
+				await waitFor(() => transports.length === 1 && transports[0]?.started === true);
+				gated.completeGoal({ expectedRevision: 0 });
+				transports[0]?.releaseStart();
+				await expect(starting).rejects.toThrow("startup was superseded");
+				expect(transports[0]?.killCount).toBe(1);
+				expect(gated.get("ro1").state).toBe("interrupted");
+			} finally {
+				await gated.dispose();
+				rmSync("/tmp/neta-goal-start-leak.sock", { force: true });
 			}
 		});
 
