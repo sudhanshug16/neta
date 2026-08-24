@@ -163,6 +163,16 @@ export function formatWorkerSummary(summary: WorkerSummary, now = Date.now()): s
 		parts.join(" | "),
 		...(summary.laterFailure ? [`After its report: ${clipDisplay(summary.laterFailure)}`] : []),
 		...(summary.headlessReason ? [`Worker view: headless — ${clipDisplay(summary.headlessReason)}`] : []),
+		...(summary.viewStatus === "verification-pending"
+			? [
+					`Worker view: view verification pending${summary.viewReason ? ` — ${clipDisplay(summary.viewReason)}` : ""}`,
+				]
+			: []),
+		...(summary.viewStatus === "verification-unavailable"
+			? [
+					`Worker view: view launched; verification unavailable${summary.viewReason ? ` — ${clipDisplay(summary.viewReason)}` : ""}`,
+				]
+			: []),
 	].join("\n");
 }
 

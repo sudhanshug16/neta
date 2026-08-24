@@ -243,7 +243,7 @@ describe("neta (launching a leader)", () => {
 		}, managerEnv);
 		expect(
 			await adapter.openPane("ro1 scout", { command: "neta", args: ["watch", "ro1"] }, cwd, "user-session"),
-		).toBe(false);
+		).toMatchObject({ status: "failed" });
 		expect(calls).toBe(0);
 	});
 

@@ -10,7 +10,7 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { findOnPath } from "../detect.ts";
-import type { MuxAdapter, ProcessSpec } from "./types.ts";
+import type { MuxAdapter, PaneCloseOutcome, PaneIdentity, PaneOpenOutcome, ProcessSpec } from "./types.ts";
 
 interface CommandResult {
 	status: number | null;
@@ -178,6 +178,11 @@ export function renameTabByIdArgs(sessionName: string, tabId: number, title: str
 	return ["--session", sessionName, "action", "rename-tab-by-id", String(tabId), title];
 }
 
+/** Close one exact tab; never infer an ordinal from a mutable tab listing. */
+export function closeTabByIdArgs(sessionName: string, tabId: number): string[] {
+	return ["--session", sessionName, "action", "close-tab-by-id", String(tabId)];
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -263,12 +268,12 @@ function zellijTabs(stdout: string): Map<number, string> | undefined {
 	return tabs;
 }
 
-function openedZellijTab(before: string, after: string, title: string): boolean {
+function openedZellijTab(before: string, after: string, title: string): ZellijTab | undefined {
 	const beforeTabs = zellijTabs(before);
 	const afterTabs = zellijTabs(after);
-	if (!beforeTabs || !afterTabs) return false;
+	if (!beforeTabs || !afterTabs) return undefined;
 	const added = [...afterTabs].filter(([id]) => !beforeTabs.has(id));
-	return added.length === 1 && added[0][1] === title;
+	return added.length === 1 && added[0][1] === title ? { id: added[0][0], name: title } : undefined;
 }
 
 const ZELLIJ_TAB_POLL_ATTEMPTS = 2;
@@ -280,10 +285,11 @@ async function waitForOpenedZellijTab(
 	title: string,
 	targetSession: string,
 	run: ZellijCommandRunner,
-): Promise<boolean> {
+): Promise<ZellijTab | undefined> {
 	let after = initialAfter;
 	for (let attempt = 0; attempt < ZELLIJ_TAB_POLL_ATTEMPTS; attempt += 1) {
-		if (openedZellijTab(before, after, title)) return true;
+		const opened = openedZellijTab(before, after, title);
+		if (opened) return opened;
 		if (attempt === ZELLIJ_TAB_POLL_ATTEMPTS - 1) break;
 		await new Promise((resolve) => setTimeout(resolve, ZELLIJ_TAB_POLL_MS));
 		let listed: CommandResult;
@@ -296,8 +302,34 @@ async function waitForOpenedZellijTab(
 		if (listedError) throw listedError;
 		after = listed.stdout;
 	}
-	return false;
+	return undefined;
 }
+
+function paneIdentity(sessionName: string, title: string, before: string, tabId?: number): PaneIdentity {
+	const beforeTabs = zellijTabs(before);
+	return {
+		mux: "zellij",
+		sessionName,
+		title,
+		...(tabId === undefined ? {} : { tabId }),
+		...(beforeTabs ? { beforeTabIds: [...beforeTabs.keys()] } : {}),
+	};
+}
+
+function listedTab(stdout: string, identity: PaneIdentity): ZellijTab | undefined {
+	const tabs = zellijTabs(stdout);
+	if (!tabs) return undefined;
+	if (identity.tabId !== undefined) {
+		return tabs.get(identity.tabId) === identity.title ? { id: identity.tabId, name: identity.title } : undefined;
+	}
+	if (!identity.beforeTabIds) return undefined;
+	const before = new Set(identity.beforeTabIds);
+	const added = [...tabs].filter(([id, name]) => !before.has(id) && name === identity.title);
+	return added.length === 1 ? { id: added[0][0], name: identity.title } : undefined;
+}
+
+const ZELLIJ_RECONCILE_ATTEMPTS = 4;
+const ZELLIJ_RECONCILE_MS = 50;
 
 /**
  * A session may have no attached clients, or several clients each focused on a
@@ -410,21 +442,24 @@ export class ZellijAdapter implements MuxAdapter {
 		return { command: "zellij", args: newSessionArgs(sessionName, layoutPath), env: leader.env };
 	}
 
-	async openPane(title: string, spec: ProcessSpec, cwd: string, sessionName?: string): Promise<boolean> {
+	async openPane(title: string, spec: ProcessSpec, cwd: string, sessionName?: string): Promise<PaneOpenOutcome> {
 		const targetSession = sessionName ?? this.sessionName();
 		const paneId = this.env.ZELLIJ_PANE_ID;
-		if (!targetSession || !paneId || (!sessionName && !this.inSession())) return false;
+		if (!targetSession) return { status: "failed", reason: "zellij: no target session" };
+		if (!paneId || (!sessionName && !this.inSession()))
+			return { status: "failed", reason: "zellij: could not identify the leader pane" };
 
 		let before: CommandResult;
 		try {
 			before = this.run("zellij", listTabPanesArgs(targetSession));
 		} catch (error) {
-			throw new Error(`zellij: ${error instanceof Error ? error.message : String(error)}`);
+			return { status: "failed", reason: `zellij: ${error instanceof Error ? error.message : String(error)}` };
 		}
 		const beforeError = zellijCommandError(before);
-		if (beforeError) throw beforeError;
+		if (beforeError) return { status: "failed", reason: beforeError.message };
 		const originalTab = zellijTabForPane(before.stdout, paneId);
-		if (!originalTab) return false;
+		if (!originalTab) return { status: "failed", reason: "zellij: could not identify the leader tab" };
+		const identity = paneIdentity(targetSession, title, before.stdout);
 
 		let created: CommandResult;
 		let after: CommandResult;
@@ -434,13 +469,22 @@ export class ZellijAdapter implements MuxAdapter {
 			});
 			after = this.run("zellij", listTabPanesArgs(targetSession));
 		} catch (error) {
-			throw new Error(`zellij: ${error instanceof Error ? error.message : String(error)}`);
+			return {
+				status: "failed",
+				reason: `zellij: ${error instanceof Error ? error.message : String(error)}`,
+				identity,
+			};
 		}
 		const createdError = zellijCommandError(created);
-		if (createdError) throw createdError;
+		if (createdError) return { status: "failed", reason: createdError.message, identity };
 		const afterError = zellijCommandError(after);
-		if (afterError) throw afterError;
-		const opened = await waitForOpenedZellijTab(before.stdout, after.stdout, title, targetSession, this.run);
+		if (afterError) return { status: "failed", reason: afterError.message, identity };
+		let opened: ZellijTab | undefined;
+		try {
+			opened = await waitForOpenedZellijTab(before.stdout, after.stdout, title, targetSession, this.run);
+		} catch (error) {
+			return { status: "failed", reason: error instanceof Error ? error.message : String(error), identity };
+		}
 
 		// new-tab always focuses the new tab. Restore the exact stable id belonging
 		// to the calling pane, then verify active state because actions can report
@@ -451,16 +495,80 @@ export class ZellijAdapter implements MuxAdapter {
 			restoredFocus = this.run("zellij", goToTabByIdArgs(targetSession, originalTab.id));
 			focused = this.run("zellij", listTabsArgs(targetSession));
 		} catch (error) {
-			throw new Error(`zellij: ${error instanceof Error ? error.message : String(error)}`);
+			return {
+				status: "failed",
+				reason: `zellij: ${error instanceof Error ? error.message : String(error)}`,
+				identity,
+			};
 		}
 		const restoreError = zellijCommandError(restoredFocus);
-		if (restoreError) throw restoreError;
+		if (restoreError) return { status: "failed", reason: restoreError.message, identity };
 		const focusedError = zellijCommandError(focused);
-		if (focusedError) throw focusedError;
+		if (focusedError) return { status: "failed", reason: focusedError.message, identity };
 		const restored = zellijFocusRestored(focused.stdout, originalTab.id);
-		if (!opened) return false;
-		if (!restored) throw new Error(`zellij: opened tab but could not restore focus to ${originalTab.name}`);
-		return true;
+		const openedIdentity = opened ? paneIdentity(targetSession, title, before.stdout, opened.id) : identity;
+		if (!opened || !restored)
+			return {
+				status: "unconfirmed",
+				reason: !restored
+					? `zellij: view launched; focus verification unavailable for ${originalTab.name}`
+					: "zellij: view launched; tab listing verification pending",
+				identity: openedIdentity,
+			};
+		return { status: "opened", identity: openedIdentity };
+	}
+
+	async reconcilePane(identity: PaneIdentity): Promise<PaneOpenOutcome> {
+		if (identity.mux !== "zellij") return { status: "failed", reason: "zellij: incompatible view identity" };
+		for (let attempt = 0; attempt < ZELLIJ_RECONCILE_ATTEMPTS; attempt += 1) {
+			let listed: CommandResult;
+			try {
+				listed = this.run("zellij", listTabPanesArgs(identity.sessionName));
+			} catch (error) {
+				return { status: "failed", reason: `zellij: ${error instanceof Error ? error.message : String(error)}` };
+			}
+			const listedError = zellijCommandError(listed);
+			if (listedError) return { status: "failed", reason: listedError.message };
+			const found = listedTab(listed.stdout, identity);
+			if (found) return { status: "opened", identity: { ...identity, tabId: found.id } };
+			if (attempt === ZELLIJ_RECONCILE_ATTEMPTS - 1) break;
+			await new Promise((resolve) => setTimeout(resolve, ZELLIJ_RECONCILE_MS));
+		}
+		return { status: "unconfirmed", reason: "zellij: view launched; verification unavailable", identity };
+	}
+
+	closePane(identity: PaneIdentity): PaneCloseOutcome {
+		if (identity.mux !== "zellij" || identity.tabId === undefined)
+			return { status: "ambiguous", reason: "zellij: exact tab id is unavailable; left the tab open" };
+		let listed: CommandResult;
+		try {
+			listed = this.run("zellij", listTabPanesArgs(identity.sessionName));
+		} catch (error) {
+			return {
+				status: "ambiguous",
+				reason: `zellij: could not verify tab ${identity.tabId}; left it open (${error instanceof Error ? error.message : String(error)})`,
+			};
+		}
+		const listedError = zellijCommandError(listed);
+		if (listedError)
+			return { status: "ambiguous", reason: `${listedError.message}; left tab ${identity.tabId} open` };
+		const tabs = zellijTabs(listed.stdout);
+		if (!tabs || tabs.get(identity.tabId) !== identity.title)
+			return {
+				status: "ambiguous",
+				reason: `zellij: tab ${identity.tabId} no longer proves title ${identity.title}; left it open`,
+			};
+		let closed: CommandResult;
+		try {
+			closed = this.run("zellij", closeTabByIdArgs(identity.sessionName, identity.tabId));
+		} catch (error) {
+			return {
+				status: "ambiguous",
+				reason: `zellij: close command could not be verified; left tab ${identity.tabId} open (${error instanceof Error ? error.message : String(error)})`,
+			};
+		}
+		const closeError = zellijCommandError(closed);
+		return closeError ? { status: "failed", reason: closeError.message } : { status: "closed" };
 	}
 
 	renameCurrentPane(title: string, env: Record<string, string | undefined> = process.env): boolean {

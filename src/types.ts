@@ -90,6 +90,9 @@ export type WorkerState =
 	/** Recovered after its owning runtime stopped; never restarted automatically. */
 	| "interrupted";
 
+/** A mux tab was launched, but its visibility is not yet a confirmed fact. */
+export type WorkerViewStatus = "verification-pending" | "verification-unavailable";
+
 export function isTerminalState(state: WorkerState): boolean {
 	return (
 		state === "blocked" || state === "done" || state === "failed" || state === "killed" || state === "interrupted"
@@ -254,6 +257,9 @@ export interface WorkerSummary {
 	agentInfo?: string;
 	/** Why this worker has no visible mux tab. */
 	headlessReason?: string;
+	/** Truthful non-headless status while a launched view is being reconciled. */
+	viewStatus?: WorkerViewStatus;
+	viewReason?: string;
 	/** Number of confirmed ACP session/resume revivals. */
 	revivalCount?: number;
 }

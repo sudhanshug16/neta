@@ -15,6 +15,7 @@ import {
 } from "../src/mux/tmux.ts";
 import type { MuxAdapter, ProcessSpec } from "../src/mux/types.ts";
 import {
+	closeTabByIdArgs,
 	goToTabByIdArgs,
 	leaderLayout,
 	listTabPanesArgs,
@@ -332,7 +333,9 @@ describe("zellij", () => {
 			{ ZELLIJ: "0", ZELLIJ_SESSION_NAME: "user-session", ZELLIJ_PANE_ID: "41" },
 		);
 
-		expect(await adapter.openPane("ro1 duplicate", { command: "neta", args: ["watch", "ro1"] }, "/repo")).toBe(true);
+		expect(
+			await adapter.openPane("ro1 duplicate", { command: "neta", args: ["watch", "ro1"] }, "/repo"),
+		).toMatchObject({ status: "opened" });
 		expect(calls.map((call) => call.args)).toEqual([
 			listTabPanesArgs("user-session"),
 			newTabArgs("ro1 duplicate", { command: "neta", args: ["watch", "ro1"] }, "/repo", "user-session"),
@@ -390,7 +393,9 @@ describe("zellij", () => {
 			ZELLIJ_PANE_ID: "41",
 		});
 
-		expect(await adapter.openPane("ro1 auth", { command: "neta", args: [] }, "/repo")).toBe(true);
+		expect(await adapter.openPane("ro1 auth", { command: "neta", args: [] }, "/repo")).toMatchObject({
+			status: "opened",
+		});
 		expect(call).toBe(5);
 	});
 
@@ -414,9 +419,9 @@ describe("zellij", () => {
 			ZELLIJ_PANE_ID: "41",
 		});
 
-		expect(adapter.openPane("ro1 auth", { command: "neta", args: [] }, "/repo")).rejects.toThrow(
-			"opened tab but could not restore focus to user-work",
-		);
+		expect(await adapter.openPane("ro1 auth", { command: "neta", args: [] }, "/repo")).toMatchObject({
+			status: "unconfirmed",
+		});
 	});
 
 	it("surfaces false-zero missing-session diagnostics from Zellij", async () => {
@@ -426,9 +431,10 @@ describe("zellij", () => {
 			ZELLIJ_PANE_ID: "41",
 		});
 
-		expect(adapter.openPane("ro1 auth", { command: "neta", args: [] }, "/repo")).rejects.toThrow(
-			"zellij: Session 'gone' not found",
-		);
+		expect(await adapter.openPane("ro1 auth", { command: "neta", args: [] }, "/repo")).toMatchObject({
+			status: "failed",
+			reason: "zellij: Session 'gone' not found",
+		});
 	});
 
 	it("surfaces thrown Zellij command errors", async () => {
@@ -439,9 +445,10 @@ describe("zellij", () => {
 			{ ZELLIJ: "0", ZELLIJ_SESSION_NAME: "s1", ZELLIJ_PANE_ID: "41" },
 		);
 
-		expect(adapter.openPane("ro1 auth", { command: "neta", args: [] }, "/repo")).rejects.toThrow(
-			"zellij: spawn zellij ENOENT",
-		);
+		expect(await adapter.openPane("ro1 auth", { command: "neta", args: [] }, "/repo")).toMatchObject({
+			status: "failed",
+			reason: "zellij: spawn zellij ENOENT",
+		});
 	});
 
 	it("returns false when Zellij reports success but no stable tab was added", async () => {
@@ -461,8 +468,85 @@ describe("zellij", () => {
 			ZELLIJ_PANE_ID: "41",
 		});
 
-		expect(await adapter.openPane("ro1 auth", { command: "neta", args: [] }, "/repo")).toBe(false);
+		expect(await adapter.openPane("ro1 auth", { command: "neta", args: [] }, "/repo")).toMatchObject({
+			status: "unconfirmed",
+		});
 		expect(call).toBe(6);
+	});
+
+	it("reconciles a delayed tab listing without treating the launch as headless", async () => {
+		const before = JSON.stringify([{ id: 41, is_plugin: false, tab_id: 7, tab_name: "user-work" }]);
+		const stale = before;
+		const after = JSON.stringify([
+			{ id: 41, is_plugin: false, tab_id: 7, tab_name: "user-work" },
+			{ id: 42, is_plugin: false, tab_id: 8, tab_name: "ro1 auth" },
+		]);
+		const responses = [
+			{ status: 0, stdout: before },
+			{ status: 0, stdout: "8\n" },
+			{ status: 0, stdout: stale },
+			{ status: 0, stdout: stale },
+			{ status: 0, stdout: "" },
+			{ status: 0, stdout: JSON.stringify([{ tab_id: 7, active: true }]) },
+			{ status: 0, stdout: after },
+		];
+		let call = 0;
+		const adapter = new ZellijAdapter(() => responses[call++], {
+			ZELLIJ: "0",
+			ZELLIJ_SESSION_NAME: "s1",
+			ZELLIJ_PANE_ID: "41",
+		});
+
+		const launched = await adapter.openPane("ro1 auth", { command: "neta", args: [] }, "/repo");
+		expect(launched.status).toBe("unconfirmed");
+		if (launched.status !== "unconfirmed") throw new Error("expected an unconfirmed launch");
+		expect(launched.identity).toMatchObject({ mux: "zellij", sessionName: "s1", title: "ro1 auth" });
+		const reconciled = await adapter.reconcilePane?.(launched.identity);
+		expect(reconciled).toEqual({
+			status: "opened",
+			identity: { mux: "zellij", sessionName: "s1", title: "ro1 auth", tabId: 8, beforeTabIds: [7] },
+		});
+	});
+
+	it("leaves a persistently ambiguous launch unconfirmed after bounded reconciliation", async () => {
+		const identity = { mux: "zellij" as const, sessionName: "s1", title: "ro1 auth", beforeTabIds: [7] };
+		let calls = 0;
+		const adapter = new ZellijAdapter(
+			() => {
+				calls += 1;
+				return { status: 0, stdout: JSON.stringify([{ tab_id: 7, tab_name: "user-work" }]) };
+			},
+			{ ZELLIJ: "0", ZELLIJ_SESSION_NAME: "s1", ZELLIJ_PANE_ID: "41" },
+		);
+
+		const result = await adapter.reconcilePane(identity);
+		expect(result).toEqual({
+			status: "unconfirmed",
+			reason: "zellij: view launched; verification unavailable",
+			identity,
+		});
+		expect(calls).toBe(4);
+	});
+
+	it("closes only an exactly verified Zellij tab by id", () => {
+		const calls: string[][] = [];
+		const adapter = new ZellijAdapter((command, args) => {
+			calls.push([command, ...args]);
+			return calls.length === 1
+				? { status: 0, stdout: JSON.stringify([{ tab_id: 8, tab_name: "ro1 auth" }]) }
+				: { status: 0, stdout: "" };
+		});
+		const result = adapter.closePane({ mux: "zellij", sessionName: "s1", title: "ro1 auth", tabId: 8 });
+		expect(result).toEqual({ status: "closed" });
+		expect(calls[1]).toEqual(["zellij", ...closeTabByIdArgs("s1", 8)]);
+
+		const unsafe = new ZellijAdapter(() => ({
+			status: 0,
+			stdout: JSON.stringify([{ tab_id: 8, tab_name: "other" }]),
+		}));
+		expect(unsafe.closePane({ mux: "zellij", sessionName: "s1", title: "ro1 auth", tabId: 8 }).status).toBe(
+			"ambiguous",
+		);
 	});
 
 	it("reports an opened Zellij tab when targeted focus restoration cannot be verified", async () => {
@@ -485,9 +569,9 @@ describe("zellij", () => {
 			ZELLIJ_PANE_ID: "41",
 		});
 
-		expect(adapter.openPane("ro1 auth", { command: "neta", args: [] }, "/repo")).rejects.toThrow(
-			"opened tab but could not restore focus to user-work",
-		);
+		expect(await adapter.openPane("ro1 auth", { command: "neta", args: [] }, "/repo")).toMatchObject({
+			status: "unconfirmed",
+		});
 		expect(call).toBe(5);
 	});
 
@@ -508,7 +592,9 @@ describe("zellij", () => {
 				},
 				{ ZELLIJ: "0", ZELLIJ_SESSION_NAME: "s1", ZELLIJ_PANE_ID: "41" },
 			);
-			expect(await adapter.openPane("ro1 auth", { command: "neta", args: [] }, "/repo")).toBe(false);
+			expect(await adapter.openPane("ro1 auth", { command: "neta", args: [] }, "/repo")).toMatchObject({
+				status: "failed",
+			});
 			expect(calls).toBe(1);
 		}
 	});
@@ -686,7 +772,7 @@ describe("worker views", () => {
 				openPane: (title, spec, _cwd, sessionName) => {
 					calls.push({ title, command: spec.command, args: spec.args, env: spec.env });
 					expect(sessionName).toBe("neta-s7");
-					return true;
+					return { status: "opened" };
 				},
 			},
 		};
@@ -855,7 +941,7 @@ describe("worker views", () => {
 			{ command: "claude", args: ["--resume", "vendor-exact"] },
 		);
 
-		expect(outcome).toEqual({ opened: true });
+		expect(outcome).toMatchObject({ status: "opened" });
 		expect(calls[0]).toEqual({
 			title: "ro1 auth flow tui",
 			command: "claude",
@@ -881,9 +967,7 @@ describe("worker views", () => {
 			inSession: () => true,
 			sessionName: () => "fallback",
 			wrapLeader: () => undefined,
-			openPane: () => {
-				throw new Error("tmux: no server running");
-			},
+			openPane: () => ({ status: "failed", reason: "tmux: no server running" }),
 		};
 
 		const outcome = await createPaneHost(
@@ -895,7 +979,7 @@ describe("worker views", () => {
 			"neta-s1",
 		)?.open(worker);
 
-		expect(outcome).toEqual({ opened: false, reason: "tmux: no server running" });
+		expect(outcome).toEqual({ status: "failed", reason: "tmux: no server running" });
 	});
 
 	it("opens nothing when the leader is not inside a multiplexer", () => {
@@ -914,7 +998,7 @@ describe("selecting a multiplexer", () => {
 			inSession: () => inSession,
 			sessionName: () => undefined,
 			wrapLeader: () => undefined,
-			openPane: () => true,
+			openPane: () => ({ status: "opened" }),
 		};
 	}
 
@@ -946,7 +1030,7 @@ describe("selecting a multiplexer", () => {
 	it("opens no panes when headless", () => {
 		const none = new NoMux();
 
-		expect(none.openPane()).toBe(false);
+		expect(none.openPane()).toEqual({ status: "failed", reason: "multiplexer views are disabled" });
 		expect(none.wrapLeader()).toBeUndefined();
 	});
 

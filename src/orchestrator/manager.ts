@@ -43,6 +43,7 @@ import {
 	type V6WorkerRef,
 } from "../checkpoint-store.ts";
 import { APP_NAME } from "../config.ts";
+import type { PaneIdentity, PaneOpenOutcome } from "../mux/types.ts";
 import { loadRoleText, roleNames, workingAgreement } from "../prompts/roles.ts";
 import { canonicalizeCwd } from "../session.ts";
 import { assertClaudeModelAllowed, type NetaConfig, type ResolvedBackend } from "../settings.ts";
@@ -69,6 +70,7 @@ import {
 	type WorkerStatusSnapshot,
 	type WorkerSummary,
 	type WorkerUsage,
+	type WorkerViewStatus,
 } from "../types.ts";
 import { executeRepoCommand, type RepoExecRequest, type RepoExecResult } from "./exec.ts";
 import {
@@ -236,6 +238,9 @@ interface WorkerRecord {
 	processGroupId?: number;
 	/** Why this worker has no visible mux tab. */
 	headlessReason?: string;
+	/** Truthful non-headless status while a launched view is being reconciled. */
+	viewStatus?: WorkerViewStatus;
+	viewReason?: string;
 	revivalCount: number;
 	/** Message to deliver after a queued writer reacquires its slot. */
 	revivalMessage?: string;
@@ -264,31 +269,27 @@ interface WorkerRecord {
 	queuedStartedAt?: number;
 }
 
+type LegacyPaneOpenOutcome = { opened: true } | { opened: false; reason: string };
+type WorkerPaneOutcome = PaneOpenOutcome | LegacyPaneOpenOutcome;
+
 /** Opens a pane per worker, when a multiplexer is running. */
 export interface WorkerPaneHost {
-	open(
-		worker: WorkerSummary,
-	):
-		| { opened: true }
-		| { opened: false; reason: string }
-		| Promise<{ opened: true } | { opened: false; reason: string }>;
+	open(worker: WorkerSummary): WorkerPaneOutcome | Promise<WorkerPaneOutcome>;
 	/** Opens the room's merged view; one pane per room, beside its members'. */
-	openRoom(
-		room: string,
+	openRoom(room: string): WorkerPaneOutcome | Promise<WorkerPaneOutcome>;
+	/** Recheck a view whose launch succeeded but whose tab listing was stale. */
+	reconcile?(identity: PaneIdentity): PaneOpenOutcome | Promise<PaneOpenOutcome>;
+	/** Close an exact stale view only after the mux verifies its identity. */
+	close?(
+		identity: PaneIdentity,
 	):
-		| { opened: true }
-		| { opened: false; reason: string }
-		| Promise<{ opened: true } | { opened: false; reason: string }>;
+		| { status: "closed" | "ambiguous" | "failed"; reason?: string }
+		| Promise<{ status: "closed" | "ambiguous" | "failed"; reason?: string }>;
 	/** Opens a fresh native backend TUI for an already-terminal worker. */
 	attach?(
 		worker: WorkerSummary,
 		resume: { command: string; args: string[] },
-	):
-		| {
-				opened: true;
-		  }
-		| { opened: false; reason: string }
-		| Promise<{ opened: true } | { opened: false; reason: string }>;
+	): WorkerPaneOutcome | Promise<WorkerPaneOutcome>;
 }
 
 export type TransportFactory = (options: TransportOptions) => WorkerTransportDriver;
@@ -490,6 +491,8 @@ export class WorkerManager implements ChannelHandler {
 	private readonly roomDebaterBackends = new Map<string, string[]>();
 	/** Rooms whose merged-view pane is already open, so each opens once. */
 	private readonly roomPanesOpened = new Set<string>();
+	/** Room view commands in flight; unlike roomPanesOpened this is not proof of opening. */
+	private readonly roomPanesOpening = new Set<string>();
 	/** Authorizes leader channel commands. Given only to the leader's own process. */
 	readonly leaderToken: string;
 	/** Open-notes ledger. */
@@ -652,6 +655,8 @@ export class WorkerManager implements ChannelHandler {
 				pendingBriefLeaderMessages: [],
 				headAtStart: worker.headAtStart,
 				headlessReason: worker.headlessReason,
+				viewStatus: worker.viewStatus,
+				viewReason: worker.viewReason,
 				revivalCount: worker.revivalCount ?? 0,
 				nativeAttached: worker.nativeAttached,
 				...timing,
@@ -867,6 +872,8 @@ export class WorkerManager implements ChannelHandler {
 			pendingBrief: [...record.pendingBrief],
 			headAtStart: record.headAtStart,
 			headlessReason: record.headlessReason,
+			viewStatus: record.viewStatus,
+			viewReason: record.viewReason,
 			revivalCount: record.revivalCount,
 			nativeAttached: record.nativeAttached,
 		};
@@ -1302,7 +1309,7 @@ export class WorkerManager implements ChannelHandler {
 			if (record.writer) this.notifyReadOnlyWorkers(record, "started");
 			const firstPrompt = this.withPendingBrief(record, task);
 			this.enqueue(record, firstPrompt.message, false, firstPrompt.leaderMessages);
-			await this.openWorkerView(record);
+			await this.openWorkerView(record, generation);
 			await this.publishSpawnBatch(record, generation, driver);
 		} catch (error) {
 			if (record.driver === driver && !isTerminalState(record.state)) {
@@ -1368,6 +1375,7 @@ export class WorkerManager implements ChannelHandler {
 				// Room views close with the batch they belonged to; a room joined again
 				// later gets a fresh pane. This follows durable publication, not intent.
 				this.roomPanesOpened.clear();
+				this.roomPanesOpening.clear();
 				return;
 			} catch (error) {
 				const persistenceError = error instanceof Error ? error : new Error(String(error));
@@ -1583,6 +1591,11 @@ export class WorkerManager implements ChannelHandler {
 	}
 
 	private async resumeRecord(record: WorkerRecord, message: string): Promise<SteerResult> {
+		// Reserve a fresh view generation before any asynchronous resume setup. A
+		// reconciliation from the prior terminal conversation must not commit to the
+		// revived record while its new ACP session is still being negotiated.
+		const generation = ++this.startGeneration;
+		record.startGeneration = generation;
 		this.beginActive(record);
 		const priorState = record.revivalFromState ?? (record.state as "blocked" | "done" | "failed");
 		const priorTerminalSummary = record.terminalSummary;
@@ -1633,6 +1646,8 @@ export class WorkerManager implements ChannelHandler {
 			record.queuedBehind = undefined;
 			record.revivalCount += 1;
 			record.headlessReason = "resumed headlessly in a fresh ACP process";
+			record.viewStatus = undefined;
+			record.viewReason = undefined;
 			record.queue = Promise.resolve();
 			record.queuedPrompts = 0;
 			this.setState(record, "running");
@@ -1925,10 +1940,11 @@ export class WorkerManager implements ChannelHandler {
 			);
 		}
 		const outcome = await this.options.panes.attach(summary, resume);
-		if (!outcome.opened) {
-			throw new Error(
-				`Could not open ${workerId}'s native TUI: ${outcome.reason}. ${this.headlessAlternatives(workerId)}`,
-			);
+		if (this.paneOutcome(outcome).status !== "opened") {
+			const failed = this.paneOutcome(outcome);
+			const reason =
+				failed.status === "failed" || failed.status === "unconfirmed" ? failed.reason : "view was not opened";
+			throw new Error(`Could not open ${workerId}'s native TUI: ${reason}. ${this.headlessAlternatives(workerId)}`);
 		}
 		record.nativeAttached = true;
 		this.nativeAttachmentsOpened.add(workerId);
@@ -2675,6 +2691,12 @@ export class WorkerManager implements ChannelHandler {
 		// caveat on it: reading them the other way round buries the handoff.
 		if (summary.laterFailure)
 			line += `\n  after its report: ${boundedFields ? clipChannel(summary.laterFailure, CHANNEL_RESULT_LIMIT) : summary.laterFailure}`;
+		if (summary.headlessReason)
+			line += `\n  view headless — ${boundedFields ? clipChannel(summary.headlessReason) : summary.headlessReason}`;
+		if (summary.viewStatus === "verification-pending")
+			line += `\n  view verification pending${summary.viewReason ? ` — ${boundedFields ? clipChannel(summary.viewReason) : summary.viewReason}` : ""}`;
+		if (summary.viewStatus === "verification-unavailable")
+			line += `\n  view launched; verification unavailable${summary.viewReason ? ` — ${boundedFields ? clipChannel(summary.viewReason) : summary.viewReason}` : ""}`;
 		return line;
 	}
 
@@ -3270,8 +3292,102 @@ export class WorkerManager implements ChannelHandler {
 		}
 	}
 
+	private paneOutcome(outcome: WorkerPaneOutcome): PaneOpenOutcome {
+		if ("status" in outcome) return outcome;
+		return outcome.opened ? { status: "opened" } : { status: "failed", reason: outcome.reason };
+	}
+
+	private currentViewGeneration(record: WorkerRecord, generation: number): boolean {
+		return (
+			!this.disposed &&
+			this.workers.get(record.id) === record &&
+			record.startGeneration === generation &&
+			!isTerminalState(record.state)
+		);
+	}
+
+	private setViewPending(record: WorkerRecord, reason: string): void {
+		record.headlessReason = undefined;
+		record.viewStatus = "verification-pending";
+		record.viewReason = reason;
+		this.appendLog(record, "status", `Worker view: view verification pending — ${reason}`);
+		this.checkpointChanged(record);
+	}
+
+	private setViewUnavailable(record: WorkerRecord, reason: string): void {
+		record.headlessReason = undefined;
+		record.viewStatus = "verification-unavailable";
+		record.viewReason = reason;
+		this.appendLog(record, "status", `Worker view: view launched; verification unavailable — ${reason}`);
+		this.checkpointChanged(record);
+	}
+
+	private setViewOpened(record: WorkerRecord): void {
+		const wasPending = record.viewStatus !== undefined;
+		record.headlessReason = undefined;
+		record.viewStatus = undefined;
+		record.viewReason = undefined;
+		if (wasPending) this.appendLog(record, "status", "Worker view: opened and verified");
+		this.checkpointChanged(record);
+	}
+
+	private async cleanupStalePane(outcome: PaneOpenOutcome): Promise<void> {
+		const identity = outcome.identity;
+		if (!identity || identity.tabId === undefined || !this.options.panes?.close) return;
+		await this.options.panes.close({ ...identity });
+	}
+
+	private async reconcileWorkerView(
+		record: WorkerRecord,
+		generation: number,
+		outcome: PaneOpenOutcome,
+	): Promise<void> {
+		if (!outcome.identity || !this.options.panes?.reconcile) {
+			if (this.currentViewGeneration(record, generation))
+				this.setViewUnavailable(record, "no bounded reconciliation is available");
+			return;
+		}
+		let reconciled: PaneOpenOutcome;
+		try {
+			reconciled = await this.options.panes.reconcile(outcome.identity);
+		} catch (error) {
+			reconciled = { status: "failed", reason: error instanceof Error ? error.message : String(error) };
+		}
+		if (!this.currentViewGeneration(record, generation)) {
+			await this.cleanupStalePane({ ...reconciled, identity: reconciled.identity ?? outcome.identity });
+			return;
+		}
+		if (reconciled.status === "opened") this.setViewOpened(record);
+		else this.setViewUnavailable(record, reconciled.reason);
+	}
+
+	private async reconcileRoomView(record: WorkerRecord, generation: number, outcome: PaneOpenOutcome): Promise<void> {
+		if (!outcome.identity || !this.options.panes?.reconcile) {
+			if (record.room) this.roomPanesOpening.delete(record.room);
+			return;
+		}
+		let reconciled: PaneOpenOutcome;
+		try {
+			reconciled = await this.options.panes.reconcile(outcome.identity);
+		} catch (error) {
+			reconciled = { status: "failed", reason: error instanceof Error ? error.message : String(error) };
+		}
+		if (!this.currentViewGeneration(record, generation)) {
+			await this.cleanupStalePane({ ...reconciled, identity: reconciled.identity ?? outcome.identity });
+			if (record.room) this.roomPanesOpening.delete(record.room);
+			return;
+		}
+		if (record.room) this.roomPanesOpening.delete(record.room);
+		if (reconciled.status === "opened" && record.room) this.roomPanesOpened.add(record.room);
+		else if (reconciled.status === "failed" || reconciled.status === "unconfirmed") {
+			const reason =
+				reconciled.status === "failed" || reconciled.status === "unconfirmed" ? reconciled.reason : "unknown";
+			this.appendLog(record, "status", `Room view: view launched; verification unavailable — ${reason}`);
+		}
+	}
+
 	/** A missing pane is visible in the delegate result; it never blocks the worker. */
-	private async openWorkerView(record: WorkerRecord): Promise<void> {
+	private async openWorkerView(record: WorkerRecord, generation: number): Promise<void> {
 		if (this.options.panes && missingUnixChannel(this.options.channelAddress)) {
 			const reason =
 				`manager Unix socket ${this.options.channelAddress} is missing; ` +
@@ -3280,20 +3396,41 @@ export class WorkerManager implements ChannelHandler {
 			this.appendLog(record, "status", `Worker view: headless — ${reason}`);
 			return;
 		}
-		const outcome = await this.options.panes?.open(this.summarize(record));
-		const reason = outcome ? (outcome.opened ? undefined : outcome.reason) : this.options.headlessReason;
-		if (reason) {
+		const rawOutcome = await this.options.panes?.open(this.summarize(record));
+		const outcome = rawOutcome ? this.paneOutcome(rawOutcome) : undefined;
+		if (outcome?.status === "failed" || (!outcome && this.options.headlessReason)) {
+			const reason =
+				outcome?.status === "failed" ? outcome.reason : (this.options.headlessReason ?? "headless mode");
+			record.viewStatus = undefined;
+			record.viewReason = undefined;
 			record.headlessReason = reason;
 			this.appendLog(record, "status", `Worker view: headless — ${reason}`);
+		} else if (outcome?.status === "unconfirmed") {
+			this.setViewPending(record, outcome.reason);
+			void this.reconcileWorkerView(record, generation, outcome);
+		} else if (outcome?.status === "opened") {
+			this.setViewOpened(record);
 		}
 		// The room's own merged view opens once, beside its first member's pane.
 		// It closes itself the way a worker pane does: the watch process holds
 		// after the last member finishes and exits when the batch is archived.
-		if (record.room && this.options.panes && !this.roomPanesOpened.has(record.room)) {
-			this.roomPanesOpened.add(record.room);
-			const roomOutcome = await this.options.panes.openRoom(record.room);
-			if (!roomOutcome.opened) {
-				this.appendLog(record, "status", `Room view: headless — ${roomOutcome.reason}`);
+		if (
+			record.room &&
+			this.options.panes &&
+			!this.roomPanesOpened.has(record.room) &&
+			!this.roomPanesOpening.has(record.room)
+		) {
+			this.roomPanesOpening.add(record.room);
+			const roomOutcome = this.paneOutcome(await this.options.panes.openRoom(record.room));
+			if (roomOutcome.status === "opened") {
+				this.roomPanesOpening.delete(record.room);
+				this.roomPanesOpened.add(record.room);
+			} else if (roomOutcome.status === "unconfirmed") {
+				this.appendLog(record, "status", `Room view: view verification pending — ${roomOutcome.reason}`);
+				void this.reconcileRoomView(record, generation, roomOutcome);
+			} else {
+				this.roomPanesOpening.delete(record.room);
+				this.appendLog(record, "status", `Room view: failed — ${roomOutcome.reason}`);
 			}
 		}
 	}
@@ -3331,6 +3468,8 @@ export class WorkerManager implements ChannelHandler {
 			mode: record.mode,
 			agentInfo: record.agentInfo,
 			headlessReason: record.headlessReason,
+			viewStatus: record.viewStatus,
+			viewReason: record.viewReason,
 			revivalCount: record.revivalCount,
 		};
 	}

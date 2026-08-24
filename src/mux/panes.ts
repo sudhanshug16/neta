@@ -15,10 +15,10 @@ import type { CliInvocation } from "../cli-shim.ts";
 import type { WorkerPaneHost } from "../orchestrator/manager.ts";
 import { isTerminalState, type WorkerState, type WorkerSummary } from "../types.ts";
 import { TmuxAdapter } from "./tmux.ts";
-import type { MuxAdapter, ProcessSpec } from "./types.ts";
+import type { MuxAdapter, PaneIdentity, PaneOpenOutcome, ProcessSpec } from "./types.ts";
 import { ZellijAdapter } from "./zellij.ts";
 
-export type PaneOpenOutcome = { opened: true } | { opened: false; reason: string };
+export type { PaneCloseOutcome, PaneOpenOutcome } from "./types.ts";
 
 const TITLE_LIMIT = 22;
 
@@ -89,11 +89,9 @@ export function createPaneHost(
 	// `neta watch` takes a worker id or a room name; the pane command is the same.
 	const open = async (title: string, spec: ProcessSpec): Promise<PaneOpenOutcome> => {
 		try {
-			const opened = await mux.openPane(title, spec, cwd, sessionName);
-			if (opened) return { opened: true };
-			return { opened: false, reason: `could not open a ${mux.id} view` };
+			return await mux.openPane(title, spec, cwd, sessionName);
 		} catch (error) {
-			return { opened: false, reason: error instanceof Error ? error.message : String(error) };
+			return { status: "failed", reason: error instanceof Error ? error.message : String(error) };
 		}
 	};
 	const openView = (title: string, target: string): Promise<PaneOpenOutcome> =>
@@ -107,5 +105,21 @@ export function createPaneHost(
 		open: (worker: WorkerSummary) => openView(tabTitle(worker.id, worker.name), worker.id),
 		openRoom: (room: string) => openView(tabTitle(room, ""), room),
 		attach: (worker: WorkerSummary, resume: ProcessSpec) => open(tuiTabTitle(worker.id, worker.name), resume),
+		reconcile: async (identity: PaneIdentity): Promise<PaneOpenOutcome> => {
+			if (!mux.reconcilePane) return { status: "failed", reason: `could not verify a ${mux.id} view` };
+			try {
+				return await mux.reconcilePane(identity);
+			} catch (error) {
+				return { status: "failed", reason: error instanceof Error ? error.message : String(error) };
+			}
+		},
+		close: async (identity: PaneIdentity) => {
+			if (!mux.closePane) return { status: "ambiguous", reason: `could not safely close a ${mux.id} view` };
+			try {
+				return await mux.closePane(identity);
+			} catch (error) {
+				return { status: "failed", reason: error instanceof Error ? error.message : String(error) };
+			}
+		},
 	};
 }

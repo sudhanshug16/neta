@@ -39,6 +39,7 @@ import {
 	type WorkerLogEntry,
 	type WorkerState,
 	type WorkerUsage,
+	type WorkerViewStatus,
 } from "./types.ts";
 
 export const CHECKPOINT_SCHEMA_VERSION = 5;
@@ -86,6 +87,8 @@ export interface CheckpointWorker {
 	task: string;
 	state: WorkerState;
 	stateBeforeStop?: "starting" | "running" | "waiting" | "queued";
+	viewStatus?: WorkerViewStatus;
+	viewReason?: string;
 	startedAt: number;
 	updatedAt: number;
 	endedAt?: number;
@@ -310,6 +313,8 @@ function validateWorker(value: unknown, path: string): void {
 			"pendingBrief",
 			"headAtStart",
 			"headlessReason",
+			"viewStatus",
+			"viewReason",
 			"cwd",
 			"revivalCount",
 			"nativeAttached",
@@ -352,11 +357,18 @@ function validateWorker(value: unknown, path: string): void {
 		"queuedBehind",
 		"headAtStart",
 		"headlessReason",
+		"viewReason",
 		"cwd",
 	])
 		optional(worker[key], (item) => string(item, `${path}.${key}`));
 	optional(worker.revivalCount, (item) => number(item, `${path}.revivalCount`));
 	optional(worker.nativeAttached, (item) => boolean(item, `${path}.nativeAttached`));
+	optional(worker.viewStatus, (item) => {
+		string(item, `${path}.viewStatus`);
+		if (item !== "verification-pending" && item !== "verification-unavailable")
+			throw new CheckpointError(`Corrupt checkpoint: ${path}.viewStatus is unknown.`);
+	});
+	optional(worker.viewReason, (item) => string(item, `${path}.viewReason`));
 	optional(worker.archived, (item) => boolean(item, `${path}.archived`));
 	optional(worker.lastProgress, (item) => {
 		const progress = object(item, `${path}.lastProgress`);

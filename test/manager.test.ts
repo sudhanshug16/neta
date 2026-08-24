@@ -366,7 +366,9 @@ describe("WorkerManager", () => {
 			}
 		}
 		manager.configure({ cwd: process.cwd(), agentDir: "/nonexistent-agent-dir", config: new FailingConfig() });
-		await expect(manager.spawn({ role: "scout", tier: "expert", task: "b" })).rejects.toThrow(/backend resolution failed/);
+		await expect(manager.spawn({ role: "scout", tier: "expert", task: "b" })).rejects.toThrow(
+			/backend resolution failed/,
+		);
 		expect(manager.tailLog(first.id).archived).toBe(false);
 	});
 
@@ -979,6 +981,143 @@ describe("WorkerManager", () => {
 		} finally {
 			await paneManager.dispose();
 			rmSync("/tmp/neta-test-positive-pane.sock", { force: true });
+		}
+	});
+
+	it("keeps an unconfirmed view pending, then marks it opened only after reconciliation", async () => {
+		const socket = "/tmp/neta-pending-pane.sock";
+		writeFileSync(socket, "");
+		let resolveReconciliation:
+			| ((outcome: {
+					status: "opened";
+					identity: { mux: "zellij"; sessionName: string; title: string; tabId: number };
+			  }) => void)
+			| undefined;
+		const paneManager = new WorkerManager({
+			cwd: process.cwd(),
+			agentDir: "/nonexistent-agent-dir",
+			config,
+			channelAddress: socket,
+			onEvent: () => {},
+			createTransport: (options) => new FakeTransport(options),
+			panes: {
+				open: () => ({
+					status: "unconfirmed",
+					reason: "zellij: view launched; tab listing verification pending",
+					identity: { mux: "zellij", sessionName: "s1", title: "ro1 scout", tabId: 41 },
+				}),
+				openRoom: () => ({ status: "opened" }),
+				reconcile: () =>
+					new Promise((resolve) => {
+						resolveReconciliation = resolve;
+					}),
+			},
+		});
+		try {
+			const summary = await paneManager.spawn({ role: "scout", tier: "expert", task: "check delayed view" });
+			expect(summary.viewStatus).toBe("verification-pending");
+			expect(summary.headlessReason).toBeUndefined();
+			expect(paneManager.inspect("ro1").worker.viewStatus).toBe("verification-pending");
+			resolveReconciliation?.({
+				status: "opened",
+				identity: { mux: "zellij", sessionName: "s1", title: "ro1 scout", tabId: 41 },
+			});
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			expect(paneManager.get("ro1").viewStatus).toBeUndefined();
+			expect(paneManager.get("ro1").headlessReason).toBeUndefined();
+		} finally {
+			await paneManager.dispose();
+			rmSync(socket, { force: true });
+		}
+	});
+
+	it("reports reconciliation exhaustion as unavailable without claiming headless", async () => {
+		const socket = "/tmp/neta-unavailable-pane.sock";
+		writeFileSync(socket, "");
+		const paneManager = new WorkerManager({
+			cwd: process.cwd(),
+			agentDir: "/nonexistent-agent-dir",
+			config,
+			channelAddress: socket,
+			onEvent: () => {},
+			createTransport: (options) => new FakeTransport(options),
+			panes: {
+				open: () => ({
+					status: "unconfirmed",
+					reason: "stale listing",
+					identity: { mux: "zellij", sessionName: "s1", title: "ro1 scout" },
+				}),
+				openRoom: () => ({ status: "opened" }),
+				reconcile: async (identity) => ({ status: "unconfirmed", reason: "verification unavailable", identity }),
+			},
+		});
+		try {
+			await paneManager.spawn({ role: "scout", tier: "expert", task: "check unavailable view" });
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			expect(paneManager.get("ro1")).toMatchObject({
+				viewStatus: "verification-unavailable",
+				headlessReason: undefined,
+			});
+			const detail = paneManager.inspect("ro1").worker;
+			expect(detail.viewStatus).toBe("verification-unavailable");
+		} finally {
+			await paneManager.dispose();
+			rmSync(socket, { force: true });
+		}
+	});
+
+	it("cleans a stale reconciled tab only by exact identity after terminal state", async () => {
+		const socket = "/tmp/neta-stale-pane.sock";
+		writeFileSync(socket, "");
+		let resolveReconciliation:
+			| ((outcome: {
+					status: "opened";
+					identity: { mux: "zellij"; sessionName: string; title: string; tabId: number };
+			  }) => void)
+			| undefined;
+		const closed: unknown[] = [];
+		let transport: FakeTransport | undefined;
+		const paneManager = new WorkerManager({
+			cwd: process.cwd(),
+			agentDir: "/nonexistent-agent-dir",
+			config,
+			channelAddress: socket,
+			onEvent: () => {},
+			createTransport: (options) => {
+				transport = new FakeTransport(options);
+				return transport;
+			},
+			panes: {
+				open: () => ({
+					status: "unconfirmed",
+					reason: "stale listing",
+					identity: { mux: "zellij", sessionName: "s1", title: "ro1 scout", tabId: 41 },
+				}),
+				openRoom: () => ({ status: "opened" }),
+				reconcile: () =>
+					new Promise((resolve) => {
+						resolveReconciliation = resolve;
+					}),
+				close: async (identity) => {
+					closed.push(identity);
+					return { status: "closed" };
+				},
+			},
+		});
+		try {
+			await paneManager.spawn({ role: "scout", tier: "expert", task: "stale view" });
+			transport?.finish({ ok: true, summary: "done" });
+			await paneManager.waitFor(["ro1"], 5000);
+			resolveReconciliation?.({
+				status: "opened",
+				identity: { mux: "zellij", sessionName: "s1", title: "ro1 scout", tabId: 41 },
+			});
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			expect(closed).toEqual([{ mux: "zellij", sessionName: "s1", title: "ro1 scout", tabId: 41 }]);
+			expect(paneManager.get("ro1").viewStatus).toBe("verification-pending");
+		} finally {
+			await paneManager.dispose();
+			rmSync(socket, { force: true });
 		}
 	});
 

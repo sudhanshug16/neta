@@ -12,7 +12,7 @@ import {
 	attachSessionArgs as tmuxAttachSessionArgs,
 	killSessionArgs as tmuxKillSessionArgs,
 } from "./tmux.ts";
-import type { MuxAdapter, MuxId, ProcessSpec } from "./types.ts";
+import type { MuxAdapter, MuxId, PaneOpenOutcome, ProcessSpec } from "./types.ts";
 import {
 	ZellijAdapter,
 	attachSessionArgs as zellijAttachSessionArgs,
@@ -39,8 +39,8 @@ export class NoMux implements MuxAdapter {
 		return undefined;
 	}
 
-	openPane(): boolean {
-		return false;
+	openPane(): PaneOpenOutcome {
+		return { status: "failed", reason: "multiplexer views are disabled" };
 	}
 }
 

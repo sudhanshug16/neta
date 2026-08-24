@@ -114,6 +114,15 @@ describe("formatStatusSnapshot", () => {
 		expect(formatWorkerSummary(worker({ model: "sonnet" }))).toContain("model=sonnet");
 	});
 
+	it("reports pending and unavailable launched views without calling them headless", () => {
+		expect(
+			formatWorkerSummary(worker({ viewStatus: "verification-pending", viewReason: "stale tab listing" })),
+		).toContain("Worker view: view verification pending — stale tab listing");
+		expect(
+			formatWorkerSummary(worker({ viewStatus: "verification-unavailable", viewReason: "ambiguous tab identity" })),
+		).toContain("Worker view: view launched; verification unavailable — ambiguous tab identity");
+	});
+
 	it("renders only writers in finished, active and queued groups", () => {
 		const active = worker({
 			id: "rw1",

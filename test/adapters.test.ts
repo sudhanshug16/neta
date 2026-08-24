@@ -226,7 +226,7 @@ describe("Codex adapter", () => {
 			wrapLeader: () => undefined,
 			openPane: (_title, _spec, _cwd, sessionName) => {
 				target = sessionName;
-				return true;
+				return { status: "opened" };
 			},
 		};
 		const outcome = await createPaneHost(

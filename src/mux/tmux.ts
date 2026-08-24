@@ -7,7 +7,7 @@
 
 import { spawnSync } from "node:child_process";
 import { findOnPath } from "../detect.ts";
-import type { MuxAdapter, ProcessSpec } from "./types.ts";
+import type { MuxAdapter, PaneOpenOutcome, ProcessSpec } from "./types.ts";
 
 interface CommandResult {
 	status: number | null;
@@ -107,15 +107,19 @@ export class TmuxAdapter implements MuxAdapter {
 		return { command: "tmux", args: newSessionArgs(sessionName, leader), env: leader.env };
 	}
 
-	openPane(title: string, spec: ProcessSpec, cwd: string, sessionName?: string): boolean {
-		if (!sessionName && !this.inSession()) return false;
+	openPane(title: string, spec: ProcessSpec, cwd: string, sessionName?: string): PaneOpenOutcome {
+		const targetSession = sessionName ?? this.sessionName();
+		if (!targetSession && !this.inSession()) return { status: "failed", reason: "tmux: no active session" };
 		const result = this.run("tmux", newWindowArgs(title, spec, cwd, sessionName), {
 			env: { ...process.env, ...spec.env },
 		});
-		if (result.status === 0) return true;
+		if (result.status === 0) return { status: "opened" };
 		// tmux explains itself on stderr; throwing that away leaves a user with a
 		// missing window and no reason for it.
-		throw new Error(`tmux: ${(result.stderr || result.error?.message || `exit ${result.status}`).trim()}`);
+		return {
+			status: "failed",
+			reason: `tmux: ${(result.stderr || result.error?.message || `exit ${result.status}`).trim()}`,
+		};
 	}
 
 	renameCurrentPane(title: string, env: Record<string, string | undefined> = process.env): boolean {
