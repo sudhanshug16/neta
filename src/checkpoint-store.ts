@@ -28,7 +28,13 @@ import {
 import { dirname, join, resolve } from "node:path";
 import type { CheckpointWorker, HydratableCheckpoint, SessionCheckpoint } from "./checkpoint.ts";
 import { readCheckpoint, validateCheckpoint } from "./checkpoint.ts";
-import { assertCheckpointClaimHeld, type CheckpointClaim, isSessionLeaseAlive, processStartTime } from "./session.ts";
+import {
+	assertCheckpointClaimHeld,
+	type CheckpointClaim,
+	isSessionLeaseAlive,
+	MAX_CANONICAL_SESSION_ID_LENGTH,
+	processStartTime,
+} from "./session.ts";
 import { isTerminalState, type WorkerState } from "./types.ts";
 
 export const CHECKPOINT_STORE_FORMAT_VERSION = 6 as const;
@@ -202,7 +208,8 @@ function fail(hooks: V6FaultHooks | undefined, event: V6FaultEvent): void {
 }
 
 function safePart(value: string, label: string): void {
-	if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value)) throw new CheckpointStoreError(`Invalid ${label} "${value}".`);
+	if (value.length > MAX_CANONICAL_SESSION_ID_LENGTH || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value))
+		throw new CheckpointStoreError(`Invalid ${label} "${value}".`);
 }
 
 function hash(bytes: Uint8Array): string {
@@ -473,6 +480,31 @@ export function v6ManifestPath(storePath: string): string {
 	return join(storePath, V6_MANIFEST_FILE);
 }
 
+/** Whether a v6 store is absent or published; any other entry is corruption. */
+export function v6StorePresence(storePath: string): "absent" | "published" {
+	let store: ReturnType<typeof lstatSync>;
+	try {
+		store = lstatSync(storePath);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return "absent";
+		throw new CheckpointStoreError(`Could not inspect v6 store ${storePath}.`);
+	}
+	if (store.isSymbolicLink() || !store.isDirectory())
+		throw new CheckpointStoreError(`v6 store is not a regular directory: ${storePath}.`);
+
+	let manifest: ReturnType<typeof lstatSync>;
+	try {
+		manifest = lstatSync(v6ManifestPath(storePath));
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT")
+			throw new CheckpointStoreError(`No published v6 manifest at ${storePath}.`);
+		throw new CheckpointStoreError(`Could not inspect v6 manifest in ${storePath}.`);
+	}
+	if (manifest.isSymbolicLink() || !manifest.isFile() || manifest.nlink !== 1)
+		throw new CheckpointStoreError(`v6 manifest is not a regular file: ${v6ManifestPath(storePath)}.`);
+	return "published";
+}
+
 const V6_LOCKS_DIR = "locks";
 const V6_READERS_DIR = "readers";
 const V6_MAINTENANCE_DIR = "maintenance";
@@ -496,7 +528,7 @@ function v6MaintenanceOwnerPath(storePath: string): string {
 }
 
 function withV6ReadLock<T>(storePath: string, read: () => T): T {
-	if (!existsSync(storePath)) return read();
+	if (v6StorePresence(storePath) === "absent") return read();
 	const readers = v6ReadersPath(storePath);
 	mkdirSync(readers, { recursive: true, mode: 0o700 });
 	const tokenPath = join(readers, `${process.pid}-${randomBytes(8).toString("hex")}`);
@@ -1054,12 +1086,7 @@ export function writeV6CheckpointUpdate(
 }
 
 function manifestExists(storePath: string): boolean {
-	try {
-		const stat = lstatSync(v6ManifestPath(storePath));
-		return stat.isFile() && stat.nlink === 1;
-	} catch {
-		return false;
-	}
+	return v6StorePresence(storePath) === "published";
 }
 
 function readV6ManifestUnlocked(storePath: string, counters?: V6ReadCounters): V6Manifest {
@@ -1700,7 +1727,12 @@ export function reclaimV6StoreOffline(
 		!proof.shutdownProof
 	)
 		return gcResult("skipped", "offline ownership, process-death, or shutdown proof is absent", startedAt, empty);
-	if (!existsSync(v6ManifestPath(storePath))) return gcResult("skipped", "no published v6 manifest", startedAt, empty);
+	try {
+		if (v6StorePresence(storePath) === "absent")
+			return gcResult("skipped", "no published v6 manifest", startedAt, empty);
+	} catch (error) {
+		return gcResult("failed", error instanceof Error ? error.message : String(error), startedAt, empty);
+	}
 	if (!claimV6Maintenance(storePath, options))
 		return gcResult("skipped", "exclusive maintenance ownership is unavailable", startedAt, empty);
 	try {
@@ -2092,7 +2124,7 @@ function copyTreeWithoutManifest(source: string, destination: string, hooks: V6F
 /** v6 is authoritative as soon as its manifest exists; a corrupt v6 never falls back. */
 export function readAuthoritativeCheckpoint(id: string, agentDir: string): SessionCheckpoint {
 	const storePath = v6CheckpointStorePath(id, agentDir);
-	if (existsSync(v6ManifestPath(storePath))) return readV6Checkpoint(storePath).checkpoint;
+	if (v6StorePresence(storePath) === "published") return readV6Checkpoint(storePath).checkpoint;
 	return readCheckpoint(id, agentDir);
 }
 

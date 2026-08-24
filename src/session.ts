@@ -27,6 +27,8 @@ import { getAgentDir } from "./config.ts";
 import { killSessionSpec } from "./mux/index.ts";
 
 const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+/** Keep session/checkpoint path components to 128 ASCII bytes, below 255-byte filesystem limits. */
+export const MAX_CANONICAL_SESSION_ID_LENGTH = 128;
 declare const checkpointClaimBrand: unique symbol;
 
 export interface SessionRecord {
@@ -73,9 +75,12 @@ export interface CheckpointClaim extends SessionLock {
 	readonly [checkpointClaimBrand]: true;
 }
 
+export class SessionIdError extends Error {}
+
 /** The only ids that may become session-owned path components. */
 export function assertCanonicalSessionId(id: string, label = "session id"): void {
-	if (typeof id !== "string" || !SESSION_ID_PATTERN.test(id)) throw new Error(`Invalid ${label} "${String(id)}".`);
+	if (typeof id !== "string" || id.length > MAX_CANONICAL_SESSION_ID_LENGTH || !SESSION_ID_PATTERN.test(id))
+		throw new SessionIdError(`Invalid ${label} "${String(id)}".`);
 }
 
 function canonicalAgentDir(agentDir: string): string {
@@ -107,8 +112,8 @@ export function assertSessionLockHeld(lock: SessionLock): void {
 /** Identity captured when a detached ACP group is created, before crash recovery can ever reap it. */
 export interface SessionWorkerGroup {
 	pgid: number;
-	/** `ps lstart` for the group leader; prevents a recycled numeric PGID from being killed. */
-	leaderStartedAt: string;
+	/** `ps lstart` for the group leader; absence is retained as uncertainty and never treated as death. */
+	leaderStartedAt?: string;
 }
 
 /**
@@ -404,37 +409,39 @@ export function isGroupPopulated(pgid: number): boolean | undefined {
  * True once this exact recorded group is gone — never merely "the leader pid is
  * free".
  *
- * Two facts make this decidable. A pgid number cannot be handed to a new
- * process while the group it names still has members (Linux holds the `struct
- * pid`; the BSDs check `pgfind` before reusing a pid), so a live group under a
- * dead leader is still ours. And a live *process* at that number proves the
- * opposite: the number was reissued, which the kernel only allows once our
- * group emptied, so a mismatched leader identity means our group is gone and
- * whatever holds the number now is a stranger.
+ * The only positive proof is that the kernel reports the recorded group empty.
+ * A live group with a dead, unidentifiable, or mismatched leader is retained as
+ * uncertain: recovery must not hydrate a replacement while it may still own
+ * repository-writing descendants.
  */
 export function isProcessGroupGone(
 	group: SessionWorkerGroup,
-	identify: (pid: number) => string | undefined,
+	_identify: (pid: number) => string | undefined,
 	groupPopulated: (pgid: number) => boolean | undefined = isGroupPopulated,
 ): boolean {
-	const { pgid, leaderStartedAt } = group;
-	if (!Number.isInteger(pgid) || pgid <= 1) return true;
-	const leaderMatches = isAlive(pgid) && identify(pgid) === leaderStartedAt;
+	const { pgid } = group;
+	if (!Number.isInteger(pgid) || pgid <= 1) return false;
 	const populated = groupPopulated(pgid);
-	// No group signalling here: the recorded leader is the only evidence.
-	if (populated === undefined) return !leaderMatches;
-	if (!populated) return true;
-	// A live group whose number was reissued to an unrelated process is not ours.
-	return isAlive(pgid) && !leaderMatches;
+	// An empty group is proof of death. A live or unobservable group is not gone,
+	// even when its leader identity is missing or belongs to a replacement.
+	return populated === false;
+}
+
+function ownsLiveProcessGroup(
+	group: SessionWorkerGroup,
+	identify: (pid: number) => string | undefined,
+	groupPopulated: (pgid: number) => boolean | undefined,
+): boolean {
+	if (groupPopulated(group.pgid) !== true || !isAlive(group.pgid) || !group.leaderStartedAt) return false;
+	return identify(group.pgid) === group.leaderStartedAt;
 }
 
 /**
  * Stop one recorded worker group and report whether its death is proven.
  *
- * The identity check is the whole safety property: a numeric pgid is reused, so
- * a recorded group is only ever signalled while it is still provably the one
- * Neta created — its leader alive under the recorded start time, or the leader
- * gone and the number still held by the group it led.
+ * A numeric pgid is reused, so a recorded group is only ever signalled while
+ * the live group leader has the exact recorded start identity. If that proof is
+ * unavailable, cleanup stops and recovery remains refused.
  */
 export function reapProcessGroup(
 	group: SessionWorkerGroup,
@@ -443,14 +450,26 @@ export function reapProcessGroup(
 	waitMs = 2000,
 	groupPopulated: (pgid: number) => boolean | undefined = isGroupPopulated,
 ): boolean {
-	const { pgid, leaderStartedAt } = group;
-	if (!Number.isInteger(pgid) || pgid <= 1 || pgid === process.pid) return true;
-	if (isAlive(pgid) && identify(pgid) !== leaderStartedAt) {
-		warn(`[neta] stale session skipped process group ${pgid}: group leader identity no longer matches`);
-		return true;
+	const { pgid } = group;
+	if (!Number.isInteger(pgid) || pgid <= 1 || pgid === process.pid) {
+		warn(`[neta] stale session skipped invalid process group ${pgid}`);
+		return false;
 	}
 	if (isProcessGroupGone(group, identify, groupPopulated)) return true;
+	if (!ownsLiveProcessGroup(group, identify, groupPopulated)) {
+		warn(
+			`[neta] stale session skipped process group ${pgid}: live group identity is unavailable or no longer matches`,
+		);
+		return false;
+	}
 	for (const signal of ["SIGTERM", "SIGKILL"] as const) {
+		if (isProcessGroupGone(group, identify, groupPopulated)) return true;
+		if (!ownsLiveProcessGroup(group, identify, groupPopulated)) {
+			warn(
+				`[neta] stale session stopped signaling process group ${pgid}: live group identity is unavailable or no longer matches`,
+			);
+			return false;
+		}
 		try {
 			process.kill(-pgid, signal);
 		} catch {
@@ -463,6 +482,7 @@ export function reapProcessGroup(
 		const deadline = Date.now() + waitMs / 2;
 		while (Date.now() < deadline) {
 			if (isProcessGroupGone(group, identify, groupPopulated)) return true;
+			if (!ownsLiveProcessGroup(group, identify, groupPopulated)) return false;
 			sleepSync(25);
 		}
 	}

@@ -228,7 +228,10 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 			if (pgid === undefined) workerGroups.delete(workerId);
 			else {
 				const leaderStartedAt = processStartTime(pgid);
-				if (leaderStartedAt) workerGroups.set(workerId, { pgid, leaderStartedAt });
+				// Keep an unidentifiable live group in the durable registry. Dropping it
+				// would make a crash look clean and let recovery hydrate a replacement
+				// while the original worker may still be editing the repository.
+				workerGroups.set(workerId, { pgid, leaderStartedAt });
 			}
 			writeRegistry();
 		},

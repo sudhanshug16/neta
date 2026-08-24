@@ -6,6 +6,7 @@ import {
 	closeSync,
 	existsSync,
 	fsyncSync,
+	lstatSync,
 	mkdirSync,
 	openSync,
 	readdirSync,
@@ -24,10 +25,11 @@ import {
 	type V6WriteCounters,
 	v6CheckpointStorePath,
 	v6ManifestPath,
+	v6StorePresence,
 	writeV6CheckpointDelta,
 } from "./checkpoint-store.ts";
 import { VERSION } from "./config.ts";
-import { isSessionLeaseAlive } from "./session.ts";
+import { assertCanonicalSessionId, isSessionLeaseAlive } from "./session.ts";
 import {
 	type Note,
 	type RoomPost,
@@ -165,8 +167,10 @@ function checkpointDir(agentDir: string): string {
 }
 
 function safeId(id: string): void {
-	if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id)) {
-		throw new CheckpointError(`Invalid checkpoint id "${id}".`);
+	try {
+		assertCanonicalSessionId(id, "checkpoint id");
+	} catch (error) {
+		throw new CheckpointError(error instanceof Error ? error.message : String(error));
 	}
 }
 
@@ -506,6 +510,8 @@ export function validateCheckpoint(value: unknown): SessionCheckpoint {
 		);
 	}
 	for (const key of ["appVersion", "id", "canonicalCwd"]) string(root[key], `checkpoint.${key}`);
+	string(root.id, "checkpoint.id");
+	safeId(root.id);
 	for (const key of ["createdAt", "updatedAt", "counter", "noteCounter"]) number(root[key], `checkpoint.${key}`);
 	const leader = object(root.leader, "checkpoint.leader");
 	exact(leader, ["backend", "vendorConversationId"], "checkpoint.leader");
@@ -614,7 +620,7 @@ export function validateCheckpoint(value: unknown): SessionCheckpoint {
 
 export function readCheckpoint(id: string, agentDir: string): SessionCheckpoint {
 	const v6Path = v6CheckpointStorePath(id, agentDir);
-	if (existsSync(v6ManifestPath(v6Path))) return readV6Checkpoint(v6Path).checkpoint;
+	if (v6StorePresence(v6Path) === "published") return readV6Checkpoint(v6Path).checkpoint;
 	const path = checkpointPath(id, agentDir);
 	let parsed: unknown;
 	try {
@@ -655,15 +661,24 @@ export function listCheckpoints(agentDir: string): CheckpointListEntry[] {
 		}
 	}
 	const v6Root = join(agentDir, "checkpoints-v6");
-	if (existsSync(v6Root)) {
+	let v6RootStat: ReturnType<typeof lstatSync> | undefined;
+	try {
+		v6RootStat = lstatSync(v6Root);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+	}
+	if (v6RootStat) {
+		if (v6RootStat.isSymbolicLink() || !v6RootStat.isDirectory())
+			throw new CheckpointError(`v6 checkpoint root is not a regular directory: ${v6Root}.`);
 		for (const id of readdirSync(v6Root)) {
-			const path = v6ManifestPath(join(v6Root, id));
-			if (!existsSync(path)) continue;
+			const storePath = join(v6Root, id);
+			const path = v6ManifestPath(storePath);
 			try {
+				if (v6StorePresence(storePath) !== "published") continue;
 				// A published v6 manifest is authoritative even when its contents are
 				// corrupt; readCheckpoint deliberately fails closed instead of falling
 				// back to a stale legacy JSON file.
-				entries.set(id, { id, path, checkpoint: readV6CheckpointMetadata(join(v6Root, id)).checkpoint });
+				entries.set(id, { id, path, checkpoint: readV6CheckpointMetadata(storePath).checkpoint });
 			} catch (error) {
 				entries.set(id, { id, path, error: error instanceof Error ? error.message : String(error) });
 			}
@@ -687,7 +702,7 @@ export function readCheckpointForHydration(id: string, agentDir: string): Hydrat
 export function writeCheckpointAtomic(input: SessionCheckpoint, agentDir: string): string {
 	const checkpoint = validateCheckpoint(input);
 	const v6Path = v6CheckpointStorePath(checkpoint.id, agentDir);
-	if (existsSync(v6ManifestPath(v6Path))) {
+	if (v6StorePresence(v6Path) === "published") {
 		throw new CheckpointError("v6 checkpoints require a typed delta write; refusing the legacy full writer.");
 	}
 	const dir = checkpointDir(agentDir);
@@ -1150,7 +1165,7 @@ export function updateCheckpoint(
 	mutate: (checkpoint: SessionCheckpoint) => SessionCheckpoint | undefined,
 ): SessionCheckpoint | undefined {
 	const v6Path = v6CheckpointStorePath(id, agentDir);
-	if (existsSync(v6ManifestPath(v6Path)))
+	if (v6StorePresence(v6Path) === "published")
 		throw new CheckpointError("v6 checkpoints require a typed delta update; refusing the legacy full writer.");
 	const next = mutate(readCheckpoint(id, agentDir));
 	if (!next) return undefined;
@@ -1170,7 +1185,7 @@ export function recordCheckpointStopped(
 	managerId?: string,
 ): SessionCheckpoint | undefined {
 	const v6Path = v6CheckpointStorePath(id, agentDir);
-	if (existsSync(v6ManifestPath(v6Path))) {
+	if (v6StorePresence(v6Path) === "published") {
 		const state = readV6StructuralState(v6Path);
 		if (managerId && state.liveLease && state.liveLease.managerId !== managerId) return undefined;
 		const next = { ...state, liveLease: undefined, shutdown: { at: Date.now(), processesStopped: true, by } };
@@ -1198,7 +1213,7 @@ export function recordLeaderVendorConversationId(
 	vendorConversationId: string,
 ): SessionCheckpoint | undefined {
 	const v6Path = v6CheckpointStorePath(id, agentDir);
-	if (existsSync(v6ManifestPath(v6Path))) {
+	if (v6StorePresence(v6Path) === "published") {
 		const state = readV6StructuralState(v6Path);
 		const existing = state.leader.vendorConversationId;
 		if (existing === vendorConversationId) return undefined;

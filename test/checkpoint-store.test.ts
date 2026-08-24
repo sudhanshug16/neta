@@ -13,7 +13,13 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { checkpointPath, newCheckpointBase, type SessionCheckpoint, writeCheckpointAtomic } from "../src/checkpoint.ts";
+import {
+	checkpointPath,
+	newCheckpointBase,
+	readCheckpoint,
+	type SessionCheckpoint,
+	writeCheckpointAtomic,
+} from "../src/checkpoint.ts";
 import {
 	CHECKPOINT_STORE_FORMAT_VERSION,
 	CheckpointStoreError,
@@ -143,6 +149,33 @@ describe("normalized v6 checkpoint store", () => {
 		mkdirSync(join(noManifest, "blobs"), { recursive: true });
 		writeFileSync(join(noManifest, "blobs", `${"b".repeat(64)}.json`), "orphan");
 		expect(() => readV6Checkpoint(noManifest)).toThrow("No published v6 manifest");
+	});
+
+	it("falls back only when the v6 store is truly absent", () => {
+		const agentDir = temp();
+		const legacy = checkpoint("legacy-absence");
+		writeCheckpointAtomic(legacy, agentDir);
+		const parent = join(agentDir, "checkpoints-v6");
+		const store = v6CheckpointStorePath(legacy.id, agentDir);
+		mkdirSync(parent, { recursive: true });
+
+		expect(readCheckpoint(legacy.id, agentDir).id).toBe(legacy.id);
+		symlinkSync(join(parent, "missing-target"), store);
+		expect(() => readCheckpoint(legacy.id, agentDir)).toThrow("v6 store is not a regular directory");
+		rmSync(store, { force: true });
+
+		mkdirSync(join(store, "manifest.json"), { recursive: true });
+		expect(() => readCheckpoint(legacy.id, agentDir)).toThrow("v6 manifest is not a regular file");
+		rmSync(store, { recursive: true, force: true });
+
+		mkdirSync(store, { recursive: true });
+		symlinkSync(join(store, "missing-manifest"), v6ManifestPath(store));
+		expect(() => readCheckpoint(legacy.id, agentDir)).toThrow("v6 manifest");
+		rmSync(store, { recursive: true, force: true });
+
+		mkdirSync(store, { recursive: true });
+		writeFileSync(v6ManifestPath(store), "{broken");
+		expect(() => readCheckpoint(legacy.id, agentDir)).toThrow("invalid JSON");
 	});
 
 	it("cleans failed manifest temps while preserving the prior authority", () => {

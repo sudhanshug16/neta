@@ -18,6 +18,7 @@ import {
 	findSession,
 	isProcessGroupGone,
 	listSessions,
+	MAX_CANONICAL_SESSION_ID_LENGTH,
 	processStartTime,
 	readSessionRecord,
 	reapProcessGroup,
@@ -143,8 +144,7 @@ describe("session registry", () => {
 		});
 		const pgid = leader.pid;
 		if (pgid === undefined) throw new Error("Could not start the group leader fixture.");
-		const leaderStartedAt = processStartTime(pgid);
-		if (!leaderStartedAt) throw new Error("Could not identify the group leader fixture.");
+		const leaderStartedAt = processStartTime(pgid) ?? "fixture-started-at";
 		const group = { pgid, leaderStartedAt };
 		await waitFor(() => readFileSync(marker, "utf-8").includes("ready"), 5000);
 		const childPid = Number.parseInt(readFileSync(marker, "utf-8").split(":")[1] ?? "", 10);
@@ -156,10 +156,13 @@ describe("session registry", () => {
 			expect(isProcessGroupGone(group, processStartTime)).toBe(false);
 			expect(() => process.kill(childPid, 0)).not.toThrow();
 
-			// Reaping it must both kill the child and prove it.
-			expect(reapProcessGroup(group, processStartTime, () => {})).toBe(true);
-			expect(isProcessGroupGone(group, processStartTime)).toBe(true);
+			// The leader is gone but the group is alive; without a live identity,
+			// recovery must not signal it or call it gone.
+			expect(reapProcessGroup(group, processStartTime, () => {})).toBe(false);
+			expect(() => process.kill(childPid, 0)).not.toThrow();
+			process.kill(-pgid, "SIGKILL");
 			await waitFor(() => processGone(childPid), 5000);
+			expect(isProcessGroupGone(group, processStartTime)).toBe(true);
 
 			// And the sweep must refuse to call the session stopped until then.
 			writeSessionRecord(record({ id: "orphaned", pid: 2147483646, workerGroups: [group] }), dir);
@@ -315,7 +318,19 @@ describe("session registry", () => {
 			entry,
 			readFileSync(join(dir, "sessions", "claims", "valid-id", entry)),
 		]);
-		for (const id of ["..", ".", "/", "a/b", join(tmpdir(), "absolute"), "", " ", "%2e%2e", "a\\b", "a∕b"])
+		for (const id of [
+			"..",
+			".",
+			"/",
+			"a/b",
+			join(tmpdir(), "absolute"),
+			"",
+			" ",
+			"%2e%2e",
+			"a\\b",
+			"a∕b",
+			"a".repeat(MAX_CANONICAL_SESSION_ID_LENGTH + 1),
+		])
 			expect(() => tryAcquireCheckpointClaim(id, dir)).toThrow();
 		expect(
 			readdirSync(join(dir, "sessions", "claims", "valid-id")).map((entry) => [

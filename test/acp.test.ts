@@ -785,7 +785,10 @@ describe("sanitizeInheritedEnv", () => {
 		const clean = sanitizeInheritedEnv({
 			NETA_LEADER_TOKEN: "leader-secret",
 			NETA_LEADER_BACKEND: "claude",
+			NETA_LEADER_CONVERSATION_ID: "recovered-conversation",
 			NETA_SESSION_ID: "leader-session",
+			NETA_CHECKPOINT_ID: "recovered-checkpoint",
+			NETA_RESUME: "1",
 			NETA_MUX: "tmux",
 			NETA_PANES: "1",
 			NETA_WORKER_ID: "ro1",

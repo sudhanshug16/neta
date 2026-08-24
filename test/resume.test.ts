@@ -66,6 +66,7 @@ import {
 	requireLeaderConversationId,
 } from "../src/recovery.ts";
 import {
+	MAX_CANONICAL_SESSION_ID_LENGTH,
 	processStartTime,
 	readStoppedMarker,
 	type SessionRecord,
@@ -207,7 +208,19 @@ describe("resume refuses rather than guesses", () => {
 		mkdirSync(sessions, { recursive: true });
 		writeFileSync(join(sessions, "sentinel.json"), "sentinel\n");
 		const before = readdirSync(sessions).map((name) => [name, readFileSync(join(sessions, name), "utf8")]);
-		for (const checkpointId of ["..", ".", "/", "a/b", join(tmpdir(), "absolute"), "", " ", "%2e%2e", "a\\b", "a∕b"])
+		for (const checkpointId of [
+			"..",
+			".",
+			"/",
+			"a/b",
+			join(tmpdir(), "absolute"),
+			"",
+			" ",
+			"%2e%2e",
+			"a\\b",
+			"a∕b",
+			"a".repeat(MAX_CANONICAL_SESSION_ID_LENGTH + 1),
+		])
 			await expect(resumeLeader({ checkpointId, agentDir, extraArgs: [] })).rejects.toThrow();
 		expect(readdirSync(sessions).map((name) => [name, readFileSync(join(sessions, name), "utf8")])).toEqual(before);
 	});
@@ -317,13 +330,14 @@ describe("resume refuses rather than guesses", () => {
 		);
 
 		const warnings: string[] = [];
-		const notes = await proveManagerStopped(checkpoint, { agentDir, warn: (message) => warnings.push(message) });
+		await expect(
+			proveManagerStopped(checkpoint, { agentDir, warn: (message) => warnings.push(message) }),
+		).rejects.toThrow("Could not prove every worker process group");
 		expect(() => process.kill(stranger.pid as number, 0)).not.toThrow();
 		process.kill(stranger.pid as number, "SIGKILL");
-		expect(warnings.join(" ")).toContain("identity no longer matches");
-		expect(notes.join(" ")).toContain("reaped 1 recorded worker process group");
-		expect(readCheckpoint("recycled", agentDir).shutdown).toMatchObject({ processesStopped: true, by: "recovery" });
-		expect(readStoppedMarker("manager-crashed", agentDir)).toBeUndefined();
+		expect(warnings.join(" ")).toContain("identity is unavailable or no longer matches");
+		expect(readCheckpoint("recycled", agentDir).shutdown).toBeUndefined();
+		expect(readStoppedMarker("manager-crashed", agentDir)).toMatchObject({ processesStopped: false });
 	});
 
 	it("accepts a graceful stop and a swept crash, and records the proof once", async () => {
@@ -1087,6 +1101,11 @@ describe("listing sessions", () => {
 		const missing = await failing([CLI, "resume", "nope"], agentDir);
 		expect(missing.stderr).toContain('Checkpoint "nope" does not exist.');
 		expect(missing.code).toBe(1);
+
+		const overlong = await failing([CLI, "resume", "a".repeat(MAX_CANONICAL_SESSION_ID_LENGTH + 1)], agentDir);
+		expect(overlong.stderr).toContain("Invalid checkpoint id");
+		expect(overlong.stderr).not.toContain("at ");
+		expect(overlong.code).toBe(1);
 
 		const empty = await run(process.execPath, [CLI, "sessions", "--all"], {
 			env: { ...process.env, NETA_DIR: agentDir },

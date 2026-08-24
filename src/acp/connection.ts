@@ -47,6 +47,8 @@ const INHERITED_SESSION_PREFIXES = ["CLAUDE_CODE_"];
 const INHERITED_SESSION_VARS = new Set(["CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT"]);
 const LEADER_ENV_PREFIX = "NETA_LEADER_";
 const LEADER_ENV_VARS = new Set(["NETA_SESSION_ID", "NETA_MUX", "NETA_PANES", "NETA_TIERS"]);
+/** Fresh nested launches must not inherit a parent's recovery capability. */
+const RESUME_ONLY_NETA_VARS = new Set(["NETA_RESUME", "NETA_CHECKPOINT_ID"]);
 
 export function sanitizeInheritedEnv(env: NodeJS.ProcessEnv): Record<string, string> {
 	const clean: Record<string, string> = {};
@@ -54,7 +56,7 @@ export function sanitizeInheritedEnv(env: NodeJS.ProcessEnv): Record<string, str
 		if (value === undefined) continue;
 		if (INHERITED_SESSION_VARS.has(name)) continue;
 		if (INHERITED_SESSION_PREFIXES.some((prefix) => name.startsWith(prefix))) continue;
-		if (name.startsWith(LEADER_ENV_PREFIX) || LEADER_ENV_VARS.has(name)) continue;
+		if (name.startsWith(LEADER_ENV_PREFIX) || LEADER_ENV_VARS.has(name) || RESUME_ONLY_NETA_VARS.has(name)) continue;
 		clean[name] = value;
 	}
 	return clean;

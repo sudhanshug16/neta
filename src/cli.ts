@@ -22,6 +22,7 @@ import { handleWorkerChannelCommand } from "./channel/client.ts";
 import { handleLeaderChannelCommand, LEADER_COMMANDS } from "./channel/leader-cli.ts";
 import { NETA_WORKER_ENV } from "./channel/protocol.ts";
 import { CheckpointError } from "./checkpoint.ts";
+import { CheckpointStoreError } from "./checkpoint-store.ts";
 import { APP_NAME, getAgentDir, VERSION } from "./config.ts";
 import { detectLeaderBackends } from "./detect.ts";
 import { runGuard } from "./guard.ts";
@@ -30,7 +31,7 @@ import { captureLeaderSession, readHookPayload } from "./leader-capture.ts";
 import { runControlPlane, runWorkerBridge } from "./mcp/run.ts";
 import { listBackendModels } from "./models.ts";
 import { formatDurableSession, listDurableSessions, RecoveryError } from "./recovery.ts";
-import { listSessions } from "./session.ts";
+import { listSessions, SessionIdError } from "./session.ts";
 import { isWorkerId, watchRoom, watchWorker } from "./watch.ts";
 import { watchRoomTui, watchWorkerTui } from "./watch-tui.ts";
 
@@ -194,7 +195,15 @@ async function main(argv: string[]): Promise<void> {
 				// Every refusal here left the checkpoint untouched; say so plainly and
 				// stop, rather than falling back to a fresh session the user did not ask
 				// for.
-				if (!(error instanceof LaunchError || error instanceof RecoveryError || error instanceof CheckpointError))
+				if (
+					!(
+						error instanceof LaunchError ||
+						error instanceof RecoveryError ||
+						error instanceof CheckpointError ||
+						error instanceof CheckpointStoreError ||
+						error instanceof SessionIdError
+					)
+				)
 					throw error;
 				console.error(error.message);
 				process.exitCode = 1;
