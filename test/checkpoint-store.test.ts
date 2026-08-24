@@ -7,12 +7,13 @@ import {
 	readdirSync,
 	readFileSync,
 	rmSync,
+	lstatSync,
 	statSync,
 	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { checkpointPath, newCheckpointBase, type SessionCheckpoint, writeCheckpointAtomic } from "../src/checkpoint.ts";
 import {
 	CHECKPOINT_STORE_FORMAT_VERSION,
@@ -234,6 +235,77 @@ describe("normalized v6 checkpoint store", () => {
 		expect(result.checkpoint.workers[0]?.finalResult).toBe("summary survives detail loss");
 	});
 
+	it("serializes migration before staging cleanup and permits a later retry", () => {
+		const agentDir = temp();
+		const legacy = checkpoint("concurrent-migration");
+		writeCheckpointAtomic(legacy, agentDir);
+		const legacyPath = checkpointPath(legacy.id, agentDir);
+		const before = readFileSync(legacyPath);
+		const target = v6CheckpointStorePath(legacy.id, agentDir);
+		let nestedError: unknown;
+		let nested = false;
+		expect(() =>
+			migrateV5ToV6(legacy.id, agentDir, target, {
+				fail: (event) => {
+					if (nested || event.type !== "artifact-write") return;
+					nested = true;
+					const staging = readdirSync(dirname(target)).find((name) => name.endsWith(".staging"));
+					expect(staging).toBeDefined();
+					try {
+						migrateV5ToV6(legacy.id, agentDir, target);
+					} catch (error) {
+						nestedError = error;
+					}
+					expect(staging ? statSync(join(dirname(target), staging)).isDirectory() : false).toBe(true);
+					throw new Error("blocked first copy");
+				},
+			}),
+		).toThrow("blocked first copy");
+		expect(nestedError).toBeInstanceOf(CheckpointStoreError);
+		expect(String((nestedError as Error).message)).toContain("already owned");
+		expect(readFileSync(legacyPath)).toEqual(before);
+		expect(migrateV5ToV6(legacy.id, agentDir, target).published).toBe(true);
+		expect(readFileSync(legacyPath)).toEqual(before);
+	});
+
+	it("fails closed on malformed claims and unowned staging", () => {
+		for (const kind of ["malformed", "symlink", "hardlink"] as const) {
+			const agentDir = temp();
+			const legacy = checkpoint(`unsafe-${kind}`);
+			writeCheckpointAtomic(legacy, agentDir);
+			const legacyPath = checkpointPath(legacy.id, agentDir);
+			const before = readFileSync(legacyPath);
+			const claim = join(agentDir, "checkpoint-migration-claims", legacy.id);
+			mkdirSync(claim, { recursive: true });
+			const owner = join(claim, "owner.json");
+			if (kind === "malformed") writeFileSync(owner, "{not-json");
+			if (kind === "symlink") symlinkSync(agentDir, owner);
+			if (kind === "hardlink") {
+				const source = join(agentDir, "owner-source");
+				writeFileSync(source, JSON.stringify({ id: legacy.id, pid: 4242, startedAt: "dead", nonce: "a".repeat(24) }));
+				linkSync(source, owner);
+			}
+			expect(() => migrateV5ToV6(legacy.id, agentDir)).toThrow();
+			expect(readFileSync(legacyPath)).toEqual(before);
+			expect(() => statSync(v6CheckpointStorePath(legacy.id, agentDir))).toThrow();
+		}
+
+		const agentDir = temp();
+		const legacy = checkpoint("unowned-staging");
+		writeCheckpointAtomic(legacy, agentDir);
+		const claim = join(agentDir, "checkpoint-migration-claims", legacy.id);
+		mkdirSync(claim, { recursive: true });
+		writeFileSync(
+			join(claim, "owner.json"),
+			JSON.stringify({ id: legacy.id, pid: 4242, startedAt: "dead", nonce: "b".repeat(24) }),
+		);
+		const staging = join(agentDir, "checkpoints-v6", `.${legacy.id}.4242.${"c".repeat(24)}.staging`);
+		mkdirSync(dirname(staging), { recursive: true });
+		symlinkSync(agentDir, staging);
+		expect(() => migrateV5ToV6(legacy.id, agentDir)).toThrow();
+		expect(lstatSync(staging).isSymbolicLink()).toBe(true);
+	});
+
 	it("migrates v5 once, preserves the original bytes, and supports stable-directory fallback", () => {
 		const agentDir = temp();
 		const legacy = checkpoint("migration");
@@ -321,7 +393,13 @@ describe("normalized v6 checkpoint store", () => {
 		);
 		expect(readFileSync(marker, "utf8")).toBe("preserve");
 
-		const crashStaging = join(agentDir, "checkpoints-v6", ".migration.4242.eeeeeeeeeeee.fallback.staging");
+		const migrationClaim = join(agentDir, "checkpoint-migration-claims", "migration");
+		mkdirSync(migrationClaim, { recursive: true });
+		writeFileSync(
+			join(migrationClaim, "owner.json"),
+			JSON.stringify({ id: "migration", pid: 4242, startedAt: "dead-owner", nonce: "e".repeat(24) }),
+		);
+		const crashStaging = join(agentDir, "checkpoints-v6", `.migration.4242.${"e".repeat(24)}.fallback.staging`);
 		mkdirSync(crashStaging, { recursive: true });
 		writeFileSync(join(crashStaging, "partial"), "partial");
 		const recoveredTarget = join(agentDir, "checkpoints-v6", "recovered-staging");

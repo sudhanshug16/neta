@@ -18,6 +18,7 @@ import {
 	readdirSync,
 	readFileSync,
 	renameSync,
+	rmdirSync,
 	rmSync,
 	statSync,
 	unlinkSync,
@@ -35,6 +36,8 @@ export const V6_FORMAT_VERSION = CHECKPOINT_STORE_FORMAT_VERSION;
 export const V6_MANIFEST_FILE = "manifest.json";
 export const TERMINAL_INDEX_SHARD_COUNT = 64 as const;
 const V6_MANIFEST_TEMP_PATTERN = /^manifest\.json\.[1-9][0-9]*\.[a-f0-9]{12}\.tmp$/;
+const V6_MIGRATION_CLAIMS_DIR = "checkpoint-migration-claims";
+const V6_MIGRATION_NONCE_PATTERN = /^[a-f0-9]{24}$/;
 
 type BlobKind = "active" | "terminal" | "outcome";
 
@@ -1054,8 +1057,8 @@ export function writeV6CheckpointUpdate(
 
 function manifestExists(storePath: string): boolean {
 	try {
-		statSync(v6ManifestPath(storePath));
-		return true;
+		const stat = lstatSync(v6ManifestPath(storePath));
+		return stat.isFile() && stat.nlink === 1;
 	} catch {
 		return false;
 	}
@@ -1841,57 +1844,66 @@ export function migrateV5ToV6(
 	hooks?: V6FaultHooks,
 ): V6MigrationResult {
 	safePart(id, "checkpoint id");
-	if (manifestExists(targetStorePath)) {
-		const published = readV6Checkpoint(targetStorePath);
-		if (published.manifest.id !== id) throw new CheckpointStoreError(`Published v6 store id does not match "${id}".`);
-		return { storePath: targetStorePath, published: true, alreadyMigrated: true };
-	}
-	const legacy = readCheckpoint(id, agentDir);
 	const parent = dirname(targetStorePath);
-	mkdirSync(parent, { recursive: true, mode: 0o700 });
-	if (gcPathPresent(targetStorePath))
-		throw new CheckpointStoreError(
-			`The v6 migration destination already exists without a valid manifest: ${targetStorePath}.`,
-		);
-	cleanupMigrationStaging(parent, id);
-	const staging = join(parent, `.${id}.${process.pid}.${randomBytes(6).toString("hex")}.staging`);
-	let fallbackStaging: string | undefined;
+	const claim = acquireMigrationClaim(id, agentDir, parent);
+	if (!claim)
+		throw new CheckpointStoreError(`v6 migration for checkpoint "${id}" is already owned by another process.`);
 	try {
-		const manifest = writeV6Checkpoint(legacy, staging, hooks);
-		publishManifest(staging, manifest, hooks);
-		gcValidateReferences(staging, manifest);
-		fail(hooks, { type: "store-rename", from: staging, to: targetStorePath });
-		renameSync(staging, targetStorePath);
-		fsyncDirectory(parent, "manifest-parent-fsync", hooks);
-		return { storePath: targetStorePath, published: true, alreadyMigrated: false };
-	} catch (error) {
-		const code = (error as NodeJS.ErrnoException).code;
-		if (!["EXDEV", "EPERM", "EACCES", "ENOTSUP", "EINVAL"].includes(code ?? "")) {
-			removeMigrationStagingBestEffort(staging, parent);
-			throw error;
+		if (manifestExists(targetStorePath)) {
+			const published = readV6Checkpoint(targetStorePath);
+			if (published.manifest.id !== id) throw new CheckpointStoreError(`Published v6 store id does not match "${id}".`);
+			return { storePath: targetStorePath, published: true, alreadyMigrated: true };
 		}
+		const legacy = readCheckpoint(id, agentDir);
+		mkdirSync(parent, { recursive: true, mode: 0o700 });
+		if (!isDirectoryWithoutSymlink(parent))
+			throw new CheckpointStoreError(`The v6 migration parent is not a safe directory: ${parent}.`);
+		if (gcPathPresent(targetStorePath))
+			throw new CheckpointStoreError(
+				`The v6 migration destination already exists without a valid manifest: ${targetStorePath}.`,
+			);
+		cleanupMigrationStaging(parent, id, claim);
+		const staging = join(parent, `.${id}.${process.pid}.${claim.owner.nonce}.staging`);
+		let fallbackStaging: string | undefined;
 		try {
-			const manifest = readV6ManifestUnlocked(staging);
-			fallbackStaging = join(parent, `.${id}.${process.pid}.${randomBytes(6).toString("hex")}.fallback.staging`);
-			copyTreeWithoutManifest(staging, fallbackStaging, hooks);
-			publishManifest(fallbackStaging, manifest, hooks);
-			gcValidateReferences(fallbackStaging, manifest);
-			if (gcPathPresent(targetStorePath))
-				throw new CheckpointStoreError(
-					`The v6 migration destination appeared before publication: ${targetStorePath}.`,
-				);
-			removeMigrationStaging(staging, parent);
-			// The fallback staging directory is complete, validated, and fsynced. Its
-			// same-parent rename is the one point at which the destination appears.
-			renameSync(fallbackStaging, targetStorePath);
-			fallbackStaging = undefined;
+			const manifest = writeV6Checkpoint(legacy, staging, hooks);
+			publishManifest(staging, manifest, hooks);
+			gcValidateReferences(staging, manifest);
+			fail(hooks, { type: "store-rename", from: staging, to: targetStorePath });
+			renameSync(staging, targetStorePath);
 			fsyncDirectory(parent, "manifest-parent-fsync", hooks);
 			return { storePath: targetStorePath, published: true, alreadyMigrated: false };
-		} catch (fallbackError) {
-			removeMigrationStagingBestEffort(fallbackStaging, parent);
-			removeMigrationStagingBestEffort(staging, parent);
-			throw fallbackError;
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (!["EXDEV", "EPERM", "EACCES", "ENOTSUP", "EINVAL"].includes(code ?? "")) {
+				removeMigrationStagingBestEffort(staging, parent, id, claim);
+				throw error;
+			}
+			try {
+				const manifest = readV6ManifestUnlocked(staging);
+				fallbackStaging = join(parent, `.${id}.${process.pid}.${claim.owner.nonce}.fallback.staging`);
+				copyTreeWithoutManifest(staging, fallbackStaging, hooks);
+				publishManifest(fallbackStaging, manifest, hooks);
+				gcValidateReferences(fallbackStaging, manifest);
+				if (gcPathPresent(targetStorePath))
+					throw new CheckpointStoreError(
+						`The v6 migration destination appeared before publication: ${targetStorePath}.`,
+					);
+				removeMigrationStaging(staging, parent, id, claim);
+				// The fallback staging directory is complete, validated, and fsynced. Its
+				// same-parent rename is the one point at which the destination appears.
+				renameSync(fallbackStaging, targetStorePath);
+				fallbackStaging = undefined;
+				fsyncDirectory(parent, "manifest-parent-fsync", hooks);
+				return { storePath: targetStorePath, published: true, alreadyMigrated: false };
+			} catch (fallbackError) {
+				removeMigrationStagingBestEffort(fallbackStaging, parent, id, claim);
+				removeMigrationStagingBestEffort(staging, parent, id, claim);
+				throw fallbackError;
+			}
 		}
+	} finally {
+		releaseMigrationClaim(claim);
 	}
 }
 
@@ -1900,24 +1912,218 @@ function migrationStagingName(name: string, id: string): boolean {
 	const suffix = ".staging";
 	if (!name.startsWith(prefix) || !name.endsWith(suffix)) return false;
 	const middle = name.slice(prefix.length, -suffix.length);
-	return /^[1-9][0-9]*\.[a-f0-9]{12}(?:\.fallback)?$/.test(middle);
+	return /^[1-9][0-9]*\.[a-f0-9]{24}(?:\.fallback)?$/.test(middle);
 }
 
-function cleanupMigrationStaging(parent: string, id: string): void {
-	let entries: Dirent[];
+interface MigrationOwner {
+	id: string;
+	nonce: string;
+	pid: number;
+	startedAt: string;
+}
+
+interface FileIdentity {
+	dev: number;
+	ino: number;
+}
+
+interface MigrationClaim {
+	path: string;
+	ownerPath: string;
+	owner: MigrationOwner;
+	directory: FileIdentity;
+	ownerFile: FileIdentity;
+}
+
+function migrationClaimsRoot(agentDir: string): string {
+	const root = join(agentDir, V6_MIGRATION_CLAIMS_DIR);
 	try {
-		entries = readdirSync(parent, { withFileTypes: true });
+		const stat = lstatSync(root);
+		if (!stat.isDirectory()) throw new CheckpointStoreError(`Unsafe v6 migration claims root: ${root}.`);
 	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-		throw new CheckpointStoreError(`Could not scan v6 migration staging in ${parent}.`);
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		mkdirSync(root, { recursive: true, mode: 0o700 });
+		const stat = lstatSync(root);
+		if (!stat.isDirectory()) throw new CheckpointStoreError(`Unsafe v6 migration claims root: ${root}.`);
 	}
-	const stale = entries.filter((entry) => migrationStagingName(entry.name, id));
-	for (const entry of stale)
-		if (entry.isSymbolicLink() || !entry.isDirectory())
-			throw new CheckpointStoreError(`Found an unsafe v6 migration staging entry ${entry.name}.`);
-	for (const entry of stale) validateMigrationStagingTree(join(parent, entry.name));
-	for (const entry of stale) rmSync(join(parent, entry.name), { recursive: true, force: false });
-	if (stale.length > 0) fsyncDirectory(parent, "manifest-parent-fsync", undefined);
+	return root;
+}
+
+function fileIdentity(path: string, label: string): FileIdentity {
+	const stat = lstatSync(path);
+	if (stat.isSymbolicLink() || (!stat.isDirectory() && stat.nlink !== 1))
+		throw new CheckpointStoreError(`Unsafe v6 migration ${label}: ${path}.`);
+	return { dev: stat.dev, ino: stat.ino };
+}
+
+function sameFileIdentity(left: FileIdentity, right: FileIdentity): boolean {
+	return left.dev === right.dev && left.ino === right.ino;
+}
+
+function migrationOwnerPath(path: string): string {
+	return join(path, "owner.json");
+}
+
+function readMigrationOwner(path: string, id: string): MigrationClaim {
+	const directoryStat = lstatSync(path);
+	if (directoryStat.isSymbolicLink() || !directoryStat.isDirectory())
+		throw new CheckpointStoreError(`Unsafe v6 migration claim: ${path}.`);
+	const entries = readdirSync(path, { withFileTypes: true });
+	if (entries.length !== 1 || entries[0]?.name !== "owner.json" || entries[0].isSymbolicLink() || !entries[0].isFile())
+		throw new CheckpointStoreError(`Malformed v6 migration claim: ${path}.`);
+	const ownerPath = migrationOwnerPath(path);
+	const ownerFile = fileIdentity(ownerPath, "claim owner");
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(readFileSync(ownerPath, "utf8"));
+	} catch {
+		throw new CheckpointStoreError(`Malformed v6 migration claim: ${path}.`);
+	}
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+		throw new CheckpointStoreError(`Malformed v6 migration claim: ${path}.`);
+	const record = parsed as Record<string, unknown>;
+	if (
+		Object.keys(record).sort().join(",") !== "id,nonce,pid,startedAt" ||
+		record.id !== id ||
+		!V6_MIGRATION_NONCE_PATTERN.test(String(record.nonce)) ||
+		!Number.isInteger(record.pid) ||
+		(record.pid as number) <= 1 ||
+		typeof record.startedAt !== "string" ||
+		(record.startedAt as string).length === 0
+	)
+		throw new CheckpointStoreError(`Malformed v6 migration claim: ${path}.`);
+	return {
+		path,
+		ownerPath,
+		owner: {
+			id,
+			nonce: record.nonce as string,
+			pid: record.pid as number,
+			startedAt: record.startedAt as string,
+		},
+		directory: { dev: directoryStat.dev, ino: directoryStat.ino },
+		ownerFile,
+	};
+}
+
+function migrationOwnerState(owner: MigrationOwner): "live" | "dead" | "ambiguous" {
+	let live = false;
+	try {
+		process.kill(owner.pid, 0);
+		live = true;
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		if (code !== "ESRCH") return "ambiguous";
+	}
+	const startedAt = processStartTime(owner.pid) ?? (owner.pid === process.pid ? LOCAL_PROCESS_START : undefined);
+	if (live) return startedAt === owner.startedAt ? "live" : "ambiguous";
+	return startedAt === undefined ? "dead" : "ambiguous";
+}
+
+function removeStaleMigrationClaim(claim: MigrationClaim): void {
+	if (migrationOwnerState(claim.owner) !== "dead")
+		throw new CheckpointStoreError(`v6 migration claim became live or ambiguous: ${claim.path}.`);
+	const directory = fileIdentity(claim.path, "claim directory");
+	if (!sameFileIdentity(directory, claim.directory)) return;
+	const ownerFile = fileIdentity(claim.ownerPath, "claim owner");
+	if (!sameFileIdentity(ownerFile, claim.ownerFile)) return;
+	unlinkSync(claim.ownerPath);
+	const after = fileIdentity(claim.path, "claim directory");
+	if (!sameFileIdentity(after, claim.directory)) return;
+	if (readdirSync(claim.path).length !== 0) return;
+	rmdirSync(claim.path);
+}
+
+function assertMigrationClaimIdentity(claim: MigrationClaim): void {
+	const current = readMigrationOwner(claim.path, claim.owner.id);
+	if (
+		!sameFileIdentity(current.directory, claim.directory) ||
+		!sameFileIdentity(current.ownerFile, claim.ownerFile) ||
+		current.owner.nonce !== claim.owner.nonce ||
+		current.owner.pid !== claim.owner.pid
+	)
+		throw new CheckpointStoreError(`v6 migration claim changed during ownership check: ${claim.path}.`);
+}
+
+function releaseMigrationClaim(claim: MigrationClaim): void {
+	try {
+		const current = readMigrationOwner(claim.path, claim.owner.id);
+		if (!sameFileIdentity(current.directory, claim.directory) || !sameFileIdentity(current.ownerFile, claim.ownerFile)) return;
+		if (current.owner.nonce !== claim.owner.nonce || current.owner.pid !== claim.owner.pid) return;
+		unlinkSync(claim.ownerPath);
+		const after = fileIdentity(claim.path, "claim directory");
+		if (!sameFileIdentity(after, claim.directory) || readdirSync(claim.path).length !== 0) return;
+		rmdirSync(claim.path);
+	} catch {
+		// A replacement or malformed claim is never ours to remove.
+	}
+}
+
+function acquireMigrationClaim(id: string, agentDir: string, parent: string): MigrationClaim | undefined {
+	const root = migrationClaimsRoot(agentDir);
+	const path = join(root, id);
+	try {
+		mkdirSync(path, { recursive: false, mode: 0o700 });
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+		const existing = readMigrationOwner(path, id);
+		const state = migrationOwnerState(existing.owner);
+		if (state === "live" || state === "ambiguous") return undefined;
+		cleanupMigrationStaging(parent, id, existing, true);
+		removeStaleMigrationClaim(existing);
+		return acquireMigrationClaim(id, agentDir, parent);
+	}
+	const startedAt = processStartTime(process.pid) ?? LOCAL_PROCESS_START;
+	if (!startedAt) {
+		try {
+			rmdirSync(path);
+		} catch {
+			// A malformed incomplete claim is safer left for an operator than guessed away.
+		}
+		throw new CheckpointStoreError("Could not verify the v6 migration owner process identity.");
+	}
+	const owner: MigrationOwner = { id, nonce: randomBytes(12).toString("hex"), pid: process.pid, startedAt };
+	const ownerPath = migrationOwnerPath(path);
+	try {
+		writeFileSync(ownerPath, JSON.stringify(owner), { encoding: "utf8", mode: 0o600, flag: "wx" });
+		return {
+			path,
+			ownerPath,
+			owner,
+			directory: fileIdentity(path, "claim directory"),
+			ownerFile: fileIdentity(ownerPath, "claim owner"),
+		};
+	} catch (error) {
+		try {
+			if (readdirSync(path).length === 0) rmdirSync(path);
+		} catch {
+			// Preserve ambiguous claim residue; the next attempt must fail closed.
+		}
+		throw error;
+	}
+}
+
+function isDirectoryWithoutSymlink(path: string): boolean {
+	try {
+		const stat = lstatSync(path);
+		return stat.isDirectory() && stat.nlink >= 2;
+	} catch {
+		return false;
+	}
+}
+
+interface StagingIdentity {
+	path: string;
+	identity: FileIdentity;
+}
+
+function parseMigrationStaging(name: string, id: string): { pid: number; nonce: string } | undefined {
+	const prefix = `.${id}.`;
+	const suffix = ".staging";
+	if (!name.startsWith(prefix) || !name.endsWith(suffix)) return undefined;
+	const middle = name.slice(prefix.length, -suffix.length).replace(/\.fallback$/, "");
+	const match = /^(\d+)\.([a-f0-9]{24})$/.exec(middle);
+	return match ? { pid: Number(match[1]), nonce: match[2] } : undefined;
 }
 
 function validateMigrationStagingTree(path: string): void {
@@ -1930,12 +2136,7 @@ function validateMigrationStagingTree(path: string): void {
 	for (const entry of entries) {
 		const entryPath = join(path, entry.name);
 		if (entry.isSymbolicLink()) throw new CheckpointStoreError(`Found a symlink in v6 migration staging ${path}.`);
-		let stat: ReturnType<typeof lstatSync>;
-		try {
-			stat = lstatSync(entryPath);
-		} catch {
-			throw new CheckpointStoreError(`Could not inspect v6 migration staging ${entryPath}.`);
-		}
+		const stat = lstatSync(entryPath);
 		if (stat.isDirectory()) {
 			validateMigrationStagingTree(entryPath);
 			continue;
@@ -1945,18 +2146,71 @@ function validateMigrationStagingTree(path: string): void {
 	}
 }
 
-function removeMigrationStaging(path: string | undefined, parent: string): void {
+function cleanupMigrationStaging(parent: string, id: string, claim: MigrationClaim, ownerMustBeDead = false): void {
+	assertMigrationClaimIdentity(claim);
+	if (ownerMustBeDead && migrationOwnerState(claim.owner) !== "dead")
+		throw new CheckpointStoreError(`v6 migration claim became live or ambiguous: ${claim.path}.`);
+	try {
+		const parentStat = lstatSync(parent);
+		if (parentStat.isSymbolicLink() || !parentStat.isDirectory())
+			throw new CheckpointStoreError(`Unsafe v6 migration staging parent: ${parent}.`);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+		throw error;
+	}
+	let entries: Dirent[];
+	try {
+		entries = readdirSync(parent, { withFileTypes: true });
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+		throw new CheckpointStoreError(`Could not scan v6 migration staging in ${parent}.`);
+	}
+	const stale = entries.filter((entry) => migrationStagingName(entry.name, id));
+	const owned: StagingIdentity[] = [];
+	for (const entry of stale) {
+		if (entry.isSymbolicLink() || !entry.isDirectory())
+			throw new CheckpointStoreError(`Found an unsafe v6 migration staging entry ${entry.name}.`);
+		const parsed = parseMigrationStaging(entry.name, id);
+		if (!parsed || parsed.pid !== claim.owner.pid || parsed.nonce !== claim.owner.nonce)
+			throw new CheckpointStoreError(`Found an unowned v6 migration staging entry ${entry.name}.`);
+		const path = join(parent, entry.name);
+		validateMigrationStagingTree(path);
+		owned.push({ path, identity: fileIdentity(path, "staging directory") });
+	}
+	for (const staging of owned) {
+		assertMigrationClaimIdentity(claim);
+		if (ownerMustBeDead && migrationOwnerState(claim.owner) !== "dead")
+			throw new CheckpointStoreError(`v6 migration claim became live or ambiguous: ${claim.path}.`);
+		const current = fileIdentity(staging.path, "staging directory");
+		if (!sameFileIdentity(current, staging.identity))
+			throw new CheckpointStoreError(`v6 migration staging changed before cleanup: ${staging.path}.`);
+		rmSync(staging.path, { recursive: true, force: false });
+	}
+	if (owned.length > 0) fsyncDirectory(parent, "manifest-parent-fsync", undefined);
+}
+
+function removeMigrationStaging(path: string | undefined, parent: string, id: string, claim: MigrationClaim): void {
 	if (!path) return;
+	if (dirname(path) !== parent || !parseMigrationStaging(path.slice(parent.length + 1), id))
+		throw new CheckpointStoreError(`Unsafe v6 migration staging path: ${path}.`);
+	const identity = fileIdentity(path, "staging directory");
+	const parsed = parseMigrationStaging(path.slice(parent.length + 1), id);
+	if (!parsed || parsed.pid !== claim.owner.pid || parsed.nonce !== claim.owner.nonce)
+		throw new CheckpointStoreError(`Unowned v6 migration staging path: ${path}.`);
+	validateMigrationStagingTree(path);
+	const current = fileIdentity(path, "staging directory");
+	if (!sameFileIdentity(identity, current))
+		throw new CheckpointStoreError(`v6 migration staging changed before cleanup: ${path}.`);
 	rmSync(path, { recursive: true, force: false });
 	fsyncDirectory(parent, "manifest-parent-fsync", undefined);
 }
 
-function removeMigrationStagingBestEffort(path: string | undefined, parent: string): void {
+function removeMigrationStagingBestEffort(path: string | undefined, parent: string, id: string, claim: MigrationClaim): void {
 	try {
-		removeMigrationStaging(path, parent);
+		removeMigrationStaging(path, parent, id, claim);
 	} catch {
-		// The original migration error is authoritative. A recognized staging
-		// residue is handled deterministically by the next exclusive migration.
+		// The original migration error is authoritative. A failed ownership check
+		// leaves residue for a later retry rather than risking another owner's tree.
 	}
 }
 
@@ -1985,7 +2239,9 @@ export function readAuthoritativeCheckpoint(id: string, agentDir: string): Sessi
 /** Open legacy checkpoints by publishing a v6 copy, leaving the original JSON untouched. */
 export function openCheckpointForHydration(id: string, agentDir: string): HydratableCheckpoint {
 	const storePath = v6CheckpointStorePath(id, agentDir);
-	if (!manifestExists(storePath)) migrateV5ToV6(id, agentDir, storePath);
+	// Migration itself owns the claim before inspecting the destination. Calling
+	// it for an already-published store keeps the same ordering for every resume.
+	migrateV5ToV6(id, agentDir, storePath);
 	const checkpoint = readV6CheckpointMetadata(storePath).checkpoint;
 	if (checkpoint.liveLease && isSessionLeaseAlive(checkpoint.liveLease, agentDir))
 		throw new CheckpointStoreError(
