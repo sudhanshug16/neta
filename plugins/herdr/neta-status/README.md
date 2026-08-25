@@ -1,13 +1,15 @@
-# Neta Status Plugin for Herdr
+# Neta Agents Plugin for Herdr
 
-A Herdr plugin that monitors live Neta sessions and displays their status in a persistent terminal pane.
+A personal Herdr 0.8.2 plugin that reports live Neta leaders and workers in
+Herdr's Agents sidebar. The terminal monitor remains available as optional
+drill-down.
 
 ## Features
 
-- **Live session monitoring**: Displays status of all active Neta sessions
-- **Persistent pane**: Tab-based pane that can be kept open during development
-- **Real-time updates**: Refreshes status ~1 second intervals
-- **Socket-based communication**: Connects directly to session control planes using Unix sockets
+- **Worker rows**: Creates one plugin-owned, pane-backed Agent row per live Neta worker
+- **Leader enrichment**: Adds Neta metadata only to an exactly matched native leader pane
+- **Lifecycle mapping**: Reports working, queued/idle, blocked, and unknown states
+- **Optional monitor**: Keeps the existing formatted terminal status view as drill-down
 
 ## Installation
 
@@ -18,9 +20,26 @@ From a checkout or installed package, link it with:
 herdr plugin link <neta-repo-or-installed-package>/plugins/herdr/neta-status
 ```
 
-## Usage
+## Agents sidebar
 
-### Opening the monitor pane
+Herdr runs a one-shot startup hook. The hook starts one lock-protected reporter,
+which polls the owner-only Neta live registry and requests structured state over
+each session's authenticated Unix socket. Starting/running/waiting workers show
+as working, queued workers as idle with queued metadata, and blocked workers as
+blocked with their pending question. Terminal workers are released, have their
+plugin metadata cleared, and then have only their plugin-owned proxy pane closed.
+
+The reporter retains an existing worker row as unknown across a transient socket
+failure while the registry still proves the exact manager PID and process start
+identity. It removes the row only when that registry disappears or the exact
+process identity no longer matches.
+
+Leader panes are never claimed. The plugin adds display-only Neta metadata when
+canonical cwd, manager PID membership, process start identity, and the native
+agent label all match exactly. If that evidence is unavailable or ambiguous,
+the leader remains unchanged rather than being guessed.
+
+## Optional monitor
 
 Use the `open-monitor` action:
 
@@ -56,27 +75,30 @@ Press Ctrl+C to exit. Last update: 14:23:45
 
 - `NETA_DIR`: Override the default Neta session directory (default: `~/.neta`)
 
-## Limitations
+## Verified Herdr 0.8.2 constraints
 
-### Herdr plugin v1 constraints
-
-- **Authoritative monitoring**: The monitor pane works for normal and muxed Neta sessions
-- **Per-worker details**: Native per-worker Agent sidebar rows are not available in Herdr plugin v1
-  - Use `neta inspect <worker-id>` in a terminal for detailed worker logs and status
-  - Full worker state (model, task, timing) requires direct Neta control plane access
+- `agent.view.set` cannot create virtual Agent rows; sidebar rows are pane-backed.
+  Worker rows therefore use inert plugin-owned terminal panes.
+- Native leader integrations retain lifecycle and resumable-session authority.
+  Neta leader identity is carried as guarded display metadata/tokens, not a
+  competing `report-agent` or `report-agent-session` source.
+- Startup hooks are one-shot and unsupervised. The hook detaches the reporter;
+  an owner-only lock prevents duplicates, and the reporter exits when Herdr's
+  pane API socket disappears.
 
 ### Runtime
 
-- **Socket availability**: Sessions must have accessible Unix sockets; adjust `ulimit -n` if needed
+- **Socket availability**: Sessions must have accessible authenticated Unix sockets
 - **Token security**: Session tokens are never printed to output
-- **Manual action**: Use `open-monitor` when you want to open the monitor; it does not auto-open on Herdr startup
+- **Leader ambiguity**: A leader row stays native and unenriched when the exact
+  manager process cannot be proven inside one pane
 
 ## Testing
 
 Run the test suite:
 
 ```bash
-python3 tests/test_monitor.py
+python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
 For single-run validation against the real current session:
@@ -87,8 +109,10 @@ python3 scripts/monitor.py --once
 
 ## Implementation notes
 
-- Monitor uses Python 3 stdlib only (no external dependencies)
-- Connects to Neta session sockets using the leader channel protocol
+- Reporter and monitor use Python 3 stdlib only (no external dependencies)
+- Reporter uses the structured authenticated `actor-snapshot` channel request;
+  existing human-formatted `workers` and `status` output is unchanged
 - Respects NETA_DIR environment variable and default ~/.neta location
-- Handles socket errors, malformed JSON, and missing registry files gracefully
+- Persists only plugin pane ownership and per-source sequence counters under
+  `HERDR_PLUGIN_STATE_DIR`, with owner-only file permissions
 - Does not persist checkpoint data; relies on active session registry

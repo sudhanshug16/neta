@@ -109,6 +109,15 @@ describe("settled channel surface", () => {
 		}
 	});
 
+	it("dispatches actor snapshots only through the machine channel", async () => {
+		expect(LEADER_REQUEST_TYPES.has("actor-snapshot")).toBe(true);
+		expect(LEADER_COMMANDS.has("actor-snapshot")).toBe(false);
+		expect(await sendChannelRequest(address, { type: "actor-snapshot", token: "leader" })).toEqual({
+			ok: true,
+			text: "actor-snapshot",
+		});
+	});
+
 	it("worker CLI sends neta_blocked", async () => {
 		env.set(NETA_SOCKET_ENV, address);
 		env.set(NETA_WORKER_ENV, "ro1");

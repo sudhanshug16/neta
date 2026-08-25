@@ -18,7 +18,7 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { AcpWorkerTransport } from "../acp/transport.ts";
 import { workerResumeCommand } from "../attach.ts";
-import type { ChannelResponse, LeaderChannelRequest } from "../channel/protocol.ts";
+import type { ChannelResponse, LeaderChannelRequest, NetaActorSnapshot } from "../channel/protocol.ts";
 import { NETA_SCRATCH_ENV, NETA_SOCKET_ENV, NETA_WORKER_ENV, NETA_WORKER_TOKEN_ENV } from "../channel/protocol.ts";
 import type { ChannelHandler } from "../channel/server.ts";
 import {
@@ -336,6 +336,15 @@ export interface WorkerManagerOptions {
 	channelAddress: string;
 	/** Authorizes socket-side worker management. Generated when the caller has no token to share. */
 	leaderToken?: string;
+	/** Exact live manager identity echoed by the authenticated actor snapshot. */
+	runtimeIdentity?: {
+		managerId: string;
+		logicalSessionId: string;
+		managerPid: number;
+		processStartedAt?: string;
+		startedAt: number;
+		leaderBackend: string;
+	};
 	onEvent: (event: WorkerEvent) => void;
 	/**
 	 * Runs before every spawn: opens the worker channel and returns the extra
@@ -2919,6 +2928,8 @@ export class WorkerManager implements ChannelHandler {
 				}
 				case "status":
 					return { ok: true, text: this.status() };
+				case "actor-snapshot":
+					return { ok: true, data: this.actorSnapshot() };
 				case "tail": {
 					const page = this.tailLog(request.workerId, request.since);
 					return {
@@ -2973,6 +2984,53 @@ export class WorkerManager implements ChannelHandler {
 		} catch (error) {
 			return { ok: false, error: error instanceof Error ? error.message : String(error) };
 		}
+	}
+
+	/** Secret-free machine view for authenticated local integrations. */
+	actorSnapshot(): NetaActorSnapshot {
+		const runtime = this.options.runtimeIdentity;
+		const sessionId = runtime?.managerId ?? this.logicalSessionId ?? `manager-${process.pid}`;
+		const logicalId = runtime?.logicalSessionId ?? this.logicalSessionId ?? sessionId;
+		const leaderBackend = runtime?.leaderBackend ?? this.options.checkpoint?.leaderBackend ?? "unknown";
+		return {
+			version: 1,
+			session: {
+				id: sessionId,
+				logicalId,
+				cwd: this.cwd,
+				managerPid: runtime?.managerPid ?? process.pid,
+				processStartedAt: runtime?.processStartedAt,
+				startedAt: runtime?.startedAt ?? this.checkpointCreatedAt,
+			},
+			leader: {
+				id: `${sessionId}:leader`,
+				backend: leaderBackend,
+				state: "running",
+				startedAt: runtime?.startedAt ?? this.checkpointCreatedAt,
+				vendorSessionId: this.options.checkpoint?.leaderVendorConversationId,
+			},
+			workers: [...this.workers.values()].map((record) => {
+				const summary = this.summarize(record);
+				return {
+					id: summary.id,
+					state: summary.state,
+					name: summary.name,
+					role: summary.role,
+					tier: summary.tier,
+					backend: summary.backend,
+					writer: summary.writer,
+					task: summary.task,
+					cwd: record.cwd,
+					startedAt: summary.startedAt,
+					endedAt: summary.endedAt,
+					activeStartedAt: summary.activeStartedAt,
+					queuedStartedAt: summary.queuedStartedAt,
+					pendingQuestion: summary.pendingQuestion,
+					lastProgress: summary.lastProgress,
+					vendorSessionId: summary.vendorSessionId,
+				};
+			}),
+		};
 	}
 
 	// =========================================================================

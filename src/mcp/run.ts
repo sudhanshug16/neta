@@ -202,6 +202,14 @@ export async function runControlPlane(options: ControlPlaneOptions = {}): Promis
 		sessionTiers,
 		channelAddress: address,
 		leaderToken: token,
+		runtimeIdentity: {
+			managerId: sessionId,
+			logicalSessionId: checkpointId,
+			managerPid: sessionRecord.pid,
+			processStartedAt: sessionRecord.processStartedAt,
+			startedAt: sessionRecord.startedAt,
+			leaderBackend: sessionRecord.leader,
+		},
 		onEvent: (event) => note(describeEvent(event)),
 		execOutputDir: join(sessionTempDir, "exec"),
 		prepareEnv: async () => {

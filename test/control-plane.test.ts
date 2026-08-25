@@ -14,6 +14,8 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { sendChannelRequest } from "../src/channel/client.ts";
+import type { NetaActorSnapshot } from "../src/channel/protocol.ts";
 import { listSessions, tryAcquireSessionLock } from "../src/session.ts";
 import { waitFor } from "./helpers.ts";
 
@@ -210,6 +212,29 @@ describe("neta mcp", () => {
 		expect(stdout).toContain("Neta status");
 		expect(stdout).toContain("Writer slot:\n  (none)");
 		expect(stdout).toContain("Open notes:\n  (none)");
+	});
+
+	it("returns an authenticated structured actor snapshot through the real socket", async () => {
+		const session = listSessions(agentDir)[0];
+		const response = await sendChannelRequest(session.socket, { type: "actor-snapshot", token: session.token });
+		expect(response.ok).toBe(true);
+		const snapshot = response.ok ? (response.data as NetaActorSnapshot) : undefined;
+		expect(snapshot).toMatchObject({
+			version: 1,
+			session: {
+				id: session.id,
+				logicalId: session.checkpointId,
+				cwd: session.cwd,
+				managerPid: session.pid,
+				processStartedAt: session.processStartedAt,
+			},
+			leader: { id: `${session.id}:leader`, backend: session.leader, state: "running" },
+			workers: [],
+		});
+		expect(await sendChannelRequest(session.socket, { type: "actor-snapshot", token: "guessed" })).toEqual({
+			ok: false,
+			error: "Invalid leader token. Worker processes cannot use leader commands.",
+		});
 	});
 
 	it("refuses a worker command from someone without the session token", async () => {

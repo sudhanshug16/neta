@@ -293,8 +293,9 @@ checkpoint claim stop two resumes from building two managers over one session.
 Two doors reach one manager, but they do not carry the same operations. The
 MCP door has ten leader tools. The socket door carries the six
 leader commands a person or token-holding process needs from a terminal —
-`workers`, `status`, `inspect`, `wait`, `send`, `kill` — plus
-the worker commands and the view commands (`watch`, `attach`, `sessions`).
+`workers`, `status`, `inspect`, `wait`, `send`, `kill` — plus the authenticated,
+machine-only read-only `actor-snapshot` request for local integrations, the
+worker commands, and the view commands (`watch`, `attach`, `sessions`).
 Delegation, unrestricted command execution, and notes are MCP-only surfaces of the leader's judgment loop.
 
 For a delegation batch, Neta validates every request before seeding a room or

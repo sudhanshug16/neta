@@ -2034,6 +2034,42 @@ describe("WorkerManager", () => {
 			expect(listed.ok && listed.text).toContain("last: reading auth.ts");
 		});
 
+		it("returns a structured authenticated actor snapshot without changing text views", async () => {
+			const summary = await manager.spawn({
+				role: "worker",
+				tier: "expert",
+				writer: true,
+				name: "Herdr bridge",
+				task: "publish actor state",
+			});
+			manager.progress(summary.id, "reconciling panes");
+
+			const response = await manager.leader({ type: "actor-snapshot", token: manager.leaderToken }, signal);
+			expect(response).toMatchObject({
+				ok: true,
+				data: {
+					version: 1,
+					session: { cwd: process.cwd(), managerPid: process.pid },
+					leader: { state: "running" },
+					workers: [
+						{
+							id: summary.id,
+							state: "running",
+							name: "Herdr bridge",
+							role: "worker",
+							tier: "expert",
+							writer: true,
+							task: "publish actor state",
+							cwd: process.cwd(),
+							lastProgress: { text: "reconciling panes" },
+						},
+					],
+				},
+			});
+			const text = await manager.leader({ type: "workers", token: manager.leaderToken }, signal);
+			expect(text.ok && text.text).toContain("reconciling panes");
+		});
+
 		it("waits for the named workers and returns their results", async () => {
 			const summary = await manager.spawn({ role: "scout", tier: "expert", task: "look" });
 			const waiting = manager.leader(

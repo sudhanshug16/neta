@@ -54,9 +54,14 @@ class TestHerdrManifest(unittest.TestCase):
         with manifest_path.open("rb") as manifest_file:
             manifest = tomllib.load(manifest_file)
 
-        self.assertNotIn("startup", manifest)
+        startup = manifest["startup"][0]["command"]
+        self.assertEqual(startup[:2], ["bash", "-c"])
+        self.assertIn('"$HERDR_PLUGIN_ROOT/scripts/reporter.py" --startup', startup[2])
+        worker = next(pane for pane in manifest["panes"] if pane["id"] == "worker")
+        self.assertIn('"$HERDR_PLUGIN_ROOT/scripts/reporter.py" --worker-pane', worker["command"][2])
+        monitor = next(pane for pane in manifest["panes"] if pane["id"] == "monitor")
         commands = [
-            manifest["panes"][0]["command"],
+            monitor["command"],
             manifest["actions"][0]["command"],
         ]
         expected_startup = [False, True]

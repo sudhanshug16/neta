@@ -12,6 +12,7 @@
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Tier, WorkerState } from "../types.ts";
 
 /** Set on every worker process so the CLI knows where to reach its leader. */
 export const NETA_SOCKET_ENV = "NETA_SOCKET";
@@ -60,6 +61,8 @@ export type WorkerChannelRequest =
 export type LeaderChannelRequest =
 	| { type: "workers"; token: string }
 	| { type: "status"; token: string }
+	/** Machine-readable, read-only live actor state for authenticated integrations. */
+	| { type: "actor-snapshot"; token: string }
 	/**
 	 * Read a worker's log without consuming it. `log` moves the leader's cursor;
 	 * this is for extra readers — the pane watcher, a person in another terminal.
@@ -85,6 +88,7 @@ export type ChannelRequest = WorkerChannelRequest | LeaderChannelRequest;
 export const LEADER_REQUEST_TYPES = new Set([
 	"workers",
 	"status",
+	"actor-snapshot",
 	"tail",
 	"room-tail",
 	"inspect",
@@ -96,6 +100,43 @@ export const LEADER_REQUEST_TYPES = new Set([
 
 /** `data` carries a structured payload for callers that parse rather than print. */
 export type ChannelResponse = { ok: true; text?: string; data?: unknown } | { ok: false; error: string };
+
+export interface NetaActorSnapshot {
+	version: 1;
+	session: {
+		id: string;
+		logicalId: string;
+		cwd: string;
+		managerPid: number;
+		processStartedAt?: string;
+		startedAt: number;
+	};
+	leader: {
+		id: string;
+		backend: string;
+		state: "running";
+		startedAt: number;
+		vendorSessionId?: string;
+	};
+	workers: Array<{
+		id: string;
+		state: WorkerState;
+		name: string;
+		role: string;
+		tier: Tier;
+		backend: string;
+		writer: boolean;
+		task: string;
+		cwd: string;
+		startedAt: number;
+		endedAt?: number;
+		activeStartedAt?: number;
+		queuedStartedAt?: number;
+		pendingQuestion?: string;
+		lastProgress?: { text: string; at: number };
+		vendorSessionId?: string;
+	}>;
+}
 
 /**
  * Unix domain socket path, or a named pipe on Windows where AF_UNIX paths are

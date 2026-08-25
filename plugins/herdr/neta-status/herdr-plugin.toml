@@ -2,8 +2,17 @@ id = "personal.neta-status"
 name = "Neta Status"
 version = "0.1.0"
 min_herdr_version = "0.8.2"
-description = "Monitor live Neta sessions with persistent pane display"
+description = "Report live Neta leaders and workers in Herdr's Agents sidebar"
 platforms = ["macos"]
+
+[[startup]]
+command = ["bash", "-c", "exec python3 \"$HERDR_PLUGIN_ROOT/scripts/reporter.py\" --startup"]
+
+[[panes]]
+id = "worker"
+title = "Neta Worker"
+placement = "tab"
+command = ["bash", "-c", "exec python3 \"$HERDR_PLUGIN_ROOT/scripts/reporter.py\" --worker-pane"]
 
 [[panes]]
 id = "monitor"
