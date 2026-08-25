@@ -35,6 +35,7 @@ class FakeHerdr:
         self.open_count = 0
         self.closed = []
         self.processes = {}
+        self.fail_commands = []
 
     def panes(self):
         return [dict(pane, tokens=dict(pane.get("tokens", {}))) for pane in self.current_panes]
@@ -62,6 +63,9 @@ class FakeHerdr:
 
     def command(self, args):
         self.commands.append(args)
+        if args[0] in self.fail_commands:
+            self.fail_commands.remove(args[0])
+            return False
         if args[0] == "report-metadata":
             pane = next((pane for pane in self.current_panes if pane["pane_id"] == args[1]), None)
             if pane is not None:
@@ -202,7 +206,7 @@ class TestReconciliation(ReporterHarness):
         self.assertNotIn(identity, self.state.data["panes"])
         self.assertEqual(self.herdr.closed, [pane_id])
         cleanup = [command[0] for command in self.herdr.commands[-2:]]
-        self.assertEqual(cleanup, ["report-metadata", "release-agent"])
+        self.assertEqual(cleanup, ["release-agent", "report-metadata"])
 
     def test_identical_worker_ids_in_two_sessions_get_distinct_composite_rows(self):
         self.add_session("s1", 101, "ro1")
@@ -232,7 +236,63 @@ class TestReconciliation(ReporterHarness):
         self.herdr.current_panes.append(duplicate)
         self.herdr.processes["leader-2"] = [{"pid": record["pid"], "name": "neta"}]
         self.reporter.reconcile_once()
-        self.assertFalse(any(command[0] == "report-metadata" and command[1].startswith("leader") for command in self.herdr.commands))
+        leader_clears = [
+            command for command in self.herdr.commands
+            if command[0] == "report-metadata" and command[1] == "leader"
+        ]
+        self.assertEqual(len(leader_clears), 1)
+        self.assertIn("--clear-title", leader_clears[0])
+
+    def test_leader_registry_disappearance_clears_only_plugin_metadata(self):
+        record, _ = self.add_session()
+        leader = {
+            "pane_id": "leader", "workspace_id": "workspace-1", "cwd": record["cwd"],
+            "foreground_cwd": record["cwd"], "label": "Codex", "agent": "codex",
+            "tokens": {"unrelated": "preserve"},
+        }
+        self.herdr.current_panes.append(leader)
+        self.herdr.processes["leader"] = [{"pid": record["pid"], "name": "neta"}]
+        self.reporter.reconcile_once()
+        self.assertIn("s1", self.state.data["leaders"])
+        (self.sessions / "s1.json").unlink()
+        self.herdr.commands.clear()
+        self.reporter.reconcile_once()
+        clear = next(command for command in self.herdr.commands if command[:2] == ["report-metadata", "leader"])
+        self.assertFalse(any(command[:2] == ["release-agent", "leader"] for command in self.herdr.commands))
+        self.assertIn("--clear-token", clear)
+        self.assertNotIn("unrelated", clear)
+        self.assertEqual(leader["tokens"], {"unrelated": "preserve"})
+        self.assertNotIn("s1", self.state.data["leaders"])
+
+    def test_worker_cleanup_retries_after_release_failure(self):
+        _, worker = self.add_session()
+        self.reporter.reconcile_once()
+        identity = "s1:worker:ro1"
+        pane_id = self.state.data["panes"][identity]["pane_id"]
+        worker["state"] = "done"
+        self.herdr.fail_commands.append("release-agent")
+        self.reporter.reconcile_once()
+        self.assertIn(identity, self.state.data["panes"])
+        self.assertEqual(self.herdr.closed, [])
+        self.assertIn(identity, self.state.data["panes"])
+        self.reporter.reconcile_once()
+        self.assertNotIn(identity, self.state.data["panes"])
+        self.assertEqual(self.herdr.closed, [pane_id])
+
+    def test_initial_reporting_failure_retries_same_plugin_pane(self):
+        self.add_session()
+        self.herdr.fail_commands.append("report-agent-session")
+        self.reporter.reconcile_once()
+        identity = "s1:worker:ro1"
+        pane_id = self.state.data["panes"][identity]["pane_id"]
+        self.assertTrue(self.state.data["panes"][identity]["provisional"])
+        self.reporter.reconcile_once()
+        self.assertEqual(self.herdr.open_count, 1)
+        self.assertEqual(self.state.data["panes"][identity]["pane_id"], pane_id)
+        self.assertNotIn("provisional", self.state.data["panes"][identity])
+        self.assertEqual(
+            self.herdr.current_panes[0]["tokens"][IDENTITY_TOKEN], identity,
+        )
 
     def test_pid_reuse_removes_only_owned_rows(self):
         self.add_session()

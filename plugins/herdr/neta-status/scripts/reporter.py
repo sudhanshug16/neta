@@ -258,11 +258,13 @@ class HerdrClient:
 class StateStore:
     def __init__(self, state_dir: Path):
         self.path = state_dir / "reporter-state.json"
-        self.data = {"panes": {}, "seq": {}}
+        self.data = {"panes": {}, "leaders": {}, "seq": {}}
         try:
             value = json.loads(self.path.read_text())
             if isinstance(value, dict) and isinstance(value.get("panes"), dict) and isinstance(value.get("seq"), dict):
                 self.data = value
+                if not isinstance(self.data.get("leaders"), dict):
+                    self.data["leaders"] = {}
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             pass
 
@@ -310,6 +312,19 @@ class Reporter:
             and pane.get("tokens", {}).get(IDENTITY_TOKEN) == identity
         )
 
+    def _provisionally_owned(self, pane: dict, identity: str) -> bool:
+        entry = self.state.data["panes"].get(identity, {})
+        tokens = pane.get("tokens", {})
+        return (
+            entry.get("provisional") is True
+            and pane.get("pane_id") == entry.get("pane_id")
+            and pane.get("label") == WORKER_PANE_LABEL
+            and canonical_path(pane.get("cwd")) == self.plugin_root
+            and isinstance(tokens, dict)
+            and tokens.get(OWNER_TOKEN) in (None, PLUGIN_ID)
+            and tokens.get(IDENTITY_TOKEN) in (None, identity)
+        )
+
     def _report_worker(self, pane_id: str, identity: str, session_id: str, worker: dict) -> bool:
         source = LIFECYCLE_SOURCE
         agent = worker["backend"]
@@ -354,23 +369,70 @@ class Reporter:
 
     def _cleanup(self, identity: str, pane: dict | None) -> None:
         entry = self.state.data["panes"].get(identity)
-        if not isinstance(entry, dict) or pane is None or not self._owned(pane, identity):
+        if not isinstance(entry, dict) or pane is None:
+            return
+        cleanup = entry.setdefault("cleanup", {})
+        metadata_cleared = cleanup.get("metadata_cleared") is True
+        safe_after_clear = (
+            metadata_cleared
+            and pane.get("pane_id") == entry.get("pane_id")
+            and pane.get("label") == WORKER_PANE_LABEL
+            and canonical_path(pane.get("cwd")) == self.plugin_root
+            and isinstance(pane.get("tokens", {}), dict)
+            and pane["tokens"].get(OWNER_TOKEN) in (None, PLUGIN_ID)
+            and pane["tokens"].get(IDENTITY_TOKEN) in (None, identity)
+        )
+        if not self._owned(pane, identity) and not self._provisionally_owned(pane, identity) and not safe_after_clear:
             return
         pane_id = entry["pane_id"]
         agent = entry.get("agent", "neta")
-        cleared = self.herdr.command([
-            "report-metadata", pane_id, "--source", METADATA_SOURCE, "--agent", agent,
-            "--applies-to-source", LIFECYCLE_SOURCE, "--clear-title", "--clear-display-agent",
-            "--clear-state-labels", "--clear-token", OWNER_TOKEN, "--clear-token", IDENTITY_TOKEN,
-            "--clear-token", SESSION_TOKEN, "--clear-token", "state", "--clear-token", "tier",
-            "--clear-token", "writer", *self._seq_args(pane_id, METADATA_SOURCE),
-        ])
-        released = self.herdr.command([
-            "release-agent", pane_id, "--source", LIFECYCLE_SOURCE, "--agent", agent,
-            *self._seq_args(pane_id, LIFECYCLE_SOURCE),
-        ])
-        if released and cleared and self.herdr.close(pane_id):
+        if cleanup.get("released") is not True:
+            if not self.herdr.command([
+                "release-agent", pane_id, "--source", LIFECYCLE_SOURCE, "--agent", agent,
+                *self._seq_args(pane_id, LIFECYCLE_SOURCE),
+            ]):
+                return
+            cleanup["released"] = True
+            self.state.save()
+        if not metadata_cleared:
+            if not self.herdr.command([
+                "report-metadata", pane_id, "--source", METADATA_SOURCE, "--agent", agent,
+                "--applies-to-source", LIFECYCLE_SOURCE, "--clear-title", "--clear-display-agent",
+                "--clear-state-labels", "--clear-token", OWNER_TOKEN, "--clear-token", IDENTITY_TOKEN,
+                "--clear-token", SESSION_TOKEN, "--clear-token", "state", "--clear-token", "tier",
+                "--clear-token", "writer", *self._seq_args(pane_id, METADATA_SOURCE),
+            ]):
+                return
+            cleanup["metadata_cleared"] = True
+            self.state.save()
+        if self.herdr.close(pane_id):
             del self.state.data["panes"][identity]
+            self.state.save()
+
+    def _clear_leader(self, session_id: str, pane: dict | None) -> None:
+        entry = self.state.data["leaders"].get(session_id)
+        if not isinstance(entry, dict):
+            return
+        if pane is None:
+            del self.state.data["leaders"][session_id]
+            self.state.save()
+            return
+        tokens = pane.get("tokens", {})
+        if (
+            pane.get("pane_id") != entry.get("pane_id")
+            or not isinstance(tokens, dict)
+            or tokens.get(SESSION_TOKEN) != entry.get("session_token")
+            or tokens.get("neta_logical_session_id") != entry.get("logical_session_token")
+        ):
+            return
+        if self.herdr.command([
+            "report-metadata", pane["pane_id"], "--source", METADATA_SOURCE,
+            "--agent", entry["agent"], "--clear-title", "--clear-display-agent",
+            "--clear-state-labels", "--clear-token", SESSION_TOKEN,
+            "--clear-token", "neta_logical_session_id",
+            *self._seq_args(pane["pane_id"], METADATA_SOURCE),
+        ]):
+            del self.state.data["leaders"][session_id]
             self.state.save()
 
     def _leader_pane(self, registry: dict, panes: list[dict]) -> dict | None:
@@ -388,14 +450,22 @@ class Reporter:
     def _report_leader(self, registry: dict, snapshot: dict, pane: dict) -> None:
         pane_id = pane["pane_id"]
         leader = snapshot["leader"]
-        self.herdr.command([
+        logical_session_id = snapshot["session"]["logicalId"]
+        if self.herdr.command([
             "report-metadata", pane_id, "--source", METADATA_SOURCE,
             "--agent", leader["backend"], "--title", "Neta leader",
             "--display-agent", f"Neta leader · {leader['backend']}",
             "--token", f"{SESSION_TOKEN}={registry['id']}",
-            "--token", f"neta_logical_session_id={snapshot['session']['logicalId']}",
+            "--token", f"neta_logical_session_id={logical_session_id}",
             *self._seq_args(pane_id, METADATA_SOURCE),
-        ])
+        ]):
+            self.state.data["leaders"][registry["id"]] = {
+                "pane_id": pane_id,
+                "agent": leader["backend"],
+                "session_token": registry["id"],
+                "logical_session_token": logical_session_id,
+            }
+            self.state.save()
 
     def reconcile_once(self) -> bool:
         panes = self.herdr.panes()
@@ -403,6 +473,12 @@ class Reporter:
             return False
         by_id = {pane.get("pane_id"): pane for pane in panes if isinstance(pane, dict)}
         scan = scan_registry(self.neta_dir, self.identify)
+        for session_id, entry in list(self.state.data["leaders"].items()):
+            pane = by_id.get(entry.get("pane_id")) if isinstance(entry, dict) else None
+            registry = scan.valid.get(session_id)
+            matched = self._leader_pane(registry, panes) if registry is not None else None
+            if matched is None or matched.get("pane_id") != entry.get("pane_id"):
+                self._clear_leader(session_id, pane)
         known_sessions = {entry.get("session_id") for entry in self.state.data["panes"].values() if isinstance(entry, dict)}
         for session_id in known_sessions:
             if not isinstance(session_id, str):
@@ -471,14 +547,14 @@ class Reporter:
                 if worker["state"] in TERMINAL_STATES:
                     self._cleanup(identity, pane)
                     continue
-                if pane is not None and not self._owned(pane, identity):
+                if pane is not None and not self._owned(pane, identity) and not self._provisionally_owned(pane, identity):
                     continue
                 if pane is None:
                     pane_id = self.herdr.open_worker(identity, workspace)
                     if pane_id is None:
                         continue
                     self.state.data["panes"][identity] = {
-                        "pane_id": pane_id, "session_id": session_id, "agent": worker["backend"]
+                        "pane_id": pane_id, "session_id": session_id, "agent": worker["backend"], "provisional": True,
                     }
                     self.state.save()
                     pane = {
@@ -488,7 +564,9 @@ class Reporter:
                     by_id[pane_id] = pane
                 self.state.data["panes"][identity]["agent"] = worker["backend"]
                 self.state.save()
-                self._report_worker(pane["pane_id"], identity, session_id, worker)
+                if self._report_worker(pane["pane_id"], identity, session_id, worker):
+                    self.state.data["panes"][identity].pop("provisional", None)
+                    self.state.save()
         return True
 
 
