@@ -1,39 +1,102 @@
 import { describe, expect, test } from "bun:test";
-import { ulid } from "../src/core/ids.ts";
-import { decodeFrame, encodeFrame, FramingError, isEnvelope, isNotice, isReply } from "../src/node/protocol.ts";
+import { decodeLines, encodeLine, NODE_ERRORS, NodeError, rpcError } from "../src/node/protocol.ts";
 
-describe("protocol framing", () => {
-	test("an envelope round-trips", () => {
-		const id = ulid();
-		const frame = decodeFrame(encodeFrame({ v: 1, id, method: "neta_ping", params: { a: 1 } }));
-		expect(isEnvelope(frame)).toBe(true);
-		expect(frame).toEqual({ v: 1, id, method: "neta_ping", params: { a: 1 } });
+describe("ndjson framing", () => {
+	test("a message round-trips", () => {
+		const message = { jsonrpc: "2.0", id: "1", method: "hello", params: { a: 1 } };
+		const { messages, rest } = decodeLines(encodeLine(message));
+		expect(messages).toEqual([message]);
+		expect(rest).toBe("");
 	});
 
-	test("replies and notices narrow", () => {
-		const id = ulid();
-		const ok = decodeFrame(encodeFrame({ v: 1, id, ok: true, result: [1] }));
-		expect(isReply(ok)).toBe(true);
-		expect(isEnvelope(ok)).toBe(false);
-		const err = decodeFrame(encodeFrame({ v: 1, id, ok: false, error: { code: "NO", message: "no" } }));
-		expect(isReply(err)).toBe(true);
-		const notice = decodeFrame(encodeFrame({ v: 1, method: "changed", params: null }));
-		expect(isNotice(notice)).toBe(true);
-		expect(isReply(notice)).toBe(false);
+	test("a 3-message buffer split at every byte offset yields those 3 messages", () => {
+		const sent = [
+			{ jsonrpc: "2.0", id: 1, method: "snapshot", params: {} },
+			{ jsonrpc: "2.0", id: 2, method: "node.stop", params: {} },
+			{ jsonrpc: "2.0", method: "event", params: { event: { seq: 1 } } },
+		];
+		const buffer = sent.map((message) => encodeLine(message)).join("");
+		for (let split = 0; split < buffer.length; split++) {
+			const first = decodeLines(buffer.slice(0, split));
+			const second = decodeLines(first.rest + buffer.slice(split));
+			expect([...first.messages, ...second.messages]).toEqual(sent);
+			expect(second.rest).toBe("");
+		}
 	});
 
-	test("old versions, missing ids and non-ULID ids throw FramingError", () => {
-		expect(() => decodeFrame('{"v":0,"id":"x","method":"m"}')).toThrow(FramingError);
-		// No id means a notice, which only needs a method.
-		expect(isNotice(decodeFrame('{"v":1,"method":"m"}'))).toBe(true);
-		expect(() => decodeFrame('{"v":1,"id":"not-a-ulid","method":"m"}')).toThrow(FramingError);
-		expect(() => decodeFrame('{"v":1,"id":"not-a-ulid","ok":true,"result":1}')).toThrow(FramingError);
-		expect(() => decodeFrame("{oops")).toThrow(FramingError);
-		expect(() => decodeFrame('{"v":1,"id":"x","ok":false,"error":{"code":1}}')).toThrow(FramingError);
+	test("a partial line is kept in rest", () => {
+		const line = encodeLine({ jsonrpc: "2.0", id: 1, result: {} });
+		const cut = line.length - 3;
+		const { messages, rest } = decodeLines(line.slice(0, cut));
+		expect(messages).toEqual([]);
+		expect(rest).toBe(line.slice(0, cut));
+		const whole = decodeLines(rest + line.slice(cut));
+		expect(whole.messages).toHaveLength(1);
+		expect(whole.rest).toBe("");
 	});
 
-	test("unknown method names pass decode and fail dispatch later", () => {
-		const frame = decodeFrame(encodeFrame({ v: 1, id: ulid(), method: "neta_frobnicator" }));
-		expect(isEnvelope(frame)).toBe(true);
+	test("bad JSON throws PARSE", () => {
+		let thrown: unknown;
+		try {
+			decodeLines('{"jsonrpc": "2.0",\n');
+		} catch (error) {
+			thrown = error;
+		}
+		expect(thrown).toBeInstanceOf(NodeError);
+		expect((thrown as NodeError).symbol).toBe("PARSE");
+		expect((thrown as NodeError).code).toBe(NODE_ERRORS.PARSE);
+	});
+
+	test("PARSE carries the buffer past the bad line for resync", () => {
+		const good = encodeLine({ jsonrpc: "2.0", id: 1, result: {} });
+		let thrown: unknown;
+		try {
+			decodeLines(`{bad\n${good}`);
+		} catch (error) {
+			thrown = error;
+		}
+		const data = (thrown as NodeError).data as { rest: string };
+		expect(data.rest).toBe(good);
+		expect(decodeLines(data.rest).messages).toHaveLength(1);
+	});
+
+	test("an oversize line is rejected", () => {
+		const big = `{"jsonrpc":"2.0","id":1,"method":"m","params":"${"x".repeat(8 * 1024 * 1024)}"}\n`;
+		let thrown: unknown;
+		try {
+			decodeLines(big);
+		} catch (error) {
+			thrown = error;
+		}
+		expect(thrown).toBeInstanceOf(NodeError);
+		expect((thrown as NodeError).symbol).toBe("LINE_TOO_LARGE");
+	});
+});
+
+describe("rpcError", () => {
+	test("a NodeError keeps its code and carries the symbol in data", () => {
+		const line = rpcError("abc", new NodeError("NOT_FOUND", "no such mission"));
+		const reply = JSON.parse(line) as {
+			jsonrpc: string;
+			id: string;
+			error: { code: number; message: string; data: { code: string } };
+		};
+		expect(reply).toEqual({
+			jsonrpc: "2.0",
+			id: "abc",
+			error: { code: -32002, message: "no such mission", data: { code: "NOT_FOUND" } },
+		});
+	});
+
+	test("anything else is INTERNAL with no stack", () => {
+		const line = rpcError(null, new Error("boom"));
+		const reply = JSON.parse(line) as {
+			jsonrpc: string;
+			id: null;
+			error: { code: number; message: string; data: { code: string } };
+		};
+		expect(reply.error.code).toBe(-32603);
+		expect(reply.error.data).toEqual({ code: "INTERNAL" });
+		expect(line.includes("at ")).toBe(false);
 	});
 });
