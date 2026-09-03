@@ -24,6 +24,7 @@ jobs:
       - run: bun run check
       - run: bun test
       - run: bun run build
+      - run: node dist/main.js --version
 
   macos:
     runs-on: macos-15

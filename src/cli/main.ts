@@ -235,6 +235,7 @@ export function parse(argv: string[]): Command | Usage {
 		case "mcp":
 			return parseMcp(rest);
 		case "version":
+		case "--version":
 			if (rest.length > 0) return { usage: "neta version takes no arguments" };
 			return { name: "version", args: [], flags: {} };
 		default:
