@@ -327,6 +327,7 @@ async function startInner(opts: StartOptions): Promise<AcpSession> {
 			const turnId = ulid();
 			const turn: Turn = { id: turnId, sessionId, startedAt: nowIso(), role: "user" };
 			openTurnId = turnId;
+			last = undefined;
 			push({ type: "turn", turn });
 			void (async (): Promise<void> => {
 				const current = proc;
