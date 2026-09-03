@@ -312,7 +312,7 @@ describe("buildSnapshot", () => {
 describe("snapshotHandlers", () => {
 	test("bad params give INVALID_PARAMS", async () => {
 		const ctx = testCtx();
-		const handler = snapshotHandlers["snapshot"];
+		const handler = snapshotHandlers.snapshot;
 		if (handler === undefined) {
 			throw new Error("snapshot handler is missing");
 		}

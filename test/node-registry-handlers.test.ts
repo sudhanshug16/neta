@@ -365,7 +365,8 @@ describe("leader.setMode and node.stop", () => {
 			stopped = true;
 			return Promise.resolve();
 		};
-		const handler = registryHandlers["node.stop"];
+		const method: string = "node.stop";
+		const handler = registryHandlers[method];
 		if (handler === undefined) {
 			throw new Error("node.stop handler is missing");
 		}
