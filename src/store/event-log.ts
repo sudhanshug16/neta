@@ -1,7 +1,16 @@
 import { readdir } from "node:fs/promises";
 import { nowIso } from "../core/time.ts";
 import type { Event, EventKind, IsoTime, WorkspaceId } from "../core/types.ts";
-import { appendLine, createMutex, ensureDir, type Mutex, readNdjson, readText, writeFileAtomic } from "./files.ts";
+import {
+	appendLine,
+	createMutex,
+	ensureDir,
+	type Mutex,
+	readNdjson,
+	readText,
+	repairTornTail,
+	writeFileAtomic,
+} from "./files.ts";
 import { monthKey, paths } from "./paths.ts";
 
 export interface EventQuery {
@@ -70,6 +79,7 @@ export function openEventLog(): EventLog {
 		let next = Number.isInteger(filed) && filed >= 1 ? filed : 1;
 		const months = await presentMonths(workspaceId);
 		if (months.length > 0) {
+			await repairTornTail(p.eventMonth(workspaceId, months[months.length - 1]));
 			const newest = await readNdjson<Event>(p.eventMonth(workspaceId, months[months.length - 1]));
 			for (const event of newest.records) {
 				if (event.seq >= next) {
@@ -99,6 +109,9 @@ export function openEventLog(): EventLog {
 			if (month < fromMonth || month > toMonth) {
 				continue;
 			}
+			// Crash recovery first: a torn tail warns once here and is cut,
+			// so the read below sees clean lines and the next append lands.
+			await repairTornTail(p.eventMonth(workspaceId, month));
 			const read = await readNdjson<Event>(p.eventMonth(workspaceId, month));
 			for (const event of read.records) {
 				if (event.seq <= cursorSeq) {

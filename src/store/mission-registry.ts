@@ -9,6 +9,7 @@ import {
 	readJson,
 	readNdjson,
 	readText,
+	repairTornTail,
 	writeFileAtomic,
 	writeJsonAtomic,
 } from "./files.ts";
@@ -45,6 +46,7 @@ interface WorkspaceState {
 	index: MissionIndex;
 	tailLines: number;
 	mutex: Mutex;
+	loaded: boolean;
 }
 
 export function openMissionRegistry(): MissionRegistry {
@@ -53,7 +55,7 @@ export function openMissionRegistry(): MissionRegistry {
 	function stateFor(workspaceId: WorkspaceId): WorkspaceState {
 		let state = states.get(workspaceId);
 		if (state === undefined) {
-			state = { index: createMissionIndex(), tailLines: 0, mutex: createMutex() };
+			state = { index: createMissionIndex(), tailLines: 0, mutex: createMutex(), loaded: false };
 			states.set(workspaceId, state);
 		}
 		return state;
@@ -61,6 +63,10 @@ export function openMissionRegistry(): MissionRegistry {
 
 	async function loadInner(workspaceId: WorkspaceId, state: WorkspaceState): Promise<void> {
 		const p = paths();
+		// Crash recovery: a torn tail warns once here and is cut, so the next
+		// append lands on a line boundary. Replaying the surviving lines over
+		// the snapshot stays idempotent.
+		await repairTornTail(p.registryLog(workspaceId));
 		const snapshot = await readJson<RegistrySnapshot>(p.registrySnapshot(workspaceId));
 		const index = createMissionIndex();
 		if (snapshot !== undefined) {
@@ -78,7 +84,10 @@ export function openMissionRegistry(): MissionRegistry {
 
 	async function ensureLoaded(workspaceId: WorkspaceId): Promise<WorkspaceState> {
 		const state = stateFor(workspaceId);
-		await state.mutex(() => loadInner(workspaceId, state));
+		if (!state.loaded) {
+			await state.mutex(() => loadInner(workspaceId, state));
+			state.loaded = true;
+		}
 		return state;
 	}
 
@@ -99,13 +108,14 @@ export function openMissionRegistry(): MissionRegistry {
 
 	return {
 		load: async (workspaceId) => {
-			await ensureLoaded(workspaceId);
+			const state = stateFor(workspaceId);
+			await state.mutex(() => loadInner(workspaceId, state));
+			state.loaded = true;
 		},
 
 		allocateNumber: async (workspaceId) => {
-			const state = stateFor(workspaceId);
+			const state = await ensureLoaded(workspaceId);
 			return state.mutex(async () => {
-				await loadInner(workspaceId, state);
 				const p = paths();
 				const raw = await readText(p.counter(workspaceId));
 				const next = raw === undefined ? nextNumber(state.index.maxNumber()) : Number.parseInt(raw, 10);

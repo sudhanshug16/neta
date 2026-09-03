@@ -9,6 +9,7 @@ import {
 	readJson,
 	readNdjson,
 	readNdjsonBackwards,
+	repairTornTail,
 	writeJsonAtomic,
 } from "./files.ts";
 import { paths } from "./paths.ts";
@@ -221,6 +222,7 @@ export function openConversationStore(): ConversationStore {
 		appendTurn: async (turn) =>
 			mutexFor(turn.sessionId)(async () => {
 				await ensureDir(conversationsDir());
+				await repairTornTail(paths().conversation(turn.sessionId));
 				const line: ConversationLine = { t: "turn", turn };
 				await appendLine(paths().conversation(turn.sessionId), line);
 				turnsFor(turn.sessionId).add(turn.id);
@@ -229,6 +231,7 @@ export function openConversationStore(): ConversationStore {
 
 		appendBlock: async (sessionId, block) =>
 			mutexFor(sessionId)(async () => {
+				await repairTornTail(paths().conversation(sessionId));
 				if (!(await hasTurn(sessionId, block.turnId))) {
 					throw new Error(`unknown turn ${block.turnId} in ${sessionId}`);
 				}
@@ -240,6 +243,7 @@ export function openConversationStore(): ConversationStore {
 
 		tail: async ({ sessionId, cursor, limit }) =>
 			mutexFor(sessionId)(async () => {
+				await repairTornTail(paths().conversation(sessionId));
 				const capped = Math.min(Math.max(limit ?? 100, 1), 500);
 				const path = paths().conversation(sessionId);
 				if (cursor !== undefined) {
@@ -282,6 +286,7 @@ export function openConversationStore(): ConversationStore {
 
 		readBefore: async ({ sessionId, cursor, limit }) =>
 			mutexFor(sessionId)(async () => {
+				await repairTornTail(paths().conversation(sessionId));
 				const capped = Math.min(Math.max(limit ?? 100, 1), 500);
 				const path = paths().conversation(sessionId);
 				const found = await lastBlocksBefore(path, capped, cursor);
@@ -294,6 +299,7 @@ export function openConversationStore(): ConversationStore {
 
 		turnRange: async (sessionId, turnId) =>
 			mutexFor(sessionId)(async () => {
+				await repairTornTail(paths().conversation(sessionId));
 				let turn: Turn | undefined;
 				let start = 0;
 				let end = 0;

@@ -81,10 +81,13 @@ export async function readText(path: string): Promise<string | undefined> {
 	}
 }
 
-// Append one JSON line, fsync, return the EOF offset after the write.
+// Append one JSON line, fsync, return the EOF offset after the write. The
+// file is set 0600 explicitly, so files created under a loose umask — or
+// before this rule — still end up private.
 export async function appendLine(path: string, value: unknown): Promise<number> {
 	const handle = await open(path, "a");
 	try {
+		await handle.chmod(0o600);
 		await handle.write(`${JSON.stringify(value)}\n`);
 		await handle.sync();
 		const st = await handle.stat();
@@ -92,6 +95,57 @@ export async function appendLine(path: string, value: unknown): Promise<number> 
 	} finally {
 		await handle.close();
 	}
+}
+
+// Cut `path` back to `size` bytes. Crash recovery only: callers pass an
+// offset a forward read already proved is a line boundary.
+export async function truncateFile(path: string, size: number): Promise<void> {
+	const handle = await open(path, "r+");
+	try {
+		await handle.truncate(size);
+		await handle.sync();
+	} finally {
+		await handle.close();
+	}
+}
+
+// Drop a torn tail (a crash mid-line): scan forward silently to the last good
+// line boundary and cut the file there, with one warning. Returns whether
+// anything was cut. Clean files cost one single-byte read.
+export async function repairTornTail(path: string): Promise<boolean> {
+	const size = await fileSize(path);
+	if (size === 0) {
+		return false;
+	}
+	const probe = await open(path, "r");
+	try {
+		const last = Buffer.alloc(1);
+		await probe.read(last, 0, 1, size - 1);
+		if (last[0] === 0x0a) {
+			return false;
+		}
+	} finally {
+		await probe.close();
+	}
+	const silent = (): void => undefined;
+	let from = 0;
+	let good = 0;
+	let window = 256 * 1024;
+	for (;;) {
+		const read = await readNdjson<unknown>(path, { from, maxBytes: window, onWarn: silent });
+		if (read.records.length > 0) {
+			good = read.bytes;
+			from = read.bytes;
+			window = 256 * 1024;
+		} else if (from + window >= size) {
+			break;
+		} else {
+			window *= 2;
+		}
+	}
+	await truncateFile(path, good);
+	console.warn(`repaired torn tail in ${basename(path)}, kept ${good} of ${size} bytes`);
+	return true;
 }
 
 // Forward read from `opts.from ?? 0`, at most `maxBytes`. A trailing fragment
