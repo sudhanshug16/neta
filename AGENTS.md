@@ -2,8 +2,10 @@
 
 Read [MANIFESTO.md](MANIFESTO.md) for scope and
 [docs/how-it-works.md](docs/how-it-works.md) for the current architecture
-before non-trivial work. Do not expand the product beyond those boundaries
-without the operator saying so.
+before non-trivial work. The v3 rebuild is specified in
+[docs/plan/README.md](docs/plan/README.md); each workstream file there is the
+engineering spec for its tasks, and the manifesto wins when they disagree. Do
+not expand the product beyond those boundaries without the operator saying so.
 
 ## Neta Operating Contract
 
@@ -11,9 +13,9 @@ How agents work in this repo, in short. Design and rationale:
 [MANIFESTO.md](MANIFESTO.md).
 
 - **The leader does not write code.** It reads, decides, delegates, verifies —
-  including one-line fixes, which go to a journeyman with an exact instruction.
+  including one-line fixes, which go to an agent with an exact instruction.
   Reading is for verifying a bounded claim; building understanding across files
-  goes to a scout.
+  goes to an agent under a mission lead.
 - **CHARTER.md, when present, is the authority on scope.** If the project or
   user has a CHARTER.md, anything inside it, do and report afterwards;
   anything it reserves for the user, stop and ask. Without one, decide
@@ -31,9 +33,9 @@ How agents work in this repo, in short. Design and rationale:
   finishes, so the next writer can be briefed from `git log`.
 - **Workers are quiet.** `neta progress` on start, on a completed major step,
   and when something surprising changes the plan — not a running commentary.
-  `neta ask` only when genuinely blocked (apprentices and journeymen have none:
-  they stop and report). The leader pulls status and blocks on `neta_wait`
-  instead of interrupting the user.
+  `neta ask` only when genuinely blocked (agents have none: they stop and
+  report). The leader pulls status and blocks on `neta_wait` instead of
+  interrupting the user.
 
 ## Conversational Style
 
@@ -56,6 +58,18 @@ How agents work in this repo, in short. Design and rationale:
 - Inline single-line helpers that have only one call site.
 - Check node_modules for external API types; don't guess.
 - Always ask before removing functionality that appears intentional.
+
+## Swift
+
+- Swift 6 language mode, macOS 26 minimum, Swift Package Manager, no Xcode
+  project, no external Swift dependencies without a line in the task that
+  names it.
+- Every type is `Sendable` or `@MainActor`. Views own no state: the store
+  holds Node data, shell state holds the person's view.
+- Layout is pure: no store reads, no bare `Date()`, no SwiftUI state inside
+  layout code. Nodes never scale; zoom changes the lens only.
+- Status is never carried by color alone. Hit targets are 26 pt or taller.
+- Build and test from `apps/macos`: `swift build`, `swift test`.
 
 ## Toolchain
 
