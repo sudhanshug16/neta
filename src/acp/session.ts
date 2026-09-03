@@ -45,7 +45,7 @@ export interface AcpSession {
 	cancel(): Promise<void>;
 	listModels(): ModelOption[];
 	setModel(model: string): Promise<void>;
-	setConfigOption(configId: string, value: string): Promise<void>;
+	setConfigOption(configId: string, value: string | boolean): Promise<void>;
 	relaunch(access: Access): Promise<void>;
 	close(): Promise<void>;
 	events(): AsyncIterableIterator<SessionEvent>;
@@ -401,19 +401,19 @@ async function startInner(opts: StartOptions): Promise<AcpSession> {
 			await applyModelPlan(wantedModel);
 		},
 
-		setConfigOption: async (configId: string, value: string): Promise<void> => {
+		setConfigOption: async (configId: string, value: string | boolean): Promise<void> => {
 			if (closed || proc === undefined) {
 				throw new SessionClosedError();
 			}
-			const response = await proc.connection.agent.request("session/set_config_option", {
+			const response = (await proc.connection.agent.request("session/set_config_option", {
 				sessionId: vendorSessionId,
 				configId,
 				value,
-			});
+			})) as { configOptions?: SessionConfigOption[] | null };
 			if (response.configOptions !== undefined && response.configOptions !== null) {
 				configOptions = response.configOptions;
 			}
-			if (configId === modelState.configId) {
+			if (configId === modelState.configId && typeof value === "string") {
 				model = value;
 				modelState = { ...modelState, current: value };
 			}
