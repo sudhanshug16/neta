@@ -11,7 +11,7 @@
 // stateful adaptation, and tests still stub the ports.
 import { execFile } from "node:child_process";
 import { realpath, stat } from "node:fs/promises";
-import { basename } from "node:path";
+import { basename, join } from "node:path";
 import { netaMcpServer } from "../acp/mcp.ts";
 import { loadSettings, providerFor } from "../acp/settings.ts";
 import { ulid } from "../core/ids.ts";
@@ -94,7 +94,7 @@ async function createLeader(ctx: NodeContext, workspaceId: string, machineId: st
 		provider: providerName,
 		model,
 		access: "readOnly",
-		mcpServers: [netaMcpServer({ actorId: ulid(), token: newToken() })],
+		mcpServers: [netaMcpServer({ actorId: ulid(), token: newToken(), socketPath: join(netaDir(), "node.sock") })],
 	});
 	const leader: Leader = {
 		workspaceId,

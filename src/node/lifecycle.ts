@@ -362,7 +362,9 @@ export function adaptAcp(settings: Settings): AdaptedAcp {
 			const token = newToken();
 			const mcpServers = o.mcpServers.some((server) => server.name === NETA_MCP_SERVER_NAME)
 				? o.mcpServers.map((server) =>
-						server.name === NETA_MCP_SERVER_NAME ? netaMcpServer({ actorId: sessionId, token }) : server,
+						server.name === NETA_MCP_SERVER_NAME
+							? netaMcpServer({ actorId: sessionId, token, socketPath: join(netaDir(), "node.sock") })
+							: server,
 					)
 				: o.mcpServers;
 			const session = await startSession({
