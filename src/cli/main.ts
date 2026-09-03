@@ -8,6 +8,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { attach } from "./chat.ts";
 import { CliError, NodeClient } from "./client.ts";
+import { missionCommand, missionsCommand } from "./commands/missions.ts";
 import { nodeCommand, openCommand } from "./commands/node.ts";
 
 export type Command = {
@@ -286,12 +287,31 @@ async function attachCommand(): Promise<number> {
 	return attach(client, process.cwd());
 }
 
+async function withClient(fn: (client: NodeClient) => Promise<number>): Promise<number> {
+	let client: NodeClient;
+	try {
+		client = await NodeClient.connect();
+	} catch (error) {
+		if (error instanceof CliError) {
+			process.stderr.write(`neta: ${error.message}\n`);
+			return error.code;
+		}
+		process.stderr.write(`neta: ${error instanceof Error ? error.message : String(error)}\n`);
+		return 1;
+	}
+	try {
+		return await fn(client);
+	} finally {
+		client.close();
+	}
+}
+
 const handlers: Record<Command["name"], (cmd: Command) => number | Promise<number>> = {
 	attach: attachCommand,
 	node: (cmd) => nodeCommand(cmd.sub ?? "", cmd.flags),
 	open: (cmd) => openCommand(cmd.args[0]),
-	missions: notImplemented,
-	mission: notImplemented,
+	missions: (cmd) => withClient((client) => missionsCommand(client, cmd.flags)),
+	mission: (cmd) => withClient((client) => missionCommand(client, Number(cmd.args[0]), cmd.flags)),
 	events: notImplemented,
 	mode: notImplemented,
 	models: notImplemented,
