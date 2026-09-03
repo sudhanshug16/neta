@@ -218,12 +218,15 @@ public actor SocketNodeClient: NodeClient {
 		return result.events
 	}
 
-	public func conversationTail(sessionId: Ulid, cursor: String?, limit: Int) async throws
-		-> ConversationPage
-	{
+	public func conversationTail(
+		sessionId: Ulid, cursor: String? = nil, limit: Int,
+		direction: String? = nil, turnId: TurnId? = nil
+	) async throws -> ConversationPage {
 		guard connected else { throw NodeClientError.disconnected }
 		var params: [String: Any] = ["sessionId": sessionId, "limit": limit]
 		if let cursor { params["cursor"] = cursor }
+		if let direction { params["direction"] = direction }
+		if let turnId { params["turnId"] = turnId }
 		return try await sendRequest(method: "conversation.tail", params: params)
 	}
 

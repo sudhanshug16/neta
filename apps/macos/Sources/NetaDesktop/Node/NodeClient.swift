@@ -11,7 +11,9 @@ public protocol NodeClient: Sendable {
 	func snapshot() async throws -> Snapshot
 	func missionsList(workspaceId: String, before: Date?, limit: Int) async throws -> [Mission]
 	func eventsList(workspaceId: String, before: Date?, limit: Int) async throws -> [Event]
-	func conversationTail(sessionId: Ulid, cursor: String?, limit: Int) async throws -> ConversationPage
+	func conversationTail(
+		sessionId: Ulid, cursor: String?, limit: Int, direction: String?, turnId: TurnId?
+	) async throws -> ConversationPage
 	func prompt(sessionId: Ulid, text: String) async throws -> Ulid
 	func cancel(sessionId: Ulid) async throws
 	func setModel(sessionId: Ulid, model: String) async throws
@@ -25,7 +27,19 @@ public protocol NodeClient: Sendable {
 /// 04's `conversation.tail` result: one page of a session's turns and the
 /// blocks that belong to those turns. `cursor`/`prevCursor` are opaque
 /// offsets minted by the client; a nil `prevCursor` is the start of history
-/// and a nil `nextCursor` the end.
+/// and a nil `nextCursor` the end. A `turnId` anchors the page on that turn
+/// (the page starting at it, or the page before it with
+/// `direction: "backward"`); `direction: "backward"` pages older history
+/// from `cursor`.
+///
+/// The three-argument tail below keeps earlier callers compiling: it asks
+/// for the newest page, exactly as before.
+public extension NodeClient {
+	func conversationTail(sessionId: Ulid, cursor: String?, limit: Int) async throws -> ConversationPage {
+		try await conversationTail(
+			sessionId: sessionId, cursor: cursor, limit: limit, direction: nil, turnId: nil)
+	}
+}
 public struct ConversationPage: Codable, Sendable {
 	public let turns: [Turn]
 	public let blocks: [Block]

@@ -13,14 +13,26 @@ import Observation
 	/// How many of the newest turns `start()` tails.
 	private static let tailLimit = 50
 
-	private let client: any NodeClient
-	private let sessionId: SessionId
+	let client: any NodeClient
+	let sessionId: SessionId
 	private var streamTask: Task<Void, Never>?
 
-	public private(set) var turns: [ChatTurn] = []
+	public internal(set) var turns: [ChatTurn] = []
 	public var atBottom: Bool = true
-	public private(set) var openTurnId: TurnId?
-	public private(set) var pendingScroll: ScrollRequest?
+	public internal(set) var openTurnId: TurnId?
+	public internal(set) var pendingScroll: ScrollRequest?
+
+	// MARK: - Paging window (11-desktop-chat T11.2; behavior in ChatPaging.swift)
+
+	/// `prevCursor` of the oldest loaded page; nil when no older history is
+	/// known. Backs `hasOlder` together with `droppedOlderTurns`.
+	var olderCursor: String?
+	/// True once the loaded window no longer reaches the live end: a
+	/// mid-history scroll anchor or a trim that dropped newer turns. While
+	/// true, `apply` drops payloads for turns outside the window.
+	var windowHasNewer = false
+	/// True once a trim has dropped turns older than the loaded window.
+	var droppedOlderTurns = false
 
 	/// The newest turn id while the transcript sits at the bottom, else nil.
 	public var autoScrollTarget: TurnId? {
@@ -38,7 +50,7 @@ import Observation
 		if let page = try? await client.conversationTail(
 			sessionId: sessionId, cursor: nil, limit: Self.tailLimit)
 		{
-			replace(with: page)
+			resetToLatest(with: page)
 		}
 		streamTask?.cancel()
 		let stream = client.notifications
@@ -57,6 +69,7 @@ import Observation
 	/// Folds one turn notification in; other sessions are dropped.
 	public func apply(_ payload: TurnChange) {
 		guard payload.sessionId == sessionId else { return }
+		guard !shouldDropTurnPayload(payload) else { return }
 		if let turn = payload.turn {
 			upsert(turn)
 		}
@@ -72,10 +85,10 @@ import Observation
 		return request
 	}
 
-	// MARK: - Private
+	// MARK: - Turn and block merging
 
 	/// Rebuilds `turns` from a tail page.
-	private func replace(with page: ConversationPage) {
+	func replace(with page: ConversationPage) {
 		var merged: [TurnId: ChatTurn] = [:]
 		for turn in page.turns {
 			merged[turn.id] = ChatTurn(
@@ -92,7 +105,7 @@ import Observation
 	}
 
 	/// Inserts a turn or refreshes its close state by id.
-	private func upsert(_ turn: Turn) {
+	func upsert(_ turn: Turn) {
 		if let index = turns.firstIndex(where: { $0.id == turn.id }) {
 			turns[index].endedAt = turn.endedAt
 			turns[index].cancelled = turn.cancelled ?? false
@@ -110,7 +123,7 @@ import Observation
 	}
 
 	/// Files a block into its turn by `seq`; a repeat replaces.
-	private func insert(_ block: Block) {
+	func insert(_ block: Block) {
 		if let index = turns.firstIndex(where: { $0.id == block.turnId }) {
 			turns[index].insert(block)
 		} else {
@@ -122,7 +135,7 @@ import Observation
 		}
 	}
 
-	private static func turnOrder(_ a: ChatTurn, _ b: ChatTurn) -> Bool {
+	static func turnOrder(_ a: ChatTurn, _ b: ChatTurn) -> Bool {
 		if a.startedAt != b.startedAt { return a.startedAt < b.startedAt }
 		return a.id < b.id
 	}

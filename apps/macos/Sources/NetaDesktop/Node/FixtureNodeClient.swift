@@ -169,14 +169,44 @@ public actor FixtureNodeClient: NodeClient {
 				.prefix(max(limit, 0)))
 	}
 
-	public func conversationTail(sessionId: Ulid, cursor: String?, limit: Int) async throws -> ConversationPage {
+	public func conversationTail(
+		sessionId: Ulid, cursor: String? = nil, limit: Int,
+		direction: String? = nil, turnId: TurnId? = nil
+	) async throws -> ConversationPage {
 		var params: [String: Any] = ["sessionId": sessionId, "limit": limit]
 		if let cursor { params["cursor"] = cursor }
+		if let direction { params["direction"] = direction }
+		if let turnId { params["turnId"] = turnId }
 		record("conversationTail", params)
 		let thread = threads[sessionId] ?? ConversationThread()
 		let turns = thread.turns.sorted { $0.startedAt < $1.startedAt }
+		// 04's `turnId` anchor: the page starting at that turn, or with
+		// `direction: "backward"` the page before it. An unknown anchor is
+		// lenient like every other unknown id here: it falls back to the
+		// cursor behavior below and changes nothing.
+		if let turnId, let anchor = turns.firstIndex(where: { $0.id == turnId }) {
+			if direction == "backward" {
+				return page(thread: thread, turns: turns, end: anchor, limit: limit)
+			}
+			let start = anchor
+			let end = min(start + max(limit, 0), turns.count)
+			return page(thread: thread, turns: turns, start: start, end: end)
+		}
 		let end = cursor.flatMap(Int.init).map { min(max($0, 0), turns.count) } ?? turns.count
+		return page(thread: thread, turns: turns, end: end, limit: limit)
+	}
+
+	/// One page over pre-sorted `turns`: the `limit` turns ending at `end`.
+	private func page(thread: ConversationThread, turns: [Turn], end: Int, limit: Int) -> ConversationPage {
+		let end = min(max(end, 0), turns.count)
 		let start = max(0, end - max(limit, 0))
+		return page(thread: thread, turns: turns, start: start, end: end)
+	}
+
+	/// One page over pre-sorted `turns`: `[start, end)`, with the blocks of
+	/// those turns. Cursors are end offsets: a nil `prevCursor` is the start
+	/// of history and a nil `nextCursor` its end.
+	private func page(thread: ConversationThread, turns: [Turn], start: Int, end: Int) -> ConversationPage {
 		let page = Array(turns[start ..< end])
 		let ids = Set(page.map(\.id))
 		let blocks = thread.blocks
