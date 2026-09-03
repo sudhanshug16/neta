@@ -250,6 +250,22 @@ instructions and restrictions. Its instructions carry a short recovered-state
 briefing — prior version, worker outcomes, open notes, and the fact that no
 worker was restarted — and point at `neta_status` for the rest.
 
+### Desktop archive and Worktrunk restoration
+
+Neta Desktop lists live sessions separately from closed durable checkpoints.
+Opening an archived session reads its saved workers and logs without hydrating a
+manager. Resume is explicit and uses the same checkpoint claim, process-death
+barrier, exact vendor conversation id, and inert hydration as `neta resume`.
+
+New sessions also record a token-free workspace binding outside the checkpoint:
+the primary repository worktree, branch, exact worktree root, project-relative
+directory, and starting commit. The checkpoint remains the semantic authority;
+the binding is only a restoration hint. When the saved directory is missing,
+Desktop may call Worktrunk to restore the branch. It proceeds only when
+Worktrunk recreates the exact recorded worktree and project path. Old sessions
+without a binding, detached worktrees, and path mismatches remain visible but
+refuse automatic restoration rather than guessing.
+
 ### Generated vendor state lives at a stable path
 
 Codex records the absolute path of a session's rollout file in its own thread

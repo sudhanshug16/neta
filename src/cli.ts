@@ -24,6 +24,7 @@ import { NETA_WORKER_ENV } from "./channel/protocol.ts";
 import { CheckpointError } from "./checkpoint.ts";
 import { CheckpointStoreError } from "./checkpoint-store.ts";
 import { APP_NAME, getAgentDir, VERSION } from "./config.ts";
+import { runDesktopBridge } from "./desktop/bridge.ts";
 import { detectLeaderBackends } from "./detect.ts";
 import { runGuard } from "./guard.ts";
 import { LaunchError, launchLeader, resumeLeader } from "./launch.ts";
@@ -123,6 +124,9 @@ async function main(argv: string[]): Promise<void> {
 	if (await handleLeaderChannelCommand(args)) return;
 
 	switch (command) {
+		case "desktop-bridge":
+			await runDesktopBridge();
+			return;
 		case "mcp":
 			if (args.includes("--worker")) await runWorkerBridge();
 			else await runControlPlane();

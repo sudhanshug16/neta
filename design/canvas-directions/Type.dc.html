@@ -1,0 +1,723 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #0E0F13; }
+    a { color: #8AB3FF; } a:hover { color: #B9CFFF; }
+
+    /* --- type helpers --- */
+    .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+    .tnum { font-variant-numeric: tabular-nums; }
+    .sec { font-size: 9px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-2); padding: 0 8px; }
+    .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+
+    /* --- state colours: the dot inherits currentColor --- */
+    .state-running { color: var(--mint); }
+    .state-blocked { color: var(--amber); }
+    .state-failed { color: var(--red); }
+    .state-completed { color: var(--green); }
+    .state-ready { color: var(--blue); }
+    .state-merged { color: var(--blue); }
+    .state-idle { color: var(--text-2); }
+
+    /* --- window ground --- */
+    .ground { position: absolute; inset: 0; background-image: radial-gradient(var(--dot) 1.3px, transparent 1.4px); background-size: 28px 28px; }
+    .traffic { position: absolute; left: 20px; top: 18px; display: flex; gap: 8px; z-index: 9; }
+    .light { width: 12px; height: 12px; border-radius: 50%; background: #5C5F66; border: 1px solid rgba(0,0,0,0.40); }
+
+    /* --- canvas layer (direction authors own everything inside) --- */
+    .canvas-layer { z-index: 1; }
+    .edge { fill: none; stroke: rgba(153,133,245,0.35); stroke-width: 1.4; stroke-linecap: round; }
+    .edge-leader { stroke: rgba(153,133,245,0.5); }
+    .edge-blocked { stroke-dasharray: 5 6; }
+
+    /* --- node anatomy --- */
+    .node { position: absolute; display: flex; flex-direction: column; gap: 4px; min-width: 168px; max-width: 236px; padding: 10px 12px; border-radius: 14px; background: var(--node-fill); border: 1px solid var(--node-border); box-shadow: 0 6px 18px rgba(0,0,0,0.30); }
+    .node.selected { border: 2px solid var(--mint); padding: 9px 11px; }
+    .node-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+    .node-name { font-size: 13px; font-weight: 600; line-height: 1.24; letter-spacing: -0.01em; }
+    .node-task { font-size: 11px; font-weight: 400; line-height: 1.36; color: rgba(255,255,255,0.90); text-wrap: pretty; }
+    .node-state { display: flex; align-items: center; gap: 5px; min-width: 0; }
+    .state-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+    .state-label { font-size: 10px; font-weight: 600; letter-spacing: 0.005em; flex: none; }
+    .node-activity { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 10px; font-weight: 400; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+    .node-attn { font-size: 10px; font-weight: 500; line-height: 1.35; color: rgba(255,255,255,0.72); text-wrap: pretty; }
+    .prov { width: 14px; height: 14px; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 9px; font-weight: 700; color: var(--text-2); background: var(--surface); flex: none; }
+    .access { display: flex; color: var(--text-2); flex: none; }
+    .sigil { display: block; flex: none; }
+
+    /* --- workspace leader node --- */
+    .node-leader { gap: 10px; min-width: 236px; max-width: 272px; padding: 14px 16px; border-radius: 18px; border: 1px solid rgba(153,133,245,0.60); background: rgba(21,21,31,0.97); box-shadow: 0 16px 40px rgba(0,0,0,0.45); }
+    .leader-avatar { width: 44px; height: 44px; border-radius: 50%; display: flex; align-items: center; justify-content: center; flex: none; color: var(--violet); background: rgba(153,133,245,0.18); border: 1px solid rgba(153,133,245,0.55); }
+    .leader-name { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
+    .leader-sub { font-size: 10px; font-weight: 500; color: var(--text-2); }
+    .chip-mode { display: inline-flex; align-items: center; height: 16px; padding: 0 6px; border-radius: 5px; background: rgba(153,133,245,0.18); color: var(--violet); font-size: 9px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; flex: none; }
+
+    /* --- mission lead node --- */
+    .node-lead { min-width: 196px; max-width: 236px; }
+    .lead-ord { font-size: 11px; font-weight: 600; color: var(--text-2); flex: none; }
+    .lead-age { font-size: 11px; font-weight: 600; color: var(--text-2); flex: none; margin-left: auto; }
+    .lead-name { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
+
+    /* --- +N completed expander --- */
+    .chip-more { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 8px 0 9px; border-radius: 11px; background: var(--surface); border: 1px solid var(--node-border); color: var(--text-2); font-size: 10px; font-weight: 600; white-space: nowrap; }
+
+    /* --- floating panels --- */
+    .panel { position: absolute; background: var(--panel-fill); border: 1px solid var(--panel-border); border-radius: var(--panel-radius); box-shadow: var(--panel-shadow); backdrop-filter: blur(24px); overflow: hidden; }
+
+    /* --- navigator --- */
+    .nav { left: 16px; top: 48px; width: 248px; height: 936px; padding: 16px; z-index: 6; display: flex; flex-direction: column; gap: 14px; }
+    .nav-head { padding: 0 8px 2px; display: flex; flex-direction: column; gap: 1px; }
+    .nav-word { font-size: 15px; font-weight: 700; letter-spacing: -0.015em; }
+    .nav-sub { font-size: 10px; font-weight: 500; color: var(--text-2); }
+    .nav-group { display: flex; flex-direction: column; gap: 2px; }
+    .nav-row { display: flex; align-items: center; gap: 8px; height: 26px; padding: 0 8px; border-radius: 7px; font-size: 12px; font-weight: 500; min-width: 0; }
+    .nav-row.sel { background: var(--surface-sel); }
+    .nav-trail { font-size: 10px; font-weight: 600; color: var(--text-2); flex: none; }
+    .mono-sq { width: 18px; height: 18px; border-radius: 5px; background: var(--surface); display: flex; align-items: center; justify-content: center; font-size: 9px; font-weight: 700; color: var(--text-2); flex: none; }
+    .mono-sq.on { background: rgba(255,255,255,0.10); color: rgba(255,255,255,0.88); }
+    .live { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; margin: 0 6px; }
+    .nav-lead-av { width: 18px; height: 18px; border-radius: 50%; display: flex; align-items: center; justify-content: center; flex: none; color: var(--violet); background: rgba(153,133,245,0.18); border: 1px solid rgba(153,133,245,0.45); }
+    .nav-lead-mode { font-size: 9px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--violet); flex: none; }
+    .grp-head { display: flex; align-items: center; gap: 6px; height: 20px; padding: 0 8px; }
+    .mi-row { height: 24px; gap: 6px; padding: 0 7px; }
+    .mi-ord { font-size: 11px; font-weight: 600; color: var(--text-2); flex: none; }
+    .mi-state { font-size: 10px; font-weight: 600; flex: none; }
+
+    /* --- chat --- */
+    .chat { right: 16px; top: 48px; width: 410px; height: 936px; z-index: 6; display: flex; flex-direction: column; }
+    .chat-head { padding: 14px 14px 12px; display: flex; flex-direction: column; gap: 11px; border-bottom: 1px solid var(--divider); flex: none; }
+    .chat-av { width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; flex: none; color: var(--violet); background: rgba(153,133,245,0.18); border: 1px solid rgba(153,133,245,0.55); }
+    .chat-name { font-size: 14px; font-weight: 600; letter-spacing: -0.01em; }
+    .chat-tag { display: inline-flex; align-items: center; height: 15px; padding: 0 5px; border-radius: 4px; background: var(--surface); color: var(--text-2); font-size: 9px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; flex: none; }
+    .chat-sub { font-size: 10px; font-weight: 500; color: var(--text-2); }
+    .seg { display: inline-flex; gap: 2px; padding: 2px; border-radius: 8px; background: var(--surface); flex: none; }
+    .seg-item { height: 20px; padding: 0 10px; border-radius: 6px; display: flex; align-items: center; font-size: 10px; font-weight: 600; color: var(--text-2); }
+    .seg-item.on { background: rgba(153,133,245,0.20); color: var(--violet); }
+    .btn-text { font-size: 11px; font-weight: 600; color: var(--text-2); padding: 0 2px; flex: none; }
+    .btn-stop { width: 24px; height: 24px; border-radius: 50%; background: var(--surface); border: 1px solid var(--panel-border); display: flex; align-items: center; justify-content: center; color: rgba(255,255,255,0.72); flex: none; }
+    .strip { display: flex; align-items: center; gap: 6px; padding: 7px 14px; background: rgba(153,133,245,0.12); color: var(--violet); font-size: 10px; font-weight: 500; flex: none; }
+    .msgs { flex: 1; padding: 16px 14px; display: flex; flex-direction: column; justify-content: flex-end; gap: 12px; overflow: hidden; }
+    .msg-wrap { display: flex; flex-direction: column; gap: 3px; max-width: 306px; }
+    .msg-wrap.me { align-self: flex-end; align-items: flex-end; }
+    .msg-wrap.them { align-self: flex-start; align-items: flex-start; }
+    .msg { padding: 8px 11px; border-radius: 13px; font-size: 12.5px; font-weight: 400; line-height: 1.42; text-wrap: pretty; }
+    .msg-user { background: rgba(153,133,245,0.55); color: rgba(255,255,255,0.98); border-bottom-right-radius: 5px; }
+    .msg-agent { background: var(--surface); border-bottom-left-radius: 5px; }
+    .msg-time { font-size: 9px; font-weight: 500; color: var(--text-2); padding: 0 3px; }
+    .msg-sys { align-self: center; text-align: center; max-width: 320px; font-size: 10px; font-weight: 500; line-height: 1.4; color: var(--text-2); }
+    .composer { padding: 12px 14px 14px; border-top: 1px solid var(--divider); display: flex; align-items: center; gap: 8px; flex: none; }
+    .composer-input { flex: 1; height: 34px; border-radius: 10px; background: var(--surface); border: 1px solid var(--panel-border); display: flex; align-items: center; padding: 0 11px; font-size: 12.5px; color: var(--text-2); }
+    .send { width: 30px; height: 30px; border-radius: 50%; background: var(--mint); color: #0E0F13; display: flex; align-items: center; justify-content: center; flex: none; }
+
+    /* --- toolbar --- */
+    .toolbar { position: absolute; left: 800px; transform: translateX(-50%); top: 18px; height: 40px; z-index: 7; display: flex; align-items: center; padding: 0 7px; border-radius: 20px; background: rgba(24,26,32,0.72); border: 1px solid var(--panel-border); box-shadow: var(--panel-shadow); backdrop-filter: blur(18px); }
+    .tb-item { display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 9px; border-radius: 8px; font-size: 12px; font-weight: 600; color: rgba(255,255,255,0.88); white-space: nowrap; }
+    .tb-chev { color: var(--text-2); display: flex; }
+    .tb-div { width: 1px; height: 18px; background: var(--divider); margin: 0 4px; flex: none; }
+    .tb-icon { width: 26px; height: 26px; border-radius: 7px; display: flex; align-items: center; justify-content: center; color: var(--text-2); flex: none; }
+    .tb-zoom { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 10px; font-weight: 600; color: rgba(255,255,255,0.88); min-width: 38px; text-align: center; font-variant-numeric: tabular-nums; }
+
+    /* --- type direction: the text is the node --- */
+    .typeform .tmission { position: absolute; display: flex; flex-direction: column; }
+    .typeform .thead { display: flex; align-items: center; gap: 12px; min-height: 44px; padding: 0 6px; border-radius: 6px; white-space: nowrap; }
+    .typeform .tord { width: 46px; flex: none; font-weight: 700; line-height: 1; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+    .typeform .tmeta { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+    .typeform .tname { font-size: 16px; font-weight: 600; color: var(--text-1); letter-spacing: -0.005em; }
+    .typeform .tsub { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; }
+    .typeform .thead .chip-more { margin-left: 10px; flex: none; }
+    .typeform .tattn { height: 16px; padding: 0 6px 0 16px; font-size: 11px; font-weight: 400; line-height: 16px; white-space: nowrap; }
+    .typeform .tlines { display: flex; flex-direction: column; padding-top: 6px; padding-left: 10px; }
+    .typeform .tline { display: grid; grid-template-columns: 12px 64px minmax(0, 228px) 72px 12px; column-gap: 8px; align-items: center; min-height: 24px; padding: 0 6px; border-radius: 6px; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; line-height: 24px; white-space: nowrap; }
+    .typeform .tline.is-run { grid-template-rows: 24px 10px; min-height: 34px; }
+    .typeform .tline.is-run > * { align-self: center; }
+    .typeform .tsig { display: inline-flex; }
+    .typeform .tnm { font-weight: 600; color: var(--text-1); }
+    .typeform .ttask { color: rgba(255,255,255,0.78); overflow: hidden; text-overflow: ellipsis; }
+    .typeform .tst { font-weight: 600; }
+    .typeform .tac { display: inline-flex; color: var(--text-2); }
+    .typeform .tactv { grid-column: 3 / 6; grid-row: 2; align-self: start; font-size: 10px; line-height: 10px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; }
+    .typeform .tleader { position: absolute; display: flex; align-items: center; gap: 12px; }
+    .typeform .tlav { width: 44px; height: 44px; border-radius: 50%; flex: none; display: flex; align-items: center; justify-content: center; background: rgba(153,133,245,0.16); border: 1px solid rgba(153,133,245,0.45); color: var(--violet); }
+    .typeform .tlmeta { display: flex; flex-direction: column; gap: 5px; }
+    .typeform .tlname { font-size: 30px; font-weight: 700; line-height: 1; letter-spacing: -0.01em; color: var(--violet); border-bottom: 2px solid var(--mint); padding-bottom: 5px; align-self: flex-start; }
+    .typeform .tlsub { font-size: 11px; font-weight: 500; color: var(--text-2); }
+    .typeform .truler-tick { position: absolute; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 10px; font-weight: 500; color: var(--text-2); transform: translateX(-50%); }
+
+    @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+  </style>
+</helmet>
+<div class="dc-root" style="position: relative; width: 1600px; height: 1000px; overflow: hidden; background: #0E0F13; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif; color: rgba(255,255,255,0.94); -webkit-font-smoothing: antialiased; --ground: #0E0F13; --panel-fill: rgba(24,26,32,0.92); --panel-border: rgba(255,255,255,0.10); --panel-shadow: 0 12px 28px rgba(0,0,0,0.28); --panel-radius: 18px; --node-fill: rgba(20,23,25,0.96); --node-border: rgba(255,255,255,0.10); --dot: rgba(255,255,255,0.115); --text-1: rgba(255,255,255,0.94); --text-2: rgba(255,255,255,0.56); --divider: rgba(255,255,255,0.06); --surface: rgba(255,255,255,0.045); --surface-hover: rgba(255,255,255,0.07); --surface-sel: rgba(255,255,255,0.075); --violet: #9985F5; --mint: #73D1B8; --blue: #8AB3FF; --amber: #F5AD47; --green: #7DD98C; --red: #FF6161; --hue-0: #52B3F2; --hue-1: #F28775; --hue-2: #C7A34F; --hue-3: #70CC99; --hue-4: #E39BC7; --hue-5: #7FC8D9;">
+  <div class="ground"></div>
+  <div class="traffic">
+    <span class="light"></span>
+    <span class="light"></span>
+    <span class="light"></span>
+  </div>
+  <div class="canvas-layer" style="position: absolute; inset: 0;">
+    <div class="typeform" style="position: absolute; inset: 0;">
+      <svg style="position: absolute; inset: 0; width: 1600px; height: 1000px;" aria-hidden="true">
+        <path d="M 940 529 C 666.4 529 605.6 87.4 332 87.4" fill="none" stroke="rgba(153,133,245,0.30)" stroke-width="1" stroke-linecap="round"></path>
+        <path d="M 940 529 C 666.4 529 605.6 153.4 332 153.4" fill="none" stroke="rgba(245,173,71,0.5)" stroke-width="1" stroke-linecap="round" stroke-dasharray="5 6"></path>
+        <path d="M 940 529 C 666.4 529 605.6 283.4 332 283.4" fill="none" stroke="rgba(153,133,245,0.30)" stroke-width="1" stroke-linecap="round"></path>
+        <path d="M 940 529 C 666.4 529 605.6 441.4 332 441.4" fill="none" stroke="rgba(153,133,245,0.30)" stroke-width="1" stroke-linecap="round"></path>
+        <path d="M 940 529 C 666.4 529 605.6 491.4 332 491.4" fill="none" stroke="rgba(153,133,245,0.30)" stroke-width="1" stroke-linecap="round"></path>
+        <path d="M 940 529 C 666.4 529 605.6 616.8 332 616.8" fill="none" stroke="rgba(153,133,245,0.30)" stroke-width="1" stroke-linecap="round"></path>
+        <path d="M 940 529 C 666.4 529 605.6 740.8 332 740.8" fill="none" stroke="rgba(153,133,245,0.30)" stroke-width="1" stroke-linecap="round"></path>
+        <path d="M 940 529 C 666.4 529 605.6 864.8 332 864.8" fill="none" stroke="rgba(153,133,245,0.30)" stroke-width="1" stroke-linecap="round"></path>
+        <path d="M 940 529 C 666.4 529 605.6 938.8 332 938.8" fill="none" stroke="rgba(153,133,245,0.30)" stroke-width="1" stroke-linecap="round"></path>
+        <path d="M 940 529 C 869.8 529 854.2 90.2 784 90.2" fill="none" stroke="rgba(153,133,245,0.30)" stroke-width="1" stroke-linecap="round"></path>
+        <path d="M 940 529 C 869.8 529 854.2 284.2 784 284.2" fill="none" stroke="rgba(153,133,245,0.72)" stroke-width="2" stroke-linecap="round"></path>
+        <path d="M 940 529 C 869.8 529 854.2 604.2 784 604.2" fill="none" stroke="rgba(245,173,71,0.5)" stroke-width="1" stroke-linecap="round" stroke-dasharray="5 6"></path>
+        <path d="M 940 529 C 869.8 529 854.2 736.2 784 736.2" fill="none" stroke="rgba(153,133,245,0.30)" stroke-width="1" stroke-linecap="round"></path>
+        <path d="M 940 529 C 869.8 529 854.2 940.2 784 940.2" fill="none" stroke="rgba(153,133,245,0.30)" stroke-width="1" stroke-linecap="round"></path>
+        <path d="M 300 888 L 1150 888" stroke="rgba(255,255,255,0.10)" stroke-width="1" fill="none"></path>
+        <path d="M 302.2 884 L 302.2 888" stroke="#8AB3FF" stroke-width="1.5" fill="none"></path>
+        <path d="M 380.3 884 L 380.3 888" stroke="#F5AD47" stroke-width="1.5" fill="none"></path>
+        <path d="M 470.8 884 L 470.8 888" stroke="#73D1B8" stroke-width="1.5" fill="none"></path>
+        <path d="M 500.1 884 L 500.1 888" stroke="#8AB3FF" stroke-width="1.5" fill="none"></path>
+        <path d="M 537.3 884 L 537.3 888" stroke="#73D1B8" stroke-width="1.5" fill="none"></path>
+        <path d="M 586.5 884 L 586.5 888" stroke="#73D1B8" stroke-width="1.5" fill="none"></path>
+        <path d="M 633.4 884 L 633.4 888" stroke="#73D1B8" stroke-width="1.5" fill="none"></path>
+        <path d="M 719.3 884 L 719.3 888" stroke="#8AB3FF" stroke-width="1.5" fill="none"></path>
+        <path d="M 748.9 884 L 748.9 888" stroke="#FF6161" stroke-width="1.5" fill="none"></path>
+        <path d="M 805.5 884 L 805.5 888" stroke="#73D1B8" stroke-width="1.5" fill="none"></path>
+        <path d="M 863.3 884 L 863.3 888" stroke="#73D1B8" stroke-width="1.5" fill="none"></path>
+        <path d="M 918.2 884 L 918.2 888" stroke="#F5AD47" stroke-width="1.5" fill="none"></path>
+        <path d="M 949.9 884 L 949.9 888" stroke="#73D1B8" stroke-width="1.5" fill="none"></path>
+        <path d="M 1037.7 884 L 1037.7 888" stroke="#73D1B8" stroke-width="1.5" fill="none"></path>
+      </svg>
+      <div class="tmission" style="left: 280px; top: 56px; width: 453px;">
+        <div class="thead">
+          <span class="tord" style="font-size: 26px; color: rgba(138,179,255,0.85);">01</span>
+          <span class="tmeta">
+            <span class="tname">Payments regression</span>
+            <span class="tsub" style="color: #8AB3FF;">MERGED · NOT CLOSED · 9D · LED BY WREN</span>
+          </span>
+          <span class="chip-more">+16 completed<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6.4 4.4 3.6 3.6-3.6 3.6"></path></svg></span>
+        </div>
+        <div class="tattn" style="color: #8AB3FF;">Merged 2h ago, not closed</div>
+      </div>
+      <div class="tmission" style="left: 280px; top: 122px; width: 442px;">
+        <div class="thead">
+          <span class="tord" style="font-size: 26px; color: rgba(245,173,71,0.85);">02</span>
+          <span class="tmeta">
+            <span class="tname">Stripe webhook retries</span>
+            <span class="tsub" style="color: #F5AD47;">BLOCKED · 8D · LED BY OTTER</span>
+          </span>
+          <span class="chip-more">+9 completed<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6.4 4.4 3.6 3.6-3.6 3.6"></path></svg></span>
+        </div>
+        <div class="tattn" style="color: #F5AD47;">Asked: keep idempotency keys in Redis or Postgres?</div>
+        <div class="tlines">
+          <div class="tline is-run">
+            <span class="tsig"><svg class="sigil" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="0.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="3.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="6.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="9.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="0.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="3.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="6.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="9.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="0.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="3.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="6.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="9.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="0.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="3.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="6.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="9.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect></svg></span>
+            <span class="tnm">Dune</span>
+            <span class="ttask">Replay the failed webhook backlog</span>
+            <span class="tst" style="color: #73D1B8;">Running</span>
+            <span class="tac"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.7 8C3.5 4.7 5.6 3.3 8 3.3s4.5 1.4 6.3 4.7c-1.8 3.3-3.9 4.7-6.3 4.7S3.5 11.3 1.7 8Z"></path><circle cx="8" cy="8" r="2.1"></circle></svg></span>
+            <span class="tactv">Running bun test test/webhooks</span>
+          </div>
+          <div class="tline">
+            <span class="tsig"><svg class="sigil" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="0.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="3.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="6.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="9.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="0.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="3.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="6.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="9.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="0.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="3.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="6.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="9.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="0.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="3.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="6.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="9.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect></svg></span>
+            <span class="tnm">Moss</span>
+            <span class="ttask">Decide where idempotency keys are stored</span>
+            <span class="tst" style="color: #F5AD47;">Blocked</span>
+            <span class="tac"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.7 8C3.5 4.7 5.6 3.3 8 3.3s4.5 1.4 6.3 4.7c-1.8 3.3-3.9 4.7-6.3 4.7S3.5 11.3 1.7 8Z"></path><circle cx="8" cy="8" r="2.1"></circle></svg></span>
+          </div>
+        </div>
+      </div>
+      <div class="tmission" style="left: 280px; top: 252px; width: 442px;">
+        <div class="thead">
+          <span class="tord" style="font-size: 26px; color: rgba(115,209,184,0.85);">03</span>
+          <span class="tmeta">
+            <span class="tname">Postgres 16 upgrade</span>
+            <span class="tsub" style="color: #73D1B8;">RUNNING · 6D · LED BY BASIL</span>
+          </span>
+          <span class="chip-more">+5 completed<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6.4 4.4 3.6 3.6-3.6 3.6"></path></svg></span>
+        </div>
+        <div class="tlines">
+          <div class="tline is-run">
+            <span class="tsig"><svg class="sigil" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="0.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="0.13"></rect><rect x="3.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="1"></rect><rect x="6.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="1"></rect><rect x="9.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="0.13"></rect><rect x="0.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="0.13"></rect><rect x="3.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="1"></rect><rect x="6.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="1"></rect><rect x="9.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="0.13"></rect><rect x="0.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="1"></rect><rect x="3.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="1"></rect><rect x="6.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="1"></rect><rect x="9.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="1"></rect><rect x="0.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="1"></rect><rect x="3.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="0.13"></rect><rect x="6.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="0.13"></rect><rect x="9.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="1"></rect></svg></span>
+            <span class="tnm">Ozzie</span>
+            <span class="ttask">Rehearse the upgrade on a staging replica</span>
+            <span class="tst" style="color: #73D1B8;">Running</span>
+            <span class="tac"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.7 8C3.5 4.7 5.6 3.3 8 3.3s4.5 1.4 6.3 4.7c-1.8 3.3-3.9 4.7-6.3 4.7S3.5 11.3 1.7 8Z"></path><circle cx="8" cy="8" r="2.1"></circle></svg></span>
+            <span class="tactv">Running pg_upgrade --check on replica-2</span>
+          </div>
+          <div class="tline is-run">
+            <span class="tsig"><svg class="sigil" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="0.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="1"></rect><rect x="3.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="1"></rect><rect x="6.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="1"></rect><rect x="9.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="1"></rect><rect x="0.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="1"></rect><rect x="3.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="0.13"></rect><rect x="6.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="0.13"></rect><rect x="9.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="1"></rect><rect x="0.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="1"></rect><rect x="3.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="0.13"></rect><rect x="6.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="0.13"></rect><rect x="9.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="1"></rect><rect x="0.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="0.13"></rect><rect x="3.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="0.13"></rect><rect x="6.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="0.13"></rect><rect x="9.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="0.13"></rect></svg></span>
+            <span class="tnm">Elm</span>
+            <span class="ttask">Rewrite queries that use removed operators</span>
+            <span class="tst" style="color: #73D1B8;">Running</span>
+            <span class="tac"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m11.1 2.9 2 2-7.5 7.5-2.8.8.8-2.8Z"></path><path d="m9.9 4.1 2 2"></path></svg></span>
+            <span class="tactv">Editing src/db/search-query.ts</span>
+          </div>
+          <div class="tline is-run">
+            <span class="tsig"><svg class="sigil" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="0.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="0.13"></rect><rect x="3.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="1"></rect><rect x="6.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="1"></rect><rect x="9.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="0.13"></rect><rect x="0.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="0.13"></rect><rect x="3.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="1"></rect><rect x="6.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="1"></rect><rect x="9.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="0.13"></rect><rect x="0.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="1"></rect><rect x="3.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="1"></rect><rect x="6.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="1"></rect><rect x="9.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="1"></rect><rect x="0.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="1"></rect><rect x="3.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="0.13"></rect><rect x="6.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="0.13"></rect><rect x="9.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="1"></rect></svg></span>
+            <span class="tnm">Tove</span>
+            <span class="ttask">Time the vacuum pass on the orders table</span>
+            <span class="tst" style="color: #73D1B8;">Running</span>
+            <span class="tac"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.7 8C3.5 4.7 5.6 3.3 8 3.3s4.5 1.4 6.3 4.7c-1.8 3.3-3.9 4.7-6.3 4.7S3.5 11.3 1.7 8Z"></path><circle cx="8" cy="8" r="2.1"></circle></svg></span>
+            <span class="tactv">Watching pg_stat_progress_vacuum</span>
+          </div>
+        </div>
+      </div>
+      <div class="tmission" style="left: 280px; top: 410px; width: 433px;">
+        <div class="thead">
+          <span class="tord" style="font-size: 26px; color: rgba(138,179,255,0.85);">04</span>
+          <span class="tmeta">
+            <span class="tname">Onboarding email copy</span>
+            <span class="tsub" style="color: #8AB3FF;">READY TO CLOSE · 5D · LED BY JUNIPER</span>
+          </span>
+          <span class="chip-more">+5 completed<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6.4 4.4 3.6 3.6-3.6 3.6"></path></svg></span>
+        </div>
+      </div>
+      <div class="tmission" style="left: 280px; top: 460px; width: 442px;">
+        <div class="thead">
+          <span class="tord" style="font-size: 26px; color: rgba(115,209,184,0.85);">05</span>
+          <span class="tmeta">
+            <span class="tname">Flaky auth tests</span>
+            <span class="tsub" style="color: #73D1B8;">RUNNING · 4D · LED BY COBALT</span>
+          </span>
+          <span class="chip-more">+9 completed<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6.4 4.4 3.6 3.6-3.6 3.6"></path></svg></span>
+        </div>
+        <div class="tlines">
+          <div class="tline is-run">
+            <span class="tsig"><svg class="sigil" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="0.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="3.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="6.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="9.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="0.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="3.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="6.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="9.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="0.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="3.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="6.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="9.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="0.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="3.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="6.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="9.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect></svg></span>
+            <span class="tnm">Rune</span>
+            <span class="ttask">Re-run the suite fifty times for flakes</span>
+            <span class="tst" style="color: #73D1B8;">Running</span>
+            <span class="tac"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.7 8C3.5 4.7 5.6 3.3 8 3.3s4.5 1.4 6.3 4.7c-1.8 3.3-3.9 4.7-6.3 4.7S3.5 11.3 1.7 8Z"></path><circle cx="8" cy="8" r="2.1"></circle></svg></span>
+            <span class="tactv">Running bun test test/auth --repeat 50</span>
+          </div>
+          <div class="tline is-run">
+            <span class="tsig"><svg class="sigil" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="0.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="1"></rect><rect x="3.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="1"></rect><rect x="6.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="1"></rect><rect x="9.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="1"></rect><rect x="0.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="0.13"></rect><rect x="3.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="0.13"></rect><rect x="6.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="0.13"></rect><rect x="9.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="0.13"></rect><rect x="0.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="1"></rect><rect x="3.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="0.13"></rect><rect x="6.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="0.13"></rect><rect x="9.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="1"></rect><rect x="0.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="0.13"></rect><rect x="3.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="1"></rect><rect x="6.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="1"></rect><rect x="9.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="0.13"></rect></svg></span>
+            <span class="tnm">Gale</span>
+            <span class="ttask">Remove sleeps from the session helper</span>
+            <span class="tst" style="color: #73D1B8;">Running</span>
+            <span class="tac"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m11.1 2.9 2 2-7.5 7.5-2.8.8.8-2.8Z"></path><path d="m9.9 4.1 2 2"></path></svg></span>
+            <span class="tactv">Editing test/helpers/session.ts</span>
+          </div>
+        </div>
+      </div>
+      <div class="tmission" style="left: 280px; top: 584px; width: 442px;">
+        <div class="thead">
+          <span class="tord" style="font-size: 30px; color: rgba(115,209,184,0.85);">06</span>
+          <span class="tmeta">
+            <span class="tname">Invoice PDF rendering</span>
+            <span class="tsub" style="color: #73D1B8;">RUNNING · 3D · LED BY FIG</span>
+          </span>
+          <span class="chip-more">+2 completed<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6.4 4.4 3.6 3.6-3.6 3.6"></path></svg></span>
+        </div>
+        <div class="tlines">
+          <div class="tline is-run">
+            <span class="tsig"><svg class="sigil" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="0.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="1"></rect><rect x="3.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="1"></rect><rect x="6.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="1"></rect><rect x="9.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="1"></rect><rect x="0.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="1"></rect><rect x="3.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="1"></rect><rect x="6.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="1"></rect><rect x="9.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="1"></rect><rect x="0.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="1"></rect><rect x="3.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="0.13"></rect><rect x="6.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="0.13"></rect><rect x="9.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="1"></rect><rect x="0.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="0.13"></rect><rect x="3.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="1"></rect><rect x="6.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="1"></rect><rect x="9.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="0.13"></rect></svg></span>
+            <span class="tnm">Sorrel</span>
+            <span class="ttask">Fix line wrapping on long item names</span>
+            <span class="tst" style="color: #73D1B8;">Running</span>
+            <span class="tac"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m11.1 2.9 2 2-7.5 7.5-2.8.8.8-2.8Z"></path><path d="m9.9 4.1 2 2"></path></svg></span>
+            <span class="tactv">Editing src/invoices/pdf/layout.ts</span>
+          </div>
+          <div class="tline is-run">
+            <span class="tsig"><svg class="sigil" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="0.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="0.13"></rect><rect x="3.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="1"></rect><rect x="6.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="1"></rect><rect x="9.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="0.13"></rect><rect x="0.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="1"></rect><rect x="3.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="0.13"></rect><rect x="6.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="0.13"></rect><rect x="9.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="1"></rect><rect x="0.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="0.13"></rect><rect x="3.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="1"></rect><rect x="6.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="1"></rect><rect x="9.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="0.13"></rect><rect x="0.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="0.13"></rect><rect x="3.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="0.13"></rect><rect x="6.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="0.13"></rect><rect x="9.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="0.13"></rect></svg></span>
+            <span class="tnm">Hollis</span>
+            <span class="ttask">Embed the invoice font subset</span>
+            <span class="tst" style="color: #73D1B8;">Running</span>
+            <span class="tac"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.7 8C3.5 4.7 5.6 3.3 8 3.3s4.5 1.4 6.3 4.7c-1.8 3.3-3.9 4.7-6.3 4.7S3.5 11.3 1.7 8Z"></path><circle cx="8" cy="8" r="2.1"></circle></svg></span>
+            <span class="tactv">Running bun run render:invoice-samples</span>
+          </div>
+        </div>
+      </div>
+      <div class="tmission" style="left: 280px; top: 708px; width: 442px;">
+        <div class="thead">
+          <span class="tord" style="font-size: 30px; color: rgba(115,209,184,0.85);">07</span>
+          <span class="tmeta">
+            <span class="tname">Rate limiter on /search</span>
+            <span class="tsub" style="color: #73D1B8;">RUNNING · 2D · LED BY MARLOWE</span>
+          </span>
+          <span class="chip-more">+9 completed<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6.4 4.4 3.6 3.6-3.6 3.6"></path></svg></span>
+        </div>
+        <div class="tlines">
+          <div class="tline is-run">
+            <span class="tsig"><svg class="sigil" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="0.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="3.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="6.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="9.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="0.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="3.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="6.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="9.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="0.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="3.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="6.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="9.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="0.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="3.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="6.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="9.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect></svg></span>
+            <span class="tnm">Thane</span>
+            <span class="ttask">Load test /search at the new limits</span>
+            <span class="tst" style="color: #73D1B8;">Running</span>
+            <span class="tac"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.7 8C3.5 4.7 5.6 3.3 8 3.3s4.5 1.4 6.3 4.7c-1.8 3.3-3.9 4.7-6.3 4.7S3.5 11.3 1.7 8Z"></path><circle cx="8" cy="8" r="2.1"></circle></svg></span>
+            <span class="tactv">Running k6 run load/search.js</span>
+          </div>
+          <div class="tline is-run">
+            <span class="tsig"><svg class="sigil" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="0.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="0.13"></rect><rect x="3.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="1"></rect><rect x="6.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="1"></rect><rect x="9.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="0.13"></rect><rect x="0.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="0.13"></rect><rect x="3.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="1"></rect><rect x="6.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="1"></rect><rect x="9.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="0.13"></rect><rect x="0.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="0.13"></rect><rect x="3.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="1"></rect><rect x="6.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="1"></rect><rect x="9.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="0.13"></rect><rect x="0.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="0.13"></rect><rect x="3.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="0.13"></rect><rect x="6.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="0.13"></rect><rect x="9.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="0.13"></rect></svg></span>
+            <span class="tnm">Iris</span>
+            <span class="ttask">Return Retry-After on throttled responses</span>
+            <span class="tst" style="color: #73D1B8;">Running</span>
+            <span class="tac"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m11.1 2.9 2 2-7.5 7.5-2.8.8.8-2.8Z"></path><path d="m9.9 4.1 2 2"></path></svg></span>
+            <span class="tactv">Editing src/api/middleware/limit.ts</span>
+          </div>
+        </div>
+      </div>
+      <div class="tmission" style="left: 280px; top: 832px; width: 412px;">
+        <div class="thead">
+          <span class="tord" style="font-size: 30px; color: rgba(138,179,255,0.85);">08</span>
+          <span class="tmeta">
+            <span class="tname">Remove legacy feature flags</span>
+            <span class="tsub" style="color: #8AB3FF;">READY TO CLOSE · 1D · LED BY PICO</span>
+          </span>
+          <span class="chip-more">+7 completed<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6.4 4.4 3.6 3.6-3.6 3.6"></path></svg></span>
+        </div>
+      </div>
+      <div class="tmission" style="left: 280px; top: 906px; width: 442px;">
+        <div class="thead">
+          <span class="tord" style="font-size: 30px; color: rgba(255,97,97,0.85);">09</span>
+          <span class="tmeta">
+            <span class="tname">Audit log export</span>
+            <span class="tsub" style="color: #FF6161;">FAILED · 19H · LED BY SABLE</span>
+          </span>
+          <span class="chip-more">+2 completed<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6.4 4.4 3.6 3.6-3.6 3.6"></path></svg></span>
+        </div>
+        <div class="tattn" style="color: #FF6161;">tsc failed in packages/api</div>
+        <div class="tlines">
+          <div class="tline">
+            <span class="tsig"><svg class="sigil" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="0.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="0.13"></rect><rect x="3.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect><rect x="6.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect><rect x="9.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="0.13"></rect><rect x="0.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="0.13"></rect><rect x="3.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect><rect x="6.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect><rect x="9.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="0.13"></rect><rect x="0.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect><rect x="3.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect><rect x="6.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect><rect x="9.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect><rect x="0.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect><rect x="3.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect><rect x="6.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect><rect x="9.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect></svg></span>
+            <span class="tnm">Vesper</span>
+            <span class="ttask">Stream audit rows into a signed CSV</span>
+            <span class="tst" style="color: #FF6161;">Failed</span>
+            <span class="tac"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m11.1 2.9 2 2-7.5 7.5-2.8.8.8-2.8Z"></path><path d="m9.9 4.1 2 2"></path></svg></span>
+          </div>
+        </div>
+      </div>
+      <div class="tmission" style="left: 732px; top: 56px; width: 442px;">
+        <div class="thead">
+          <span class="tord" style="font-size: 34px; color: rgba(115,209,184,0.85);">10</span>
+          <span class="tmeta">
+            <span class="tname">Sentry noise reduction</span>
+            <span class="tsub" style="color: #73D1B8;">RUNNING · 11H · LED BY IDA</span>
+          </span>
+          <span class="chip-more">+5 completed<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6.4 4.4 3.6 3.6-3.6 3.6"></path></svg></span>
+        </div>
+        <div class="tlines">
+          <div class="tline is-run">
+            <span class="tsig"><svg class="sigil" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="0.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="3.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="6.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="9.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="0.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="3.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="6.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="9.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="0.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="3.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="6.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="9.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="0.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="3.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="6.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="9.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect></svg></span>
+            <span class="tnm">Wick</span>
+            <span class="ttask">Group the top twenty duplicate issues</span>
+            <span class="tst" style="color: #73D1B8;">Running</span>
+            <span class="tac"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.7 8C3.5 4.7 5.6 3.3 8 3.3s4.5 1.4 6.3 4.7c-1.8 3.3-3.9 4.7-6.3 4.7S3.5 11.3 1.7 8Z"></path><circle cx="8" cy="8" r="2.1"></circle></svg></span>
+            <span class="tactv">Reading sentry/rules/grouping.json</span>
+          </div>
+          <div class="tline is-run">
+            <span class="tsig"><svg class="sigil" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="0.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="1"></rect><rect x="3.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="0.13"></rect><rect x="6.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="0.13"></rect><rect x="9.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="1"></rect><rect x="0.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="1"></rect><rect x="3.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="1"></rect><rect x="6.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="1"></rect><rect x="9.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="1"></rect><rect x="0.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="0.13"></rect><rect x="3.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="1"></rect><rect x="6.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="1"></rect><rect x="9.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="0.13"></rect><rect x="0.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="1"></rect><rect x="3.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="0.13"></rect><rect x="6.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="0.13"></rect><rect x="9.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="1"></rect></svg></span>
+            <span class="tnm">Lyle</span>
+            <span class="ttask">Filter bot traffic out of the browser SDK</span>
+            <span class="tst" style="color: #73D1B8;">Running</span>
+            <span class="tac"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.7 8C3.5 4.7 5.6 3.3 8 3.3s4.5 1.4 6.3 4.7c-1.8 3.3-3.9 4.7-6.3 4.7S3.5 11.3 1.7 8Z"></path><circle cx="8" cy="8" r="2.1"></circle></svg></span>
+            <span class="tactv">Reading apps/web/src/sentry.ts</span>
+          </div>
+          <div class="tline is-run">
+            <span class="tsig"><svg class="sigil" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="0.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="0.13"></rect><rect x="3.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="1"></rect><rect x="6.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="1"></rect><rect x="9.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="0.13"></rect><rect x="0.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="1"></rect><rect x="3.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="1"></rect><rect x="6.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="1"></rect><rect x="9.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="1"></rect><rect x="0.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="0.13"></rect><rect x="3.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="0.13"></rect><rect x="6.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="0.13"></rect><rect x="9.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="0.13"></rect><rect x="0.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="0.13"></rect><rect x="3.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="0.13"></rect><rect x="6.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="0.13"></rect><rect x="9.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="0.13"></rect></svg></span>
+            <span class="tnm">Greer</span>
+            <span class="ttask">Drop health check errors at ingest</span>
+            <span class="tst" style="color: #73D1B8;">Running</span>
+            <span class="tac"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.7 8C3.5 4.7 5.6 3.3 8 3.3s4.5 1.4 6.3 4.7c-1.8 3.3-3.9 4.7-6.3 4.7S3.5 11.3 1.7 8Z"></path><circle cx="8" cy="8" r="2.1"></circle></svg></span>
+            <span class="tactv">Running bun test test/observability</span>
+          </div>
+          <div class="tline is-run">
+            <span class="tsig"><svg class="sigil" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="0.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="0.13"></rect><rect x="3.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="1"></rect><rect x="6.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="1"></rect><rect x="9.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="0.13"></rect><rect x="0.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="1"></rect><rect x="3.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="0.13"></rect><rect x="6.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="0.13"></rect><rect x="9.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="1"></rect><rect x="0.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="1"></rect><rect x="3.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="0.13"></rect><rect x="6.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="0.13"></rect><rect x="9.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="1"></rect><rect x="0.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="0.13"></rect><rect x="3.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="0.13"></rect><rect x="6.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="0.13"></rect><rect x="9.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="0.13"></rect></svg></span>
+            <span class="tnm">Teo</span>
+            <span class="ttask">Set sample rates per environment</span>
+            <span class="tst" style="color: #73D1B8;">Running</span>
+            <span class="tac"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m11.1 2.9 2 2-7.5 7.5-2.8.8.8-2.8Z"></path><path d="m9.9 4.1 2 2"></path></svg></span>
+            <span class="tactv">Editing config/sentry.server.ts</span>
+          </div>
+        </div>
+      </div>
+      <div class="tmission" style="left: 732px; top: 250px; width: 442px;">
+        <div class="thead">
+          <span class="tord" style="font-size: 34px; color: rgba(115,209,184,0.85);">11</span>
+          <span class="tmeta">
+            <span class="tname">Search index rebuild</span>
+            <span class="tsub" style="color: #73D1B8;">RUNNING · 6H · LED BY HALDEN</span>
+          </span>
+          <span class="chip-more">+3 completed<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6.4 4.4 3.6 3.6-3.6 3.6"></path></svg></span>
+        </div>
+        <div class="tlines">
+          <div class="tline is-run">
+            <span class="tsig"><svg class="sigil" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="0.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="3.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="6.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="9.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="0.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="3.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="6.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="9.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="0.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="3.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="6.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="9.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="0.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="3.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="6.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="9.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect></svg></span>
+            <span class="tnm">Yarrow</span>
+            <span class="ttask">Rebuild the product index from Postgres</span>
+            <span class="tst" style="color: #73D1B8;">Running</span>
+            <span class="tac"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.7 8C3.5 4.7 5.6 3.3 8 3.3s4.5 1.4 6.3 4.7c-1.8 3.3-3.9 4.7-6.3 4.7S3.5 11.3 1.7 8Z"></path><circle cx="8" cy="8" r="2.1"></circle></svg></span>
+            <span class="tactv">Running bun run index:rebuild --shard 3</span>
+          </div>
+          <div class="tline is-run">
+            <span class="tsig"><svg class="sigil" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="0.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="1"></rect><rect x="3.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="0.13"></rect><rect x="6.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="0.13"></rect><rect x="9.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="1"></rect><rect x="0.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="1"></rect><rect x="3.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="1"></rect><rect x="6.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="1"></rect><rect x="9.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="1"></rect><rect x="0.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="0.13"></rect><rect x="3.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="1"></rect><rect x="6.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="1"></rect><rect x="9.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="0.13"></rect><rect x="0.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="1"></rect><rect x="3.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="0.13"></rect><rect x="6.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="0.13"></rect><rect x="9.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#C7A34F" opacity="1"></rect></svg></span>
+            <span class="tnm">Mira</span>
+            <span class="ttask">Backfill embeddings for archived listings</span>
+            <span class="tst" style="color: #73D1B8;">Running</span>
+            <span class="tac"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.7 8C3.5 4.7 5.6 3.3 8 3.3s4.5 1.4 6.3 4.7c-1.8 3.3-3.9 4.7-6.3 4.7S3.5 11.3 1.7 8Z"></path><circle cx="8" cy="8" r="2.1"></circle></svg></span>
+            <span class="tactv">Reading src/search/embed.ts</span>
+          </div>
+          <div class="tline is-run">
+            <span class="tsig"><svg class="sigil" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="0.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="0.13"></rect><rect x="3.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="1"></rect><rect x="6.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="1"></rect><rect x="9.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="0.13"></rect><rect x="0.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="1"></rect><rect x="3.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="1"></rect><rect x="6.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="1"></rect><rect x="9.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="1"></rect><rect x="0.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="1"></rect><rect x="3.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="0.13"></rect><rect x="6.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="0.13"></rect><rect x="9.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="1"></rect><rect x="0.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="0.13"></rect><rect x="3.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="0.13"></rect><rect x="6.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="0.13"></rect><rect x="9.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="0.13"></rect></svg></span>
+            <span class="tnm">Hale</span>
+            <span class="ttask">Compare relevance against the live index</span>
+            <span class="tst" style="color: #73D1B8;">Running</span>
+            <span class="tac"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.7 8C3.5 4.7 5.6 3.3 8 3.3s4.5 1.4 6.3 4.7c-1.8 3.3-3.9 4.7-6.3 4.7S3.5 11.3 1.7 8Z"></path><circle cx="8" cy="8" r="2.1"></circle></svg></span>
+            <span class="tactv">Running scripts/relevance-diff.ts</span>
+          </div>
+          <div class="tline is-run">
+            <span class="tsig"><svg class="sigil" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="0.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="0.13"></rect><rect x="3.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect><rect x="6.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect><rect x="9.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="0.13"></rect><rect x="0.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="0.13"></rect><rect x="3.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect><rect x="6.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect><rect x="9.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="0.13"></rect><rect x="0.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="0.13"></rect><rect x="3.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect><rect x="6.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect><rect x="9.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="0.13"></rect><rect x="0.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect><rect x="3.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="0.13"></rect><rect x="6.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="0.13"></rect><rect x="9.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect></svg></span>
+            <span class="tnm">Uma</span>
+            <span class="ttask">Keep writes flowing during the rebuild</span>
+            <span class="tst" style="color: #73D1B8;">Running</span>
+            <span class="tac"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.7 8C3.5 4.7 5.6 3.3 8 3.3s4.5 1.4 6.3 4.7c-1.8 3.3-3.9 4.7-6.3 4.7S3.5 11.3 1.7 8Z"></path><circle cx="8" cy="8" r="2.1"></circle></svg></span>
+            <span class="tactv">Reading src/search/dual-write.ts</span>
+          </div>
+          <div class="tline is-run">
+            <span class="tsig"><svg class="sigil" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="0.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="0.13"></rect><rect x="3.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="0.13"></rect><rect x="6.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="0.13"></rect><rect x="9.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="0.13"></rect><rect x="0.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="1"></rect><rect x="3.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="0.13"></rect><rect x="6.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="0.13"></rect><rect x="9.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="1"></rect><rect x="0.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="1"></rect><rect x="3.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="1"></rect><rect x="6.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="1"></rect><rect x="9.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="1"></rect><rect x="0.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="0.13"></rect><rect x="3.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="1"></rect><rect x="6.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="1"></rect><rect x="9.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#F28775" opacity="0.13"></rect></svg></span>
+            <span class="tnm">Finch</span>
+            <span class="ttask">Watch index lag and memory on the box</span>
+            <span class="tst" style="color: #73D1B8;">Running</span>
+            <span class="tac"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.7 8C3.5 4.7 5.6 3.3 8 3.3s4.5 1.4 6.3 4.7c-1.8 3.3-3.9 4.7-6.3 4.7S3.5 11.3 1.7 8Z"></path><circle cx="8" cy="8" r="2.1"></circle></svg></span>
+            <span class="tactv">Watching opensearch _cat/indices</span>
+          </div>
+        </div>
+      </div>
+      <div class="tmission" style="left: 732px; top: 570px; width: 442px;">
+        <div class="thead">
+          <span class="tord" style="font-size: 34px; color: rgba(245,173,71,0.85);">12</span>
+          <span class="tmeta">
+            <span class="tname">Refund flow edge cases</span>
+            <span class="tsub" style="color: #F5AD47;">BLOCKED · 3H · LED BY QUILL</span>
+          </span>
+          <span class="chip-more">+3 completed<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6.4 4.4 3.6 3.6-3.6 3.6"></path></svg></span>
+        </div>
+        <div class="tattn" style="color: #F5AD47;">Asked: refund partial captures or void the charge?</div>
+        <div class="tlines">
+          <div class="tline is-run">
+            <span class="tsig"><svg class="sigil" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="0.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="1"></rect><rect x="3.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="1"></rect><rect x="6.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="1"></rect><rect x="9.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="1"></rect><rect x="0.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="0.13"></rect><rect x="3.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="1"></rect><rect x="6.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="1"></rect><rect x="9.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="0.13"></rect><rect x="0.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="0.13"></rect><rect x="3.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="1"></rect><rect x="6.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="1"></rect><rect x="9.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="0.13"></rect><rect x="0.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="0.13"></rect><rect x="3.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="1"></rect><rect x="6.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="1"></rect><rect x="9.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#52B3F2" opacity="0.13"></rect></svg></span>
+            <span class="tnm">Nell</span>
+            <span class="ttask">Reproduce the refund failure on disputes</span>
+            <span class="tst" style="color: #73D1B8;">Running</span>
+            <span class="tac"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.7 8C3.5 4.7 5.6 3.3 8 3.3s4.5 1.4 6.3 4.7c-1.8 3.3-3.9 4.7-6.3 4.7S3.5 11.3 1.7 8Z"></path><circle cx="8" cy="8" r="2.1"></circle></svg></span>
+            <span class="tactv">Running bun test test/refunds</span>
+          </div>
+          <div class="tline">
+            <span class="tsig"><svg class="sigil" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="0.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect><rect x="3.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect><rect x="6.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect><rect x="9.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect><rect x="0.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect><rect x="3.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="0.13"></rect><rect x="6.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="0.13"></rect><rect x="9.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect><rect x="0.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect><rect x="3.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="0.13"></rect><rect x="6.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="0.13"></rect><rect x="9.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect><rect x="0.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect><rect x="3.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="0.13"></rect><rect x="6.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="0.13"></rect><rect x="9.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect></svg></span>
+            <span class="tnm">Zed</span>
+            <span class="ttask">Handle refunds on partially captured charges</span>
+            <span class="tst" style="color: #F5AD47;">Blocked</span>
+            <span class="tac"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m11.1 2.9 2 2-7.5 7.5-2.8.8.8-2.8Z"></path><path d="m9.9 4.1 2 2"></path></svg></span>
+          </div>
+        </div>
+      </div>
+      <div class="tmission" style="left: 732px; top: 702px; width: 442px;">
+        <div class="thead">
+          <span class="tord" style="font-size: 34px; color: rgba(115,209,184,0.85);">13</span>
+          <span class="tmeta">
+            <span class="tname">Terraform drift on staging</span>
+            <span class="tsub" style="color: #73D1B8;">RUNNING · 2H · LED BY TAMSIN</span>
+          </span>
+        </div>
+        <div class="tlines">
+          <div class="tline is-run">
+            <span class="tsig"><svg class="sigil" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="0.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="3.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="6.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="9.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="0.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="3.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="6.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="9.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="0.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="3.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="6.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="9.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="0.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="3.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="6.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="9.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect></svg></span>
+            <span class="tnm">Ash</span>
+            <span class="ttask">Diff staging state against the modules</span>
+            <span class="tst" style="color: #73D1B8;">Running</span>
+            <span class="tac"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.7 8C3.5 4.7 5.6 3.3 8 3.3s4.5 1.4 6.3 4.7c-1.8 3.3-3.9 4.7-6.3 4.7S3.5 11.3 1.7 8Z"></path><circle cx="8" cy="8" r="2.1"></circle></svg></span>
+            <span class="tactv">Running terraform plan -refresh-only</span>
+          </div>
+          <div class="tline is-run">
+            <span class="tsig"><svg class="sigil" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="0.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="3.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="6.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="9.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="0.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="3.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="6.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="9.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="0.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="3.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="6.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="9.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="0.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="3.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="6.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="9.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect></svg></span>
+            <span class="tnm">Orrin</span>
+            <span class="ttask">Import the hand-made security groups</span>
+            <span class="tst" style="color: #73D1B8;">Running</span>
+            <span class="tac"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m11.1 2.9 2 2-7.5 7.5-2.8.8.8-2.8Z"></path><path d="m9.9 4.1 2 2"></path></svg></span>
+            <span class="tactv">Editing infra/staging/network.tf</span>
+          </div>
+          <div class="tline is-run">
+            <span class="tsig"><svg class="sigil" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="0.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect><rect x="3.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect><rect x="6.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect><rect x="9.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect><rect x="0.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="0.13"></rect><rect x="3.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect><rect x="6.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect><rect x="9.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="0.13"></rect><rect x="0.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect><rect x="3.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect><rect x="6.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect><rect x="9.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect><rect x="0.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect><rect x="3.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="0.13"></rect><rect x="6.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="0.13"></rect><rect x="9.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#E39BC7" opacity="1"></rect></svg></span>
+            <span class="tnm">Jules</span>
+            <span class="ttask">Check provider versions across environments</span>
+            <span class="tst" style="color: #73D1B8;">Running</span>
+            <span class="tac"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.7 8C3.5 4.7 5.6 3.3 8 3.3s4.5 1.4 6.3 4.7c-1.8 3.3-3.9 4.7-6.3 4.7S3.5 11.3 1.7 8Z"></path><circle cx="8" cy="8" r="2.1"></circle></svg></span>
+            <span class="tactv">Reading infra/versions.tf</span>
+          </div>
+          <div class="tline">
+            <span class="tsig"><svg class="sigil" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="0.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="0.13"></rect><rect x="3.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="0.13"></rect><rect x="6.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="0.13"></rect><rect x="9.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="0.13"></rect><rect x="0.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="1"></rect><rect x="3.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="1"></rect><rect x="6.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="1"></rect><rect x="9.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="1"></rect><rect x="0.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="1"></rect><rect x="3.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="0.13"></rect><rect x="6.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="0.13"></rect><rect x="9.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="1"></rect><rect x="0.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="0.13"></rect><rect x="3.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="1"></rect><rect x="6.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="1"></rect><rect x="9.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#70CC99" opacity="0.13"></rect></svg></span>
+            <span class="tnm">Wynn</span>
+            <span class="ttask">List every resource changed outside Terraform</span>
+            <span class="tst" style="color: #7DD98C;">Completed</span>
+            <span class="tac"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.7 8C3.5 4.7 5.6 3.3 8 3.3s4.5 1.4 6.3 4.7c-1.8 3.3-3.9 4.7-6.3 4.7S3.5 11.3 1.7 8Z"></path><circle cx="8" cy="8" r="2.1"></circle></svg></span>
+          </div>
+        </div>
+      </div>
+      <div class="tmission" style="left: 732px; top: 906px; width: 442px;">
+        <div class="thead">
+          <span class="tord" style="font-size: 34px; color: rgba(115,209,184,0.85);">14</span>
+          <span class="tmeta">
+            <span class="tname">Checkout A/B rollout</span>
+            <span class="tsub" style="color: #73D1B8;">RUNNING · 25M · LED BY EMBER</span>
+          </span>
+        </div>
+        <div class="tlines">
+          <div class="tline is-run">
+            <span class="tsig"><svg class="sigil" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="0.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="3.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="6.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="9.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="0.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="3.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="6.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="9.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="0.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="3.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="6.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="9.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="0.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="3.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="6.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="9.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect></svg></span>
+            <span class="tnm">Bram</span>
+            <span class="ttask">Wire the experiment into the checkout page</span>
+            <span class="tst" style="color: #73D1B8;">Running</span>
+            <span class="tac"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m11.1 2.9 2 2-7.5 7.5-2.8.8.8-2.8Z"></path><path d="m9.9 4.1 2 2"></path></svg></span>
+            <span class="tactv">Editing apps/web/src/checkout/Experiment.tsx</span>
+          </div>
+          <div class="tline is-run">
+            <span class="tsig"><svg class="sigil" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="0.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="3.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="6.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="9.33" y="0.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="0.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="3.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="6.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="9.33" y="3.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="0.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="3.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="6.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="9.33" y="6.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="0.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect><rect x="3.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="6.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="1"></rect><rect x="9.33" y="9.33" width="2.34" height="2.34" rx="0.66" fill="#7FC8D9" opacity="0.13"></rect></svg></span>
+            <span class="tnm">Petra</span>
+            <span class="ttask">Define the conversion metric and guardrails</span>
+            <span class="tst" style="color: #73D1B8;">Running</span>
+            <span class="tac"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.7 8C3.5 4.7 5.6 3.3 8 3.3s4.5 1.4 6.3 4.7c-1.8 3.3-3.9 4.7-6.3 4.7S3.5 11.3 1.7 8Z"></path><circle cx="8" cy="8" r="2.1"></circle></svg></span>
+            <span class="tactv">Reading docs/experiments/checkout.md</span>
+          </div>
+        </div>
+      </div>
+      <div class="tleader" style="left: 940px; top: 500px;">
+        <span class="tlav"><svg width="20" height="20" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.6 11.6 3.5 4.8 6.3 7.7 8 3.7 9.7 7.7 12.5 4.8 13.4 11.6Z"></path><path d="M4 13.5h8"></path></svg></span>
+        <span class="tlmeta">
+          <span class="tlname">Halden</span>
+          <span class="tlsub">Workspace leader · Lead++</span>
+        </span>
+      </div>
+      <span class="truler-tick" style="left: 300px; top: 894px;">9d</span>
+      <span class="truler-tick" style="left: 442px; top: 894px;">1w</span>
+      <span class="truler-tick" style="left: 583px; top: 894px;">3d</span>
+      <span class="truler-tick" style="left: 725px; top: 894px;">1d</span>
+      <span class="truler-tick" style="left: 867px; top: 894px;">6h</span>
+      <span class="truler-tick" style="left: 1008px; top: 894px;">1h</span>
+      <span class="truler-tick" style="left: 1150px; top: 894px;">now</span>
+    </div>
+  </div>
+      <div class="toolbar">
+        <span class="tb-item">NoScrubs<span class="tb-chev"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4.4 6.4 3.6 3.6 3.6-3.6"></path></svg></span></span>
+        <span class="tb-div"></span>
+        <span class="tb-item"><span class="state-running" style="display: flex;"><span class="live" style="margin: 0;"></span></span>mac-studio<span class="tb-chev"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4.4 6.4 3.6 3.6 3.6-3.6"></path></svg></span></span>
+        <span class="tb-div"></span>
+        <span class="tb-item"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6.2V3.7c0-.4.3-.7.7-.7h2.5"></path><path d="M9.8 3h2.5c.4 0 .7.3.7.7v2.5"></path><path d="M13 9.8v2.5c0 .4-.3.7-.7.7H9.8"></path><path d="M6.2 13H3.7c-.4 0-.7-.3-.7-.7V9.8"></path></svg>Fit</span>
+        <span class="tb-div"></span>
+        <span class="tb-icon"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h8"></path></svg></span>
+        <span class="tb-zoom">100%</span>
+        <span class="tb-icon"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 4v8"></path><path d="M4 8h8"></path></svg></span>
+        <span class="tb-div"></span>
+        <span class="tb-item tb-chrono">Order · Started<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4.4 6.4 3.6 3.6 3.6-3.6"></path></svg></span>
+      </div>
+      <aside class="panel nav">
+        <div class="nav-head">
+          <div class="nav-word">Neta</div>
+          <div class="nav-sub">Workspaces</div>
+        </div>
+        <div class="nav-group">
+          <div class="nav-row sel"><span class="mono-sq on">NS</span><span class="ell" style="flex: 1;">NoScrubs</span></div>
+          <div class="nav-row"><span class="mono-sq">NE</span><span class="ell" style="flex: 1;">neta</span></div>
+          <div class="nav-row"><span class="mono-sq">FX</span><span class="ell" style="flex: 1;">fx-ledger</span></div>
+        </div>
+        <div class="nav-group">
+          <div class="sec" style="height: 20px; display: flex; align-items: center;">Machine</div>
+          <div class="nav-row"><span class="state-running" style="display: flex;"><span class="live"></span></span><span class="ell" style="flex: 1;">mac-studio</span><span class="nav-trail">Online</span></div>
+          <div class="nav-row"><span class="state-idle" style="display: flex;"><span class="live"></span></span><span class="ell" style="flex: 1;">build-box</span><span class="nav-trail">Offline</span></div>
+        </div>
+        <div class="nav-group">
+          <div class="sec" style="height: 20px; display: flex; align-items: center;">Workspace leader</div>
+          <div class="nav-row sel"><span class="nav-lead-av"><svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.6 11.6 3.5 4.8 6.3 7.7 8 3.7 9.7 7.7 12.5 4.8 13.4 11.6Z"></path><path d="M4 13.5h8"></path></svg></span><span class="ell" style="flex: 1;">Halden</span><span class="nav-lead-mode">Lead++</span></div>
+        </div>
+        <div class="nav-group" style="gap: 8px;">
+          <div class="sec" style="height: 20px; display: flex; align-items: center;">Mission inbox</div>
+          <div class="nav-group">
+            <div class="grp-head"><span class="sec" style="padding: 0; flex: 1;">Needs you</span><span class="nav-trail tnum">4</span></div>
+            <div class="nav-row mi-row"><span class="mono tnum mi-ord">01</span><span class="ell" style="flex: 1;">Payments regression</span><span class="mi-state state-merged">Merged</span></div>
+            <div class="nav-row mi-row"><span class="mono tnum mi-ord">02</span><span class="ell" style="flex: 1;">Stripe webhook retries</span><span class="mi-state state-blocked">Blocked</span></div>
+            <div class="nav-row mi-row"><span class="mono tnum mi-ord">09</span><span class="ell" style="flex: 1;">Audit log export</span><span class="mi-state state-failed">Failed</span></div>
+            <div class="nav-row mi-row"><span class="mono tnum mi-ord">12</span><span class="ell" style="flex: 1;">Refund flow edge cases</span><span class="mi-state state-blocked">Blocked</span></div>
+          </div>
+          <div class="nav-group">
+            <div class="grp-head"><span class="sec" style="padding: 0; flex: 1;">Ready to close</span><span class="nav-trail tnum">2</span></div>
+            <div class="nav-row mi-row"><span class="mono tnum mi-ord">04</span><span class="ell" style="flex: 1;">Onboarding email copy</span><span class="mi-state state-ready">Ready</span></div>
+            <div class="nav-row mi-row"><span class="mono tnum mi-ord">08</span><span class="ell" style="flex: 1;">Remove legacy feature flags</span><span class="mi-state state-ready">Ready</span></div>
+          </div>
+          <div class="nav-group">
+            <div class="grp-head"><span class="sec" style="padding: 0; flex: 1;">Running</span><span class="nav-trail tnum">8</span></div>
+            <div class="nav-row mi-row"><span class="mono tnum mi-ord">03</span><span class="ell" style="flex: 1;">Postgres 16 upgrade</span><span class="mi-state state-running">Running</span></div>
+            <div class="nav-row mi-row"><span class="mono tnum mi-ord">05</span><span class="ell" style="flex: 1;">Flaky auth tests</span><span class="mi-state state-running">Running</span></div>
+            <div class="nav-row mi-row"><span class="mono tnum mi-ord">06</span><span class="ell" style="flex: 1;">Invoice PDF rendering</span><span class="mi-state state-running">Running</span></div>
+            <div class="nav-row mi-row"><span class="mono tnum mi-ord">07</span><span class="ell" style="flex: 1;">Rate limiter on /search</span><span class="mi-state state-running">Running</span></div>
+            <div class="nav-row mi-row"><span class="mono tnum mi-ord">10</span><span class="ell" style="flex: 1;">Sentry noise reduction</span><span class="mi-state state-running">Running</span></div>
+            <div class="nav-row mi-row"><span class="mono tnum mi-ord">11</span><span class="ell" style="flex: 1;">Search index rebuild</span><span class="mi-state state-running">Running</span></div>
+            <div class="nav-row mi-row"><span class="mono tnum mi-ord">13</span><span class="ell" style="flex: 1;">Terraform drift on staging</span><span class="mi-state state-running">Running</span></div>
+            <div class="nav-row mi-row"><span class="mono tnum mi-ord">14</span><span class="ell" style="flex: 1;">Checkout A/B rollout</span><span class="mi-state state-running">Running</span></div>
+          </div>
+        </div>
+        <div class="nav-group">
+          <div class="nav-row"><span class="ell" style="flex: 1;">Archive</span><span class="nav-trail tnum">23</span></div>
+        </div>
+      </aside>
+      <section class="panel chat">
+        <div class="chat-head">
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <span class="chat-av"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.6 11.6 3.5 4.8 6.3 7.7 8 3.7 9.7 7.7 12.5 4.8 13.4 11.6Z"></path><path d="M4 13.5h8"></path></svg></span>
+            <div style="display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1;">
+              <div style="display: flex; align-items: center; gap: 7px; min-width: 0;">
+                <span class="chat-name">Halden</span>
+                <span class="chat-tag">Workspace leader</span>
+              </div>
+              <div class="chat-sub ell">Claude · claude-opus-5 · Running</div>
+            </div>
+            <span class="btn-text">Details</span>
+            <span class="btn-stop"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5.2" y="5.2" width="5.6" height="5.6" rx="1.3"></rect></svg></span>
+          </div>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <span class="seg" title="Lead++ gives this leader build access">
+              <span class="seg-item">Lead</span>
+              <span class="seg-item on">Lead++</span>
+            </span>
+          </div>
+        </div>
+        <div class="strip">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="5.8"></circle><path d="M8 4.9V8l2.1 1.6"></path></svg>
+          <span>Lead++ active <span class="tnum">14</span> min · <span class="mono tnum">11</span> Search index rebuild</span>
+        </div>
+        <div class="msgs">
+          <div class="msg-wrap me">
+            <div class="msg msg-user">Where are we? Anything need me?</div>
+            <div class="msg-time tnum">You · 09:41</div>
+          </div>
+          <div class="msg-wrap them">
+            <div class="msg msg-agent">Three things. 02 Stripe webhook retries is blocked on where idempotency keys live, Redis or Postgres. 09 Audit log export failed, tsc in packages/api. 01 Payments regression merged two hours ago and is still open.</div>
+            <div class="msg-time tnum">Halden · 09:41</div>
+          </div>
+          <div class="msg-wrap me">
+            <div class="msg msg-user">Redis, 24h TTL. And take 11 Search index rebuild yourself, the shards keep stalling.</div>
+            <div class="msg-time tnum">You · 09:43</div>
+          </div>
+          <div class="msg-sys">Halden switched to Lead++ · build access · mission 11 Search index rebuild</div>
+          <div class="msg-wrap them">
+            <div class="msg msg-agent">Answered Moss on 02. I have the rebuild: shard 3 is running, Finch is watching index lag. Leaving 09 with Sable until the build is green.</div>
+            <div class="msg-time tnum">Halden · 09:44</div>
+          </div>
+          <div class="msg-wrap me">
+            <div class="msg msg-user">Close 04 and 08 once checks pass. Don&#39;t close 01 until finance confirms the refunds.</div>
+            <div class="msg-time tnum">You · 09:55</div>
+          </div>
+        </div>
+        <div class="composer">
+          <div class="composer-input">Message the workspace leader</div>
+          <span class="send"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="#0E0F13" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 12.6V3.9"></path><path d="m4.4 7.5 3.6-3.6 3.6 3.6"></path></svg></span>
+        </div>
+      </section>
+</div>
+</x-dc>
+</body>
+</html>

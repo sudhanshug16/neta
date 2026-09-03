@@ -1,0 +1,315 @@
+{
+  "workspace": {
+    "name": "NoScrubs",
+    "remote": "github.com/noscrubs/app",
+    "machines": [
+      { "name": "mac-studio", "online": true },
+      { "name": "build-box", "online": false }
+    ],
+    "archivedCount": 23
+  },
+  "leader": {
+    "name": "Halden",
+    "provider": "Claude",
+    "model": "claude-opus-5",
+    "mode": "Lead++",
+    "modeActiveMinutes": 14,
+    "activeMissionOrdinal": "11",
+    "hue": 3
+  },
+  "missions": [
+    {
+      "ordinal": "01",
+      "name": "Payments regression",
+      "state": "Merged · not closed",
+      "startedMinutesAgo": 12910,
+      "age": "9d",
+      "branch": "mission/01-payments-regression",
+      "leadIsWorkspaceLeader": false,
+      "attention": "Merged 2h ago, not closed",
+      "lead": { "name": "Wren", "task": "Land the payments regression fix and backfill", "state": "Completed", "access": "read-write", "provider": "Claude", "model": "claude-opus-5", "startedMinutesAgo": 12905, "hue": 5 },
+      "agents": [
+        { "name": "Lark", "task": "Reproduce double charge on webhook retry", "state": "Completed", "access": "read-only", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 12880, "hue": 1 },
+        { "name": "Cleo", "task": "Bisect the regression to the June billing release", "state": "Completed", "access": "read-only", "provider": "Codex", "model": "gpt-5-codex", "startedMinutesAgo": 12700, "hue": 2 },
+        { "name": "Rafe", "task": "Add an idempotency key to charge creation", "state": "Completed", "access": "read-write", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 12100, "hue": 1 },
+        { "name": "Kai", "task": "Backfill duplicate charges from the last week", "state": "Completed", "access": "read-write", "provider": "Claude", "model": "claude-opus-5", "startedMinutesAgo": 11500, "hue": 4 },
+        { "name": "Xen", "task": "Write a regression test for repeated capture", "state": "Completed", "access": "read-write", "provider": "Codex", "model": "gpt-5-codex", "startedMinutesAgo": 10900, "hue": 0 },
+        { "name": "Hattie", "task": "Audit Stripe handlers for missing guards", "state": "Completed", "access": "read-only", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 10200, "hue": 4 },
+        { "name": "Poe", "task": "Refund the 41 affected customer charges", "state": "Completed", "access": "read-write", "provider": "Claude", "model": "claude-opus-5", "startedMinutesAgo": 9600, "hue": 1 },
+        { "name": "Zane", "task": "Add an alert for duplicate charge intents", "state": "Completed", "access": "read-write", "provider": "Codex", "model": "gpt-5-codex", "startedMinutesAgo": 8800, "hue": 1 },
+        { "name": "Gwen", "task": "Document the payment retry contract", "state": "Completed", "access": "read-write", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 8100, "hue": 2 },
+        { "name": "Lena", "task": "Verify ledger totals after the backfill", "state": "Completed", "access": "read-only", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 7400, "hue": 5 },
+        { "name": "Piet", "task": "Patch the reconciliation job for duplicates", "state": "Completed", "access": "read-write", "provider": "Codex", "model": "gpt-5-codex", "startedMinutesAgo": 6600, "hue": 5 },
+        { "name": "Uri", "task": "Review the charge_attempts migration", "state": "Completed", "access": "read-only", "provider": "Claude", "model": "claude-opus-5", "startedMinutesAgo": 5900, "hue": 1 },
+        { "name": "Vern", "task": "Check Sigma queries against the new schema", "state": "Completed", "access": "read-only", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 5200, "hue": 0 },
+        { "name": "Wil", "task": "Update the finance runbook for refunds", "state": "Completed", "access": "read-write", "provider": "Codex", "model": "gpt-5-codex", "startedMinutesAgo": 4400, "hue": 1 },
+        { "name": "Yara", "task": "Confirm no duplicates in the staging replay", "state": "Completed", "access": "read-only", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 3800, "hue": 0 },
+        { "name": "Zia", "task": "Close out the incident timeline", "state": "Completed", "access": "read-write", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 3100, "hue": 3 }
+      ]
+    },
+    {
+      "ordinal": "02",
+      "name": "Stripe webhook retries",
+      "state": "Blocked",
+      "startedMinutesAgo": 11240,
+      "age": "8d",
+      "branch": "mission/02-stripe-webhook-retries",
+      "leadIsWorkspaceLeader": false,
+      "attention": "Asked: keep idempotency keys in Redis or Postgres?",
+      "lead": { "name": "Otter", "task": "Make Stripe webhook delivery idempotent", "state": "Running", "access": "read-write", "provider": "Claude", "model": "claude-opus-5", "activity": "Reading src/payments/retry.ts", "startedMinutesAgo": 11235, "hue": 1 },
+      "agents": [
+        { "name": "Moss", "task": "Decide where idempotency keys are stored", "state": "Blocked", "access": "read-only", "provider": "Claude", "model": "claude-opus-5", "startedMinutesAgo": 640, "hue": 5 },
+        { "name": "Dune", "task": "Replay the failed webhook backlog", "state": "Running", "access": "read-only", "provider": "Codex", "model": "gpt-5-codex", "activity": "Running bun test test/webhooks", "startedMinutesAgo": 820, "hue": 5 },
+        { "name": "Sunna", "task": "Map every Stripe event we subscribe to", "state": "Completed", "access": "read-only", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 11200, "hue": 2 },
+        { "name": "Lior", "task": "Add exponential backoff to the retry queue", "state": "Completed", "access": "read-write", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 10600, "hue": 3 },
+        { "name": "Yael", "task": "Instrument webhook latency per event type", "state": "Completed", "access": "read-only", "provider": "Codex", "model": "gpt-5-codex", "startedMinutesAgo": 9900, "hue": 2 },
+        { "name": "Ivo", "task": "Dead-letter events after five failed attempts", "state": "Completed", "access": "read-write", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 9100, "hue": 1 },
+        { "name": "Reed", "task": "Verify signature checks on replayed events", "state": "Completed", "access": "read-only", "provider": "Claude", "model": "claude-opus-5", "startedMinutesAgo": 8300, "hue": 5 },
+        { "name": "Arlo", "task": "Split webhook handlers by event family", "state": "Completed", "access": "read-write", "provider": "Codex", "model": "gpt-5-codex", "startedMinutesAgo": 7400, "hue": 5 },
+        { "name": "Hugo", "task": "Add a fixture for out-of-order events", "state": "Completed", "access": "read-only", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 6500, "hue": 4 },
+        { "name": "Mace", "task": "Measure Redis memory under replay load", "state": "Completed", "access": "read-only", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 5600, "hue": 5 },
+        { "name": "Rory", "task": "Write the webhook retry runbook", "state": "Completed", "access": "read-write", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 4700, "hue": 3 }
+      ]
+    },
+    {
+      "ordinal": "03",
+      "name": "Postgres 16 upgrade",
+      "state": "Running",
+      "startedMinutesAgo": 8470,
+      "age": "6d",
+      "branch": "mission/03-postgres-16-upgrade",
+      "leadIsWorkspaceLeader": false,
+      "attention": null,
+      "lead": { "name": "Basil", "task": "Move production Postgres from 14 to 16", "state": "Running", "access": "read-only", "provider": "Claude", "model": "claude-opus-5", "activity": "Reading docs/runbooks/pg-cutover.md", "startedMinutesAgo": 8465, "hue": 0 },
+      "agents": [
+        { "name": "Ozzie", "task": "Rehearse the upgrade on a staging replica", "state": "Running", "access": "read-only", "provider": "Claude", "model": "claude-sonnet-5", "activity": "Running pg_upgrade --check on replica-2", "startedMinutesAgo": 410, "hue": 0 },
+        { "name": "Elm", "task": "Rewrite queries that use removed operators", "state": "Running", "access": "read-write", "provider": "Codex", "model": "gpt-5-codex", "activity": "Editing src/db/search-query.ts", "startedMinutesAgo": 260, "hue": 1 },
+        { "name": "Tove", "task": "Time the vacuum pass on the orders table", "state": "Running", "access": "read-only", "provider": "Claude", "model": "claude-sonnet-5", "activity": "Watching pg_stat_progress_vacuum", "startedMinutesAgo": 150, "hue": 3 },
+        { "name": "Maren", "task": "Inventory extensions that need rebuilding", "state": "Completed", "access": "read-only", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 8440, "hue": 0 },
+        { "name": "Zora", "task": "Pin the pgvector version for 16", "state": "Completed", "access": "read-write", "provider": "Codex", "model": "gpt-5-codex", "startedMinutesAgo": 7900, "hue": 3 },
+        { "name": "June", "task": "Diff planner output on the ten slowest queries", "state": "Completed", "access": "read-only", "provider": "Claude", "model": "claude-opus-5", "startedMinutesAgo": 7200, "hue": 3 },
+        { "name": "Sol", "task": "Update the connection pool for the new port", "state": "Completed", "access": "read-write", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 6400, "hue": 1 },
+        { "name": "Britt", "task": "Draft the cutover and rollback plan", "state": "Completed", "access": "read-only", "provider": "Claude", "model": "claude-opus-5", "startedMinutesAgo": 5500, "hue": 4 }
+      ]
+    },
+    {
+      "ordinal": "04",
+      "name": "Onboarding email copy",
+      "state": "Ready to close",
+      "startedMinutesAgo": 7105,
+      "age": "5d",
+      "branch": "mission/04-onboarding-email-copy",
+      "leadIsWorkspaceLeader": false,
+      "attention": null,
+      "lead": { "name": "Juniper", "task": "Rewrite the six-email onboarding sequence", "state": "Completed", "access": "read-write", "provider": "Claude", "model": "claude-opus-5", "startedMinutesAgo": 7100, "hue": 4 },
+      "agents": [
+        { "name": "Pell", "task": "Rewrite the welcome email for clarity", "state": "Completed", "access": "read-write", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 7080, "hue": 0 },
+        { "name": "Flint", "task": "Trim the day-three activation email", "state": "Completed", "access": "read-write", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 6600, "hue": 4 },
+        { "name": "Ansel", "task": "Align subject lines with the product voice", "state": "Completed", "access": "read-write", "provider": "Claude", "model": "claude-opus-5", "startedMinutesAgo": 6000, "hue": 2 },
+        { "name": "Noor", "task": "Check every link against the staging app", "state": "Completed", "access": "read-only", "provider": "Codex", "model": "gpt-5-codex", "startedMinutesAgo": 5300, "hue": 3 },
+        { "name": "Abel", "task": "Proofread the sequence in three email clients", "state": "Completed", "access": "read-only", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 4600, "hue": 3 }
+      ]
+    },
+    {
+      "ordinal": "05",
+      "name": "Flaky auth tests",
+      "state": "Running",
+      "startedMinutesAgo": 5690,
+      "age": "4d",
+      "branch": "mission/05-flaky-auth-tests",
+      "leadIsWorkspaceLeader": false,
+      "attention": null,
+      "lead": { "name": "Cobalt", "task": "Make the auth test suite deterministic", "state": "Running", "access": "read-only", "provider": "Claude", "model": "claude-opus-5", "activity": "Reading test/auth/refresh.test.ts", "startedMinutesAgo": 5685, "hue": 4 },
+      "agents": [
+        { "name": "Rune", "task": "Re-run the suite fifty times for flakes", "state": "Running", "access": "read-only", "provider": "Codex", "model": "gpt-5-codex", "activity": "Running bun test test/auth --repeat 50", "startedMinutesAgo": 330, "hue": 5 },
+        { "name": "Gale", "task": "Remove sleeps from the session helper", "state": "Running", "access": "read-write", "provider": "Claude", "model": "claude-sonnet-5", "activity": "Editing test/helpers/session.ts", "startedMinutesAgo": 210, "hue": 0 },
+        { "name": "Birdie", "task": "Collect two weeks of CI failure logs", "state": "Completed", "access": "read-only", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 5660, "hue": 4 },
+        { "name": "Oda", "task": "Isolate the clock drift in token expiry", "state": "Completed", "access": "read-only", "provider": "Claude", "model": "claude-opus-5", "startedMinutesAgo": 5200, "hue": 3 },
+        { "name": "Bo", "task": "Freeze time in the refresh token tests", "state": "Completed", "access": "read-write", "provider": "Codex", "model": "gpt-5-codex", "startedMinutesAgo": 4700, "hue": 0 },
+        { "name": "Koa", "task": "Seed a deterministic user fixture", "state": "Completed", "access": "read-write", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 4100, "hue": 4 },
+        { "name": "Tam", "task": "Drop the shared Redis between test files", "state": "Completed", "access": "read-write", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 3500, "hue": 5 },
+        { "name": "Cy", "task": "Fix the race in the logout redirect test", "state": "Completed", "access": "read-write", "provider": "Codex", "model": "gpt-5-codex", "startedMinutesAgo": 2900, "hue": 1 },
+        { "name": "Isla", "task": "Split the auth suite into four shards", "state": "Completed", "access": "read-write", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 2300, "hue": 0 },
+        { "name": "Nico", "task": "Quarantine the two worst offenders", "state": "Completed", "access": "read-write", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 1700, "hue": 4 },
+        { "name": "Sia", "task": "Report flake rate before and after", "state": "Completed", "access": "read-only", "provider": "Claude", "model": "claude-opus-5", "startedMinutesAgo": 1100, "hue": 2 }
+      ]
+    },
+    {
+      "ordinal": "06",
+      "name": "Invoice PDF rendering",
+      "state": "Running",
+      "startedMinutesAgo": 4215,
+      "age": "3d",
+      "branch": "mission/06-invoice-pdf-rendering",
+      "leadIsWorkspaceLeader": false,
+      "attention": null,
+      "lead": { "name": "Fig", "task": "Replace the invoice PDF renderer", "state": "Running", "access": "read-only", "provider": "Claude", "model": "claude-opus-5", "activity": "Reading src/invoices/pdf/renderer.ts", "startedMinutesAgo": 4210, "hue": 5 },
+      "agents": [
+        { "name": "Sorrel", "task": "Fix line wrapping on long item names", "state": "Running", "access": "read-write", "provider": "Claude", "model": "claude-sonnet-5", "activity": "Editing src/invoices/pdf/layout.ts", "startedMinutesAgo": 290, "hue": 2 },
+        { "name": "Hollis", "task": "Embed the invoice font subset", "state": "Running", "access": "read-only", "provider": "Codex", "model": "gpt-5-codex", "activity": "Running bun run render:invoice-samples", "startedMinutesAgo": 175, "hue": 2 },
+        { "name": "Corin", "task": "Compare output against the old renderer", "state": "Completed", "access": "read-only", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 4190, "hue": 0 },
+        { "name": "Pim", "task": "Add golden-file tests for three locales", "state": "Completed", "access": "read-write", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 3600, "hue": 3 }
+      ]
+    },
+    {
+      "ordinal": "07",
+      "name": "Rate limiter on /search",
+      "state": "Running",
+      "startedMinutesAgo": 2930,
+      "age": "2d",
+      "branch": "mission/07-rate-limiter-on-search",
+      "leadIsWorkspaceLeader": false,
+      "attention": null,
+      "lead": { "name": "Marlowe", "task": "Rate limit the public /search endpoint", "state": "Running", "access": "read-only", "provider": "Claude", "model": "claude-opus-5", "activity": "Reading src/api/routes/search.ts", "startedMinutesAgo": 2925, "hue": 4 },
+      "agents": [
+        { "name": "Thane", "task": "Load test /search at the new limits", "state": "Running", "access": "read-only", "provider": "Codex", "model": "gpt-5-codex", "activity": "Running k6 run load/search.js", "startedMinutesAgo": 240, "hue": 5 },
+        { "name": "Iris", "task": "Return Retry-After on throttled responses", "state": "Running", "access": "read-write", "provider": "Claude", "model": "claude-sonnet-5", "activity": "Editing src/api/middleware/limit.ts", "startedMinutesAgo": 130, "hue": 2 },
+        { "name": "Delphi", "task": "Chart current /search traffic by API key", "state": "Completed", "access": "read-only", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 2900, "hue": 3 },
+        { "name": "Ren", "task": "Pick the token bucket size and refill rate", "state": "Completed", "access": "read-only", "provider": "Claude", "model": "claude-opus-5", "startedMinutesAgo": 2600, "hue": 2 },
+        { "name": "Cass", "task": "Store counters in Redis with a sliding window", "state": "Completed", "access": "read-write", "provider": "Codex", "model": "gpt-5-codex", "startedMinutesAgo": 2300, "hue": 5 },
+        { "name": "Lin", "task": "Exempt internal service accounts from limits", "state": "Completed", "access": "read-write", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 2000, "hue": 0 },
+        { "name": "Ulf", "task": "Add limit headers to every search response", "state": "Completed", "access": "read-write", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 1700, "hue": 4 },
+        { "name": "Dara", "task": "Write integration tests for burst traffic", "state": "Completed", "access": "read-write", "provider": "Codex", "model": "gpt-5-codex", "startedMinutesAgo": 1400, "hue": 5 },
+        { "name": "Jett", "task": "Add a dashboard panel for throttled requests", "state": "Completed", "access": "read-write", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 1100, "hue": 0 },
+        { "name": "Opal", "task": "Document the limits in the public API docs", "state": "Completed", "access": "read-write", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 820, "hue": 3 },
+        { "name": "Tess", "task": "Roll the limiter out behind a flag", "state": "Completed", "access": "read-write", "provider": "Claude", "model": "claude-opus-5", "startedMinutesAgo": 540, "hue": 0 }
+      ]
+    },
+    {
+      "ordinal": "08",
+      "name": "Remove legacy feature flags",
+      "state": "Ready to close",
+      "startedMinutesAgo": 1505,
+      "age": "1d",
+      "branch": "mission/08-remove-legacy-feature-flags",
+      "leadIsWorkspaceLeader": false,
+      "attention": null,
+      "lead": { "name": "Pico", "task": "Retire twelve stale feature flags", "state": "Completed", "access": "read-write", "provider": "Claude", "model": "claude-opus-5", "startedMinutesAgo": 1500, "hue": 2 },
+      "agents": [
+        { "name": "Ulla", "task": "List every flag older than six months", "state": "Completed", "access": "read-only", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 1480, "hue": 5 },
+        { "name": "Jory", "task": "Delete the twelve fully rolled out flags", "state": "Completed", "access": "read-write", "provider": "Codex", "model": "gpt-5-codex", "startedMinutesAgo": 1350, "hue": 1 },
+        { "name": "Edda", "task": "Collapse the dead branches behind them", "state": "Completed", "access": "read-write", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 1200, "hue": 3 },
+        { "name": "Saga", "task": "Remove the flag rows from the database", "state": "Completed", "access": "read-write", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 1050, "hue": 3 },
+        { "name": "Dov", "task": "Update the flag list on the admin page", "state": "Completed", "access": "read-write", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 900, "hue": 4 },
+        { "name": "Milo", "task": "Run the full suite after each removal", "state": "Completed", "access": "read-only", "provider": "Codex", "model": "gpt-5-codex", "startedMinutesAgo": 740, "hue": 4 },
+        { "name": "Vale", "task": "Check no client still reads the old flags", "state": "Completed", "access": "read-only", "provider": "Claude", "model": "claude-opus-5", "startedMinutesAgo": 590, "hue": 3 }
+      ]
+    },
+    {
+      "ordinal": "09",
+      "name": "Audit log export",
+      "state": "Failed",
+      "startedMinutesAgo": 1140,
+      "age": "19h",
+      "branch": "mission/09-audit-log-export",
+      "leadIsWorkspaceLeader": false,
+      "attention": "tsc failed in packages/api",
+      "lead": { "name": "Sable", "task": "Ship a signed audit log export", "state": "Running", "access": "read-only", "provider": "Claude", "model": "claude-opus-5", "activity": "Reading packages/api/src/audit/export.ts", "startedMinutesAgo": 1135, "hue": 4 },
+      "agents": [
+        { "name": "Vesper", "task": "Stream audit rows into a signed CSV", "state": "Failed", "access": "read-write", "provider": "Codex", "model": "gpt-5-codex", "startedMinutesAgo": 300, "hue": 4 },
+        { "name": "Kit", "task": "Define the export schema and retention", "state": "Completed", "access": "read-only", "provider": "Claude", "model": "claude-opus-5", "startedMinutesAgo": 1115, "hue": 5 },
+        { "name": "Faro", "task": "Add a rate limit to the export endpoint", "state": "Completed", "access": "read-write", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 900, "hue": 1 }
+      ]
+    },
+    {
+      "ordinal": "10",
+      "name": "Sentry noise reduction",
+      "state": "Running",
+      "startedMinutesAgo": 655,
+      "age": "11h",
+      "branch": "mission/10-sentry-noise-reduction",
+      "leadIsWorkspaceLeader": false,
+      "attention": null,
+      "lead": { "name": "Ida", "task": "Cut Sentry issue volume by half", "state": "Running", "access": "read-only", "provider": "Claude", "model": "claude-opus-5", "activity": "Reading docs/observability/sentry.md", "startedMinutesAgo": 650, "hue": 3 },
+      "agents": [
+        { "name": "Wick", "task": "Group the top twenty duplicate issues", "state": "Running", "access": "read-only", "provider": "Claude", "model": "claude-sonnet-5", "activity": "Reading sentry/rules/grouping.json", "startedMinutesAgo": 210, "hue": 5 },
+        { "name": "Lyle", "task": "Filter bot traffic out of the browser SDK", "state": "Running", "access": "read-only", "provider": "Codex", "model": "gpt-5-codex", "activity": "Reading apps/web/src/sentry.ts", "startedMinutesAgo": 165, "hue": 1 },
+        { "name": "Greer", "task": "Drop health check errors at ingest", "state": "Running", "access": "read-only", "provider": "Claude", "model": "claude-sonnet-5", "activity": "Running bun test test/observability", "startedMinutesAgo": 120, "hue": 0 },
+        { "name": "Teo", "task": "Set sample rates per environment", "state": "Running", "access": "read-write", "provider": "Claude", "model": "claude-sonnet-5", "activity": "Editing config/sentry.server.ts", "startedMinutesAgo": 85, "hue": 1 },
+        { "name": "Esme", "task": "Count issues by fingerprint for a week", "state": "Completed", "access": "read-only", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 630, "hue": 5 },
+        { "name": "Nia", "task": "Tag releases so regressions stay visible", "state": "Completed", "access": "read-write", "provider": "Codex", "model": "gpt-5-codex", "startedMinutesAgo": 560, "hue": 5 },
+        { "name": "Wes", "task": "Mute the three known third-party errors", "state": "Completed", "access": "read-write", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 480, "hue": 2 },
+        { "name": "Eli", "task": "Fix the unhandled rejection in the uploader", "state": "Completed", "access": "read-write", "provider": "Claude", "model": "claude-opus-5", "startedMinutesAgo": 400, "hue": 3 },
+        { "name": "Kip", "task": "Route payment errors to the billing channel", "state": "Completed", "access": "read-write", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 320, "hue": 3 }
+      ]
+    },
+    {
+      "ordinal": "11",
+      "name": "Search index rebuild",
+      "state": "Running",
+      "startedMinutesAgo": 372,
+      "age": "6h",
+      "branch": "mission/11-search-index-rebuild",
+      "leadIsWorkspaceLeader": true,
+      "attention": null,
+      "agents": [
+        { "name": "Yarrow", "task": "Rebuild the product index from Postgres", "state": "Running", "access": "read-only", "provider": "Claude", "model": "claude-sonnet-5", "activity": "Running bun run index:rebuild --shard 3", "startedMinutesAgo": 96, "hue": 5 },
+        { "name": "Mira", "task": "Backfill embeddings for archived listings", "state": "Running", "access": "read-only", "provider": "Codex", "model": "gpt-5-codex", "activity": "Reading src/search/embed.ts", "startedMinutesAgo": 88, "hue": 2 },
+        { "name": "Hale", "task": "Compare relevance against the live index", "state": "Running", "access": "read-only", "provider": "Claude", "model": "claude-opus-5", "activity": "Running scripts/relevance-diff.ts", "startedMinutesAgo": 62, "hue": 3 },
+        { "name": "Uma", "task": "Keep writes flowing during the rebuild", "state": "Running", "access": "read-only", "provider": "Claude", "model": "claude-sonnet-5", "activity": "Reading src/search/dual-write.ts", "startedMinutesAgo": 140, "hue": 4 },
+        { "name": "Finch", "task": "Watch index lag and memory on the box", "state": "Running", "access": "read-only", "provider": "Claude", "model": "claude-sonnet-5", "activity": "Watching opensearch _cat/indices", "startedMinutesAgo": 44, "hue": 1 },
+        { "name": "Oren", "task": "Snapshot the current index for rollback", "state": "Completed", "access": "read-only", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 360, "hue": 1 },
+        { "name": "Yuki", "task": "Version the mapping for the new analyzer", "state": "Completed", "access": "read-only", "provider": "Codex", "model": "gpt-5-codex", "startedMinutesAgo": 310, "hue": 5 },
+        { "name": "Fenn", "task": "Estimate the rebuild cost and duration", "state": "Completed", "access": "read-only", "provider": "Claude", "model": "claude-opus-5", "startedMinutesAgo": 250, "hue": 0 }
+      ]
+    },
+    {
+      "ordinal": "12",
+      "name": "Refund flow edge cases",
+      "state": "Blocked",
+      "startedMinutesAgo": 188,
+      "age": "3h",
+      "branch": "mission/12-refund-flow-edge-cases",
+      "leadIsWorkspaceLeader": false,
+      "attention": "Asked: refund partial captures or void the charge?",
+      "lead": { "name": "Quill", "task": "Close the gaps in the refund flow", "state": "Running", "access": "read-only", "provider": "Claude", "model": "claude-opus-5", "activity": "Reading src/payments/refund.ts", "startedMinutesAgo": 184, "hue": 2 },
+      "agents": [
+        { "name": "Zed", "task": "Handle refunds on partially captured charges", "state": "Blocked", "access": "read-write", "provider": "Claude", "model": "claude-opus-5", "startedMinutesAgo": 55, "hue": 4 },
+        { "name": "Nell", "task": "Reproduce the refund failure on disputes", "state": "Running", "access": "read-only", "provider": "Codex", "model": "gpt-5-codex", "activity": "Running bun test test/refunds", "startedMinutesAgo": 40, "hue": 0 },
+        { "name": "Inga", "task": "Enumerate the refund states we accept", "state": "Completed", "access": "read-only", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 180, "hue": 2 },
+        { "name": "Vida", "task": "Add fixtures for multi-currency refunds", "state": "Completed", "access": "read-write", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 150, "hue": 3 },
+        { "name": "Gus", "task": "Log every refund decision with a reason", "state": "Completed", "access": "read-write", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 110, "hue": 2 }
+      ]
+    },
+    {
+      "ordinal": "13",
+      "name": "Terraform drift on staging",
+      "state": "Running",
+      "startedMinutesAgo": 126,
+      "age": "2h",
+      "branch": "mission/13-terraform-drift-on-staging",
+      "leadIsWorkspaceLeader": false,
+      "attention": null,
+      "lead": { "name": "Tamsin", "task": "Bring staging back under Terraform", "state": "Running", "access": "read-only", "provider": "Claude", "model": "claude-opus-5", "activity": "Reading infra/staging/main.tf", "startedMinutesAgo": 122, "hue": 1 },
+      "agents": [
+        { "name": "Ash", "task": "Diff staging state against the modules", "state": "Running", "access": "read-only", "provider": "Claude", "model": "claude-sonnet-5", "activity": "Running terraform plan -refresh-only", "startedMinutesAgo": 118, "hue": 5 },
+        { "name": "Orrin", "task": "Import the hand-made security groups", "state": "Running", "access": "read-write", "provider": "Codex", "model": "gpt-5-codex", "activity": "Editing infra/staging/network.tf", "startedMinutesAgo": 92, "hue": 5 },
+        { "name": "Jules", "task": "Check provider versions across environments", "state": "Running", "access": "read-only", "provider": "Claude", "model": "claude-sonnet-5", "activity": "Reading infra/versions.tf", "startedMinutesAgo": 70, "hue": 4 },
+        { "name": "Wynn", "task": "List every resource changed outside Terraform", "state": "Completed", "access": "read-only", "provider": "Claude", "model": "claude-sonnet-5", "startedMinutesAgo": 105, "hue": 3 }
+      ]
+    },
+    {
+      "ordinal": "14",
+      "name": "Checkout A/B rollout",
+      "state": "Running",
+      "startedMinutesAgo": 25,
+      "age": "25m",
+      "branch": "mission/14-checkout-ab-rollout",
+      "leadIsWorkspaceLeader": false,
+      "attention": null,
+      "lead": { "name": "Ember", "task": "Roll out the checkout A/B test", "state": "Running", "access": "read-only", "provider": "Claude", "model": "claude-opus-5", "activity": "Reading apps/web/src/checkout/page.tsx", "startedMinutesAgo": 24, "hue": 0 },
+      "agents": [
+        { "name": "Bram", "task": "Wire the experiment into the checkout page", "state": "Running", "access": "read-write", "provider": "Claude", "model": "claude-sonnet-5", "activity": "Editing apps/web/src/checkout/Experiment.tsx", "startedMinutesAgo": 21, "hue": 5 },
+        { "name": "Petra", "task": "Define the conversion metric and guardrails", "state": "Running", "access": "read-only", "provider": "Codex", "model": "gpt-5-codex", "activity": "Reading docs/experiments/checkout.md", "startedMinutesAgo": 18, "hue": 5 }
+      ]
+    }
+  ],
+  "leaderTranscript": [
+    { "author": "user", "text": "Where are we? Anything need me?", "time": "09:41" },
+    { "author": "agent", "text": "Three things. 02 Stripe webhook retries is blocked on where idempotency keys live, Redis or Postgres. 09 Audit log export failed, tsc in packages/api. 01 Payments regression merged two hours ago and is still open.", "time": "09:41" },
+    { "author": "user", "text": "Redis, 24h TTL. And take 11 Search index rebuild yourself, the shards keep stalling.", "time": "09:43" },
+    { "author": "system", "text": "Halden switched to Lead++ · build access · mission 11 Search index rebuild", "time": "09:43" },
+    { "author": "agent", "text": "Answered Moss on 02. I have the rebuild: shard 3 is running, Finch is watching index lag. Leaving 09 with Sable until the build is green.", "time": "09:44" },
+    { "author": "user", "text": "Close 04 and 08 once checks pass. Don't close 01 until finance confirms the refunds.", "time": "09:55" }
+  ]
+}

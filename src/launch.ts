@@ -57,6 +57,7 @@ import {
 	StartupCancelled,
 } from "./startup/preflight.ts";
 import { TIERS, type Tier } from "./types.ts";
+import { detectWorkspaceBinding, writeWorkspaceBinding } from "./workspace.ts";
 
 export interface LaunchOptions {
 	cwd: string;
@@ -257,6 +258,15 @@ export async function launchLeader(options: LaunchOptions): Promise<number> {
 					`No leader was started. Fix that directory (or point NETA_DIR elsewhere) and run \`${APP_NAME}\` again.`,
 			);
 		}
+		const workspaceBinding = await detectWorkspaceBinding(cwd, logicalSessionId);
+		if (workspaceBinding) {
+			try {
+				writeWorkspaceBinding(workspaceBinding, agentDir);
+			} catch {
+				// This is a Worktrunk restoration hint, not resumable semantic state.
+				// The checkpoint above remains the authority and launch may continue.
+			}
+		}
 		return await runLeaderSession({
 			cwd,
 			agentDir,
@@ -334,6 +344,15 @@ export async function resumeLeader(options: ResumeOptions): Promise<number> {
 			// checkpoint written before session tiers existed reads as every tier,
 			// which is what those sessions actually ran with.
 			const sessionTiers = checkpoint.sessionTiers ?? [...TIERS];
+			const workspaceBinding = await detectWorkspaceBinding(cwd, checkpoint.id);
+			if (workspaceBinding) {
+				try {
+					writeWorkspaceBinding(workspaceBinding, agentDir);
+				} catch {
+					// Optional Worktrunk restoration metadata does not weaken exact
+					// checkpoint resume, which is already fully established here.
+				}
+			}
 			write(
 				`${APP_NAME}: resuming ${checkpoint.id} in ${cwd} · ${backend.name} conversation ${conversationId} · ` +
 					`tiers ${sessionTiers.join(", ")} · saved by Neta ${checkpoint.appVersion}, now ${VERSION}`,

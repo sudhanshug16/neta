@@ -264,6 +264,12 @@ neta kill rw2              stop it
 neta --backends            which agent CLIs are installed
 ```
 
+Neta Desktop presents the same data as Active and Archive sections. Archived
+sessions are read-only until an explicit resume reopens their exact leader ACP
+conversation. For Git worktrees, Neta records a Worktrunk binding and can ask
+`wt switch` to restore an exact removed worktree before resuming; Worktrunk
+continues to own worktree naming, hooks, merging, and removal.
+
 ### Reopening a session after quitting or upgrading
 
 A closed session is not lost. Neta keeps a durable checkpoint per session —

@@ -34,6 +34,8 @@
  *           the Fable model Neta's policy forbids, so a test can prove which
  *           model a Claude tier actually ran on
  *   --missing-sonnet - drops "sonnet" from that list
+ *   --launch-mcp - launches session/new MCP servers for desktop-host tests
+ *   --uuid-session - uses a capture-compatible UUID session id
  */
 
 import { spawn } from "node:child_process";
@@ -55,6 +57,8 @@ const sessionStore = sessionStoreIndex === -1 ? undefined : process.argv[session
 // A Claude-shaped backend whose own default is the model Neta must never run.
 const claudeShaped = process.argv.includes("--claude-fable-default");
 const missingSonnet = process.argv.includes("--missing-sonnet");
+const launchMcp = process.argv.includes("--launch-mcp");
+const uuidSession = process.argv.includes("--uuid-session");
 const promptMarkerIndex = process.argv.indexOf("--prompt-marker");
 const promptMarker = promptMarkerIndex === -1 ? undefined : process.argv[promptMarkerIndex + 1];
 const barrierFileIndex = process.argv.indexOf("--barrier-file");
@@ -73,6 +77,23 @@ let counter = 0;
 let mcpServers = [];
 const selectedConfig = new Map();
 let selectedLegacyModel = "test-model";
+const mcpChildren = [];
+
+function launchMcpServers(servers) {
+	if (!launchMcp) return;
+	for (const server of servers) {
+		const env = Object.fromEntries((server.env ?? []).map((entry) => [entry.name, entry.value]));
+		const child = spawn(server.command, server.args ?? [], {
+			env: { ...process.env, ...env },
+			stdio: ["pipe", "ignore", "ignore"],
+		});
+		mcpChildren.push(child);
+	}
+}
+
+process.on("exit", () => {
+	for (const child of mcpChildren) child.kill("SIGTERM");
+});
 
 function persist() {
 	if (sessionStore) writeFileSync(sessionStore, JSON.stringify(stored), "utf-8");
@@ -397,7 +418,11 @@ acp.agent({ name: "fake-acp-agent" })
 	}))
 	.onRequest("session/new", (ctx) => {
 		mcpServers = ctx.params.mcpServers ?? [];
-		const sessionId = `s${++stored.counter}`;
+		launchMcpServers(mcpServers);
+		const nextSession = ++stored.counter;
+		const sessionId = uuidSession
+			? `00000000-0000-4000-8000-${String(nextSession).padStart(12, "0")}`
+			: `s${nextSession}`;
 		sessions.add(sessionId);
 		stored.sessions[sessionId] = {
 			cwd: ctx.params.cwd,
@@ -433,6 +458,7 @@ acp.agent({ name: "fake-acp-agent" })
 		if (!saved) throw new Error(`unknown session ${ctx.params.sessionId}`);
 		if (saved.cwd !== ctx.params.cwd) throw new Error("resume cwd mismatch");
 		mcpServers = ctx.params.mcpServers ?? [];
+		launchMcpServers(mcpServers);
 		saved.mcpServers = mcpServers;
 		selectedConfig.set(ctx.params.sessionId, { model: saved.model, thoughtLevel: saved.thoughtLevel });
 		persist();

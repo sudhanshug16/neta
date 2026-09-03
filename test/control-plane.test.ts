@@ -22,6 +22,38 @@ import { waitFor } from "./helpers.ts";
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const run = promisify(execFile);
 
+async function desktopRequest(agentDir: string, request: Record<string, unknown>): Promise<Record<string, unknown>> {
+	return new Promise((resolve, reject) => {
+		const child = spawn(process.execPath, [CLI, "desktop-bridge"], {
+			env: { ...process.env, NETA_DIR: agentDir },
+			stdio: ["pipe", "pipe", "pipe"],
+		});
+		let stdout = "";
+		let stderr = "";
+		child.stdout.setEncoding("utf-8");
+		child.stderr.setEncoding("utf-8");
+		child.stdout.on("data", (chunk) => {
+			stdout += chunk;
+		});
+		child.stderr.on("data", (chunk) => {
+			stderr += chunk;
+		});
+		child.on("error", reject);
+		child.on("close", (code) => {
+			if (code !== 0) {
+				reject(new Error(`desktop bridge exited ${code}: ${stderr}`));
+				return;
+			}
+			try {
+				resolve(JSON.parse(stdout.trim()) as Record<string, unknown>);
+			} catch (error) {
+				reject(error);
+			}
+		});
+		child.stdin.end(`${JSON.stringify(request)}\n`);
+	});
+}
+
 describe("neta mcp", () => {
 	let agentDir: string;
 	let client: Client;
@@ -119,6 +151,17 @@ describe("neta mcp", () => {
 		expect(sessions[0].id).toBe("smoke");
 		expect(sessions[0].leader).toBe("claude");
 		expect(existsSync(sessions[0].socket)).toBe(true);
+	});
+
+	it("feeds authenticated live actor state to the desktop bridge without exposing the session token", async () => {
+		const response = await desktopRequest(agentDir, { id: "desktop-list", command: "list" });
+		const data = response.data as { projects: Array<{ id: string; owned: boolean; agents: Array<{ id: string }> }> };
+
+		expect(response.ok).toBe(true);
+		expect(data.projects).toHaveLength(1);
+		expect(data.projects[0]).toMatchObject({ id: "smoke", owned: false });
+		expect(data.projects[0].agents[0]).toMatchObject({ id: "leader" });
+		expect(JSON.stringify(response)).not.toContain(listSessions(agentDir)[0].token);
 	});
 
 	it("persists the launcher's mux session name before releasing its launch lock", async () => {
