@@ -46,6 +46,7 @@
 		"typecheck": "tsc --noEmit",
 		"check": "biome check --write --error-on-warnings . && bun run typecheck",
 		"test": "bun test",
+		"smoke": "bash scripts/smoke.sh",
 		"prepublishOnly": "bun run clean && bun run check && bun test && bun run build"
 	},
 	"dependencies": {
