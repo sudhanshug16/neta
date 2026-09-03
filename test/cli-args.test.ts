@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { main, parse, readVersion } from "../src/cli/main.ts";
+import { main, parse } from "../src/cli/main.ts";
+import { netaVersion } from "../src/version.ts";
 
 function commandOf(argv: string[]): Exclude<ReturnType<typeof parse>, { usage: string }> {
 	const parsed = parse(argv);
@@ -170,11 +171,11 @@ describe("cli usage errors", () => {
 });
 
 describe("cli version", () => {
-	test("readVersion equals package.json", () => {
+	test("netaVersion equals package.json", () => {
 		const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
 			version: string;
 		};
-		expect(readVersion()).toBe(pkg.version);
+		expect(netaVersion()).toBe(pkg.version);
 	});
 
 	test("main version returns 0 and prints only the version", async () => {
@@ -189,7 +190,7 @@ describe("cli version", () => {
 		} finally {
 			process.stdout.write = original;
 		}
-		expect(writes.join("")).toBe(`${readVersion()}\n`);
+		expect(writes.join("")).toBe(`${netaVersion()}\n`);
 	});
 
 	test("main usage returns 1 and names the problem on stderr", async () => {

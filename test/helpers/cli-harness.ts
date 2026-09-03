@@ -52,7 +52,7 @@ async function buildBundleOnce(): Promise<string> {
 		}
 		const built = join(outdir, "main.js");
 		await chmod(built, 0o755);
-		// `readVersion()` walks up from the bundle to the first
+		// `netaVersion()` walks up from the bundle to the first
 		// `@intervene/neta` package.json; a tmpdir build has none above
 		// it, so the repo's own rides along, the way the installed
 		// package carries one above `dist/main.js`.

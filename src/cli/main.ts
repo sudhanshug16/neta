@@ -3,9 +3,7 @@
 // Every command is a thin client of the Node over its socket; this module owns
 // the command line shape only. Later tasks fill in the handlers behind the
 // dispatch table. Exit codes: 0 ok, 1 usage, 2 node unreachable, 3 refused.
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { netaVersion } from "../version.ts";
 import { attach } from "./chat.ts";
 import { CliError, NodeClient } from "./client.ts";
 import { eventsCommand } from "./commands/events.ts";
@@ -244,29 +242,8 @@ export function parse(argv: string[]): Command | Usage {
 	}
 }
 
-export function readVersion(): string {
-	let dir = dirname(fileURLToPath(import.meta.url));
-	while (true) {
-		try {
-			const data: unknown = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
-			if (typeof data === "object" && data !== null) {
-				const pkg = data as { name?: unknown; version?: unknown };
-				if (pkg.name === "@intervene/neta") {
-					if (typeof pkg.version === "string" && pkg.version.length > 0) return pkg.version;
-					throw new Error("neta: the @intervene/neta package.json has no version");
-				}
-			}
-		} catch (err) {
-			if (err instanceof Error && err.message.startsWith("neta: ")) throw err;
-		}
-		const parent = dirname(dir);
-		if (parent === dir) throw new Error("neta: cannot find the @intervene/neta package.json");
-		dir = parent;
-	}
-}
-
 function printVersion(): number {
-	process.stdout.write(`${readVersion()}\n`);
+	process.stdout.write(`${netaVersion()}\n`);
 	return 0;
 }
 

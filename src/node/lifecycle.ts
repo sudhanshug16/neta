@@ -23,7 +23,6 @@
 //   the port to assemble backward and turn-anchored windows.
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
-import packageJson from "../../package.json" with { type: "json" };
 import { closeAll, SessionTable } from "../acp/lifecycle.ts";
 import { NETA_MCP_SERVER_NAME, netaMcpServer } from "../acp/mcp.ts";
 import type { AcpSession, SessionEvent } from "../acp/session.ts";
@@ -47,6 +46,7 @@ import type { ConversationStore } from "../store/conversations.ts";
 import { createMutex, readJson, writeJsonAtomic } from "../store/files.ts";
 import { openStore, type Store } from "../store/index.ts";
 import { decodeWorkspaceId, paths } from "../store/paths.ts";
+import { netaVersion } from "../version.ts";
 import { conversationHandlers, wireTurnStream } from "./handlers-conversation.ts";
 import { registryHandlers } from "./handlers-registry.ts";
 import {
@@ -62,8 +62,6 @@ import { type ConversationTailResult, NodeError, PROTOCOL_VERSION, type TurnNoti
 import { createServer, type Hub, type NodeAcp, type NodeContext, type NodeHandlers, type NodeStore } from "./server.ts";
 import { snapshotHandlers } from "./snapshot.ts";
 import { workspaceHandlers } from "./workspace-open.ts";
-
-const NODE_VERSION: string = packageJson.version;
 
 export interface AdaptedStore extends NodeStore {
 	refreshMissions(workspaceId?: WorkspaceId): Promise<void>;
@@ -542,7 +540,7 @@ export async function startNode(o?: { store?: NodeStore; acp?: NodeAcp }): Promi
 			})();
 			return stopping;
 		};
-		const ctx: Omit<NodeContext, "hub"> = { store: storePort, acp: acpPort, nodeVersion: NODE_VERSION, stop };
+		const ctx: Omit<NodeContext, "hub"> = { store: storePort, acp: acpPort, nodeVersion: netaVersion(), stop };
 		const server = await createServer({ socketPath, token, handlers: allHandlers, ctx });
 		hub = server.hub;
 		wireTurnStream({ ...ctx, hub: server.hub });

@@ -4,9 +4,9 @@
 // the socket with the actor's token. Both sides speak NDJSON JSON-RPC 2.0.
 import { connect, type Socket } from "node:net";
 import type { Readable, Writable } from "node:stream";
-import packageJson from "../../package.json" with { type: "json" };
 import { readDescriptor } from "../node/lockfile.ts";
 import { decodeLines, encodeLine, PROTOCOL_VERSION } from "../node/protocol.ts";
+import { netaVersion } from "../version.ts";
 
 export interface ProxyOptions {
 	actorId: string;
@@ -185,7 +185,7 @@ export async function runProxy(options: ProxyOptions): Promise<number> {
 			send(
 				ok(id, {
 					protocolVersion: typeof params.protocolVersion === "string" ? params.protocolVersion : "2024-11-05",
-					serverInfo: { name: "neta", version: (packageJson as { version: string }).version },
+					serverInfo: { name: "neta", version: netaVersion() },
 					capabilities: { tools: {} },
 				}),
 			);
