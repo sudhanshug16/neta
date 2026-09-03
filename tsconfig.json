@@ -3,8 +3,8 @@
 	// exists so `bun run typecheck` and your editor agree on what the rules are,
 	// since Bun itself does not check types.
 	"compilerOptions": {
-		"target": "ES2022",
-		"lib": ["ES2022"],
+		"target": "ES2023",
+		"lib": ["ES2023"],
 		"module": "NodeNext",
 		"moduleResolution": "NodeNext",
 		"types": ["node", "bun"],

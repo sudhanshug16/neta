@@ -17,13 +17,6 @@
 		"lineWidth": 120
 	},
 	"files": {
-		"includes": [
-			"src/**/*.ts",
-			"test/**/*.ts",
-			"test/**/*.mjs",
-			"!**/node_modules/**/*",
-			"!dist/**/*",
-			"!test/fixtures/neta-old-runtime.mjs"
-		]
+		"includes": ["src/**/*.ts", "test/**/*.ts", "test/**/*.mjs", "!**/node_modules/**/*", "!dist/**/*"]
 	}
 }
