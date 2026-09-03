@@ -50,7 +50,7 @@ public struct RootView: View {
 						.position(x: navigator.midX, y: navigator.midY)
 				}
 				if let chat = layout.chat {
-					ChatPlaceholder()
+					ChatPanel(client: client, store: store, shell: shell, windowWidth: proxy.size.width)
 						.netaGlass()
 						.frame(width: chat.width, height: chat.height)
 						.position(x: chat.midX, y: chat.midY)
