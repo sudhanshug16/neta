@@ -63,6 +63,12 @@ public enum ZoomStep: Sendable {
 		}
 	}
 
+	/// T10.9: adopts a lens staged elsewhere (the `NowState` jump request,
+	/// which keeps the focus duration while re-anchoring the live edge).
+	public func replaceLens(_ lens: TimeLens) {
+		self.lens = lens
+	}
+
 	/// ⌘0: the focus window becomes all open missions via
 	/// `index.earliestOpen`, and the vertical pan resets.
 	public func fit(index: SpineIndex, viewport: CGRect, now: Date) {

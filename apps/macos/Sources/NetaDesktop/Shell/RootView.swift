@@ -34,7 +34,7 @@ public struct RootView: View {
 				chatVisible: shell.chatVisible,
 				navigatorVisible: shell.navigatorVisible)
 			ZStack {
-				CanvasPlaceholder(covered: layout.covered)
+				SpineCanvasView(store: store, shell: shell)
 					.frame(width: layout.canvas.width, height: layout.canvas.height)
 				VStack(spacing: 0) {
 					ToolbarPlaceholder()
