@@ -147,18 +147,24 @@ export async function readNdjson<T>(path: string, opts?: NdjsonOptions): Promise
 
 const BACKWARDS_CHUNK = 64 * 1024;
 
-// The last `lines` whole lines, in file order. Reads 64 KiB chunks from EOF;
-// an unterminated trailing fragment is dropped and reported via `truncated`.
-export async function readNdjsonBackwards<T>(path: string, lines: number): Promise<NdjsonRead<T>> {
+// The last `lines` whole lines before `opts.endAt` (default EOF), in file
+// order. Reads 64 KiB chunks backwards; an unterminated trailing fragment is
+// dropped and reported via `truncated`. `bytes` is the offset the read ran to.
+export async function readNdjsonBackwards<T>(
+	path: string,
+	lines: number,
+	opts?: { endAt?: number },
+): Promise<NdjsonRead<T>> {
 	const size = await fileSize(path);
-	if (size === 0 || lines <= 0) {
+	const stop = opts?.endAt === undefined ? size : Math.min(opts.endAt, size);
+	if (stop === 0 || lines <= 0) {
 		return { records: [], bytes: 0, truncated: false };
 	}
 	const handle = await open(path, "r");
 	const collected: string[] = [];
 	let truncated = false;
 	try {
-		let position = size;
+		let position = stop;
 		let carry = "";
 		let first = true;
 		let sawNewline = false;
@@ -193,7 +199,7 @@ export async function readNdjsonBackwards<T>(path: string, lines: number): Promi
 	}
 	const wanted = collected.slice(-lines);
 	const records = wanted.map((line) => JSON.parse(line) as T);
-	return { records, bytes: size, truncated };
+	return { records, bytes: stop, truncated };
 }
 
 export async function fileSize(path: string): Promise<number> {
