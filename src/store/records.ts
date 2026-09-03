@@ -3,7 +3,8 @@ import { hostname } from "node:os";
 import { join } from "node:path";
 import { ulid } from "../core/ids.ts";
 import { nowIso } from "../core/time.ts";
-import type { Leader, Machine, Workspace, WorkspaceId } from "../core/types.ts";
+import type { AgentId, Leader, Machine, Workspace, WorkspaceId } from "../core/types.ts";
+import type { LeadMode } from "../modes/records.ts";
 import { createMutex, type Mutex, readJson, writeJsonAtomic } from "./files.ts";
 import { paths } from "./paths.ts";
 
@@ -18,9 +19,16 @@ export interface WorkspaceStore {
 	list(): Promise<Workspace[]>;
 }
 
+// The document 02 persists in `leaders/<workspaceId>.json`: the Leader plus
+// 07's optional leadModes. 01's Leader is untouched; callers keep passing a
+// plain Leader and keep getting one back.
+export interface LeaderDocument extends Leader {
+	leadModes?: Record<AgentId, LeadMode>;
+}
+
 export interface LeaderStore {
-	load(id: WorkspaceId, defaults: () => Leader): Promise<Leader>;
-	save(l: Leader): Promise<void>;
+	load(id: WorkspaceId, defaults: () => Leader): Promise<LeaderDocument>;
+	save(l: Leader | LeaderDocument): Promise<void>;
 }
 
 async function loadOrCreate<T>(path: string, mutex: Mutex, defaults: () => T): Promise<T> {
@@ -80,7 +88,14 @@ export function openWorkspaceStore(): WorkspaceStore {
 export function openLeaderStore(): LeaderStore {
 	const mutex = createMutex();
 	return {
-		load: (id, defaults) => loadOrCreate(paths().leader(id), mutex, defaults),
-		save: (l) => mutex(() => writeJsonAtomic(paths().leader(l.workspaceId), l)),
+		load: (id, defaults) => loadOrCreate<LeaderDocument>(paths().leader(id), mutex, defaults),
+		save: (l) =>
+			mutex(() => {
+				const doc: LeaderDocument = { ...(l as LeaderDocument) };
+				if (doc.leadModes !== undefined && Object.keys(doc.leadModes).length === 0) {
+					delete doc.leadModes;
+				}
+				return writeJsonAtomic(paths().leader(l.workspaceId), doc);
+			}),
 	};
 }
