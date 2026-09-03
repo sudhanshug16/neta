@@ -19,7 +19,7 @@ export interface CliRunResult {
 export interface Harness {
 	dir: string;
 	run(args: string[]): Promise<CliRunResult>;
-	spawn(args: string[]): ChildProcess;
+	spawn(args: string[], opts?: { cwd?: string }): ChildProcess;
 	stop(): Promise<void>;
 }
 
@@ -119,10 +119,13 @@ export async function startNode(): Promise<Harness> {
 		});
 	}
 
-	function spawnCli(args: string[]): ChildProcess {
+	function spawnCli(args: string[], opts?: { cwd?: string }): ChildProcess {
 		const child = spawn("node", [bundle, ...args], {
 			env: { ...process.env, NETA_DIR: dir },
-			stdio: ["ignore", "pipe", "pipe"],
+			cwd: opts?.cwd,
+			// stdin stays a pipe so chat tests (T8.4) can drive the prompt
+			// loop and signal the process.
+			stdio: ["pipe", "pipe", "pipe"],
 		});
 		children.add(child);
 		child.on("exit", () => {

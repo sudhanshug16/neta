@@ -43,10 +43,11 @@ import type {
 	Turn,
 	WorkspaceId,
 } from "../core/types.ts";
+import type { ConversationStore } from "../store/conversations.ts";
 import { createMutex, readJson, writeJsonAtomic } from "../store/files.ts";
 import { openStore, type Store } from "../store/index.ts";
 import { decodeWorkspaceId, paths } from "../store/paths.ts";
-import { conversationHandlers } from "./handlers-conversation.ts";
+import { conversationHandlers, wireTurnStream } from "./handlers-conversation.ts";
 import { registryHandlers } from "./handlers-registry.ts";
 import {
 	acquireLock,
@@ -321,7 +322,11 @@ function toTurnNotification(sessionId: SessionId, event: SessionEvent): TurnNoti
 	return { sessionId };
 }
 
-export function adaptAcp(settings: Settings): AdaptedAcp {
+// `conversations` is the real 02 store when the Node runs for real. With it,
+// every session starts with a conversation meta record, so `conversation.tail`
+// succeeds (possibly empty) and subscribes the caller for the live `turn`
+// stream; without it (stubbed tests) session creation touches no store.
+export function adaptAcp(settings: Settings, conversations?: ConversationStore): AdaptedAcp {
 	const table = new SessionTable({ settings, cwd: process.cwd(), access: "readOnly" });
 	const listeners = new Set<(notification: TurnNotification) => void>();
 	const tokens = new Map<SessionId, string>();
@@ -376,6 +381,14 @@ export function adaptAcp(settings: Settings): AdaptedAcp {
 				mcpServers,
 				sessionId,
 			});
+			if (conversations !== undefined) {
+				await conversations.create({
+					sessionId: session.sessionId,
+					provider: session.provider,
+					model: session.model,
+					createdAt: nowIso(),
+				});
+			}
 			table.set(session.sessionId, { session, provider: o.provider });
 			tokens.set(session.sessionId, token);
 			pump(session);
@@ -484,7 +497,7 @@ export async function startNode(o?: { store?: NodeStore; acp?: NodeAcp }): Promi
 			realStore = await openStore();
 			storePort = await adaptStore(realStore);
 		}
-		const acpPort = o?.acp ?? adaptAcp(loadSettings({ netaDir: netaDir() }).settings);
+		const acpPort = o?.acp ?? adaptAcp(loadSettings({ netaDir: netaDir() }).settings, realStore?.conversations);
 		for (const entry of await markInterrupted(storePort)) {
 			await storePort.appendEvent({
 				workspaceId: entry.workspaceId,
@@ -532,6 +545,7 @@ export async function startNode(o?: { store?: NodeStore; acp?: NodeAcp }): Promi
 		const ctx: Omit<NodeContext, "hub"> = { store: storePort, acp: acpPort, nodeVersion: NODE_VERSION, stop };
 		const server = await createServer({ socketPath, token, handlers: allHandlers, ctx });
 		hub = server.hub;
+		wireTurnStream({ ...ctx, hub: server.hub });
 		return { descriptor, hub: server.hub, stop, stopped };
 	} catch (error) {
 		if (realStore !== undefined) {

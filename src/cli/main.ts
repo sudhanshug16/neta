@@ -6,6 +6,8 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { attach } from "./chat.ts";
+import { CliError, NodeClient } from "./client.ts";
 import { nodeCommand, openCommand } from "./commands/node.ts";
 
 export type Command = {
@@ -269,8 +271,23 @@ function notImplemented(cmd: Command): number {
 	return 1;
 }
 
+async function attachCommand(): Promise<number> {
+	let client: NodeClient;
+	try {
+		client = await NodeClient.connect({ start: true });
+	} catch (error) {
+		if (error instanceof CliError) {
+			process.stderr.write(`neta: ${error.message}\n`);
+			return error.code;
+		}
+		process.stderr.write(`neta: ${error instanceof Error ? error.message : String(error)}\n`);
+		return 1;
+	}
+	return attach(client, process.cwd());
+}
+
 const handlers: Record<Command["name"], (cmd: Command) => number | Promise<number>> = {
-	attach: notImplemented,
+	attach: attachCommand,
 	node: (cmd) => nodeCommand(cmd.sub ?? "", cmd.flags),
 	open: (cmd) => openCommand(cmd.args[0]),
 	missions: notImplemented,
