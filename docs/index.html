@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Neta — a leader agent that delegates to worker agents</title>
-<meta name="description" content="Neta delegates work to tiered worker agents inside the CLI you already use — the leader reads, decides and verifies, and cannot edit files.">
-<meta property="og:title" content="Neta — a leader agent that delegates to worker agents">
-<meta property="og:description" content="Neta delegates work to tiered worker agents inside the CLI you already use — the leader reads, decides and verifies, and cannot edit files.">
+<title>Neta — persistent agent teams for every workspace</title>
+<meta name="description" content="Neta runs a long-lived Node for each workspace: a leader that opens missions, mission leads that direct agents, and a desktop canvas with the spine, the mission bar, and chat.">
+<meta property="og:title" content="Neta — persistent agent teams for every workspace">
+<meta property="og:description" content="Neta runs a long-lived Node for each workspace: a leader that opens missions, mission leads that direct agents, and a desktop canvas with the spine, the mission bar, and chat.">
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -37,35 +37,34 @@
     <div class="hero-grid">
       <div>
         <div class="kicker"><span class="deva">नेता</span> · Hindi: leader</div>
-        <h1>You talk to a leader.<br>It runs the team.</h1>
-        <p class="lead">Neta delegates work to tiered worker agents and drives them until the problem is done. The leader never edits files — that restriction is enforced by your CLI's own machinery, not suggested in a prompt.</p>
-        <p class="sublead">And it owns no session UI. You stay in Claude Code, Codex or OpenCode — the UI you already use and pay for. Neta injects instructions, tools and restrictions, then gets out of the way; the one surface it draws is the per-worker watch pane.</p>
+        <h1>You talk to a leader.<br>It runs the missions.</h1>
+        <p class="lead">Neta keeps a long-lived Node for every workspace. The workspace leader reasons, opens missions, and directs mission leads; each mission lead works directly or with agents of its own — every mission numbered, every outcome closed out.</p>
+        <p class="sublead">One Node serves every client. The terminal attaches to the leader's conversation, and the desktop draws the same state as a spine of missions, a mission bar for work that needs you, and chat on the exact same sessions. Close any client and the work keeps running.</p>
         <div class="chips">
           <span class="chip brass">MIT</span>
           <span class="chip phosphor">one bundled file</span>
-          <span class="chip steel">no runtime deps</span>
-          <span class="chip muted">node 22.19+</span>
+          <span class="chip steel">no build step</span>
+          <span class="chip muted">node 22+</span>
         </div>
       </div>
       <div>
         <div class="term">
-          <div><span class="t-muted">$</span> npm install -g @intervene/neta</div>
-          <div><span class="t-muted">$</span> cd your-repo &amp;&amp; neta</div>
+          <div><span class="t-muted">$</span> npm i -g @intervene/neta</div>
+          <div><span class="t-muted">$</span> neta open ~/your-repo</div>
           <div></div>
-          <div class="t-muted">launching <span class="t-paper">claude</span> as leader · read-only enforced</div>
+          <div class="t-muted">attaching to workspace leader · Lead, read-only</div>
           <div></div>
           <div class="t-paper"><span class="t-brass">›</span> the signup flow drops 4% of users at the email</div>
           <div class="t-paper">  step. find out why and fix it.</div>
           <div></div>
-          <div class="t-dim">● neta_delegate scout/architect  ×2</div>
-          <div class="t-dim">● neta_wait  ro1 ro2</div>
-          <div class="t-paper"><span class="t-steel">»</span> ro1: the token expires before the mail provider</div>
-          <div class="t-paper">  retries</div>
-          <div class="t-dim">● neta_delegate worker/expert --writer</div>
-          <div class="t-dim">● neta_delegate reviewer/expert</div>
+          <div class="t-dim">● mission 12 opened · mission lead assigned</div>
+          <div class="t-dim">● agent gray-owl investigating the checkout flow</div>
+          <div class="t-paper"><span class="t-steel">»</span> gray-owl: the token expires before the mail</div>
+          <div class="t-paper">  provider retries</div>
+          <div class="t-dim">● mission 12 ready to close · merged, evidence recorded</div>
           <div></div>
-          <div class="t-paper"><span class="t-phosphor">✓</span> fixed, reviewed, committed as 4a9f2c1</div>
-          <div class="t-dim">  4 workers · 61,204 tokens · est. $0.38</div>
+          <div class="t-paper"><span class="t-phosphor">✓</span> mission bar clear · 3 missions closed this week</div>
+          <div class="t-dim">  1 mission · 2 agents · every turn in the event log</div>
           <div></div>
           <div><span class="t-brass">›</span> <span class="caret">▌</span></div>
         </div>
@@ -79,23 +78,23 @@
     <div class="principles-grid">
       <div class="principle">
         <div class="num">01</div>
-        <h3>A lead, not an implementer</h3>
-        <p>The leader reads, decides, delegates and verifies. Its edit tools are removed by the vendor's own permission system, and shell writes are blocked too — a leader with a way to edit eventually edits.</p>
+        <h3>A leader, not just a chatter</h3>
+        <p>The workspace leader stays available in one continuous conversation and routes sustained work into missions. A small bounded task it handles itself; anything that writes becomes a mission, so isolation, access, and closeout stay visible.</p>
       </div>
       <div class="principle">
         <div class="num">02</div>
-        <h3>One writer per session</h3>
-        <p>Reads parallelize; writes serialize. Each session has a single writer slot: a second writer is queued, not raced, and starts when the slot frees. A writer is told to commit everything before handing off, and a dirty handoff is called out loudly in its result.</p>
+        <h3>One mission, one objective</h3>
+        <p>Each mission has a permanent number, one owning workspace, one worktree, and one mission lead. Numbers are never reused, and a closed mission stays on the spine at its start position — archived and read-only, never deleted.</p>
       </div>
       <div class="principle">
         <div class="num">03</div>
-        <h3>Enforcement over instruction</h3>
-        <p>Every restriction that matters is a mechanism: a permission rule, a hook, a kernel sandbox, a protocol rejection. A rule that lives only in a prompt is a suggestion.</p>
+        <h3>Work survives the UI</h3>
+        <p>The Node owns every session, mission, and event. Closing the terminal or the desktop changes nothing on the Node; the next client takes one snapshot and resumes exactly where the previous view left off.</p>
       </div>
       <div class="principle">
         <div class="num">04</div>
-        <h3>Finish, then report</h3>
-        <p>A CHARTER.md says which decisions the leader may take on your behalf. Inside that boundary it just does the work. Workers are quiet; only terminal events, blocking questions, and room posts the leader opts into push.</p>
+        <h3>Finish, then close</h3>
+        <p>Merging a branch does not close a mission. The leader reviews the handoff, records merged or abandoned with evidence, and only then is the mission closed. The mission bar keeps every open mission visible until then.</p>
       </div>
     </div>
   </div>
@@ -104,112 +103,109 @@
 <section class="band">
   <div class="wrap">
     <div class="sec-head">
-      <h2>Tiers, not model names</h2>
-      <span class="sec-label">you decide what each one costs</span>
+      <h2>One tree, three levels</h2>
+      <span class="sec-label">leader · mission lead · agent</span>
     </div>
     <div class="card-grid">
       <div class="card tier-muted">
-        <div class="tier-head"><span class="swatch"></span>apprentice</div>
-        <p>The mechanical floor: run a named command and report output, apply one exactly specified small change, or answer one bounded question about a named file.</p>
+        <div class="tier-head"><span class="swatch"></span>workspace leader</div>
+        <p>One continuous conversation per workspace. It opens missions, sets access, and owns closeout — merged or abandoned, with evidence, for every mission.</p>
       </div>
       <div class="card tier-steel">
-        <div class="tier-head"><span class="swatch"></span>journeyman</div>
-        <p>Mechanical work with a precise spec: renames, applying a reviewed diff, running tests and reporting output. It only gets exact instructions.</p>
+        <div class="tier-head"><span class="swatch"></span>mission</div>
+        <p>One bounded objective with a permanent number that never changes. Its worktree, agents, conversations, and closeout state all belong to it.</p>
       </div>
       <div class="card tier-phosphor">
-        <div class="tier-head"><span class="swatch"></span>expert</div>
-        <p>Well-scoped features, bug fixes with tests, code review.</p>
+        <div class="tier-head"><span class="swatch"></span>mission lead</div>
+        <p>The agent responsible for one mission. It may work directly or create ordinary agents, and it moves between Lead and Lead++ as the work demands.</p>
       </div>
       <div class="card tier-violet">
-        <div class="tier-head"><span class="swatch"></span>architect</div>
-        <p>Ambiguity: unknown-cause debugging, design work, debates.</p>
+        <div class="tier-head"><span class="swatch"></span>agent</div>
+        <p>A bounded helper beneath a mission lead. It receives a task, read-only or read-write access, a provider and a model — and creates nothing further.</p>
       </div>
     </div>
-    <p class="followup">The leader asks for an apprentice, journeyman, expert or architect worker; you map tiers to backends in settings, and you can mix vendors — putting architect work on Codex while everything else stays on Claude. Unconfigured tiers spread deterministically across whatever you have installed, and reviewers prefer a different vendor than the last writer.</p>
+    <p class="followup">Agents take display names from a fixed pool, unique across the workspace's open missions. A snapshot carries running, blocked, and failed agents plus the most recent completed ones; archiving hides an agent from the canvas but keeps its conversation and outcome.</p>
   </div>
 </section>
 
 <section class="band">
   <div class="wrap">
     <div class="sec-head">
-      <h2>The leader cannot write</h2>
-      <span class="sec-label">enforced by each vendor, not by us</span>
+      <h2>Lead first, Lead++ when it earns it</h2>
+      <span class="sec-label">access is visible and reversible</span>
     </div>
     <div class="et-scroll">
       <div class="et-row et-head">
-        <div>Leader</div>
-        <div>Typed edit tools</div>
-        <div>Its shell</div>
-        <div>Strength</div>
+        <div>Mode</div>
+        <div>Coordination</div>
+        <div>Workspace writes</div>
+        <div>How it ends</div>
       </div>
       <div class="et-row">
-        <div class="leader">Claude Code</div>
-        <div class="mech">denied by permission rules</div>
-        <div class="mech">neta guard as a PreToolUse hook</div>
-        <div class="strength ember">denylist</div>
+        <div class="leader">Lead</div>
+        <div class="mech">opens missions, directs agents</div>
+        <div class="mech">never writes</div>
+        <div class="strength phosphor">the default, always</div>
       </div>
       <div class="et-row">
-        <div class="leader">Codex</div>
-        <div class="mech">kernel sandbox</div>
-        <div class="mech">same kernel sandbox, read-only</div>
-        <div class="strength phosphor">kernel</div>
+        <div class="leader">Lead++</div>
+        <div class="mech">everything in Lead</div>
+        <div class="mech">builds and writes, one writer lease at a time</div>
+        <div class="strength ember">returns to Lead when mutation work ends</div>
       </div>
       <div class="et-row">
-        <div class="leader">OpenCode</div>
-        <div class="mech">permission.edit: deny</div>
-        <div class="mech">bash denied by default; read-only allowlist</div>
-        <div class="strength ember">allowlist</div>
+        <div class="leader">Mission lead</div>
+        <div class="mech">directs its mission's agents</div>
+        <div class="mech">in Lead++ only, under a decision record</div>
+        <div class="strength ember">closing the mission returns it to Lead</div>
       </div>
     </div>
-    <p class="et-note">Codex's is the strongest — the kernel refuses the write. Claude Code relies on Neta's guard, which is a denylist, and a denylist can be incomplete. OpenCode denies bash outright and allows only read-only commands — an allowlist fails closed, but both are weaker than a kernel. That is worth knowing rather than papering over.</p>
+    <p class="et-note">Every Lead++ request carries a decision record — objective, target mission and worktree, files affected, validation, duration. Duration counts active connected time only; after ten minutes the canvas warns and a reminder falls due every two minutes. Nothing expires on its own.</p>
   </div>
 </section>
 
 <section class="band">
   <div class="wrap">
     <div class="sec-head">
-      <h2>Workers you can take over</h2>
-      <span class="sec-label">a pane each, and a door out</span>
+      <h2>Missions you can open</h2>
+      <span class="sec-label">every conversation is the real one</span>
     </div>
     <div class="two-col">
       <div>
-        <p>A worker is an ordinary session of the CLI that ran it. <code class="brass">neta attach rw3</code> hands the worker's own session id to that CLI's resume command and drops you inside the conversation, where you can read what it did and keep talking to it yourself. Neta drove it; you can finish it.</p>
-        <p>With Zellij or tmux, each worker also gets a tab streaming its log — prose as markdown, tool calls as one-liners, changes as coloured diffs, and an input line that talks to the worker. An existing watch tab is renamed in place with <code>✓</code>, <code>✗</code>, or <code>⊘</code> when its worker finishes; status marking never opens or retains a tab. Panes read without consuming, so nothing shown there is taken from the leader. CLI <code>neta attach</code> takes over its caller's terminal; the leader's <code>neta_attach</code> tool is the only attach action that opens a fresh tab. Without a multiplexer, workers run headless.</p>
+        <p>Every leader, mission lead, and agent holds a real ACP conversation owned by the Node. Selecting it — in the terminal or on the canvas — opens that exact session with its full history. No dummy surfaces, no second orchestration path.</p>
+        <p>The desktop draws the spine with its missions, the mission bar with the workspace leader and every open mission that needs a person, and a navigator that jumps anywhere. The terminal attaches to the same leader conversation the desktop shows, so both views see each other's turns.</p>
         <div class="cmdlist">
-          <div class="cmd-row"><span class="cmd">neta workers</span><span class="what">what is running, and what it has cost</span></div>
-          <div class="cmd-row"><span class="cmd">neta watch rw1</span><span class="what">watch one worker, and type to it</span></div>
-          <div class="cmd-row"><span class="cmd">neta watch auth-debate</span><span class="what">follow a room's merged transcript</span></div>
-          <div class="cmd-row"><span class="cmd">neta attach rw1</span><span class="what">take over this terminal with its own CLI</span></div>
-          <div class="cmd-row"><span class="cmd">neta send rw1 &lt;msg&gt;</span><span class="what">give a running worker more instructions</span></div>
-          <div class="cmd-row"><span class="cmd">neta send rw1 &lt;text&gt;</span><span class="what">steer or resume the exact worker conversation</span></div>
-          <div class="cmd-row"><span class="cmd">neta kill rw1</span><span class="what">stop it</span></div>
-          <div class="cmd-row"><span class="cmd">neta sessions</span><span class="what">leader sessions running on this machine</span></div>
+          <div class="cmd-row"><span class="cmd">neta</span><span class="what">attach to the leader, starting the Node if needed</span></div>
+          <div class="cmd-row"><span class="cmd">neta open .</span><span class="what">open this workspace and its leader</span></div>
+          <div class="cmd-row"><span class="cmd">neta mission 7</span><span class="what">open mission 7 by its permanent number</span></div>
+          <div class="cmd-row"><span class="cmd">neta missions</span><span class="what">missions, states, and what needs you</span></div>
+          <div class="cmd-row"><span class="cmd">neta events</span><span class="what">read the workspace event log</span></div>
+          <div class="cmd-row"><span class="cmd">neta node status</span><span class="what">the Node, without starting one</span></div>
+          <div class="cmd-row"><span class="cmd">neta node stop</span><span class="what">stop the Node and what it owns</span></div>
+          <div class="cmd-row"><span class="cmd">neta mcp --actor &lt;id&gt;</span><span class="what">tool proxy for one agent session</span></div>
         </div>
       </div>
       <div>
         <div class="term">
-          <div><span class="t-paper t-bold">rw3 auth-refactor</span><span class="t-muted"> · worker/expert · claude · writer</span></div>
-          <div class="t-muted">task: sign the session token, tests included</div>
+          <div><span class="t-paper t-bold">mission 12 · signup recovery</span><span class="t-muted"> · lead: juniper · Lead++</span></div>
+          <div class="t-muted">objective: find the drop-off and fix it</div>
           <div></div>
-          <div class="t-steel t-bold">Reading the session layer</div>
+          <div class="t-steel t-bold">Mission lead juniper</div>
           <div class="t-paper">Two call sites set the cookie directly, so the</div>
           <div class="t-paper">token is signed in <span class="t-brass">session.ts</span> and read back in</div>
           <div class="t-paper">the middleware.</div>
           <div></div>
-          <div class="t-dim">● read src/session.ts</div>
-          <div class="t-dim">● grep "Set-Cookie" src/</div>
+          <div class="t-dim">● agent gray-owl read-only · checkout flow mapped</div>
+          <div class="t-dim">● agent sorrel read-write · worktree mission/12-signup</div>
           <div></div>
-          <div class="t-paper t-bold">src/session.ts</div>
-          <div class="t-steel">@@ -12,7 +12,9 @@</div>
-          <div class="t-brick">-  res.setHeader("Set-Cookie", raw);</div>
-          <div class="t-phosphor">+  const token = sign(payload, secret);</div>
-          <div></div>
+          <div class="t-paper t-bold">integration evidence</div>
+          <div class="t-steel">branch mission/12-signup is ancestor-verified</div>
           <div class="t-paper"><span class="t-steel">»</span> 41/41 tests pass</div>
           <div></div>
-          <div class="t-dim"><span class="t-steel">⠹</span> running · 18,240 tokens, est. $0.11</div>
+          <div class="t-dim"><span class="t-steel">⠹</span> ready to close · awaiting leader review</div>
           <div></div>
-          <div><span class="t-dim">│</span> <span class="t-paper">commit before you hand off</span><span class="caret">▌</span> <span class="t-dim">│</span></div>
-          <div class="t-dim">enter steers this worker now · ctrl+c closes</div>
+          <div><span class="t-dim">│</span> <span class="t-paper">merge and close mission 12</span><span class="caret">▌</span> <span class="t-dim">│</span></div>
+          <div class="t-dim">enter prompts this conversation now · ctrl+c closes</div>
         </div>
       </div>
     </div>
@@ -219,27 +215,27 @@
 <section class="band">
   <div class="wrap">
     <div class="sec-head">
-      <h2>Backends &amp; playbooks</h2>
-      <span class="sec-label">one ACP path, three vendors</span>
+      <h2>Providers &amp; skills</h2>
+      <span class="sec-label">one ACP path, every agent</span>
     </div>
     <div class="card-grid-2">
       <div class="card">
-        <h3>Every worker runs on a login you already have</h3>
+        <h3>Every agent runs over ACP</h3>
         <div class="card-list">
-          <div><span class="name">Claude Code</span> — <code>claude-agent-acp</code> — its own login</div>
-          <div><span class="name">Codex</span> — <code>codex-acp</code> — its own login</div>
-          <div><span class="name">OpenCode</span> — <code>opencode acp</code>, native — its own config</div>
+          <div>One transport for the workspace leader, mission leads, and agents — clicking any of them opens that exact session.</div>
+          <div>Each provider has a configured default model; the mission lead may override it for an individual agent.</div>
+          <div>Provider, model, access, and conversation identity persist with the session. Interrupted work is marked honestly, never replayed.</div>
         </div>
-        <p class="card-foot">Driven over ACP through one internal transport — one code path, not one conditional per vendor. Each worker launches with that CLI's own auth; whether that is a subscription or API credit is that CLI's configuration.</p>
+        <p class="card-foot">Driven over ACP through one internal transport — one code path, not one conditional per vendor. Each agent launches with that provider's own login.</p>
       </div>
       <div class="card">
-        <h3>Flavors — playbooks the leader reaches for</h3>
+        <h3>Skills, not fixed identities</h3>
         <div class="card-list">
-          <div><span class="name mono">implement</span> — Decompose the task, spawn workers by tier, reviewer pass, iterate until clean, PR or merge per charter.</div>
-          <div><span class="name mono">decide</span> — For real tradeoffs: opposing stances assigned to debaters in a room, fixed rounds, a judge pass. The output is a memo that records the losing arguments.</div>
-          <div><span class="name mono">investigate</span> — Parallel scouts map the code or reproduce the bug; one synthesis. Feeds the other two.</div>
+          <div>An ordinary agent is described by its task, model, access, and skills — never by a permanent caste.</div>
+          <div>Skills are composable instruction and tool bundles the mission lead attaches to the task at hand.</div>
+          <div>Each Git mission gets its own worktree by default, and each worktree admits at most one active writer; further writers queue.</div>
         </div>
-        <p class="card-foot">Ordinary markdown you can override per project — as are the roles: scout, worker, reviewer, debater.</p>
+        <p class="card-foot">Ordinary markdown you can override per project — as are the provider defaults in settings.</p>
       </div>
     </div>
   </div>
@@ -248,24 +244,24 @@
 <section class="band">
   <div class="wrap">
     <div class="sec-head">
-      <h2>Working end to end, and young</h2>
-      <span class="sec-label">what is verified, what isn't</span>
+      <h2>Owned by one Node, seen by every client</h2>
+      <span class="sec-label">what each side does</span>
     </div>
     <div class="card-grid-2">
       <div class="card">
-        <div class="card-label phosphor">Verified</div>
+        <div class="card-label phosphor">The Node owns</div>
         <div class="card-list">
-          <div>Every vendor mechanism was checked against the installed CLI before being coded.</div>
-          <div>351 tests drive the real control plane, real worker processes and a real socket.</div>
-          <div>The published package was installed from its tarball and driven through a full session.</div>
+          <div>Workspaces, leaders, missions, agents, ACP sessions, the event log, and conversation history under ~/.neta — written atomically, files only.</div>
+          <div>One complete snapshot on connect, then live push on the same connection — no client ever merges a delta into a stale base.</div>
+          <div>Restart restores the recorded conversations and marks interrupted work, with the prior state preserved for the leader to decide on.</div>
         </div>
       </div>
       <div class="card">
-        <div class="card-label ember">Not verified, and worth knowing</div>
+        <div class="card-label ember">The clients borrow</div>
         <div class="card-list">
-          <div>Only Codex workers are sandboxed at the kernel. Elsewhere a determined worker could still write through bash.</div>
-          <div>No long-running real-model use yet. The honesty rule is mechanized on Claude Code — its own subagent tools are denied — and prompt-level on Codex and OpenCode; no test exercises it against a real model.</div>
-          <div>Vendor flags change often. That is where breakage will show up first.</div>
+          <div>The terminal acts and formats: it opens workspaces, attaches to the leader, lists missions and events, and stops the Node.</div>
+          <div>The desktop renders and caches: the spine, the mission bar, the navigator, and chat — with a bounded read cache for offline reading.</div>
+          <div>The tool proxy only forwards: one stdio process per agent session, carrying the actor's token and adding no behavior of its own.</div>
         </div>
       </div>
     </div>
@@ -276,8 +272,8 @@
   <div class="wrap">
     <div class="cta-panel">
       <div>
-        <h2>Run it in a repo you know</h2>
-        <p>Neta needs Node 22.19+ and at least one agent CLI on PATH. Nothing else to configure — tiers spread themselves across what you have until you say otherwise.</p>
+        <h2>Run it in a workspace you know</h2>
+        <p>Neta needs Node 22+ and at least one ACP provider. The first <code>neta open</code> starts the Node; everything after that is conversation.</p>
         <div class="cta-links">
           <a href="https://github.com/sudhanshug16/neta#readme">Read the docs</a>
           <a class="link-muted" href="https://github.com/sudhanshug16/neta/blob/main/MANIFESTO.md">The manifesto</a>
@@ -285,10 +281,9 @@
       </div>
       <div>
         <div class="term">
-          <div><span class="t-muted">$</span> npm install -g @intervene/neta</div>
-          <div class="t-dim">  or: bun install -g @intervene/neta</div>
+          <div><span class="t-muted">$</span> npm i -g @intervene/neta</div>
           <div></div>
-          <div><span class="t-muted">$</span> neta</div>
+          <div><span class="t-muted">$</span> neta open .</div>
         </div>
       </div>
     </div>
@@ -303,7 +298,7 @@
       <span class="mark">न</span>
       <span>Neta · MIT · Sudhanshu Gautam</span>
     </div>
-    <span>no session UI of our own</span>
+    <span>work survives the UI</span>
   </div>
 </footer>
 
