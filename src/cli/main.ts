@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { attach } from "./chat.ts";
 import { CliError, NodeClient } from "./client.ts";
 import { eventsCommand } from "./commands/events.ts";
+import { modeCommand, modelCommand, modelsCommand } from "./commands/leader.ts";
 import { missionCommand, missionsCommand } from "./commands/missions.ts";
 import { nodeCommand, openCommand } from "./commands/node.ts";
 
@@ -314,9 +315,9 @@ const handlers: Record<Command["name"], (cmd: Command) => number | Promise<numbe
 	missions: (cmd) => withClient((client) => missionsCommand(client, cmd.flags)),
 	mission: (cmd) => withClient((client) => missionCommand(client, Number(cmd.args[0]), cmd.flags)),
 	events: (cmd) => withClient((client) => eventsCommand(client, cmd.flags)),
-	mode: notImplemented,
-	models: notImplemented,
-	model: notImplemented,
+	mode: (cmd) => withClient((client) => modeCommand(client, cmd.args[0], cmd.flags)),
+	models: (cmd) => withClient((client) => modelsCommand(client, cmd.flags)),
+	model: (cmd) => withClient((client) => modelCommand(client, cmd.args[0] as string)),
 	mcp: notImplemented,
 	version: printVersion,
 };
