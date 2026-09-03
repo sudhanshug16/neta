@@ -1,7 +1,7 @@
 import { readdir } from "node:fs/promises";
 import { nowIso } from "../core/time.ts";
 import type { Event, EventKind, IsoTime, WorkspaceId } from "../core/types.ts";
-import { appendLine, createMutex, type Mutex, readNdjson, readText, writeFileAtomic } from "./files.ts";
+import { appendLine, createMutex, ensureDir, type Mutex, readNdjson, readText, writeFileAtomic } from "./files.ts";
 import { monthKey, paths } from "./paths.ts";
 
 export interface EventQuery {
@@ -134,6 +134,7 @@ export function openEventLog(): EventLog {
 			const log = logFor(event.workspaceId);
 			return log.mutex(async () => {
 				await ensureSeq(event.workspaceId, log);
+				await ensureDir(paths().eventsDir(event.workspaceId));
 				const full: Event = { ...event, seq: log.nextSeq, at: nowIso() };
 				log.nextSeq += 1;
 				const p = paths();

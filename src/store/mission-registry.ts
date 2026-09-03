@@ -4,6 +4,7 @@ import type { IsoTime, Mission, MissionId, WorkspaceId } from "../core/types.ts"
 import {
 	appendLine,
 	createMutex,
+	ensureDir,
 	type Mutex,
 	readJson,
 	readNdjson,
@@ -122,6 +123,7 @@ export function openMissionRegistry(): MissionRegistry {
 				if (state.index.get(mission.id) !== undefined) {
 					throw new Error(`mission ${mission.id} already exists`);
 				}
+				await ensureDir(paths().missionsDir(mission.workspaceId));
 				const line: RegistryLine = { op: "create", at: nowIso(), mission };
 				await appendLine(paths().registryLog(mission.workspaceId), line);
 				state.index.put(mission);
@@ -137,6 +139,7 @@ export function openMissionRegistry(): MissionRegistry {
 				if (state.index.get(mission.id) === undefined) {
 					throw new Error(`mission ${mission.id} is unknown`);
 				}
+				await ensureDir(paths().missionsDir(mission.workspaceId));
 				const line: RegistryLine = { op: "update", at: nowIso(), mission };
 				await appendLine(paths().registryLog(mission.workspaceId), line);
 				state.index.put(mission);

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Event } from "../src/core/types.ts";
 import { openEventLog } from "../src/store/event-log.ts";
-import { appendLine } from "../src/store/files.ts";
+import { appendLine, ensureDir } from "../src/store/files.ts";
 import { paths } from "../src/store/paths.ts";
 
 const prev = process.env.NETA_DIR;
@@ -68,6 +68,7 @@ describe("event log", () => {
 			kind: "mission.created",
 			data: { number: 2 },
 		};
+		await ensureDir(p.eventsDir("ws-a"));
 		await appendLine(p.eventMonth("ws-a", "2026-08"), old);
 		await appendLine(p.eventMonth("ws-a", "2026-09"), newer);
 		const log = openEventLog();
