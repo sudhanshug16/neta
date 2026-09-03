@@ -34,6 +34,7 @@ public struct MissionColumn: Sendable, Equatable, Identifiable {
 	public let id: MissionId
 	public let number: Int
 	public let side: SpineSide
+	public let state: MissionState
 	public let anchor: CGPoint
 	public let slot: CGRect
 	public let card: CGRect
@@ -43,13 +44,14 @@ public struct MissionColumn: Sendable, Equatable, Identifiable {
 	public let collapsed: Bool
 
 	public init(
-		id: MissionId, number: Int, side: SpineSide, anchor: CGPoint,
-		slot: CGRect, card: CGRect, connector: [CGPoint],
+		id: MissionId, number: Int, side: SpineSide, state: MissionState,
+		anchor: CGPoint, slot: CGRect, card: CGRect, connector: [CGPoint],
 		stack: AgentStack, rows: [CGRect], collapsed: Bool
 	) {
 		self.id = id
 		self.number = number
 		self.side = side
+		self.state = state
 		self.anchor = anchor
 		self.slot = slot
 		self.card = card
@@ -225,9 +227,9 @@ public enum SpineLayout {
 
 				columns.append(MissionColumn(
 					id: mission.id, number: mission.number, side: side,
-					anchor: anchor, slot: slot, card: card,
-					connector: connector, stack: stack, rows: rows,
-					collapsed: collapsed))
+					state: mission.state, anchor: anchor, slot: slot,
+					card: card, connector: connector, stack: stack,
+					rows: rows, collapsed: collapsed))
 				newerMinX = slotMinX
 			}
 		}
