@@ -6,6 +6,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { nodeCommand, openCommand } from "./commands/node.ts";
 
 export type Command = {
 	name:
@@ -270,8 +271,8 @@ function notImplemented(cmd: Command): number {
 
 const handlers: Record<Command["name"], (cmd: Command) => number | Promise<number>> = {
 	attach: notImplemented,
-	node: notImplemented,
-	open: notImplemented,
+	node: (cmd) => nodeCommand(cmd.sub ?? "", cmd.flags),
+	open: (cmd) => openCommand(cmd.args[0]),
 	missions: notImplemented,
 	mission: notImplemented,
 	events: notImplemented,
