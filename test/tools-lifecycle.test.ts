@@ -35,6 +35,7 @@ function mission(number: number, state: MissionState, extra?: Partial<Mission>):
 const LEADER: Leader = {
 	workspaceId: WORKSPACE,
 	machineId: "m",
+	name: "Halden",
 	sessionId: ulid(),
 	provider: "fake",
 	model: "test-model",

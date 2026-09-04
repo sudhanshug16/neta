@@ -15,6 +15,7 @@ import { basename, join } from "node:path";
 import { netaMcpServer } from "../acp/mcp.ts";
 import { loadSettings, providerFor } from "../acp/settings.ts";
 import { ulid } from "../core/ids.ts";
+import { pickName } from "../core/names.ts";
 import { nowIso } from "../core/time.ts";
 import type { Leader, Workspace, WorkspaceKind } from "../core/types.ts";
 import { canonicalRemote, workspaceIdFor } from "../core/workspace-id.ts";
@@ -79,11 +80,44 @@ export async function detectWorkspace(path: string): Promise<DetectedWorkspace> 
 	return { kind: "git", remote: rawRemote, name: basename(toplevel), root: toplevel };
 }
 
+// Names already spoken for in this workspace: every agent on every mission
+// it has. A fresh workspace has none; a workspace whose leader record was
+// lost keeps the live agents' names off the leader.
+function takenNames(ctx: NodeContext, workspaceId: string): Set<string> {
+	const taken = new Set<string>();
+	for (const mission of ctx.store.listMissions(workspaceId)) {
+		for (const agent of ctx.store.listAgents(mission.id)) {
+			taken.add(agent.name);
+		}
+	}
+	return taken;
+}
+
+// The leader is a person to talk to, not the workspace: it gets its own name
+// from the pool, seeded by the workspace id so the same workspace always draws
+// the same one. `leader.name` in settings overrides it. The name is written
+// into the record and never picked again.
+function leaderName(ctx: NodeContext, workspaceId: string): string {
+	const { settings } = loadSettings({ netaDir: netaDir() });
+	const override = settings.leader.name?.trim() ?? "";
+	return override === "" ? pickName(takenNames(ctx, workspaceId), workspaceId) : override;
+}
+
+// A leader record written before `name` existed decodes as a `Leader` with the
+// field missing, and the desktop's `Leader` requires it: the whole snapshot
+// then fails to decode and the app shows an empty window. Read the field back
+// as unknown so a record off disk is judged by what it holds, not by its type.
+function storedName(leader: Leader): string {
+	const raw: unknown = leader.name;
+	return typeof raw === "string" ? raw.trim() : "";
+}
+
 async function createLeader(ctx: NodeContext, workspaceId: string, machineId: string, cwd: string): Promise<Leader> {
 	const { settings } = loadSettings({ netaDir: netaDir() });
 	const providerName = settings.leader.provider;
 	const provider = providerFor(settings, providerName);
 	const model = settings.leader.model ?? provider.defaultModel;
+	const name = leaderName(ctx, workspaceId);
 	// Provisional actor identity: 05's token table mints the real actor token
 	// when the leader session is (re-)launched, so this entry carries the
 	// right shape (name neta, mcp --actor/--token) until then. The session id
@@ -99,6 +133,7 @@ async function createLeader(ctx: NodeContext, workspaceId: string, machineId: st
 	const leader: Leader = {
 		workspaceId,
 		machineId,
+		name,
 		sessionId: created.sessionId,
 		provider: created.provider,
 		model: created.model,
@@ -134,6 +169,13 @@ export async function openWorkspace(ctx: NodeContext, path: string): Promise<{ w
 	let leader = ctx.store.getLeader(id);
 	if (leader === undefined) {
 		leader = await createLeader(ctx, id, machineId, detected.root);
+	} else if (storedName(leader) === "") {
+		// Backfill on read: a record from before the field existed keeps its
+		// session, mode and counters and gains a name here, once, so nothing
+		// downstream ever sees a leader without one.
+		leader = { ...leader, name: leaderName(ctx, id) };
+		await ctx.store.putLeader(leader);
+		ctx.hub.broadcast("state", { kind: "leader", record: leader });
 	}
 	return { workspace, leader };
 }

@@ -10,7 +10,9 @@ import XCTest
 @MainActor
 final class ChatHeaderTests: XCTestCase {
 	private let base = Date(timeIntervalSince1970: 1_780_315_200) // 2026-06-01T12:00:00Z
-	private let workspaceId = "git:github.com/acme/Halden"
+	// The workspace is NoScrubs; the leader is Halden. Nothing may
+	// derive the leader's name from the workspace.
+	private let workspaceId = "git:github.com/acme/NoScrubs"
 
 	func testLeaderPathIsOneSegmentWithTag() {
 		let store = store()
@@ -18,6 +20,15 @@ final class ChatHeaderTests: XCTestCase {
 		XCTAssertEqual(segments, [ChatPathSegment(
 			id: "leader", label: "Halden", selection: .leader, isLast: true)])
 		XCTAssertTrue(ChatPath.showsLeaderTag(for: .leader))
+		// The label is the leader's own name, not the workspace's.
+		XCTAssertEqual(segments[0].label, store.leader?.name)
+		XCTAssertNotEqual(segments[0].label, store.workspaces.first?.name)
+	}
+
+	func testLeaderLabelFallsBackWithoutALeader() {
+		let empty = Store()
+		let segments = ChatPath.segments(for: .leader, store: empty)
+		XCTAssertEqual(segments.map(\.label), ["Leader"])
 	}
 
 	func testAgentPathHasThreeSegmentsWithSelectionsOnFirstTwo() {
@@ -119,8 +130,8 @@ final class ChatHeaderTests: XCTestCase {
 		store.replace(snapshot: Snapshot(
 			machine: Machine(id: "m1", name: "mac-studio", createdAt: base),
 			workspaces: [Workspace(
-				id: workspaceId, kind: .git, name: "repo",
-				remote: "git@github.com:acme/repo.git", roots: [],
+				id: workspaceId, kind: .git, name: "NoScrubs",
+				remote: "git@github.com:acme/NoScrubs.git", roots: [],
 				createdAt: base)],
 			leaders: [leader(mode: .leadPlus)],
 			missions: [
@@ -146,6 +157,7 @@ final class ChatHeaderTests: XCTestCase {
 	private func leader(mode: LeaderMode) -> Leader {
 		Leader(
 			workspaceId: workspaceId, machineId: "m1",
+			name: "Halden",
 			sessionId: "s-leader", provider: "Claude", model: "claude-opus-5",
 			mode: mode, modeSince: base, modeActiveMs: 14 * 60_000,
 			activeMissionId: "m304", state: .running)

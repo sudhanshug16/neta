@@ -98,6 +98,7 @@ final class ToolbarTests: XCTestCase {
 				createdAt: base)],
 			leaders: [Leader(
 				workspaceId: workspaceId, machineId: machineId,
+				name: "Halden",
 				sessionId: "s-leader", provider: "fake", model: "test-model",
 				mode: .lead, modeSince: base, modeActiveMs: 0,
 				activeMissionId: nil, state: .idle)],

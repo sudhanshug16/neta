@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { ulid } from "../src/core/ids.ts";
+import { NAME_POOL } from "../src/core/names.ts";
 import type { Agent, EventKind, Leader, Mission, Workspace } from "../src/core/types.ts";
 import type { NodeStore } from "../src/node/server.ts";
 import {
@@ -18,6 +19,7 @@ function leader(workspaceId: string, sessionId: string): Leader {
 	return {
 		workspaceId,
 		machineId: "m",
+		name: "Halden",
 		sessionId,
 		provider: "fake",
 		model: "test-model",
@@ -293,6 +295,36 @@ describe("neta_agent", () => {
 		}
 		return result.data.id as string;
 	}
+
+	test("agents never take the workspace leader's own name", async () => {
+		const f = fixture("folder");
+		const current = f.store.getLeader("folder-w");
+		if (current === undefined) {
+			throw new Error("no leader");
+		}
+		// The fixture leader is named off-pool; give it a pool name, since
+		// the question is what happens when it competes for one.
+		const leaderName = NAME_POOL[0];
+		await f.store.putLeader({ ...current, name: leaderName });
+		const missionId = await withMission(f);
+		// One agent for every other name in the pool. With the leader's name
+		// spoken for exactly 199 are free, so the names drawn must be the
+		// pool minus it; were the leader not counted, its name would appear
+		// here and one other name would be missing.
+		for (let i = 0; i < NAME_POOL.length - 2; i++) {
+			const result = await missionHandlers.neta_agent(ctx(f, f.leaderActor), {
+				task: `job ${i}`,
+				access: "readWrite",
+				missionId,
+			});
+			if (!result.ok) {
+				throw new Error(`spawn ${i} refused: ${result.message}`);
+			}
+		}
+		const names = f.store.listAgents(missionId).map((agent) => agent.name);
+		expect(names).toHaveLength(NAME_POOL.length - 1);
+		expect(new Set(names)).toEqual(new Set(NAME_POOL.filter((name) => name !== leaderName)));
+	});
 
 	test("a lead adding to its own mission may omit missionId", async () => {
 		const f = fixture("folder");

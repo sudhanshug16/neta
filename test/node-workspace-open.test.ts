@@ -1,13 +1,16 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { ulid } from "../src/core/ids.ts";
+import { NAME_POOL } from "../src/core/names.ts";
 import type { Leader, Workspace } from "../src/core/types.ts";
 import { canonicalRemote } from "../src/core/workspace-id.ts";
+import { adaptStore } from "../src/node/lifecycle.ts";
 import type { NodeAcp, NodeContext, NodeStore } from "../src/node/server.ts";
 import { detectWorkspace, openWorkspace, workspaceHandlers } from "../src/node/workspace-open.ts";
+import { openStore, paths, readJson, type Store } from "../src/store/index.ts";
 
 function runGit(args: string[], cwd: string): Promise<string> {
 	return new Promise((resolve, reject) => {
@@ -45,6 +48,17 @@ async function initRepo(path: string, remote?: string): Promise<void> {
 	if (remote !== undefined) {
 		await runGit(["remote", "add", "origin", remote], path);
 	}
+}
+
+interface World {
+	workspaces: Map<string, Workspace>;
+	leaders: Map<string, Leader>;
+	sessions: CreatedSession[];
+	broadcasts: unknown[];
+}
+
+function emptyWorld(): World {
+	return { workspaces: new Map(), leaders: new Map(), sessions: [], broadcasts: [] };
 }
 
 interface CreatedSession {
@@ -116,6 +130,13 @@ function testCtx(world: {
 	};
 }
 
+// A context whose store is the real lifecycle store over `NETA_DIR`, so
+// leader records travel through leaders/<workspaceId>.json; ACP and hub stay
+// fake.
+async function realCtx(real: Store, world: World): Promise<NodeContext> {
+	return { ...testCtx(world), store: await adaptStore(real) };
+}
+
 describe("detectWorkspace", () => {
 	test("SSH and HTTPS remotes of one repo detect the same canonical remote", async () => {
 		const repoA = join(dir, "a");
@@ -160,6 +181,98 @@ describe("detectWorkspace", () => {
 			thrown = error;
 		}
 		expect((thrown as { symbol?: string }).symbol).toBe("NOT_FOUND");
+	});
+
+	test("leader creation draws a personal name from the pool, not the workspace name", async () => {
+		const repo = join(dir, "widget");
+		await initRepo(repo, "git@github.com:acme/widget.git");
+		const world = {
+			workspaces: new Map(),
+			leaders: new Map(),
+			sessions: [] as CreatedSession[],
+			broadcasts: [] as unknown[],
+		};
+		const opened = await openWorkspace(testCtx(world), repo);
+		expect(NAME_POOL).toContain(opened.leader.name);
+		expect(opened.leader.name).not.toBe(opened.workspace.name);
+		expect(opened.leader.name).not.toBe(opened.workspace.id);
+		// Seeded by the workspace id: a second checkout of the same repo,
+		// opened into a fresh world, draws the same name.
+		const other = join(dir, "widget-clone");
+		await initRepo(other, "https://github.com/acme/widget.git");
+		const fresh = await openWorkspace(
+			testCtx({ workspaces: new Map(), leaders: new Map(), sessions: [], broadcasts: [] }),
+			other,
+		);
+		expect(fresh.leader.name).toBe(opened.leader.name);
+	});
+
+	test("settings leader.name overrides the pool, blank falls back to it", async () => {
+		const repo = join(dir, "repo");
+		await initRepo(repo, "git@github.com:acme/widget.git");
+		const neta = process.env.NETA_DIR ?? "";
+		await mkdir(neta, { recursive: true });
+		await writeFile(join(neta, "settings.json"), JSON.stringify({ leader: { provider: "claude", name: "Halden" } }));
+		const named = await openWorkspace(
+			testCtx({ workspaces: new Map(), leaders: new Map(), sessions: [], broadcasts: [] }),
+			repo,
+		);
+		expect(named.leader.name).toBe("Halden");
+		await writeFile(join(neta, "settings.json"), JSON.stringify({ leader: { provider: "claude", name: "  " } }));
+		const blank = await openWorkspace(
+			testCtx({ workspaces: new Map(), leaders: new Map(), sessions: [], broadcasts: [] }),
+			repo,
+		);
+		expect(NAME_POOL).toContain(blank.leader.name);
+	});
+
+	test("the leader name round-trips through the real store and its broadcast", async () => {
+		const repo = join(dir, "repo");
+		await initRepo(repo, "git@github.com:acme/widget.git");
+		const world = emptyWorld();
+		const real = await openStore();
+		try {
+			const first = await openWorkspace(await realCtx(real, world), repo);
+			// Not the fake map: the JSON the lifecycle store wrote under
+			// leaders/ carries the field.
+			expect((await readJson<Leader>(paths().leader(first.workspace.id)))?.name).toBe(first.leader.name);
+			// And the `state` notification that announced the leader carries it.
+			expect(world.broadcasts).toEqual([{ method: "state", params: { kind: "leader", record: first.leader } }]);
+			// A fresh adaption reads the record back off disk: same name, no
+			// second session, nothing re-broadcast.
+			const reloaded = await openWorkspace(await realCtx(real, world), repo);
+			expect(reloaded.leader.name).toBe(first.leader.name);
+			expect(world.sessions).toHaveLength(1);
+			expect(world.broadcasts).toHaveLength(1);
+		} finally {
+			await real.close();
+		}
+	});
+
+	test("a stored leader written before the field gains a name on open", async () => {
+		const repo = join(dir, "repo");
+		await initRepo(repo, "git@github.com:acme/widget.git");
+		const world = emptyWorld();
+		const real = await openStore();
+		try {
+			const first = await openWorkspace(await realCtx(real, world), repo);
+			// The record as it was written before `name` existed.
+			const legacy: Record<string, unknown> = { ...first.leader };
+			delete legacy.name;
+			await writeFile(paths().leader(first.workspace.id), JSON.stringify(legacy));
+			world.broadcasts.length = 0;
+			const reopened = await openWorkspace(await realCtx(real, world), repo);
+			expect(NAME_POOL).toContain(reopened.leader.name);
+			// Backfilled, not re-created: the session and mode survive.
+			expect(reopened.leader.sessionId).toBe(first.leader.sessionId);
+			expect(reopened.leader.modeSince).toBe(first.leader.modeSince);
+			expect(world.sessions).toHaveLength(1);
+			// Persisted and announced, so the next reader never sees it missing.
+			expect((await readJson<Leader>(paths().leader(first.workspace.id)))?.name).toBe(reopened.leader.name);
+			expect(world.broadcasts).toEqual([{ method: "state", params: { kind: "leader", record: reopened.leader } }]);
+		} finally {
+			await real.close();
+		}
 	});
 });
 

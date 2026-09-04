@@ -92,9 +92,7 @@ public enum ChatPath {
 	// MARK: - Private
 
 	@MainActor private static func leaderSegment(in store: Store, isLast: Bool) -> ChatPathSegment {
-		let label = store.leader.map {
-			MissionBarModel.leaderDisplayName(workspaceId: $0.workspaceId)
-		} ?? "Leader"
+		let label = MissionBarModel.leaderDisplayName(store.leader)
 		return ChatPathSegment(id: "leader", label: label, selection: .leader, isLast: isLast)
 	}
 

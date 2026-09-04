@@ -34,6 +34,7 @@ function leader(id: string): Leader {
 	return {
 		workspaceId: id,
 		machineId: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+		name: "Halden",
 		sessionId: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
 		provider: "claude",
 		model: "sonnet",

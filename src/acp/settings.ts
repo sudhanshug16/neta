@@ -15,7 +15,9 @@ export interface ProviderSettings {
 
 export interface Settings {
 	providers: Record<string, ProviderSettings>;
-	leader: { provider: string; model?: string };
+	// `name` overrides the leader's personal name; absent means "pick one
+	// from the name pool at leader creation".
+	leader: { provider: string; model?: string; name?: string };
 	forbiddenModels: string[];
 }
 
@@ -203,6 +205,13 @@ function validateLayer(raw: unknown, where: string, warnings: string[]): Partial
 					kept.model = leader.model;
 				} else {
 					warnings.push(`${where}: leader model is not a string, ignoring`);
+				}
+			}
+			if (leader.name !== undefined) {
+				if (isString(leader.name)) {
+					kept.name = leader.name;
+				} else {
+					warnings.push(`${where}: leader name is not a string, ignoring`);
 				}
 			}
 			patch.leader = kept;

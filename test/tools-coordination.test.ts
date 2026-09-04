@@ -51,6 +51,7 @@ function makeAgent(id: string, state: AgentState, extra?: Partial<Agent>): Agent
 const LEADER: Leader = {
 	workspaceId: WORKSPACE,
 	machineId: "m",
+	name: "Halden",
 	sessionId: ulid(),
 	provider: "fake",
 	model: "test-model",

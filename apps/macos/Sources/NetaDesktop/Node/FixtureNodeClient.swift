@@ -251,6 +251,7 @@ public actor FixtureNodeClient: NodeClient {
 			let leader = leaders[index]
 			leaders[index] = Leader(
 				workspaceId: leader.workspaceId, machineId: leader.machineId,
+				name: leader.name,
 				sessionId: leader.sessionId, provider: leader.provider, model: model,
 				mode: leader.mode, modeSince: leader.modeSince, modeActiveMs: leader.modeActiveMs,
 				activeMissionId: leader.activeMissionId, state: leader.state)
@@ -288,6 +289,7 @@ public actor FixtureNodeClient: NodeClient {
 		let leader = leaders[index]
 		leaders[index] = Leader(
 			workspaceId: leader.workspaceId, machineId: leader.machineId,
+			name: leader.name,
 			sessionId: leader.sessionId, provider: leader.provider, model: leader.model,
 			mode: mode, modeSince: Date(), modeActiveMs: leader.modeActiveMs,
 			activeMissionId: leader.activeMissionId, state: leader.state)

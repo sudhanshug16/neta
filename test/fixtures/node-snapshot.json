@@ -23,6 +23,7 @@
     {
       "workspaceId": "git:github.com/acme/widget",
       "machineId": "01KT1GW6G03YY7WR8A6BBMKV89",
+      "name": "Halden",
       "sessionId": "01KT1GW6G03YY7WR8A6BBMKV8E",
       "provider": "fake",
       "model": "test-model",

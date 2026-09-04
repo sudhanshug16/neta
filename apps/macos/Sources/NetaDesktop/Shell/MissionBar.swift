@@ -84,9 +84,7 @@ public enum MissionBarModel {
 	) -> [MissionBarItem] {
 		var items: [MissionBarItem] = []
 		if let leader {
-			items.append(.leader(
-				name: leaderDisplayName(workspaceId: leader.workspaceId),
-				mode: leader.mode))
+			items.append(.leader(name: leaderDisplayName(leader), mode: leader.mode))
 		}
 		items.append(.now(lit: nowLit))
 		items.append(.divider)
@@ -104,14 +102,12 @@ public enum MissionBarModel {
 		return items
 	}
 
-	/// The `Leader` record carries no personal name; the workspace identity
-	/// is the only human-meaningful string on it, and 01-domain names a
-	/// workspace by repo name or folder basename — the trailing segment.
-	public static func leaderDisplayName(workspaceId: String) -> String {
-		if let tail = workspaceId.split(separator: "/").last, !tail.isEmpty {
-			return String(tail)
-		}
-		return workspaceId.isEmpty ? "Leader" : workspaceId
+	/// The one place the app decides what to call the leader: the personal
+	/// name on the record (01-domain `Leader.name`), never the workspace.
+	/// Only a missing leader falls back to the generic word.
+	public static func leaderDisplayName(_ leader: Leader?) -> String {
+		guard let leader, !leader.name.isEmpty else { return "Leader" }
+		return leader.name
 	}
 }
 

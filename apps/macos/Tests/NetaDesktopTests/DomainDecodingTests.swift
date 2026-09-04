@@ -18,6 +18,27 @@ final class DomainDecodingTests: XCTestCase {
 		XCTAssertTrue(snapshot.hasOlder)
 	}
 
+	func testSnapshotLeaderCarriesItsOwnName() throws {
+		let snapshot = try decodeSnapshot()
+		let leader = try XCTUnwrap(snapshot.leaders.first)
+		XCTAssertEqual(leader.name, "Halden")
+		XCTAssertNotEqual(leader.name, snapshot.workspaces.first?.name)
+	}
+
+	/// A leader stored before `name` existed must not take the snapshot
+	/// down with it: the field decodes empty and the shell says "Leader".
+	func testLeaderWithoutANameStillDecodes() throws {
+		let json = """
+			{"workspaceId":"git:github.com/acme/widget","machineId":"01KT1GW6G03YY7WR8A6BBMKV89",\
+			"sessionId":"01KT1GW6G03YY7WR8A6BBMKV8E","provider":"fake","model":"test-model",\
+			"mode":"lead","modeSince":"2026-06-01T07:00:00.000Z","modeActiveMs":0,"state":"idle"}
+			"""
+		let leader = try NetaJSON.decoder.decode(Leader.self, from: Data(json.utf8))
+		XCTAssertEqual(leader.name, "")
+		XCTAssertEqual(leader.provider, "fake")
+		XCTAssertEqual(MissionBarModel.leaderDisplayName(leader), "Leader")
+	}
+
 	func testSnapshotMissionFieldsToTheMillisecond() throws {
 		let snapshot = try decodeSnapshot()
 		let mission = try XCTUnwrap(snapshot.missions.first { $0.number == 2 })

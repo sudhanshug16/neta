@@ -30,6 +30,7 @@ const machine: Machine = {
 const leader: Leader = {
 	workspaceId: workspace.id,
 	machineId: machine.id,
+	name: "Halden",
 	sessionId: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
 	provider: "claude",
 	model: "sonnet",

@@ -31,6 +31,7 @@ export type LeaderMode = "lead" | "leadPlus";
 export interface Leader {
 	workspaceId: WorkspaceId;
 	machineId: MachineId;
+	name: string; // personal name from the pool, fixed at creation
 	sessionId: SessionId; // the one continuous conversation
 	provider: string; // provider name from settings
 	model: string; // concrete model id

@@ -177,6 +177,7 @@ test("session tool wiring and end-to-end mission creation", async () => {
 	await real.leaders.save({
 		workspaceId: WORKSPACE,
 		machineId: "e2e-machine",
+		name: "Halden",
 		sessionId: leaderSession,
 		provider: "fake",
 		model: "test-model",

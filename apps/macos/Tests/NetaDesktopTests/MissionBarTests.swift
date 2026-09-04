@@ -131,8 +131,22 @@ final class MissionBarTests: XCTestCase {
 		guard case .leader(let name, let mode) = items[0] else {
 			return XCTFail("first item is the leader")
 		}
-		XCTAssertFalse(name.isEmpty)
+		// The recorded fixture's leader is Halden in a workspace named
+		// "repo" at "git:github.com/acme/widget": the chip shows the
+		// leader's own name, never anything derived from the workspace.
+		XCTAssertEqual(name, "Halden")
+		XCTAssertEqual(name, leader.name)
+		let workspace = try XCTUnwrap(store.workspaces.first)
+		XCTAssertNotEqual(name, workspace.name)
+		XCTAssertFalse(leader.workspaceId.contains(name))
 		XCTAssertEqual(mode, leader.mode)
+	}
+
+	func testDisplayNameIsTheRecordNameAndFallsBackWithoutALeader() async throws {
+		let store = try await fixtureStore()
+		let leader = try XCTUnwrap(store.leader)
+		XCTAssertEqual(MissionBarModel.leaderDisplayName(leader), "Halden")
+		XCTAssertEqual(MissionBarModel.leaderDisplayName(nil), "Leader")
 	}
 
 	func testViewBuildsAndStoresNoControlState() async throws {

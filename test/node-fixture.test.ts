@@ -21,6 +21,9 @@ describe("recorded node fixture", () => {
 		expect(SNAPSHOT.workspaces[0]?.kind).toBe("git");
 		expect(SNAPSHOT.leaders).toHaveLength(1);
 		expect(SNAPSHOT.leaders[0]?.mode).toBe("lead");
+		// The leader's personal name, not the workspace's ("repo").
+		expect(SNAPSHOT.leaders[0]?.name).toBe("Halden");
+		expect(SNAPSHOT.leaders[0]?.name).not.toBe(SNAPSHOT.workspaces[0]?.name);
 		expect(SNAPSHOT.missions).toHaveLength(13);
 		expect(new Set(SNAPSHOT.missions.map((m: Mission) => m.state))).toEqual(
 			new Set(["running", "blocked", "failed", "readyToClose", "mergedNotClosed", "closed"]),

@@ -62,6 +62,9 @@ public enum LeaderState: String, Codable, Hashable, Sendable {
 public struct Leader: Codable, Hashable, Sendable {
 	public let workspaceId: WorkspaceId
 	public let machineId: MachineId
+	/// The leader's personal name, drawn from the name pool when the leader
+	/// was created. It is not the workspace's name.
+	public let name: String
 	public let sessionId: SessionId
 	public let provider: String
 	public let model: String
@@ -70,6 +73,31 @@ public struct Leader: Codable, Hashable, Sendable {
 	public let modeActiveMs: Int
 	public let activeMissionId: MissionId?
 	public let state: LeaderState
+}
+
+// The memberwise initialiser stays available: this lives in an extension.
+extension Leader {
+	/// A leader record written before `name` existed arrives without the
+	/// field. The Node backfills it on `workspace.open`, but the desktop
+	/// only ever asks for a snapshot, so tolerate the gap here too: one
+	/// missing string would otherwise fail the whole snapshot decode and
+	/// leave an empty window with nothing said. An empty name reads as
+	/// "Leader". Every other field stays required, and the keys are the
+	/// verbatim field names, so this is no per-type key map.
+	public init(from decoder: any Decoder) throws {
+		let values = try decoder.container(keyedBy: AnyKey.self)
+		workspaceId = try values.decode(WorkspaceId.self, forKey: AnyKey("workspaceId"))
+		machineId = try values.decode(MachineId.self, forKey: AnyKey("machineId"))
+		name = try values.decodeIfPresent(String.self, forKey: AnyKey("name")) ?? ""
+		sessionId = try values.decode(SessionId.self, forKey: AnyKey("sessionId"))
+		provider = try values.decode(String.self, forKey: AnyKey("provider"))
+		model = try values.decode(String.self, forKey: AnyKey("model"))
+		mode = try values.decode(LeaderMode.self, forKey: AnyKey("mode"))
+		modeSince = try values.decode(Date.self, forKey: AnyKey("modeSince"))
+		modeActiveMs = try values.decode(Int.self, forKey: AnyKey("modeActiveMs"))
+		activeMissionId = try values.decodeIfPresent(MissionId.self, forKey: AnyKey("activeMissionId"))
+		state = try values.decode(LeaderState.self, forKey: AnyKey("state"))
+	}
 }
 
 // MARK: - Missions

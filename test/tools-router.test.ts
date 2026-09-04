@@ -10,6 +10,7 @@ function leader(sessionId: string): Leader {
 	return {
 		workspaceId: WORKSPACE,
 		machineId: "m",
+		name: "Halden",
 		sessionId,
 		provider: "fake",
 		model: "test-model",

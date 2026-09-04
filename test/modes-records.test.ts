@@ -24,6 +24,7 @@ function leader(id: string): Leader {
 	return {
 		workspaceId: id,
 		machineId: "m",
+		name: "Halden",
 		sessionId: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
 		provider: "fake",
 		model: "test-model",

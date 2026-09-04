@@ -48,6 +48,24 @@ describe("provider settings", () => {
 		expect(settings.providers.claude?.command).toBe("npx");
 	});
 
+	test("leader name overrides across layers and a wrong-typed one is dropped", () => {
+		const dir = mkdtempSync(join(tmpdir(), "neta-settings-"));
+		const root = mkdtempSync(join(tmpdir(), "neta-ws-"));
+		expect(loadSettings({ netaDir: dir }).settings.leader.name).toBeUndefined();
+		writeFileSync(join(dir, "settings.json"), JSON.stringify({ leader: { name: "Halden" } }));
+		expect(loadSettings({ netaDir: dir }).settings.leader.name).toBe("Halden");
+		mkdirSync(join(root, ".neta"), { recursive: true });
+		writeFileSync(join(root, ".neta", "settings.json"), JSON.stringify({ leader: { name: "Wren" } }));
+		const layered = loadSettings({ netaDir: dir, workspaceRoot: root });
+		expect(layered.warnings).toEqual([]);
+		expect(layered.settings.leader.name).toBe("Wren");
+		expect(layered.settings.leader.provider).toBe("claude");
+		writeFileSync(join(dir, "settings.json"), JSON.stringify({ leader: { name: 7 } }));
+		const bad = loadSettings({ netaDir: dir });
+		expect(bad.settings.leader.name).toBeUndefined();
+		expect(bad.warnings.some((w) => w.includes("leader name is not a string"))).toBe(true);
+	});
+
 	test("bad JSON warns and keeps the lower layer", () => {
 		const dir = mkdtempSync(join(tmpdir(), "neta-settings-"));
 		writeFileSync(join(dir, "settings.json"), "{nope");

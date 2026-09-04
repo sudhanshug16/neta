@@ -76,6 +76,7 @@ function baseLeader(): Leader {
 	return {
 		workspaceId: WORKSPACE,
 		machineId: "m",
+		name: "Halden",
 		sessionId: "01ARZ3NDEKTSV4RRFFQ69G5AAA",
 		provider: "fake",
 		model: "test-model",

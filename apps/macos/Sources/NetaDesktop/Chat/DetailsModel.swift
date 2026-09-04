@@ -210,7 +210,6 @@ public enum DetailsModel {
 	// MARK: - Titles
 
 	private static func leaderTitle(_ leader: Leader?) -> String {
-		guard let leader else { return "Leader" }
-		return MissionBarModel.leaderDisplayName(workspaceId: leader.workspaceId)
+		MissionBarModel.leaderDisplayName(leader)
 	}
 }

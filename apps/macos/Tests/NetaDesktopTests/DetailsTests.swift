@@ -10,7 +10,9 @@ import XCTest
 @MainActor
 final class DetailsTests: XCTestCase {
 	private let base = Date(timeIntervalSince1970: 1_780_315_200) // 2026-06-01T12:00:00Z
-	private let workspaceId = "git:github.com/acme/Halden"
+	// The workspace is NoScrubs; the leader is Halden. Nothing may
+	// derive the leader's name from the workspace.
+	private let workspaceId = "git:github.com/acme/NoScrubs"
 
 	func testForWidthBreakpoint() {
 		XCTAssertEqual(DetailsPlacement.forWidth(1100), .replacing)
@@ -106,6 +108,10 @@ final class DetailsTests: XCTestCase {
 		let store = store()
 		XCTAssertEqual(DetailsModel.title(for: .leader, store: store), "Halden")
 		XCTAssertEqual(
+			DetailsModel.title(for: .leader, store: store), store.leader?.name)
+		XCTAssertNotEqual(
+			DetailsModel.title(for: .leader, store: store), store.workspaces.first?.name)
+		XCTAssertEqual(
 			DetailsModel.title(for: .mission("m304"), store: store),
 			"#304 Rate limiter on /search")
 		XCTAssertEqual(
@@ -119,11 +125,12 @@ final class DetailsTests: XCTestCase {
 		store.replace(snapshot: Snapshot(
 			machine: Machine(id: "m1", name: "mac-studio", createdAt: base),
 			workspaces: [Workspace(
-				id: workspaceId, kind: .git, name: "repo",
-				remote: "git@github.com:acme/repo.git", roots: [],
+				id: workspaceId, kind: .git, name: "NoScrubs",
+				remote: "git@github.com:acme/NoScrubs.git", roots: [],
 				createdAt: base)],
 			leaders: [Leader(
 				workspaceId: workspaceId, machineId: "m1",
+				name: "Halden",
 				sessionId: "s-leader", provider: "Claude",
 				model: "claude-opus-5", mode: .leadPlus, modeSince: base,
 				modeActiveMs: 14 * 60_000, activeMissionId: "m304",

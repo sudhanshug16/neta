@@ -24,6 +24,7 @@ function leader(workspaceId: string): Leader {
 	return {
 		workspaceId,
 		machineId: MACHINE_ID,
+		name: "Halden",
 		sessionId: ulid(),
 		provider: "test",
 		model: "m",
@@ -295,6 +296,7 @@ describe("buildSnapshot", () => {
 		const snapshot = await buildSnapshot(testCtx(), { workspaceId: W2 });
 		expect(snapshot.workspaces.map((w) => w.id)).toEqual([W2]);
 		expect(snapshot.leaders.map((l) => l.workspaceId)).toEqual([W2]);
+		expect(snapshot.leaders.map((l) => l.name)).toEqual(["Halden"]);
 		expect(snapshot.missions.map((m) => m.id).sort()).toEqual(
 			[M10.id, M11.id, M12.id, M13.id, M14.id, M15.id].sort(),
 		);

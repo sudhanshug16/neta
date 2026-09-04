@@ -90,7 +90,7 @@ async function main(): Promise<void> {
 			providers: {
 				fake: { command: process.execPath, args: [FAKE_AGENT], resume: true, defaultModel: "test-model" },
 			},
-			leader: { provider: "fake" },
+			leader: { provider: "fake", name: "Halden" },
 		}),
 	);
 	await runGit(["init", "-q"], REPO_DIR);

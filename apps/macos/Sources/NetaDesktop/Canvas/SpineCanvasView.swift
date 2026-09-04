@@ -270,6 +270,11 @@ public struct SpineCanvasView: View {
 								maxPitch: viewport.maxPitch),
 							viewport: visible)
 					})
+				if store.missions.isEmpty {
+					emptyState
+						.frame(width: size.width, height: size.height)
+						.allowsHitTesting(false)
+				}
 			}
 			.frame(width: size.width, height: size.height)
 			.background(
@@ -348,9 +353,7 @@ public struct SpineCanvasView: View {
 	// MARK: - Columns
 
 	private var leaderName: String {
-		store.leader.map {
-			MissionBarModel.leaderDisplayName(workspaceId: $0.workspaceId)
-		} ?? "Leader"
+		MissionBarModel.leaderDisplayName(store.leader)
 	}
 
 	/// One materialised column: the lead card at its card centre plus one
@@ -417,6 +420,21 @@ public struct SpineCanvasView: View {
 				action: { viewport.toggleExpanded(column.id) })
 				.position(x: rect.midX, y: rect.midY)
 		}
+	}
+
+	/// Centred hint when the workspace holds no missions yet: the axis
+	/// and leader card alone read as a broken canvas, so the empty state
+	/// says so. Hit testing stays off so trackpad panning still works.
+	private var emptyState: some View {
+		VStack(spacing: 6) {
+			Text("No missions yet")
+				.font(Theme.text(13, .semibold))
+				.foregroundStyle(Theme.textPrimary)
+			Text("Missions appear here as the leader starts them.")
+				.font(Theme.text(12, .regular))
+				.foregroundStyle(Theme.textSecondary)
+		}
+		.frame(maxWidth: .infinity, maxHeight: .infinity)
 	}
 
 	@ViewBuilder @MainActor

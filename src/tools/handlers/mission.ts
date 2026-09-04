@@ -180,7 +180,9 @@ async function createMission(ctx: MissionToolContext, params: MissionParams): Pr
 		mission = await ctx.deps.worktrees.prepare(mission, workspace);
 	}
 
-	const taken = new Set<string>();
+	// The leader's own name is spoken for: two "Halden"s in the mission bar
+	// and on the spine would name one person twice.
+	const taken = new Set<string>([leader.name]);
 	const launched: Agent[] = [];
 	if (params.lead === "self") {
 		mission.lead = { kind: "leader" };
@@ -282,6 +284,10 @@ async function createAgent(ctx: MissionToolContext, params: AgentParams): Promis
 			? ctx.deps.store.getAgent(ctx.actor.agentId)
 			: ctx.deps.store.getLeader(ctx.actor.workspaceId);
 	const taken = new Set(ctx.deps.store.listAgents(mission.id).map((agent) => agent.name));
+	const workspaceLeader = ctx.deps.store.getLeader(mission.workspaceId);
+	if (workspaceLeader !== undefined) {
+		taken.add(workspaceLeader.name);
+	}
 	const spawned = await launchAgent(ctx, mission, {
 		task: params.task,
 		access: params.access,

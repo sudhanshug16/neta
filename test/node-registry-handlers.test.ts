@@ -16,6 +16,7 @@ function leader(workspaceId: string): Leader {
 	return {
 		workspaceId,
 		machineId: ulid(),
+		name: "Halden",
 		sessionId: ulid(),
 		provider: "test",
 		model: "m",
