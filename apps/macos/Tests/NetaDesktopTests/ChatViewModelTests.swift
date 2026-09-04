@@ -142,6 +142,43 @@ final class ChatViewModelTests: XCTestCase {
 		XCTAssertEqual(vm.autoScrollTarget, second)
 	}
 
+	/// FIXPASS G4-7: the client finishes every subscription when the
+	/// connection is renewed, which used to end `start()`'s loop for good, so
+	/// the chat stopped streaming after a reconnect and never restarted.
+	func testStreamResumesAfterTheSubscriptionEnds() async throws {
+		let client = FixtureNodeClient()
+		let vm = ChatViewModel(client: client, sessionId: Self.session)
+		await vm.start()
+		// Draining the recording finishes every live subscription, the same
+		// way a reconnect does.
+		while await client.emitNext() {}
+		await client.emit(.turn(makeChange(turn: makeTurn("after-reconnect", startedAt: 5_000))))
+		var found = false
+		for _ in 0 ..< 500 {
+			try await Task.sleep(nanoseconds: 10_000_000)
+			if vm.turns.contains(where: { $0.id == "after-reconnect" }) {
+				found = true
+				break
+			}
+			await client.emit(.turn(makeChange(turn: makeTurn("after-reconnect", startedAt: 5_000))))
+		}
+		XCTAssertTrue(found, "the chat never resubscribed after the stream ended")
+		let calls = await client.calls
+		XCTAssertGreaterThanOrEqual(
+			calls.filter { $0.method == "conversationTail" }.count, 2,
+			"resubscribing re-tails, which is how the Node re-subscribes the peer")
+	}
+
+	func testOpenTurnChangesAreAnnounced() {
+		let vm = makeViewModel()
+		var announced: [TurnId?] = []
+		vm.onOpenTurnChange = { announced.append(vm.openTurnId) }
+		vm.apply(makeChange(turn: makeTurn("t1")))
+		vm.apply(makeChange(block: makeBlock(0)))
+		vm.apply(makeChange(turn: makeTurn("t1", endedAt: 2_000)))
+		XCTAssertEqual(announced, ["t1", nil], "opening and closing each announce once")
+	}
+
 	func testStartStreamsLiveTurns() async throws {
 		let client = FixtureNodeClient()
 		let vm = ChatViewModel(client: client, sessionId: Self.session)
@@ -156,5 +193,141 @@ final class ChatViewModelTests: XCTestCase {
 			}
 		}
 		XCTAssertTrue(found, "live turn notification was not applied")
+	}
+
+	// MARK: - Reconnect (FIXPASS G4-7)
+
+	/// The tail is what re-subscribes this peer to the session on the Node,
+	/// and it throws for the whole reconnect, not just the first backoff.
+	/// Swallowing that failure and listening anyway left the chat silent.
+	func testResubscribeKeepsRetailingUntilTheTailSucceeds() async throws {
+		let client = ReconnectingStub()
+		let vm = ChatViewModel(client: client, sessionId: Self.session)
+		await vm.start()
+		defer { vm.stop() }
+		let firstSuccesses = await client.successes
+		XCTAssertEqual(firstSuccesses, 1, "start() tails once")
+
+		// The connection drops and stays down for several backoffs.
+		await client.goDown()
+		try await Task.sleep(nanoseconds: 400_000_000)
+		let downSuccesses = await client.successes
+		let downAttempts = await client.attempts
+		XCTAssertEqual(downSuccesses, 1, "no tail can land while the client is down")
+		XCTAssertGreaterThanOrEqual(
+			downAttempts, 2, "the loop keeps re-tailing while the tail fails")
+
+		// Back up: the next tail lands, and the chat streams again.
+		await client.comeBack()
+		var found = false
+		for _ in 0 ..< 500 {
+			try await Task.sleep(nanoseconds: 10_000_000)
+			await client.emit(.turn(makeChange(turn: makeTurn("after-reconnect", startedAt: 5_000))))
+			if vm.turns.contains(where: { $0.id == "after-reconnect" }) {
+				found = true
+				break
+			}
+		}
+		XCTAssertTrue(found, "the chat never re-subscribed after the outage ended")
+		let finalSuccesses = await client.successes
+		XCTAssertGreaterThanOrEqual(
+			finalSuccesses, 2, "a successful tail is what re-subscribes the peer")
+	}
+
+	/// The subscription is taken before the tail request, so a notification
+	/// the Node broadcasts while the tail is in flight is buffered, not lost.
+	func testNotificationSentDuringTheTailIsNotLost() async throws {
+		let client = ReconnectingStub()
+		await client.broadcastDuringTail(
+			.turn(makeChange(turn: makeTurn("mid-tail", startedAt: 4_000))))
+		let vm = ChatViewModel(client: client, sessionId: Self.session)
+		await vm.start()
+		defer { vm.stop() }
+		var found = false
+		for _ in 0 ..< 500 {
+			try await Task.sleep(nanoseconds: 10_000_000)
+			if vm.turns.contains(where: { $0.id == "mid-tail" }) {
+				found = true
+				break
+			}
+		}
+		XCTAssertTrue(found, "a notification sent while the tail was in flight was dropped")
+	}
+}
+
+/// A client that can be taken down and brought back the way a reconnect
+/// does: while it is down every subscription is finished and
+/// `conversationTail` throws `.disconnected`. It counts tail attempts and
+/// successes so a test can tell a swallowed failure from a real re-tail.
+///
+/// It also models the Node's subscription rule (`src/node/server.ts`: a
+/// `turn` reaches only peers whose per-connection `tailed` set holds the
+/// session): `emit` delivers nothing until a tail has succeeded on the
+/// current connection, so listening without a successful re-tail is silence.
+private actor ReconnectingStub: NodeClient {
+	private let hub = NotificationHub()
+	private var down = false
+	private var tailed = false
+	private var tailAttempts = 0
+	private var tailSuccesses = 0
+	private var duringTail: NodeNotification?
+
+	nonisolated var notifications: AsyncStream<NodeNotification> { hub.subscribe() }
+
+	var attempts: Int { tailAttempts }
+	var successes: Int { tailSuccesses }
+
+	/// Drops the connection: finishes every live subscription, exactly as
+	/// `SocketNodeClient.connect()` does, and fails every tail until
+	/// `comeBack()`.
+	func goDown() {
+		down = true
+		tailed = false
+		hub.finishAll()
+	}
+
+	func comeBack() { down = false }
+
+	/// Delivers only to a peer that has tailed on this connection, the way
+	/// the Node does; an untailed peer hears nothing at all.
+	func emit(_ notification: NodeNotification) {
+		guard tailed else { return }
+		hub.broadcast(notification)
+	}
+
+	/// Broadcast from inside the next `conversationTail`, i.e. in the window
+	/// between subscribing and the tail's answer.
+	func broadcastDuringTail(_ notification: NodeNotification) { duringTail = notification }
+
+	func connect() async throws {}
+	func snapshot() async throws -> Snapshot { throw NodeClientError.disconnected }
+	func missionsList(workspaceId: String, before: Date?, limit: Int) async throws -> [Mission] { [] }
+	func eventsList(workspaceId: String, before: Date?, limit: Int) async throws -> [Event] { [] }
+
+	func conversationTail(
+		sessionId: Ulid, cursor: String?, limit: Int, direction: String?, turnId: TurnId?
+	) async throws -> ConversationPage {
+		tailAttempts += 1
+		if let duringTail {
+			self.duringTail = nil
+			hub.broadcast(duringTail)
+		}
+		if down { throw NodeClientError.disconnected }
+		tailSuccesses += 1
+		tailed = true
+		return ConversationPage(turns: [], blocks: [], nextCursor: nil, prevCursor: nil)
+	}
+
+	func prompt(sessionId: Ulid, text: String) async throws -> Ulid {
+		throw NodeClientError.disconnected
+	}
+	func cancel(sessionId: Ulid) async throws {}
+	func setModel(sessionId: Ulid, model: String) async throws {}
+	func listModels(provider: String) async throws -> [ModelInfo] { [] }
+	func setMode(workspaceId: String, mode: LeaderMode) async throws {}
+	func pin(missionId: Ulid, pinned: Bool) async throws {}
+	func archiveAgent(agentId: Ulid, confirmRunning: Bool) async throws {}
+	func openWorkspace(path: String) async throws -> Workspace {
+		throw NodeClientError.disconnected
 	}
 }

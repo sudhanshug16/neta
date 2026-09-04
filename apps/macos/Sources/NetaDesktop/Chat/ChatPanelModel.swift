@@ -42,6 +42,7 @@ import Observation
 		self.transcript = ChatViewModel(client: client, sessionId: sid)
 		self.composer = ComposerModel(
 			client: client, store: store, sessionId: sid, selection: resolved)
+		followOpenTurn()
 		syncComposer()
 	}
 
@@ -53,9 +54,11 @@ import Observation
 		self.selection = selection
 		let sid = Self.sessionId(for: selection, in: store)
 		sessionId = sid
+		transcript.stop()
 		transcript = ChatViewModel(client: client, sessionId: sid)
 		composer = ComposerModel(
 			client: client, store: store, sessionId: sid, selection: selection)
+		followOpenTurn()
 		syncComposer()
 	}
 
@@ -78,6 +81,15 @@ import Observation
 	public func syncComposer() {
 		composer.hasOpenTurn = transcript.openTurnId != nil
 		composer.isArchived = Self.archived(for: selection, in: store)
+	}
+
+	/// Makes the composer follow the transcript's open turn as it changes,
+	/// not only after a tail or a select: the turn closes on a streamed
+	/// notification, and Stop has to become Send at that moment.
+	private func followOpenTurn() {
+		transcript.onOpenTurnChange = { [weak self] in
+			self?.syncComposer()
+		}
 	}
 
 	// MARK: - Private

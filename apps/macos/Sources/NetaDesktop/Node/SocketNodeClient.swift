@@ -50,6 +50,67 @@ public enum NodeClientError: Error, Sendable, Equatable {
 	case disconnected
 }
 
+/// Fans one Node's notifications out to every consumer (FIXPASS G4-3).
+///
+/// An `AsyncStream` delivers each element to exactly one waiting consumer, so
+/// one shared stream split the Node's traffic between the store loop and the
+/// chat: each saw about half of it. Every `notifications` access instead takes
+/// its own subscription here and receives every notification from that moment
+/// on. A subscription buffers the newest `bufferLimit` notifications and drops
+/// the oldest beyond that, matching 04's rule that a connection 1000
+/// notifications behind is dropped. `finishAll()` ends every subscription, so
+/// a consumer can tell the connection ended and resubscribe.
+///
+/// A subscription carries only what is broadcast after `subscribe()`, so a
+/// consumer takes its stream *before* the request whose window it cannot
+/// afford to miss (`snapshot`, `conversation.tail`), never after.
+final class NotificationHub: @unchecked Sendable {
+	/// Notifications buffered per subscription before the oldest are dropped.
+	static let bufferLimit = 1_000
+
+	private let lock = NSLock()
+	private var subscribers: [Int: AsyncStream<NodeNotification>.Continuation] = [:]
+	private var nextId = 0
+
+	/// A fresh stream carrying every notification broadcast from now on.
+	func subscribe() -> AsyncStream<NodeNotification> {
+		let (stream, continuation) = AsyncStream.makeStream(
+			of: NodeNotification.self,
+			bufferingPolicy: .bufferingNewest(Self.bufferLimit))
+		let id: Int = lock.withLock {
+			nextId += 1
+			subscribers[nextId] = continuation
+			return nextId
+		}
+		continuation.onTermination = { [weak self] _ in
+			guard let self else { return }
+			_ = self.lock.withLock { self.subscribers.removeValue(forKey: id) }
+		}
+		return stream
+	}
+
+	/// Hands one notification to every live subscription.
+	func broadcast(_ notification: NodeNotification) {
+		for continuation in lock.withLock({ Array(subscribers.values) }) {
+			continuation.yield(notification)
+		}
+	}
+
+	/// Ends every subscription. A consumer whose `for await` ends this way
+	/// resubscribes; the next `subscribe()` gets a live stream again.
+	func finishAll() {
+		let ending: [AsyncStream<NodeNotification>.Continuation] = lock.withLock {
+			let all = Array(subscribers.values)
+			subscribers.removeAll()
+			return all
+		}
+		for continuation in ending { continuation.finish() }
+	}
+
+	/// Live subscriptions, for tests.
+	var subscriberCount: Int { lock.withLock { subscribers.count } }
+}
+
 /// The real `NodeClient` transport (09-desktop-shell T9.4).
 ///
 /// Reads `node.json` from `netaDirectory`, connects with
@@ -71,22 +132,30 @@ public actor SocketNodeClient: NodeClient {
 			.appendingPathComponent(".neta", isDirectory: true)
 	}()
 
-	private static let retryWindow: Duration = .seconds(5)
-	private static let retryInterval: Duration = .milliseconds(250)
+	private static let defaultRetryWindow: Duration = .seconds(5)
+	private static let defaultRetryInterval: Duration = .milliseconds(250)
 	private static let attemptTimeout: Double = 4
+	/// Consecutive failing `connect()` calls that may still start a Node
+	/// before the client stops launching one (FIXPASS G4-2). A successful
+	/// connect resets the count, so a Node quit later is started again.
+	static let maxLaunchAttempts = 5
 
-	/// Nonisolated so it can satisfy the synchronous protocol requirement; the
-	/// actor swaps the underlying stream on every `connect()`.
-	public nonisolated var notifications: AsyncStream<NodeNotification> { relay.current }
+	/// Nonisolated so it can satisfy the synchronous protocol requirement.
+	/// Every access is its own subscription: two consumers must never share
+	/// one `AsyncStream`, which would split the traffic between them.
+	public nonisolated var notifications: AsyncStream<NodeNotification> { hub.subscribe() }
 
 	private let netaDirectory: URL
 	private let launcher: any NodeLauncher
+	private let retryWindow: Duration
+	private let retryInterval: Duration
 	private let ioQueue = DispatchQueue(label: "neta.node-connection")
-	private let relay = NotificationRelay()
+	private let hub = NotificationHub()
 	private var connection: NWConnection?
 	private var connected = false
 	private var framer = LineFramer()
 	private var nextRequestId = 0
+	private var launchAttempts = 0
 	private var pending: [Int: CheckedContinuation<Data, Error>] = [:]
 	private var readyContinuation: CheckedContinuation<Void, Error>?
 	private var knownServerVersion: Int?
@@ -95,24 +164,50 @@ public actor SocketNodeClient: NodeClient {
 		netaDirectory: URL = SocketNodeClient.defaultDirectory,
 		launcher: any NodeLauncher = BundledNodeLauncher()
 	) {
+		self.init(
+			netaDirectory: netaDirectory, launcher: launcher,
+			retryWindow: SocketNodeClient.defaultRetryWindow,
+			retryInterval: SocketNodeClient.defaultRetryInterval)
+	}
+
+	/// The retry knobs are internal so tests can shrink the 5 s window
+	/// instead of waiting it out; nothing outside the module sets them.
+	init(
+		netaDirectory: URL, launcher: any NodeLauncher,
+		retryWindow: Duration, retryInterval: Duration
+	) {
 		self.netaDirectory = netaDirectory
 		self.launcher = launcher
+		self.retryWindow = retryWindow
+		self.retryInterval = retryInterval
+	}
+
+	/// Launches at most once per `connect()` call, and at most
+	/// `maxLaunchAttempts` times across consecutive failures.
+	private func launchIfAllowed() async {
+		guard launchAttempts < Self.maxLaunchAttempts else { return }
+		launchAttempts += 1
+		try? await launcher.start()
 	}
 
 	// MARK: - Connect
 
+	/// Connects, starting a Node once if none is running. Every subscription
+	/// handed out for the previous connection is finished first, so its
+	/// consumers resubscribe against the new one.
 	public func connect() async throws {
 		if connected { return }
-		relay.renew()
-		let deadline = Date().addingTimeInterval(5)
+		hub.finishAll()
+		let deadline = Date().addingTimeInterval(retryWindowSeconds)
 		var launched = false
 		while true {
 			do {
 				try await attemptConnect()
+				launchAttempts = 0
 				return
 			} catch is CancellationError {
 				dropConnection()
-				relay.finish()
+				hub.finishAll()
 				throw CancellationError()
 			} catch let error as NodeClientError {
 				switch error {
@@ -120,33 +215,39 @@ public actor SocketNodeClient: NodeClient {
 					dropConnection()
 					if !launched {
 						launched = true
-						try? await launcher.start()
+						await launchIfAllowed()
 					}
 					guard Date() < deadline else {
 						dropConnection()
-						relay.finish()
+						hub.finishAll()
 						throw NodeClientError.nodeUnavailable
 					}
-					try await Task.sleep(for: Self.retryInterval)
+					try await Task.sleep(for: retryInterval)
 				case .protocolMismatch, .rejected, .rpc:
 					dropConnection()
-					relay.finish()
+					hub.finishAll()
 					throw error
 				}
 			} catch {
 				dropConnection()
 				if !launched {
 					launched = true
-					try? await launcher.start()
+					await launchIfAllowed()
 				}
 				guard Date() < deadline else {
 					dropConnection()
-					relay.finish()
+					hub.finishAll()
 					throw NodeClientError.nodeUnavailable
 				}
-				try await Task.sleep(for: Self.retryInterval)
+				try await Task.sleep(for: retryInterval)
 			}
 		}
+	}
+
+	/// `retryWindow` in seconds, for the wall-clock deadline above.
+	private var retryWindowSeconds: Double {
+		let components = retryWindow.components
+		return Double(components.seconds) + Double(components.attoseconds) * 1e-18
 	}
 
 	private func attemptConnect() async throws {
@@ -272,6 +373,17 @@ public actor SocketNodeClient: NodeClient {
 		guard connected else { throw NodeClientError.disconnected }
 		let _: IgnoredResult = try await sendRequest(
 			method: "agent.archive", params: ["agentId": agentId, "confirm": confirmRunning])
+	}
+
+	/// 04's `workspace.open {path} -> {workspace, leader}`. The leader comes
+	/// back on the same result and again as a `state` notification, so only
+	/// the workspace is returned here; the store takes the leader from the
+	/// notification like every other record.
+	public func openWorkspace(path: String) async throws -> Workspace {
+		guard connected else { throw NodeClientError.disconnected }
+		let result: WorkspaceOpenResult = try await sendRequest(
+			method: "workspace.open", params: ["path": path])
+		return result.workspace
 	}
 
 	// MARK: - Request machinery (seams the tests drive without a socket)
@@ -433,7 +545,7 @@ public actor SocketNodeClient: NodeClient {
 		guard let method = object["method"] as? String,
 			let notification = decodeNotification(method: method, object: object)
 		else { return }
-		relay.yield(notification)
+		hub.broadcast(notification)
 	}
 
 	private func decodeNotification(method: String, object: [String: Any]) -> NodeNotification? {
@@ -472,7 +584,7 @@ public actor SocketNodeClient: NodeClient {
 	/// caller reconnects with a fresh snapshot.
 	private func handleRemoteDisconnect() {
 		dropConnection()
-		relay.finish()
+		hub.finishAll()
 	}
 
 	private func dropConnection() {
@@ -506,46 +618,6 @@ public actor SocketNodeClient: NodeClient {
 			}
 			group.cancelAll()
 			return first
-		}
-	}
-}
-
-/// Holds the current notification stream outside actor isolation so the
-/// synchronous `notifications` requirement stays nonisolated. The actor
-/// renews it on every `connect()` (after finishing the stale one) and
-/// finishes it on disconnect.
-private final class NotificationRelay: @unchecked Sendable {
-	private let lock = NSLock()
-	private var stream: AsyncStream<NodeNotification>
-	private var continuation: AsyncStream<NodeNotification>.Continuation?
-
-	init() {
-		let (stream, continuation) = AsyncStream.makeStream(of: NodeNotification.self)
-		self.stream = stream
-		self.continuation = continuation
-	}
-
-	var current: AsyncStream<NodeNotification> {
-		lock.withLock { stream }
-	}
-
-	func yield(_ notification: NodeNotification) {
-		lock.withLock { continuation }?.yield(notification)
-	}
-
-	func renew() {
-		lock.withLock {
-			continuation?.finish()
-			let (stream, continuation) = AsyncStream.makeStream(of: NodeNotification.self)
-			self.stream = stream
-			self.continuation = continuation
-		}
-	}
-
-	func finish() {
-		lock.withLock {
-			continuation?.finish()
-			continuation = nil
 		}
 	}
 }
@@ -615,4 +687,10 @@ private struct ModelsResult: Decodable {
 
 private struct EventNotification: Decodable {
 	let event: Event
+}
+
+/// 04's `workspace.open` result: `{workspace, leader}`.
+private struct WorkspaceOpenResult: Decodable {
+	let workspace: Workspace
+	let leader: Leader?
 }

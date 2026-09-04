@@ -22,8 +22,32 @@ import Observation
 
 	public private(set) var machine: Machine?
 	public private(set) var workspaces: [Workspace] = []
-	public private(set) var leader: Leader?
+	/// Every leader the snapshot carried, by workspace. The Node lists one
+	/// per open workspace, and more than one workspace is open the moment a
+	/// `neta` command runs in a second repo.
+	public private(set) var leaders: [WorkspaceId: Leader] = [:]
+	/// The workspace the shell is showing; `leader` follows it.
+	public private(set) var currentWorkspaceId: WorkspaceId?
 	public private(set) var nodeState: NodeLifecycle?
+	/// True once the app has given up reaching the Node. Cleared by the next
+	/// snapshot, so the machine reads `Online` again as soon as it connects.
+	///
+	/// This, not `nodeState`, is the source for the navigator's machine row:
+	/// `NodePhase` (`Model/Domain.swift`, 01-domain) has only `restarting`
+	/// and `stopping`, and the Node cannot send a lifecycle notification
+	/// while it is unreachable, so an unreachable Node can never appear on
+	/// `nodeState`. The row reads `Offline` when `nodeOffline`, else
+	/// `Online`, with a text label beside the dot — status is never colour
+	/// alone.
+	public private(set) var nodeOffline = false
+
+	/// The current workspace's leader. Never `leaders.first`: with two
+	/// workspaces open that picked whichever the Node listed first, not the
+	/// one the person is looking at.
+	public var leader: Leader? {
+		guard let currentWorkspaceId else { return nil }
+		return leaders[currentWorkspaceId]
+	}
 	/// Sorted by `createdAt` ascending (ties by number).
 	public private(set) var missions: [Mission] = []
 	public private(set) var missionsById: [Ulid: Mission] = [:]
@@ -55,8 +79,26 @@ import Observation
 	public func replace(snapshot: Snapshot) {
 		machine = snapshot.machine
 		workspaces = snapshot.workspaces
-		leader = snapshot.leaders.first
+		var byWorkspace: [WorkspaceId: Leader] = [:]
+		for leader in snapshot.leaders { byWorkspace[leader.workspaceId] = leader }
+		leaders = byWorkspace
+		// The selection survives a snapshot that still carries it: a reconnect
+		// must not throw a person who picked the second workspace back to the
+		// first. Only an unset selection, or one whose workspace the Node no
+		// longer lists, takes the default: the first workspace when it has a
+		// leader, else the first leader's workspace, else the first workspace.
+		let keepsSelection = currentWorkspaceId.map { id in
+			snapshot.workspaces.contains { $0.id == id }
+		} ?? false
+		if !keepsSelection {
+			if let first = snapshot.workspaces.first, byWorkspace[first.id] != nil {
+				currentWorkspaceId = first.id
+			} else {
+				currentWorkspaceId = snapshot.leaders.first?.workspaceId ?? snapshot.workspaces.first?.id
+			}
+		}
 		nodeState = nil
+		nodeOffline = false
 		missions = snapshot.missions.sorted(by: Store.missionOrder)
 		reindexMissions()
 		var agents: [Ulid: Agent] = [:]
@@ -88,7 +130,8 @@ import Observation
 			case .agent(let agent):
 				agentsById[agent.id] = agent
 			case .leader(let next):
-				leader = next
+				leaders[next.workspaceId] = next
+				if currentWorkspaceId == nil { currentWorkspaceId = next.workspaceId }
 			}
 		case .turn(let change):
 			if let block = change.block {
@@ -97,6 +140,25 @@ import Observation
 		case .node(let lifecycle):
 			nodeState = lifecycle
 		}
+	}
+
+	/// Points `leader` at another open workspace. The shell calls it when the
+	/// person picks a workspace; an id with no leader leaves `leader` nil
+	/// rather than falling back to another workspace's.
+	///
+	/// This is the only writer of the selection outside `replace(snapshot:)`.
+	/// The workspace picker (`Shell/ToolbarCapsule.swift`) and the navigator's
+	/// workspace rows (`Shell/Navigator.swift`) must call it and read the
+	/// selection from `currentWorkspaceId`, never derive it from
+	/// `leader?.workspaceId`, which now follows the selection and is circular.
+	public func setCurrentWorkspace(_ workspaceId: WorkspaceId) {
+		currentWorkspaceId = workspaceId
+	}
+
+	/// Records that the app could not reach the Node, so the machine reads
+	/// `Offline`. The next snapshot clears it.
+	public func setNodeOffline(_ offline: Bool) {
+		nodeOffline = offline
 	}
 
 	/// Merges older pages and moves `window.lowerBound` back. Nothing loaded

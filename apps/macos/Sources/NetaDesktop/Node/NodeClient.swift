@@ -21,6 +21,11 @@ public protocol NodeClient: Sendable {
 	func setMode(workspaceId: String, mode: LeaderMode) async throws
 	func pin(missionId: Ulid, pinned: Bool) async throws
 	func archiveAgent(agentId: Ulid, confirmRunning: Bool) async throws
+	func openWorkspace(path: String) async throws -> Workspace
+	/// Every access returns its own subscription that receives every
+	/// notification from now on. Two consumers must never split one stream:
+	/// an `AsyncStream` hands each element to exactly one waiting consumer,
+	/// so a shared stream loses half of the traffic to each side.
 	var notifications: AsyncStream<NodeNotification> { get }
 }
 
@@ -39,7 +44,21 @@ public extension NodeClient {
 		try await conversationTail(
 			sessionId: sessionId, cursor: cursor, limit: limit, direction: nil, turnId: nil)
 	}
+
+	/// 04's `workspace.open`. The real transport and the fixture replay both
+	/// implement it; a client that has no workspaces to open (a test stub)
+	/// answers the way the Node answers an unknown method.
+	///
+	/// Temporary, and it weakens the protocol: a conformer that forgets
+	/// `openWorkspace` compiles and fails only at runtime. It exists so the
+	/// stubs in `Tests/NetaDesktopTests/{ChatPagingTests,ComposerTests}.swift`
+	/// — owned by other fix groups — keep compiling. Delete this default once
+	/// those two stubs implement the requirement.
+	func openWorkspace(path: String) async throws -> Workspace {
+		throw NodeClientError.rpc(code: -32601, message: "workspace.open is unavailable on this client")
+	}
 }
+
 public struct ConversationPage: Codable, Sendable {
 	public let turns: [Turn]
 	public let blocks: [Block]

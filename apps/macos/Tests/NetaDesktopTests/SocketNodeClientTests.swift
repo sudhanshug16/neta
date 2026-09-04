@@ -125,6 +125,158 @@ final class SocketNodeClientTests: XCTestCase {
 		let starts = await launcher.starts
 		XCTAssertEqual(starts, 1, "the launcher starts the node exactly once")
 	}
+
+	/// FIXPASS G4-2: a Node that never starts used to leave a new
+	/// `neta node start --detach` behind every retry, forever.
+	func testLauncherStopsAfterTheBoundedAttempts() async throws {
+		let dir = try Self.emptyDirectory()
+		defer { try? FileManager.default.removeItem(at: dir) }
+		let launcher = StubLauncher()
+		let client = SocketNodeClient(
+			netaDirectory: dir, launcher: launcher,
+			retryWindow: .milliseconds(20), retryInterval: .milliseconds(5))
+		for _ in 0 ..< (SocketNodeClient.maxLaunchAttempts + 3) {
+			try? await client.connect()
+		}
+		let starts = await launcher.starts
+		XCTAssertEqual(
+			starts, SocketNodeClient.maxLaunchAttempts,
+			"one launch per connect, and no launch past the bound")
+	}
+
+	// MARK: - Notification fan-out (G4-3)
+
+	func testEverySubscriptionSeesEveryNotification() async {
+		let hub = NotificationHub()
+		let first = hub.subscribe()
+		let second = hub.subscribe()
+		XCTAssertEqual(hub.subscriberCount, 2)
+		for phase in [NodePhase.restarting, .stopping, .restarting] {
+			hub.broadcast(.node(NodeLifecycle(phase: phase)))
+		}
+		hub.finishAll()
+		XCTAssertEqual(hub.subscriberCount, 0, "finishAll drops every subscription")
+
+		func phases(_ stream: AsyncStream<NodeNotification>) async -> [NodePhase] {
+			var seen: [NodePhase] = []
+			for await notification in stream {
+				guard case .node(let lifecycle) = notification else { continue }
+				seen.append(lifecycle.phase)
+			}
+			return seen
+		}
+		let expected: [NodePhase] = [.restarting, .stopping, .restarting]
+		let firstSeen = await phases(first)
+		let secondSeen = await phases(second)
+		XCTAssertEqual(firstSeen, expected)
+		XCTAssertEqual(secondSeen, expected, "the second consumer sees the same three")
+	}
+
+	func testSubscribingAfterFinishGetsALiveStream() async {
+		let hub = NotificationHub()
+		let stale = hub.subscribe()
+		hub.finishAll()
+		var staleCount = 0
+		for await _ in stale { staleCount += 1 }
+		XCTAssertEqual(staleCount, 0, "the old subscription ended")
+
+		let fresh = hub.subscribe()
+		hub.broadcast(.node(NodeLifecycle(phase: .stopping)))
+		hub.finishAll()
+		var freshCount = 0
+		for await _ in fresh { freshCount += 1 }
+		XCTAssertEqual(freshCount, 1, "a subscription taken after a finish is live")
+	}
+
+	// MARK: - workspace.open (G4-8)
+
+	func testWorkspaceOpenRequestEncoding() async throws {
+		let client = SocketNodeClient(netaDirectory: URL(fileURLWithPath: "/nonexistent"))
+		let (_, data) = try await client.makeRequestData(
+			method: "workspace.open", params: ["path": "/tmp/repo"])
+		let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+		XCTAssertEqual(object["method"] as? String, "workspace.open")
+		XCTAssertEqual((object["params"] as? [String: Any])?["path"] as? String, "/tmp/repo")
+	}
+
+	func testWorkspaceOpenWithoutAConnectionFails() async throws {
+		let client = SocketNodeClient(netaDirectory: URL(fileURLWithPath: "/nonexistent"))
+		do {
+			_ = try await client.openWorkspace(path: "/tmp/repo")
+			XCTFail("workspace.open needs a connection")
+		} catch let error as NodeClientError {
+			XCTAssertEqual(error, .disconnected)
+		}
+	}
+
+	// MARK: - The app's sync loop (G4-2)
+
+	func testBackoffGrowsThenSettlesOnTheSlowInterval() {
+		let waits = (1 ... 6).map { NodeSync.backoff(afterFailure: $0) }
+		XCTAssertEqual(
+			waits,
+			[.seconds(1), .seconds(2), .seconds(4), .seconds(8),
+			 NodeSync.slowInterval, NodeSync.slowInterval])
+	}
+
+	@MainActor
+	func testSyncLoopMarksTheNodeOfflineAndStopsLaunching() async throws {
+		let dir = try Self.emptyDirectory()
+		defer { try? FileManager.default.removeItem(at: dir) }
+		let launcher = StubLauncher()
+		let client = SocketNodeClient(
+			netaDirectory: dir, launcher: launcher,
+			retryWindow: .milliseconds(10), retryInterval: .milliseconds(5))
+		let store = Store()
+		XCTAssertFalse(store.nodeOffline)
+		let loop = Task { await NodeSync.run(client: client, store: store, backoff: { _ in .milliseconds(1) }) }
+		var offline = false
+		for _ in 0 ..< 400 {
+			try await Task.sleep(nanoseconds: 10_000_000)
+			if store.nodeOffline {
+				offline = true
+				break
+			}
+		}
+		loop.cancel()
+		XCTAssertTrue(offline, "the loop records the Node as offline once the attempts run out")
+		let starts = await launcher.starts
+		XCTAssertLessThanOrEqual(
+			starts, SocketNodeClient.maxLaunchAttempts,
+			"the loop never spawns another Node past the bound")
+	}
+
+	/// The store loop subscribes before it asks for the snapshot. A
+	/// subscription carries only what is broadcast after it is taken, so a
+	/// notification sent while the snapshot was in flight used to fall
+	/// between the two calls and never reach the store.
+	@MainActor
+	func testSyncLoopKeepsNotificationsSentDuringTheSnapshot() async throws {
+		let client = SnapshotWindowStub()
+		let store = Store()
+		let loop = Task {
+			await NodeSync.run(client: client, store: store, backoff: { _ in .milliseconds(1) })
+		}
+		var seen = false
+		for _ in 0 ..< 400 {
+			try await Task.sleep(nanoseconds: 10_000_000)
+			if store.nodeState?.phase == .restarting {
+				seen = true
+				break
+			}
+		}
+		loop.cancel()
+		XCTAssertTrue(seen, "a notification sent while the snapshot was in flight was dropped")
+	}
+
+	// MARK: - Helpers
+
+	private static func emptyDirectory() throws -> URL {
+		let dir = FileManager.default.temporaryDirectory
+			.appendingPathComponent(UUID().uuidString, isDirectory: true)
+		try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+		return dir
+	}
 }
 
 /// A launcher that never creates a socket, so `connect()` must exhaust its
@@ -134,5 +286,45 @@ private actor StubLauncher: NodeLauncher {
 
 	func start() async throws {
 		starts += 1
+	}
+}
+
+/// A client that broadcasts one notification from inside `snapshot()`, i.e.
+/// in the window between subscribing and the snapshot's answer.
+private actor SnapshotWindowStub: NodeClient {
+	private let hub = NotificationHub()
+	private let at = Date(timeIntervalSince1970: 1_780_315_200)
+
+	nonisolated var notifications: AsyncStream<NodeNotification> { hub.subscribe() }
+
+	func connect() async throws {}
+
+	func snapshot() async throws -> Snapshot {
+		hub.broadcast(.node(NodeLifecycle(phase: .restarting)))
+		return Snapshot(
+			machine: Machine(id: "m1", name: "machine", createdAt: at),
+			workspaces: [], leaders: [], missions: [], hasOlder: false,
+			agents: [], completedCounts: [:], events: [], attention: [],
+			windowDays: 14, protocolVersion: 1, at: at)
+	}
+
+	func missionsList(workspaceId: String, before: Date?, limit: Int) async throws -> [Mission] { [] }
+	func eventsList(workspaceId: String, before: Date?, limit: Int) async throws -> [Event] { [] }
+	func conversationTail(
+		sessionId: Ulid, cursor: String?, limit: Int, direction: String?, turnId: TurnId?
+	) async throws -> ConversationPage {
+		ConversationPage(turns: [], blocks: [], nextCursor: nil, prevCursor: nil)
+	}
+	func prompt(sessionId: Ulid, text: String) async throws -> Ulid {
+		throw NodeClientError.disconnected
+	}
+	func cancel(sessionId: Ulid) async throws {}
+	func setModel(sessionId: Ulid, model: String) async throws {}
+	func listModels(provider: String) async throws -> [ModelInfo] { [] }
+	func setMode(workspaceId: String, mode: LeaderMode) async throws {}
+	func pin(missionId: Ulid, pinned: Bool) async throws {}
+	func archiveAgent(agentId: Ulid, confirmRunning: Bool) async throws {}
+	func openWorkspace(path: String) async throws -> Workspace {
+		throw NodeClientError.disconnected
 	}
 }

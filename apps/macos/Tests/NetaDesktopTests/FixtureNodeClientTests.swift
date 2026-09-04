@@ -88,9 +88,12 @@ final class FixtureNodeClientTests: XCTestCase {
 
 	func testEmitNextReplaysInOrderThenFinishesStream() async throws {
 		let client = FixtureNodeClient()
+		// Subscribe before anything is emitted: a subscription only carries
+		// what is broadcast after it is taken.
+		let stream = client.notifications
 		let collector = Task { () -> [Event] in
 			var replayed: [Event] = []
-			for await notification in await client.notifications {
+			for await notification in stream {
 				if case .event(let event) = notification {
 					replayed.append(event)
 				}
@@ -110,8 +113,9 @@ final class FixtureNodeClientTests: XCTestCase {
 		let client = FixtureNodeClient()
 		let snapshot = try await client.snapshot()
 		let sessionId = try XCTUnwrap(snapshot.leaders.first?.sessionId)
+		let stream = client.notifications
 		let first = Task { () -> TurnChange? in
-			for await notification in await client.notifications {
+			for await notification in stream {
 				if case .turn(let change) = notification { return change }
 			}
 			return nil
@@ -136,9 +140,10 @@ final class FixtureNodeClientTests: XCTestCase {
 		let mission = try XCTUnwrap(snapshot.missions.first)
 		let agent = try XCTUnwrap(snapshot.agents.first)
 		let sessionId = try XCTUnwrap(snapshot.leaders.first?.sessionId)
+		let stream = client.notifications
 		let collected = Task { () -> [NodeNotification] in
 			var out: [NodeNotification] = []
-			for await notification in await client.notifications {
+			for await notification in stream {
 				out.append(notification)
 				if out.count == 6 { break }
 			}
@@ -191,6 +196,68 @@ final class FixtureNodeClientTests: XCTestCase {
 			methods,
 			["snapshot", "prompt", "cancel", "pin", "archiveAgent", "setMode", "setModel",
 				"snapshot", "conversationTail"])
+	}
+
+	/// FIXPASS G4-3: one shared `AsyncStream` handed each notification to
+	/// exactly one of its two consumers, so the store loop and the chat each
+	/// saw about half the traffic.
+	func testTwoSubscribersEachSeeEveryNotification() async throws {
+		let client = FixtureNodeClient()
+		let firstStream = client.notifications
+		let secondStream = client.notifications
+
+		func collect(_ stream: AsyncStream<NodeNotification>) -> Task<[String], Never> {
+			Task {
+				var seen: [String] = []
+				for await notification in stream {
+					switch notification {
+					case .turn(let change): seen.append("turn:\(change.turn?.id ?? "")")
+					case .event(let event): seen.append("event:\(event.seq)")
+					case .state(let change): seen.append("state:\(change.kind.rawValue)")
+					case .node(let lifecycle): seen.append("node:\(lifecycle.phase.rawValue)")
+					}
+					if seen.count == 3 { return seen }
+				}
+				return seen
+			}
+		}
+		let first = collect(firstStream)
+		let second = collect(secondStream)
+
+		let snapshot = try await client.snapshot()
+		let sessionId = try XCTUnwrap(snapshot.leaders.first?.sessionId)
+		let missionId = try XCTUnwrap(snapshot.missions.first?.id)
+		let turnId = try await client.prompt(sessionId: sessionId, text: "hello")
+		try await client.pin(missionId: missionId, pinned: true)
+		try await client.setMode(workspaceId: "git:github.com/acme/widget", mode: .leadPlus)
+
+		let firstSeen = await first.value
+		let secondSeen = await second.value
+		XCTAssertEqual(firstSeen.count, 3)
+		XCTAssertEqual(firstSeen.first, "turn:\(turnId)")
+		XCTAssertEqual(firstSeen.last, "state:leader")
+		XCTAssertEqual(secondSeen, firstSeen, "both consumers see all three, in order")
+	}
+
+	/// FIXPASS G4-8: the desktop had no `workspace.open` at all.
+	func testOpenWorkspaceReturnsAKnownWorkspaceAndAddsAnUnknownOne() async throws {
+		let client = FixtureNodeClient()
+		let snapshot = try await client.snapshot()
+		let known = try XCTUnwrap(snapshot.workspaces.first)
+		if let root = known.roots.first {
+			let same = try await client.openWorkspace(path: root.path)
+			XCTAssertEqual(same.id, known.id, "a known root reopens its workspace")
+		}
+		let opened = try await client.openWorkspace(path: "/tmp/neta-fixture-repo")
+		XCTAssertEqual(opened.kind, .folder)
+		XCTAssertEqual(opened.name, "neta-fixture-repo")
+		XCTAssertEqual(opened.roots.map(\.path), ["/tmp/neta-fixture-repo"])
+		let after = try await client.snapshot()
+		XCTAssertTrue(after.workspaces.contains { $0.id == opened.id })
+		let calls = await client.calls
+		XCTAssertEqual(
+			calls.last(where: { $0.method == "openWorkspace" })?.json,
+			"{\"path\":\"\\/tmp\\/neta-fixture-repo\"}")
 	}
 
 	func testWritesNeverTouchDisk() async throws {

@@ -192,9 +192,109 @@ final class StoreTests: XCTestCase {
 		XCTAssertEqual(store.cachedBytes(for: "s-big"), 800_000)
 	}
 
+	// MARK: - Leaders per workspace (FIXPASS G2/G4)
+
+	/// `leader` used to be `snapshot.leaders.first`, so with two workspaces
+	/// open the chat and the mission bar targeted whichever the Node listed
+	/// first rather than the selected workspace's.
+	func testLeaderFollowsTheSelectedWorkspace() {
+		let store = Store()
+		store.replace(snapshot: twoWorkspaceSnapshot())
+		XCTAssertEqual(store.leaders.count, 2)
+		XCTAssertEqual(store.currentWorkspaceId, workspaceId)
+		XCTAssertEqual(store.leader?.workspaceId, workspaceId)
+		XCTAssertEqual(store.leader?.name, "Halden")
+
+		store.setCurrentWorkspace(otherWorkspaceId)
+		XCTAssertEqual(store.leader?.workspaceId, otherWorkspaceId)
+		XCTAssertEqual(store.leader?.name, "Ines")
+		XCTAssertEqual(store.leader?.sessionId, "s-other")
+	}
+
+	func testLeaderStateUpsertsByWorkspaceWithoutTouchingTheOther() {
+		let store = Store()
+		store.replace(snapshot: twoWorkspaceSnapshot())
+		store.setCurrentWorkspace(otherWorkspaceId)
+		let updated = leader(
+			workspaceId: otherWorkspaceId, name: "Ines", sessionId: "s-other", mode: .leadPlus)
+		store.apply(notification: .state(StateChange(kind: .leader, record: .leader(updated))))
+		XCTAssertEqual(store.leaders.count, 2)
+		XCTAssertEqual(store.leader?.mode, .leadPlus)
+		XCTAssertEqual(store.leaders[workspaceId]?.mode, .lead, "the other leader is untouched")
+
+		store.setCurrentWorkspace(workspaceId)
+		XCTAssertEqual(store.leader?.name, "Halden")
+	}
+
+	/// A reconnect must not move the person: `replace(snapshot:)` used to
+	/// re-derive the selection on every snapshot, so a Node restart threw
+	/// whoever had picked the second workspace back to the first.
+	func testSelectedWorkspaceSurvivesAReconnectSnapshot() {
+		let store = Store()
+		store.replace(snapshot: twoWorkspaceSnapshot())
+		store.setCurrentWorkspace(otherWorkspaceId)
+		XCTAssertEqual(store.leader?.name, "Ines")
+
+		store.replace(snapshot: twoWorkspaceSnapshot())
+		XCTAssertEqual(
+			store.currentWorkspaceId, otherWorkspaceId,
+			"a snapshot that still lists the selected workspace keeps it selected")
+		XCTAssertEqual(store.leader?.name, "Ines")
+
+		// A snapshot without it falls back to the default selection.
+		store.replace(snapshot: snapshot())
+		XCTAssertEqual(store.currentWorkspaceId, workspaceId)
+		XCTAssertEqual(store.leader?.name, "Halden")
+	}
+
+	func testOfflineFlagIsSetOnDemandAndClearedByASnapshot() {
+		let store = Store()
+		XCTAssertFalse(store.nodeOffline)
+		store.setNodeOffline(true)
+		XCTAssertTrue(store.nodeOffline)
+		store.replace(snapshot: snapshot())
+		XCTAssertFalse(store.nodeOffline, "a snapshot means the Node answered")
+	}
+
 	// MARK: - Helpers
 
 	private let workspaceId = "git:github.com/acme/widget"
+	private let otherWorkspaceId = "git:github.com/acme/other"
+
+	private func leader(
+		workspaceId: WorkspaceId, name: String, sessionId: SessionId,
+		mode: LeaderMode = .lead
+	) -> Leader {
+		Leader(
+			workspaceId: workspaceId, machineId: "m1", name: name,
+			sessionId: sessionId, provider: "fake", model: "test-model",
+			mode: mode, modeSince: base, modeActiveMs: 0,
+			activeMissionId: nil, state: .idle)
+	}
+
+	/// Two open workspaces with a leader each, the shape the Node reports the
+	/// moment a `neta` command runs in a second repo.
+	private func twoWorkspaceSnapshot() -> Snapshot {
+		Snapshot(
+			machine: Machine(id: "m1", name: "machine", createdAt: base),
+			workspaces: [
+				Workspace(
+					id: workspaceId, kind: .git, name: "widget",
+					remote: "git@github.com:acme/widget.git", roots: [], createdAt: base),
+				Workspace(
+					id: otherWorkspaceId, kind: .git, name: "other",
+					remote: "git@github.com:acme/other.git", roots: [], createdAt: base),
+			],
+			// Listed with the second workspace's leader first, so a test that
+			// passes by accident on `leaders.first` cannot.
+			leaders: [
+				leader(workspaceId: otherWorkspaceId, name: "Ines", sessionId: "s-other"),
+				leader(workspaceId: workspaceId, name: "Halden", sessionId: "s-leader"),
+			],
+			missions: [], hasOlder: false, agents: [],
+			completedCounts: [:], events: [], attention: [],
+			windowDays: 14, protocolVersion: 1, at: base)
+	}
 
 	private func mission(
 		id: Ulid, number: Int, state: MissionState, hoursAfterBase: Double

@@ -31,19 +31,23 @@ public actor FixtureNodeClient: NodeClient {
 		return root.appendingPathComponent("test/fixtures", isDirectory: true)
 	}()
 
-	public let notifications: AsyncStream<NodeNotification>
+	/// Nonisolated like the real client: every access is its own
+	/// subscription, so two consumers each see every notification instead of
+	/// splitting one stream between them (FIXPASS G4-3).
+	public nonisolated var notifications: AsyncStream<NodeNotification> { hub.subscribe() }
 
 	/// Every call in order: the `NodeClient` method name plus its params as
 	/// JSON. Later tasks (11) assert writes against this log.
 	public private(set) var calls: [(method: String, json: String)] = []
 
-	private let continuation: AsyncStream<NodeNotification>.Continuation
+	private let hub = NotificationHub()
 	private let recordedEvents: [Event]
 	private var replayIndex = 0
 	private var nextSeq: Int
 
 	// Mutable in-memory copy of the snapshot.
 	private var missions: [Mission]
+	private var workspaces: [Workspace]
 	private var agents: [Agent]
 	private var leaders: [Leader]
 	private var events: [Event]
@@ -51,7 +55,6 @@ public actor FixtureNodeClient: NodeClient {
 
 	// Immutable snapshot parts.
 	private let machine: Machine
-	private let workspaces: [Workspace]
 	private let hasOlder: Bool
 	private let completedCounts: [Ulid: Int]
 	private let attention: [Mission]
@@ -87,9 +90,6 @@ public actor FixtureNodeClient: NodeClient {
 			}
 			recorded.append(event)
 		}
-		let (stream, continuation) = AsyncStream<NodeNotification>.makeStream()
-		self.notifications = stream
-		self.continuation = continuation
 		self.recordedEvents = recorded
 		self.missions = snapshot.missions
 		self.agents = snapshot.agents
@@ -110,20 +110,20 @@ public actor FixtureNodeClient: NodeClient {
 	/// finishes the stream once every recorded event has replayed.
 	public func emitNext() -> Bool {
 		guard replayIndex < recordedEvents.count else {
-			continuation.finish()
+			hub.finishAll()
 			return false
 		}
-		continuation.yield(.event(recordedEvents[replayIndex]))
+		hub.broadcast(.event(recordedEvents[replayIndex]))
 		replayIndex += 1
 		if replayIndex == recordedEvents.count {
-			continuation.finish()
+			hub.finishAll()
 		}
 		return true
 	}
 
 	/// Pushes a made-up notification, for cases the recording has no data for.
 	public func emit(_ notification: NodeNotification) {
-		continuation.yield(notification)
+		hub.broadcast(notification)
 	}
 
 	public func connect() async throws {
@@ -227,7 +227,7 @@ public actor FixtureNodeClient: NodeClient {
 		var thread = threads[sessionId] ?? ConversationThread()
 		thread.turns.append(turn)
 		threads[sessionId] = thread
-		continuation.yield(.turn(TurnChange(sessionId: sessionId, turn: turn, block: nil)))
+		hub.broadcast(.turn(TurnChange(sessionId: sessionId, turn: turn, block: nil)))
 		return turn.id
 	}
 
@@ -242,7 +242,7 @@ public actor FixtureNodeClient: NodeClient {
 			endedAt: Date(), role: open.role, cancelled: true)
 		thread.turns[index] = closed
 		threads[sessionId] = thread
-		continuation.yield(.turn(TurnChange(sessionId: sessionId, turn: closed, block: nil)))
+		hub.broadcast(.turn(TurnChange(sessionId: sessionId, turn: closed, block: nil)))
 	}
 
 	public func setModel(sessionId: Ulid, model: String) async throws {
@@ -255,7 +255,7 @@ public actor FixtureNodeClient: NodeClient {
 				sessionId: leader.sessionId, provider: leader.provider, model: model,
 				mode: leader.mode, modeSince: leader.modeSince, modeActiveMs: leader.modeActiveMs,
 				activeMissionId: leader.activeMissionId, state: leader.state)
-			continuation.yield(.state(StateChange(kind: .leader, record: .leader(leaders[index]))))
+			hub.broadcast(.state(StateChange(kind: .leader, record: .leader(leaders[index]))))
 		} else if let index = agents.firstIndex(where: { $0.sessionId == sessionId }) {
 			let agent = agents[index]
 			agents[index] = Agent(
@@ -266,7 +266,7 @@ public actor FixtureNodeClient: NodeClient {
 				stateBefore: agent.stateBefore, activity: agent.activity,
 				pendingQuestion: agent.pendingQuestion, startedAt: agent.startedAt,
 				endedAt: agent.endedAt, outcome: agent.outcome)
-			continuation.yield(.state(StateChange(kind: .agent, record: .agent(agents[index]))))
+			hub.broadcast(.state(StateChange(kind: .agent, record: .agent(agents[index]))))
 		}
 	}
 
@@ -293,7 +293,7 @@ public actor FixtureNodeClient: NodeClient {
 			sessionId: leader.sessionId, provider: leader.provider, model: leader.model,
 			mode: mode, modeSince: Date(), modeActiveMs: leader.modeActiveMs,
 			activeMissionId: leader.activeMissionId, state: leader.state)
-		continuation.yield(.state(StateChange(kind: .leader, record: .leader(leaders[index]))))
+		hub.broadcast(.state(StateChange(kind: .leader, record: .leader(leaders[index]))))
 	}
 
 	public func pin(missionId: Ulid, pinned: Bool) async throws {
@@ -306,7 +306,7 @@ public actor FixtureNodeClient: NodeClient {
 			data: ["pinned": .bool(pinned)])
 		nextSeq += 1
 		events.append(event)
-		continuation.yield(.event(event))
+		hub.broadcast(.event(event))
 	}
 
 	public func archiveAgent(agentId: Ulid, confirmRunning: Bool) async throws {
@@ -321,7 +321,24 @@ public actor FixtureNodeClient: NodeClient {
 			stateBefore: agent.stateBefore, activity: agent.activity,
 			pendingQuestion: agent.pendingQuestion, startedAt: agent.startedAt,
 			endedAt: agent.endedAt ?? Date(), outcome: agent.outcome)
-		continuation.yield(.state(StateChange(kind: .agent, record: .agent(agents[index]))))
+		hub.broadcast(.state(StateChange(kind: .agent, record: .agent(agents[index]))))
+	}
+
+	/// 04's `workspace.open`: a known root path returns its workspace, an
+	/// unknown one adds a `folder` workspace on this machine. Nothing is
+	/// written to disk, like every other write here.
+	public func openWorkspace(path: String) async throws -> Workspace {
+		record("openWorkspace", ["path": path])
+		if let known = workspaces.first(where: { $0.roots.contains { $0.path == path } }) {
+			return known
+		}
+		let name = URL(fileURLWithPath: path).lastPathComponent
+		let workspace = Workspace(
+			id: "folder:\(path)", kind: .folder, name: name, remote: nil,
+			roots: [WorkspaceRoot(machineId: machine.id, path: path)],
+			createdAt: Date())
+		workspaces.append(workspace)
+		return workspace
 	}
 
 	// MARK: - Private
