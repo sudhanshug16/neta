@@ -47,6 +47,9 @@ public struct RecordingGraphicsContext: Sendable {
 		case connector
 		case link
 		case leader
+		/// The time axis itself, and the violet bed beneath it.
+		case axis
+		case axisUnderlay
 	}
 
 	public struct Stroke: Sendable, Equatable {
@@ -120,6 +123,15 @@ struct BackdropPlan: Sendable, Equatable {
 
 	/// Mission ticks straddle the axis by this half-height.
 	static let tickHalfHeight: CGFloat = 3
+	/// The axis runs from the left window edge to the leader card at Now
+	/// and stops there (PAPER-SPINE artboard 1 item 8: "from x = 40 to the
+	/// leader at x ~ 1000-1150"). Drawn to `size.width` it ran on under the
+	/// chat glass to the window edge, past the anchor it ends on.
+	/// Clamped to the drawn size: scrolled back in time the leader is off
+	/// the right edge, and the axis then fills the canvas.
+	static func axisEnd(leader: CGRect, width: CGFloat) -> CGFloat {
+		min(max(leader.minX, 0), width)
+	}
 	/// Violet bed beneath the 1 px axis (Paper artboard 1 item 8).
 	static let axisUnderlayWidth: CGFloat = 3
 	/// Tick-label baseline drop beneath the axis.
@@ -187,7 +199,10 @@ struct BackdropPlan: Sendable, Equatable {
 ///
 /// Paint order: axis underlay, axis, age `labels` in 10 pt mono
 /// `Theme.textSecondary` beneath the axis, mission ticks, connectors, stack
-/// links, then anchors. Every edge is `edgeColor` at `edgeWidth`, solid,
+/// links, then anchors. The axis and its violet bed run from the left window
+/// edge to the leader card's leading edge and stop there
+/// (`BackdropPlan.axisEnd`): the leader at Now is what the time axis ends
+/// on, not the window edge behind the chat. Every edge is `edgeColor` at `edgeWidth`, solid,
 /// straight, with round caps. Emphasis fades anchors only; edges stay one
 /// colour.
 public enum SpinePainter {
@@ -222,7 +237,10 @@ public enum SpinePainter {
 			lineWidth: style.edgeWidth, lineCap: .round, lineJoin: .round)
 		let axis = [
 			CGPoint(x: 0, y: window.spineY),
-			CGPoint(x: size.width, y: window.spineY),
+			CGPoint(
+				x: BackdropPlan.axisEnd(
+					leader: window.leader, width: size.width),
+				y: window.spineY),
 		]
 		ctx.stroke(
 			connectorPath(axis), with: .color(style.axisUnderlay),
@@ -282,6 +300,15 @@ public enum SpinePainter {
 	) {
 		let plan = BackdropPlan(window: window, emphasisFor: emphasisFor)
 		recorder.recordStyle(style)
+		let axis = [
+			CGPoint(x: 0, y: window.spineY),
+			CGPoint(
+				x: BackdropPlan.axisEnd(
+					leader: window.leader, width: size.width),
+				y: window.spineY),
+		]
+		recorder.recordStroke(kind: .axisUnderlay, points: axis)
+		recorder.recordStroke(kind: .axis, points: axis)
 		for label in plan.labels
 		where label.point.x >= 0 && label.point.x <= size.width {
 			recorder.recordLabel()

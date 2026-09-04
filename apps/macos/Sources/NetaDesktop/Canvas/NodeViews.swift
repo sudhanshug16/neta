@@ -124,9 +124,15 @@ public struct LeadCardView: View {
 		}
 	}
 
-	/// The closed mission's node: number, name, state, one line.
+	/// The closed mission's node, in the design's form:
+	/// `#296 Slack digest bot · Merged · closed 10d` (PAPER-SPINE artboard 1
+	/// item 3, kept by Revision 2). The disposition word and the closing age
+	/// are what a closed mission is remembered by, so they hold their width
+	/// and the name is the one field that truncates inside the 180 pt node
+	/// Revision 4 reserves for it. Nothing here says `Closed`: the word the
+	/// node carries is `Merged` or `Abandoned`.
 	private var collapsedBody: some View {
-		HStack(spacing: 6) {
+		HStack(spacing: 5) {
 			Text(model.numberText)
 				.font(Theme.mono(11, .semibold))
 				.foregroundStyle(CanvasStyle.text(
@@ -136,11 +142,14 @@ public struct LeadCardView: View {
 				.foregroundStyle(CanvasStyle.text(
 					Theme.textPrimary, emphasis: emphasis, over: Theme.nodeFill))
 				.lineLimit(1)
+				.truncationMode(.tail)
 			Spacer(minLength: 4)
-			Text(model.stateLabel)
+			Text(model.closedText ?? model.stateLabel)
 				.font(Theme.text(10, .medium))
 				.foregroundStyle(CanvasStyle.text(
 					Theme.textSecondary, emphasis: emphasis, over: Theme.nodeFill))
+				.lineLimit(1)
+				.fixedSize()
 		}
 		.padding(.horizontal, 8)
 		.frame(
@@ -153,7 +162,8 @@ public struct LeadCardView: View {
 				selected ? Theme.mint : Theme.nodeBorder,
 				lineWidth: selected ? 2 : 1))
 		.accessibilityElement(children: .combine)
-		.accessibilityLabel("\(model.numberText) \(model.name), \(model.stateLabel)")
+		.accessibilityLabel(
+			"\(model.numberText) \(model.name), \(model.closedText ?? model.stateLabel)")
 	}
 
 	private var fullBody: some View {

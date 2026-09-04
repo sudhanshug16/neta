@@ -6,22 +6,21 @@ import SwiftUI
 /// Now state for the spine canvas (T10.9).
 ///
 /// Two states per the manifesto: lit when the view is at the live edge, and
-/// showing how far back the view is when it is not. `leaderOffScreen` drives
-/// `OffScreenLeaderMarker`. The 09 `MissionBarView` renders the Now control
-/// from this state; `jumpToNow` only stages a `jumpRequest` that T10.10
-/// applies via `consumeJump()`. Pure reads of `SpineIndex`: no `Store`, no
-/// bare `Date()`.
+/// showing how far back the view is when it is not. There is one way to
+/// reach Now from outside the canvas — `ShellState.jumpToNow()`, which the
+/// mission bar's control and the debug driver both call and the canvas
+/// answers in `applyShellNow` — so this state reports, and stages a jump
+/// only for a caller that already has the index in hand.
+///
+/// `leaderOffScreen` drives `OffScreenLeaderMarker`. The 09 `MissionBarView`
+/// renders the Now control from this state; `jumpToNow(index:viewport:)`
+/// stages a `jumpRequest` that T10.10 applies via `consumeJump()`. Pure
+/// reads of `SpineIndex`: no `Store`, no bare `Date()`.
 @Observable @MainActor public final class NowState {
 	public private(set) var isLive = true
 	public private(set) var leaderOffScreen = false
 	public private(set) var label = "Now"
 	public private(set) var jumpRequest: CGFloat?
-	/// The `scrollX` that last put the live edge at the usable right edge,
-	/// `nil` until the canvas has resolved a frame. The mission bar's Now
-	/// control jumps here without rebuilding the index; before the canvas
-	/// has recorded an edge the control has nowhere to jump to and does
-	/// nothing, rather than staging a jump to content x 0.
-	public private(set) var liveScrollX: CGFloat?
 
 	public init() {}
 
@@ -60,9 +59,6 @@ import SwiftUI
 			text = "Now · \(Self.backText(max(0, nowMs - at))) back"
 		}
 		set(isLive: live, label: text, offScreen: offScreen)
-		let edge = SpinePlacement.liveScrollX(
-			index: index, viewport: viewport, trailingInset: trailingInset)
-		if liveScrollX != edge { liveScrollX = edge }
 	}
 
 	/// Stages the `scrollX` putting the live edge at the usable right edge.
@@ -71,15 +67,6 @@ import SwiftUI
 	) {
 		jumpRequest = SpinePlacement.liveScrollX(
 			index: index, viewport: viewport, trailingInset: trailingInset)
-	}
-
-	/// Stages a jump to the live edge recorded by the last `update`. The
-	/// mission bar's Now control taps this; the canvas applies it. Before
-	/// the canvas has recorded an edge there is no Now to jump to, so this
-	/// does nothing.
-	public func jumpToNow() {
-		guard let liveScrollX else { return }
-		jumpRequest = liveScrollX
 	}
 
 	/// Returns the staged jump and clears it.

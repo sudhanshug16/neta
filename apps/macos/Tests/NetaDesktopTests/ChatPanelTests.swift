@@ -200,6 +200,30 @@ final class ChatPanelTests: XCTestCase {
 			"and again whenever the live end moves")
 	}
 
+	/// The transcript is bottom-anchored: the newest message sits directly
+	/// above the composer. Without it a two-message conversation hung from
+	/// the header with the rest of the panel empty beneath it. The anchor is
+	/// the scrolled content's own minimum height and alignment, so it is a
+	/// value, not a modifier that hid the stack.
+	func testTheTranscriptIsBottomAnchored() throws {
+		XCTAssertEqual(TranscriptAnchor.alignment, .bottom)
+		XCTAssertEqual(TranscriptAnchor.contentMinHeight(viewport: 640), 640)
+		XCTAssertEqual(
+			TranscriptAnchor.contentMinHeight(viewport: 0), 0,
+			"a panel SwiftUI has not measured yet takes no minimum")
+		XCTAssertEqual(TranscriptAnchor.contentMinHeight(viewport: -20), 0)
+		let source = try chatPanelSource()
+		XCTAssertTrue(
+			source.contains("minHeight: TranscriptAnchor.contentMinHeight("),
+			"the scrolled content is at least the panel's height")
+		XCTAssertTrue(
+			source.contains("alignment: TranscriptAnchor.alignment"),
+			"and sits at the bottom of it")
+		XCTAssertTrue(
+			source.contains("GeometryReader { proxy in"),
+			"measured from the panel the transcript is drawn in")
+	}
+
 	/// The design has no empty-state placeholder: an empty transcript is
 	/// simply empty, and the panel's rules are Theme hairlines.
 	func testPanelHasNoEmptyStateAndNoSystemDividers() throws {

@@ -1,5 +1,28 @@
 import SwiftUI
 
+/// How the transcript hangs inside its scroll view (T11.8).
+///
+/// The design has the newest message directly above the composer: the
+/// scrolled content is at least the height of the panel and sits at the
+/// bottom of it, so a short transcript grows upward from the composer and a
+/// long one is unchanged (its content is already taller than the panel).
+/// Pure, so the rule is asserted rather than eyeballed.
+public enum TranscriptAnchor {
+	/// The padding above and below the turns, inside the scroll view. It is
+	/// inside the min-height frame, so it is also the gap the newest turn
+	/// keeps above the composer's rule.
+	public static let verticalPadding: CGFloat = 8
+	/// Where the turns sit in that frame.
+	public static let alignment: Alignment = .bottom
+
+	/// The minimum height of the scrolled content for a panel of `viewport`
+	/// points. A viewport SwiftUI has not measured yet is 0, and a frame
+	/// never takes a negative minimum.
+	public static func contentMinHeight(viewport: CGFloat) -> CGFloat {
+		max(0, viewport)
+	}
+}
+
 /// The assembled chat surface (11-desktop-chat T11.8).
 ///
 /// A header (`ChatHeaderView`), the Lead++ strip when visible, the
@@ -142,52 +165,65 @@ public struct ChatPanel: View {
 		}
 	}
 
-	/// The transcript: every loaded turn in a `LazyVStack`, pinned to the
-	/// live end while `atBottom` by an explicit `scrollTo` (never a
-	/// default scroll anchor, which hid the stack entirely), with one-shot
+	/// The transcript: every loaded turn in a `LazyVStack`, bottom-anchored
+	/// so the newest message sits directly above the composer, pinned to the
+	/// live end while `atBottom` by an explicit `scrollTo`, with one-shot
 	/// scroll-to-turn reveals drained from `pendingScroll` via
 	/// `consumeScroll`. An empty transcript is simply empty: the design has
 	/// no empty-state placeholder.
 	private var transcript: some View {
 		ScrollViewReader { scroll in
-			ScrollView {
-				LazyVStack(alignment: .leading, spacing: 12) {
-					ForEach(model.transcript.visibleTurns) { turn in
-						TurnView(turn: turn, flashing: flashingTurnId == turn.id)
-							.id(turn.id)
+			GeometryReader { proxy in
+				ScrollView {
+					LazyVStack(alignment: .leading, spacing: 12) {
+						ForEach(model.transcript.visibleTurns) { turn in
+							TurnView(turn: turn, flashing: flashingTurnId == turn.id)
+								.id(turn.id)
+						}
+					}
+					.scrollTargetLayout()
+					.padding(.horizontal, Theme.Metric.chatPadding)
+					.padding(.vertical, TranscriptAnchor.verticalPadding)
+					// The bottom anchor: the scrolled content is at least as
+					// tall as the panel and sits at the bottom of it, so a
+					// two-message conversation reads from just above the
+					// composer instead of hanging from the header, and a long
+					// one scrolls with its live end where it already was.
+					.frame(
+						minHeight: TranscriptAnchor.contentMinHeight(
+							viewport: proxy.size.height),
+						alignment: TranscriptAnchor.alignment)
+				}
+				.scrollPosition(id: $scrollPosition)
+				// Bottom-anchored by that frame, not by a default scroll
+				// anchor of `.bottom`: on this system that modifier
+				// moved the whole stack out of the clip view and the transcript
+				// drew nothing at all — a tailed, streaming conversation
+				// rendered as an empty panel (seen with two turns and four
+				// blocks loaded). The live end is pinned explicitly on top of
+				// the anchor: `.onAppear` and the `autoScrollTarget` watch below
+				// scroll to the newest drawn turn, which is what `atBottom`
+				// gates anyway.
+				.onAppear {
+					model.transcript.atBottom = true
+					drainScroll(scroll)
+					if let target = model.transcript.autoScrollTarget {
+						scroll.scrollTo(target, anchor: .bottom)
 					}
 				}
-				.scrollTargetLayout()
-				.padding(.horizontal, Theme.Metric.chatPadding)
-				.padding(.vertical, 8)
-			}
-			.scrollPosition(id: $scrollPosition)
-			// Deliberately no default scroll anchor here. On this system
-			// it moved the whole stack out of the clip view and the transcript
-			// drew nothing at all — a tailed, streaming conversation rendered
-			// as an empty panel (seen with two turns and four blocks loaded).
-			// The live end is pinned explicitly instead: `.onAppear` and the
-			// `autoScrollTarget` watch below scroll to the newest drawn turn,
-			// which is what `atBottom` gates anyway.
-			.onAppear {
-				model.transcript.atBottom = true
-				drainScroll(scroll)
-				if let target = model.transcript.autoScrollTarget {
+				.onChange(of: model.transcript.autoScrollTarget) { _, target in
+					guard let target, model.transcript.atBottom else { return }
 					scroll.scrollTo(target, anchor: .bottom)
 				}
-			}
-			.onChange(of: model.transcript.autoScrollTarget) { _, target in
-				guard let target, model.transcript.atBottom else { return }
-				scroll.scrollTo(target, anchor: .bottom)
-			}
-			.onChange(of: model.transcript.pendingScroll) { _, _ in
-				drainScroll(scroll)
-			}
-			.onChange(of: scrollPosition) { _, position in
-				if let last = model.transcript.visibleTurns.last?.id {
-					model.transcript.atBottom = (position == last)
-				} else {
-					model.transcript.atBottom = true
+				.onChange(of: model.transcript.pendingScroll) { _, _ in
+					drainScroll(scroll)
+				}
+				.onChange(of: scrollPosition) { _, position in
+					if let last = model.transcript.visibleTurns.last?.id {
+						model.transcript.atBottom = (position == last)
+					} else {
+						model.transcript.atBottom = true
+					}
 				}
 			}
 		}

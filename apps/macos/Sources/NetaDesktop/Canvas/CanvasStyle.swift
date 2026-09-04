@@ -44,6 +44,17 @@ public enum CanvasStyle {
 		}
 	}
 
+	/// A closed mission's recorded disposition, as the word the closed node
+	/// and the navigator's archive rows both print. `Archived` when the Node
+	/// recorded none.
+	public static func label(for disposition: Disposition?) -> String {
+		switch disposition {
+		case .merged: "Merged"
+		case .abandoned: "Abandoned"
+		case nil: "Archived"
+		}
+	}
+
 	public static func label(for state: AgentState) -> String {
 		switch state {
 		case .starting: "Starting"

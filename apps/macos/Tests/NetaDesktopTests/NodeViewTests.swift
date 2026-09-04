@@ -15,14 +15,17 @@ private func makeMission(
 	state: MissionState = .running,
 	attention: String? = nil,
 	createdAt: Date = baseNow,
-	lead: MissionLead = .leader
+	lead: MissionLead = .leader,
+	closedAt: Date? = nil,
+	disposition: Disposition? = nil
 ) -> Mission {
 	Mission(
 		id: "m\(number)", number: number, workspaceId: "w", machineId: "m",
 		name: name, objective: "Objective.", changes: [], lead: lead,
 		agentIds: [], access: .readOnly, worktree: nil, state: state,
 		attention: attention, createdAt: createdAt,
-		closedAt: state == .closed ? createdAt : nil, disposition: nil,
+		closedAt: state == .closed ? (closedAt ?? createdAt) : nil,
+		disposition: state == .closed ? disposition : nil,
 		closeReason: nil, integration: nil, continuesMissionId: nil)
 }
 
@@ -82,7 +85,76 @@ final class NodeViewTests: XCTestCase {
 				model.crown, mission.lead == .leader, "crown #\(mission.number)")
 			XCTAssertNotNil(model.ledBy, "led by #\(mission.number)")
 			assertAgeFormat(model.ageText, file: #filePath, line: #line)
+			if mission.state == .closed {
+				let closed = try XCTUnwrap(model.closedText)
+				XCTAssertTrue(
+					closed.hasPrefix(CanvasStyle.label(for: mission.disposition)),
+					"disposition word #\(mission.number): \(closed)")
+				XCTAssertTrue(
+					closed.contains(" · closed "),
+					"closing age #\(mission.number): \(closed)")
+				XCTAssertFalse(
+					closed.contains("Closed ·"), "never the state label")
+			} else {
+				XCTAssertNil(
+					model.closedText,
+					"an open mission carries no closing line #\(mission.number)")
+			}
 		}
+	}
+
+	/// PAPER-SPINE artboard 1 item 3 (kept by Revision 2): a closed mission
+	/// reads `#296 Slack digest bot · Merged · closed 10d`. The word is the
+	/// recorded disposition, never the state label `Closed`, and the age is
+	/// measured from `closedAt`, not from when the mission started.
+	func testClosedMissionCarriesItsDispositionAndClosingAge() {
+		let opened = baseNow.addingTimeInterval(-40 * 86400)
+		let merged = makeMission(
+			number: 296, name: "Slack digest bot", state: .closed,
+			createdAt: opened,
+			closedAt: baseNow.addingTimeInterval(-10 * 86400),
+			disposition: .merged)
+		let model = LeadCardModel(
+			mission: merged, lead: nil, leaderName: "Halden", now: baseNow)
+		XCTAssertEqual(model.numberText, "#296")
+		XCTAssertEqual(model.name, "Slack digest bot")
+		XCTAssertEqual(model.closedText, "Merged · closed 10d")
+		XCTAssertEqual(model.ageText, "5w", "the card age is still the mission's own")
+
+		let abandoned = makeMission(
+			number: 294, name: "Docs site build cache", state: .closed,
+			createdAt: opened,
+			closedAt: baseNow.addingTimeInterval(-11 * 86400),
+			disposition: .abandoned)
+		let second = LeadCardModel(
+			mission: abandoned, lead: nil, leaderName: "Halden", now: baseNow)
+		XCTAssertEqual(second.closedText, "Abandoned · closed 11d")
+
+		// Closed with nothing recorded: the navigator's archive rows and the
+		// closed node say the same word.
+		let bare = LeadCardModel(
+			mission: makeMission(number: 291, state: .closed),
+			lead: nil, leaderName: "Halden", now: baseNow)
+		XCTAssertEqual(bare.closedText, "Archived · closed 0m")
+	}
+
+	/// The drawn node reads the model's closing line, not the state label:
+	/// `#296 Slack digest bot · Merged · closed 10d`.
+	func testTheClosedNodeDrawsTheClosingLineNotTheStateLabel() throws {
+		let source = try nodeViewsSource()
+		let start = try XCTUnwrap(source.range(of: "private var collapsedBody"))
+		let end = try XCTUnwrap(
+			source.range(of: "private var fullBody", range: start.upperBound ..< source.endIndex))
+		let body = String(source[start.lowerBound ..< end.lowerBound])
+		XCTAssertTrue(
+			body.contains("model.closedText ?? model.stateLabel"),
+			"the closed node prints the closing line")
+		XCTAssertFalse(
+			body.contains("Text(model.stateLabel)"),
+			"and never the bare state label, which reads `Closed`")
+		XCTAssertTrue(
+			body.contains("Text(model.numberText)") && body.contains("Text(model.name)"),
+			"beside the number and the name")
 	}
 
 	func testLeadCardFixtureAge() async throws {

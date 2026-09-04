@@ -316,17 +316,18 @@ final class SpineCanvasTests: XCTestCase {
 		XCTAssertEqual(now.label, "Now")
 	}
 
-	/// The mission bar owns the Now control independently of the canvas, so
-	/// its zero-argument jump must do nothing until the canvas has recorded
-	/// a live edge — otherwise a tap before the first layout stages a jump
-	/// to content x 0, the far-left placement this pass removed.
-	func testBarNowJumpIsANoOpBeforeTheFirstLayout() async throws {
+	/// The mission bar owns the Now control independently of the canvas, and
+	/// it reaches Now the one way anything outside the canvas does: the
+	/// shell's `jumpToNow()`, which the canvas answers in `applyShellNow`
+	/// with the index it holds. A tap before the first layout is harmless —
+	/// the canvas computes the live edge when it answers, so nothing stages
+	/// a jump to content x 0, the far-left placement this pass removed.
+	func testTheBarReachesNowThroughTheShell() async throws {
 		let store = try await makeStore()
 		let date = store.window.upperBound
 		let (view, shell, viewport, now, _) = makeView(store)
-		XCTAssertNil(now.liveScrollX)
-		now.jumpToNow()
-		XCTAssertNil(now.jumpRequest)
+		shell.jumpToNow()
+		view.applyShellNow(size: size)
 		_ = view.resolve(size: size, date: date)
 		let inset = SpineCanvasPipeline.trailingInset(
 			size: size, shell: shell)
@@ -334,12 +335,12 @@ final class SpineCanvasTests: XCTestCase {
 			missions: store.missions, events: store.events,
 			viewport: viewport)
 		XCTAssertEqual(
-			now.liveScrollX ?? .nan,
+			viewport.scrollX,
 			SpinePlacement.liveScrollX(
 				index: index, viewport: viewportRect, trailingInset: inset),
 			accuracy: 1e-9)
-		now.jumpToNow()
-		XCTAssertNotNil(now.jumpRequest)
+		XCTAssertTrue(now.isLive)
+		XCTAssertNil(now.jumpRequest, "the shell path stages nothing of its own")
 	}
 
 	/// Fit lands on the same right alignment as a Now jump, so ⌘0 and the
@@ -367,8 +368,7 @@ final class SpineCanvasTests: XCTestCase {
 	}
 
 	/// A staged jump applies through the next resolution: the scroll moves,
-	/// the request clears, and Now lights again. The bar's control stages it
-	/// with no index of its own, from the live edge the canvas recorded.
+	/// the request clears, and Now lights again.
 	func testJumpToNowAppliesThroughResolve() async throws {
 		let store = try await makeStore()
 		let date = store.window.upperBound
@@ -387,7 +387,8 @@ final class SpineCanvasTests: XCTestCase {
 		_ = view.resolve(size: size, date: date)
 		XCTAssertFalse(now.isLive)
 		XCTAssertTrue(now.label.hasPrefix("Now · "))
-		now.jumpToNow()
+		now.jumpToNow(
+			index: index, viewport: viewportRect, trailingInset: inset)
 		_ = view.resolve(size: size, date: date)
 		XCTAssertNil(now.consumeJump())
 		XCTAssertEqual(
@@ -400,6 +401,49 @@ final class SpineCanvasTests: XCTestCase {
 	}
 
 	// MARK: - Background click, zoom and Fit
+
+	/// The dismiss target is a plain `Button` under every node, not a tap
+	/// gesture on the backdrop.
+	///
+	/// Measured on the running app (navigator open, 1600 x 984): a
+	/// synthesized click at (500, 534) on empty canvas left
+	/// `navigator=true` with `Color.clear.onTapGesture`, while the same
+	/// click on the toolbar's Fit button bumped `fitRequested` — the click
+	/// was delivered, the gesture did not answer it. With the button, the
+	/// same click reports `navigator=false`.
+	func testTheBackgroundDismissTargetIsAButtonNotATapGesture() throws {
+		let source = try spineCanvasSource()
+		XCTAssertFalse(
+			source.contains(".onTapGesture"),
+			"a tap gesture on the backdrop never received the click")
+		let start = try XCTUnwrap(
+			source.range(of: "Button(action: handleBackgroundTap)"))
+		let block = String(source[start.lowerBound...].prefix(400))
+		XCTAssertTrue(block.contains("Color.clear"), "the target is invisible")
+		XCTAssertTrue(
+			block.contains("contentShape(Rectangle())"),
+			"and hit-tests its whole rect")
+		XCTAssertTrue(
+			block.contains(".focusable(false)")
+				&& block.contains(".accessibilityHidden(true)"),
+			"a click target and nothing else")
+		let nodes = try XCTUnwrap(
+			source.range(
+				of: "SpineBackdrop(",
+				range: start.lowerBound ..< source.endIndex))
+		XCTAssertLessThan(
+			start.lowerBound, nodes.lowerBound,
+			"the dismiss target sits below the nodes, not over them")
+	}
+
+	private func spineCanvasSource() throws -> String {
+		var url = URL(fileURLWithPath: #filePath, isDirectory: false)
+			.deletingLastPathComponent()
+		url.deleteLastPathComponent()
+		url.deleteLastPathComponent()
+		url.appendPathComponent("Sources/NetaDesktop/Canvas/SpineCanvasView.swift")
+		return try String(contentsOf: url, encoding: .utf8)
+	}
 
 	/// A click on the canvas backdrop dismisses the navigator and leaves the
 	/// selection alone; Escape still returns the selection to the leader.

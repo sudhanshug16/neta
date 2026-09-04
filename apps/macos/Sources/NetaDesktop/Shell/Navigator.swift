@@ -112,22 +112,13 @@ public struct NavigatorModel: Equatable, Sendable {
 		if mission.state == .closed {
 			return Row(
 				id: mission.id, number: mission.number, name: mission.name,
-				stateLabel: archiveLabel(for: mission), tint: Theme.textSecondary)
+				stateLabel: CanvasStyle.label(for: mission.disposition),
+				tint: Theme.textSecondary)
 		}
 		return Row(
 			id: mission.id, number: mission.number, name: mission.name,
 			stateLabel: MissionBarItem.label(for: mission.state),
 			tint: stateColor(for: mission.state))
-	}
-
-	/// Archived rows carry the recorded disposition (`Merged`/`Abandoned`),
-	/// falling back to `Archived` when none was recorded.
-	private static func archiveLabel(for mission: Mission) -> String {
-		switch mission.disposition {
-		case .merged: return "Merged"
-		case .abandoned: return "Abandoned"
-		case nil: return "Archived"
-		}
 	}
 
 	/// The shell's selected workspace: `Store.currentWorkspaceId`, falling

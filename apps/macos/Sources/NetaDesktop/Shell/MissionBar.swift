@@ -277,7 +277,7 @@ private struct MissionBarChip: View {
 					// The attention mark and its label, both in the state
 					// colour: never the colour alone.
 					Image(systemName: "exclamationmark")
-						.font(.system(size: 10, weight: .bold))
+						.font(Theme.text(10, .bold))
 						.foregroundStyle(stateColor(for: mission.state))
 					Text(MissionBarItem.label(for: mission.state))
 						.font(Theme.text(12, .regular))

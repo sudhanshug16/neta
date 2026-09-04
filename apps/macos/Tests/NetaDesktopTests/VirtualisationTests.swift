@@ -160,4 +160,57 @@ final class VirtualisationTests: XCTestCase {
 		XCTAssertEqual(
 			first.points[1].y, column.rows[0].minY, accuracy: 1e-9)
 	}
+
+	/// PAPER-SPINE artboard 1 item 8: the axis runs from the left window
+	/// edge to the leader card at Now and stops there. Painted to
+	/// `size.width` it ran on under the chat glass to the window edge, past
+	/// the anchor it ends on. The violet bed underneath ends with it.
+	func testTheAxisEndsAtTheLeaderCardsLeadingEdge() {
+		let mission = makeMission(
+			id: "m1", number: 1, state: .running, createdAt: base)
+		let index = SpineIndex(missions: [mission], pxPerHour: 48, maxPitch: 320)
+		let inset: CGFloat = 450
+		let scrollX = SpinePlacement.liveScrollX(
+			index: index, viewport: viewport, trailingInset: inset)
+		let window = SpineVirtualiser.window(
+			index: index, agents: [:], scrollX: scrollX, viewport: viewport,
+			now: base.timeIntervalSince1970 * 1000)
+		XCTAssertEqual(
+			window.leader.maxX, viewport.maxX - inset, accuracy: 1e-6,
+			"the leader is at Now, clear of the chat")
+		XCTAssertLessThan(window.leader.minX, viewport.width)
+		var recorder = RecordingGraphicsContext()
+		SpinePainter.draw(
+			into: &recorder, size: viewport.size, window: window,
+			style: .standard, emphasisFor: { _ in 1 })
+		let axes = recorder.strokes.filter {
+			$0.kind == .axis || $0.kind == .axisUnderlay
+		}
+		XCTAssertEqual(axes.count, 2, "the axis and its violet bed")
+		for axis in axes {
+			XCTAssertEqual(axis.points.count, 2)
+			XCTAssertEqual(axis.points[0].x, 0, "from the left window edge")
+			XCTAssertEqual(
+				axis.points[1].x, window.leader.minX, accuracy: 1e-9,
+				"to the leader card's leading edge, not \(viewport.width)")
+			XCTAssertEqual(axis.points[0].y, window.spineY)
+			XCTAssertEqual(axis.points[1].y, window.spineY)
+		}
+		XCTAssertLessThan(
+			window.leader.minX, viewport.width - 1,
+			"which is short of the window edge the axis used to reach")
+	}
+
+	/// Scrolled back in time the leader is off the right edge; the axis then
+	/// fills the drawn width rather than stopping at a negative x.
+	func testTheAxisFillsTheCanvasWhenTheLeaderIsPastTheRightEdge() {
+		let leaderOffRight = CGRect(
+			x: viewport.width + 200, y: 0, width: 240, height: 74)
+		XCTAssertEqual(
+			BackdropPlan.axisEnd(leader: leaderOffRight, width: viewport.width),
+			viewport.width)
+		let leaderOffLeft = CGRect(x: -400, y: 0, width: 240, height: 74)
+		XCTAssertEqual(
+			BackdropPlan.axisEnd(leader: leaderOffLeft, width: viewport.width), 0)
+	}
 }

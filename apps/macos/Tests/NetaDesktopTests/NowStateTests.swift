@@ -130,7 +130,6 @@ final class NowStateTests: XCTestCase {
 			leader: leader, now: now, trailingInset: inset)
 		XCTAssertTrue(state.isLive)
 		XCTAssertEqual(state.label, "Now")
-		XCTAssertEqual(state.liveScrollX ?? .nan, live, accuracy: 1e-9)
 		// Right-aligned on the whole viewport instead, the leader hides
 		// behind the chat: that is not Now.
 		let behind = index.contentWidth - viewport.width
@@ -200,6 +199,21 @@ final class NowStateTests: XCTestCase {
 	}
 
 	// MARK: - Jump
+
+	/// There is one way to reach Now from outside the canvas: the shell's
+	/// `jumpToNow()`, which the mission bar's control and the debug driver
+	/// both call. `NowState` no longer carries a second, cached one — a
+	/// zero-argument jump to the edge the last `update` happened to record,
+	/// which nothing in the app called and which staged a jump to content
+	/// x 0 before the first layout.
+	func testNowStateHasNoCachedZeroArgumentJump() {
+		let names = Mirror(reflecting: NowState()).children
+			.compactMap(\.label)
+			.map { $0.hasPrefix("_") ? String($0.dropFirst()) : $0 }
+		XCTAssertFalse(names.contains("liveScrollX"), "no cached live edge")
+		XCTAssertTrue(names.contains("isLive"))
+		XCTAssertTrue(names.contains("jumpRequest"))
+	}
 
 	func testConsumeJumpClearsTheRequest() {
 		let index = makeIndex([

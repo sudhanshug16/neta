@@ -261,7 +261,9 @@ public final class SpineCanvasPipeline {
 /// coordinates, so connectors stay attached to their cards. Clicks call
 /// `shell.select(_:)`; a click on the backdrop calls `shell.canvasClicked()`,
 /// which dismisses the navigator; `Escape` dismisses the top overlay, else
-/// returns selection to `.leader`.
+/// returns selection to `.leader`. The backdrop's dismiss target is a plain
+/// `Button` under every node, not a tap gesture: a tap gesture on the
+/// backdrop never received the click (see `body`).
 ///
 /// The canvas observes `shell.selection` and pans to it, so the mission bar
 /// and the navigator both "pan the spine to that mission" (MANIFESTO.md "The
@@ -491,10 +493,25 @@ public struct SpineCanvasView: View {
 				// tall along the bottom would have no target under it. It
 				// sits below every node, so a click on a card still selects
 				// the card.
-				Color.clear
-					.frame(width: size.width, height: size.height)
-					.contentShape(Rectangle())
-					.onTapGesture { handleBackgroundTap() }
+				//
+				// A `Button`, not a tap gesture on `Color.clear`: the
+				// gesture never fired. Measured on the running app with the
+				// navigator open at 1600 x 984 — a click at (500, 534) on
+				// empty canvas left `navigator=true`, while the same
+				// synthesized click on the toolbar's Fit button bumped
+				// `fitRequested`, so the click was being delivered and the
+				// gesture was what did not answer it. With this button the
+				// same click reports `navigator=false`.
+				Button(action: handleBackgroundTap) {
+					Color.clear
+						.frame(width: size.width, height: size.height)
+						.contentShape(Rectangle())
+				}
+				.buttonStyle(.plain)
+				// It is a click target and nothing else: never a stop on the
+				// keyboard-access ring, never a control VoiceOver announces.
+				.focusable(false)
+				.accessibilityHidden(true)
 				ZStack {
 					SpineBackdrop(
 						window: canvas.window,

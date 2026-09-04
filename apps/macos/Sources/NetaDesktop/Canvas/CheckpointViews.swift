@@ -37,7 +37,7 @@ public struct CheckpointLayer: View {
 	private func checkpointButton(_ checkpoint: Checkpoint) -> some View {
 		Button { router.open(checkpoint) } label: {
 			Image(systemName: checkpoint.icon.systemImage)
-				.font(.system(size: 14, weight: .regular))
+				.font(Theme.text(14, .regular))
 				.foregroundStyle(checkpoint.icon.color)
 				.frame(minWidth: 26, minHeight: 26)
 				.contentShape(Rectangle())
