@@ -26,7 +26,21 @@ public struct SpineMetrics: Sendable, Equatable {
 	/// 89 pt at 10/500. At `leadCardWidth` the text column is 61 pt and the
 	/// subtitle wrapped onto two lines.
 	public var leaderCardWidth: CGFloat = 240
-	public var closedNodeWidth: CGFloat = 180
+	/// A closed mission's faded remnant: "Closed missions: lead node only,
+	/// 180 px wide" (PAPER-SPINE Revision 4), widened by 20 pt.
+	///
+	/// `LeadCardView.collapsedBody` draws two lines inside it — number and
+	/// name, then the closing line — because the artboard's single line
+	/// (`#296 Slack digest bot · Merged · closed 10d`) spends 157 pt of 180
+	/// on everything but the name. Two lines fix that for every closed name
+	/// in the design's dataset but one: `Password reset rate limits`
+	/// (artboard 1 item 3) measures 188 pt with its number and padding. The
+	/// BRIEF.md MUST that nodes "show their FULL task name" outranks the
+	/// round number, so the node takes 200 — still visibly narrower and a
+	/// third the height of the 210 pt live lead card, so the remnant still
+	/// reads as subordinate. Beyond 200 the name truncates and the permanent
+	/// number carries the identity.
+	public var closedNodeWidth: CGFloat = 200
 	public var closedNodeHeight: CGFloat = 34
 	public var agentRowWidth: CGFloat = 220
 	public var agentRowHeight: CGFloat = 68
@@ -59,7 +73,7 @@ public struct SpineMetrics: Sendable, Equatable {
 		leadAttentionHeight: CGFloat = 148,
 		leaderCardHeight: CGFloat = 74,
 		leaderCardWidth: CGFloat = 240,
-		closedNodeWidth: CGFloat = 180,
+		closedNodeWidth: CGFloat = 200,
 		closedNodeHeight: CGFloat = 34,
 		agentRowWidth: CGFloat = 220,
 		agentRowHeight: CGFloat = 68,

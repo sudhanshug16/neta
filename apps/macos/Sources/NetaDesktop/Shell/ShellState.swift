@@ -180,9 +180,11 @@ public enum NavigatorHoverRegion: Hashable, Sendable {
 	/// side of that click path.
 	///
 	/// It only dismisses when the canvas actually calls it. The canvas owns
-	/// that call site: `SpineCanvasView`'s background layer needs
-	/// `.onTapGesture { shell.canvasClicked() }` below the nodes, so a click
-	/// on empty canvas hides the overlay without swallowing node clicks.
+	/// that call site: `SpineCanvasView`'s backdrop is a plain
+	/// `Button(action: handleBackgroundTap)` over a clear rect below the
+	/// nodes, so a click on empty canvas hides the overlay without
+	/// swallowing node clicks. A tap gesture there never fired — measured on
+	/// the running app — so a gesture is not the contract; the button is.
 	/// MANIFESTO.md "Desktop information architecture" — the navigator
 	/// "closes when dismissed".
 	@discardableResult

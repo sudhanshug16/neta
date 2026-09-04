@@ -340,7 +340,12 @@ final class SpineCanvasTests: XCTestCase {
 				index: index, viewport: viewportRect, trailingInset: inset),
 			accuracy: 1e-9)
 		XCTAssertTrue(now.isLive)
-		XCTAssertNil(now.jumpRequest, "the shell path stages nothing of its own")
+		let names = Mirror(reflecting: now).children
+			.compactMap(\.label)
+			.map { $0.hasPrefix("_") ? String($0.dropFirst()) : $0 }
+		XCTAssertFalse(
+			names.contains("jumpRequest"),
+			"the shell path is the only one; NowState stages nothing")
 	}
 
 	/// Fit lands on the same right alignment as a Now jump, so ⌘0 and the
@@ -360,15 +365,22 @@ final class SpineCanvasTests: XCTestCase {
 		let fitted = index.respaced(
 			pxPerHour: viewport.pxPerHour, maxPitch: viewport.maxPitch)
 		let afterFit = viewport.scrollX
-		now.jumpToNow(
-			index: fitted, viewport: viewportRect, trailingInset: inset)
+		XCTAssertEqual(
+			afterFit,
+			SpinePlacement.liveScrollX(
+				index: fitted, viewport: viewportRect, trailingInset: inset),
+			accuracy: 1e-9,
+			"Fit lands where the shell's Now jump resolves to")
+		shell.jumpToNow()
+		view.applyShellNow(size: size)
 		_ = view.resolve(size: size, date: date)
 		XCTAssertEqual(viewport.scrollX, afterFit, accuracy: 1e-9)
 		XCTAssertTrue(now.isLive)
 	}
 
-	/// A staged jump applies through the next resolution: the scroll moves,
-	/// the request clears, and Now lights again.
+	/// A Now jump from a view scrolled back in time: the scroll moves to the
+	/// live edge and Now lights again. The one path — `ShellState.jumpToNow`
+	/// answered by `applyShellNow`.
 	func testJumpToNowAppliesThroughResolve() async throws {
 		let store = try await makeStore()
 		let date = store.window.upperBound
@@ -387,10 +399,9 @@ final class SpineCanvasTests: XCTestCase {
 		_ = view.resolve(size: size, date: date)
 		XCTAssertFalse(now.isLive)
 		XCTAssertTrue(now.label.hasPrefix("Now · "))
-		now.jumpToNow(
-			index: index, viewport: viewportRect, trailingInset: inset)
+		shell.jumpToNow()
+		view.applyShellNow(size: size)
 		_ = view.resolve(size: size, date: date)
-		XCTAssertNil(now.consumeJump())
 		XCTAssertEqual(
 			viewport.scrollX,
 			SpinePlacement.liveScrollX(

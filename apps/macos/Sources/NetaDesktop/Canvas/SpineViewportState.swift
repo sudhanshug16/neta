@@ -73,9 +73,9 @@ public enum ZoomStep: Sendable {
 		scrollY = min(max(scrollY + delta.height, 0), maxY)
 	}
 
-	/// Applies a resolved scroll target: a staged Now jump (T10.10 calls
-	/// this with `NowState.consumeJump()`) or the first layout's jump to
-	/// Now. The target is already the live edge, which is negative when the
+	/// Applies a resolved scroll target: the shell's Now jump
+	/// (`SpineCanvasView.applyShellNow`) or the first layout's jump to Now.
+	/// The target is already the live edge, which is negative when the
 	/// sequence is narrower than the viewport, so nothing is clamped here.
 	public func jump(to scrollX: CGFloat) {
 		self.scrollX = scrollX
@@ -140,7 +140,7 @@ public enum ZoomStep: Sendable {
 	/// ⌘0: the largest `pxPerHour` at which every open mission from
 	/// `index.earliestOpen` through the leader card fits in the usable
 	/// width, else the minimum. Either way the view ends right-aligned at
-	/// the live edge, exactly where `NowState.jumpToNow` lands. Resets
+	/// the live edge, exactly where `applyShellNow` lands. Resets
 	/// `scrollY`.
 	public func fit(
 		index: SpineIndex, viewport: CGRect, trailingInset: CGFloat = 0

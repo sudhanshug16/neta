@@ -30,9 +30,18 @@ private func makeIndex(
 		missions: missions, pxPerHour: pxPerHour, maxPitch: 320)
 }
 
-/// T10.9 contract: the Now label and live edge, jump staging and clearing,
-/// the off-screen leader flip, pan moving scroll but never spacing, zoom
-/// holding the cursor, and Fit.
+private func nowStateSource() throws -> String {
+	var url = URL(fileURLWithPath: #filePath, isDirectory: false)
+		.deletingLastPathComponent()
+	url.deleteLastPathComponent()
+	url.deleteLastPathComponent()
+	url.appendPathComponent("Sources/NetaDesktop/Canvas/NowState.swift")
+	return try String(contentsOf: url, encoding: .utf8)
+}
+
+/// T10.9 contract: the Now label and live edge, the one jump path, the
+/// off-screen leader flip, pan moving scroll but never spacing, zoom holding
+/// the cursor, and Fit.
 @MainActor
 final class NowStateTests: XCTestCase {
 	private let viewport = CGRect(x: 0, y: 0, width: 1600, height: 1000)
@@ -200,36 +209,32 @@ final class NowStateTests: XCTestCase {
 
 	// MARK: - Jump
 
-	/// There is one way to reach Now from outside the canvas: the shell's
-	/// `jumpToNow()`, which the mission bar's control and the debug driver
-	/// both call. `NowState` no longer carries a second, cached one — a
-	/// zero-argument jump to the edge the last `update` happened to record,
-	/// which nothing in the app called and which staged a jump to content
-	/// x 0 before the first layout.
-	func testNowStateHasNoCachedZeroArgumentJump() {
+	/// There is exactly one way to reach Now: the shell's `jumpToNow()`,
+	/// which the mission bar's control, the off-screen leader marker and the
+	/// debug driver all call and which `SpineCanvasView.applyShellNow`
+	/// answers. `NowState` reports the two states and stages nothing.
+	///
+	/// It carried two dead staging paths before: a zero-argument jump to the
+	/// edge the last `update` happened to record (which staged content x 0
+	/// before the first layout), and a `jumpRequest` the canvas drained every
+	/// frame and only the tests ever filled.
+	func testNowStateStagesNoJumpOfItsOwn() {
 		let names = Mirror(reflecting: NowState()).children
 			.compactMap(\.label)
 			.map { $0.hasPrefix("_") ? String($0.dropFirst()) : $0 }
 		XCTAssertFalse(names.contains("liveScrollX"), "no cached live edge")
-		XCTAssertTrue(names.contains("isLive"))
-		XCTAssertTrue(names.contains("jumpRequest"))
-	}
-
-	func testConsumeJumpClearsTheRequest() {
-		let index = makeIndex([
-			makeMission(id: "a", number: 1, age: 3600),
-		])
-		let state = NowState()
-		XCTAssertNil(state.jumpRequest)
-		state.jumpToNow(index: index, viewport: viewport)
-		let request = state.jumpRequest
-		XCTAssertNotNil(request)
+		XCTAssertFalse(names.contains("jumpRequest"), "and no staged jump")
 		XCTAssertEqual(
-			request,
-			SpinePlacement.liveScrollX(
-				index: index, viewport: viewport, trailingInset: 0))
-		XCTAssertEqual(state.consumeJump(), request)
-		XCTAssertNil(state.consumeJump())
+			names.filter { !$0.hasPrefix("$") }.sorted(),
+			["isLive", "label", "leaderOffScreen"])
+		let source = try? nowStateSource()
+		XCTAssertNotNil(source)
+		XCTAssertFalse(
+			source?.contains("func jumpToNow") ?? true,
+			"the one jump lives on ShellState")
+		XCTAssertFalse(
+			source?.contains("func consumeJump") ?? true,
+			"so there is nothing for the canvas to drain")
 	}
 
 	// MARK: - Off-screen leader
@@ -544,12 +549,11 @@ final class NowStateTests: XCTestCase {
 		state.fit(index: index, viewport: viewport, trailingInset: inset)
 		let fitted = index.respaced(
 			pxPerHour: state.pxPerHour, maxPitch: state.maxPitch)
-		let now = NowState()
-		now.jumpToNow(
+		// The one jump path resolves the live edge from the index it holds
+		// (`SpineCanvasView.applyShellNow`); this is that resolution.
+		let jump = SpinePlacement.liveScrollX(
 			index: fitted, viewport: viewport, trailingInset: inset)
-		let jump = now.consumeJump()
-		XCTAssertNotNil(jump)
-		XCTAssertEqual(state.scrollX, jump ?? .nan, accuracy: 1e-9)
+		XCTAssertEqual(state.scrollX, jump, accuracy: 1e-9)
 		let leader = SpinePlacement.leaderRect(
 			index: fitted, scrollX: state.scrollX, viewport: viewport,
 			spineY: viewport.midY)

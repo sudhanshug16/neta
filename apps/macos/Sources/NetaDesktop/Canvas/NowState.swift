@@ -6,21 +6,21 @@ import SwiftUI
 /// Now state for the spine canvas (T10.9).
 ///
 /// Two states per the manifesto: lit when the view is at the live edge, and
-/// showing how far back the view is when it is not. There is one way to
-/// reach Now from outside the canvas — `ShellState.jumpToNow()`, which the
-/// mission bar's control and the debug driver both call and the canvas
-/// answers in `applyShellNow` — so this state reports, and stages a jump
-/// only for a caller that already has the index in hand.
+/// showing how far back the view is when it is not. This state only reports
+/// them. There is exactly one way to reach Now — `ShellState.jumpToNow()`,
+/// which the mission bar's control, the off-screen leader marker and the
+/// debug driver all call and which `SpineCanvasView.applyShellNow` answers
+/// with the index it holds. `NowState` stages nothing: a second staging path
+/// here (a `jumpRequest` the canvas drained every frame) was a way to Now
+/// that nothing in the app used and that only the tests could reach.
 ///
 /// `leaderOffScreen` drives `OffScreenLeaderMarker`. The 09 `MissionBarView`
-/// renders the Now control from this state; `jumpToNow(index:viewport:)`
-/// stages a `jumpRequest` that T10.10 applies via `consumeJump()`. Pure
-/// reads of `SpineIndex`: no `Store`, no bare `Date()`.
+/// renders the Now control from this state. Pure reads of `SpineIndex`: no
+/// `Store`, no bare `Date()`.
 @Observable @MainActor public final class NowState {
 	public private(set) var isLive = true
 	public private(set) var leaderOffScreen = false
 	public private(set) var label = "Now"
-	public private(set) var jumpRequest: CGFloat?
 
 	public init() {}
 
@@ -59,21 +59,6 @@ import SwiftUI
 			text = "Now · \(Self.backText(max(0, nowMs - at))) back"
 		}
 		set(isLive: live, label: text, offScreen: offScreen)
-	}
-
-	/// Stages the `scrollX` putting the live edge at the usable right edge.
-	public func jumpToNow(
-		index: SpineIndex, viewport: CGRect, trailingInset: CGFloat = 0
-	) {
-		jumpRequest = SpinePlacement.liveScrollX(
-			index: index, viewport: viewport, trailingInset: trailingInset)
-	}
-
-	/// Returns the staged jump and clears it.
-	public func consumeJump() -> CGFloat? {
-		let request = jumpRequest
-		jumpRequest = nil
-		return request
 	}
 
 	// MARK: - Private

@@ -100,9 +100,10 @@ public final class SpineCanvasPipeline {
 	}
 
 	/// Resolves the frame for one layout pass: jumps to Now on the first
-	/// layout, applies a staged jump, recomputes the window and checkpoints
-	/// on a key miss, and refreshes `NowState` against the rendered
-	/// (scroll-shifted) leader rect.
+	/// layout, recomputes the window and checkpoints on a key miss, and
+	/// refreshes `NowState` against the rendered (scroll-shifted) leader
+	/// rect. An explicit ask for Now does not pass through here — it is
+	/// `ShellState.jumpToNow()` and `applyShellNow`, the one path.
 	///
 	/// The first layout — and any later change to the usable width or the
 	/// content width while the view is live, such as hiding the chat or a
@@ -144,9 +145,6 @@ public final class SpineCanvasPipeline {
 			}
 			lastUsableWidth = usable
 			lastContentWidth = content
-		}
-		if let jumped = nowState.consumeJump() {
-			viewportState.jump(to: jumped)
 		}
 		let scrollX = viewportState.scrollX
 		let expanded = viewportState.expanded

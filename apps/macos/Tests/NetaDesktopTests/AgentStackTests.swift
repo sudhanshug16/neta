@@ -23,7 +23,9 @@ final class AgentStackTests: XCTestCase {
 		XCTAssertEqual(metrics.leadAttentionHeight, 148)
 		XCTAssertEqual(metrics.leaderCardHeight, 74)
 		XCTAssertEqual(metrics.leaderCardWidth, 240)
-		XCTAssertEqual(metrics.closedNodeWidth, 180)
+		// PAPER-SPINE Revision 4 says 180; `NodeFramingTests
+		// .testTheClosedNodeHoldsTheDesignsNamesWhole` is why it is 200.
+		XCTAssertEqual(metrics.closedNodeWidth, 200)
 		XCTAssertEqual(metrics.closedNodeHeight, 34)
 		XCTAssertEqual(metrics.agentRowWidth, 220)
 		XCTAssertEqual(metrics.agentRowHeight, 68)

@@ -212,7 +212,10 @@ final class ChatPanelTests: XCTestCase {
 			TranscriptAnchor.contentMinHeight(viewport: 0), 0,
 			"a panel SwiftUI has not measured yet takes no minimum")
 		XCTAssertEqual(TranscriptAnchor.contentMinHeight(viewport: -20), 0)
-		let source = try chatPanelSource()
+		// The `transcript` property alone, not the whole file: `body` has a
+		// `GeometryReader` of its own, so a whole-file search for one passes
+		// even with the transcript's deleted.
+		let source = try transcriptSource()
 		XCTAssertTrue(
 			source.contains("minHeight: TranscriptAnchor.contentMinHeight("),
 			"the scrolled content is at least the panel's height")
@@ -222,6 +225,9 @@ final class ChatPanelTests: XCTestCase {
 		XCTAssertTrue(
 			source.contains("GeometryReader { proxy in"),
 			"measured from the panel the transcript is drawn in")
+		XCTAssertTrue(
+			source.contains("proxy.size.height"),
+			"and the minimum is that measurement, not a constant")
 	}
 
 	/// The design has no empty-state placeholder: an empty transcript is
@@ -346,6 +352,19 @@ final class ChatPanelTests: XCTestCase {
 		return condition()
 	}
 
+
+	/// Just the `transcript` computed property's source, so an assertion
+	/// about the transcript cannot be satisfied by the rest of the panel.
+	private func transcriptSource() throws -> String {
+		let source = try chatPanelSource()
+		let start = try XCTUnwrap(
+			source.range(of: "private var transcript: some View"))
+		let end = try XCTUnwrap(
+			source.range(
+				of: "private func drainScroll",
+				range: start.upperBound ..< source.endIndex))
+		return String(source[start.lowerBound ..< end.lowerBound])
+	}
 
 	private func chatPanelSource() throws -> String {
 		var url = URL(fileURLWithPath: #filePath, isDirectory: false)

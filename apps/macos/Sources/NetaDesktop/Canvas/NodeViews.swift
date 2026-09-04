@@ -102,8 +102,8 @@ public struct LeadCardView: View {
 	private let collapsed: Bool
 
 	/// - Parameter collapsed: A closed mission. PAPER-SPINE Revision 4:
-	///   "Closed missions: lead node only, 180 px wide, 55% opacity" — one
-	///   line of number, name and state in the `closedNodeWidth x
+	///   "Closed missions: lead node only, ... 55% opacity" — the number,
+	///   the name and the closing line in the `closedNodeWidth x
 	///   closedNodeHeight` rect `SpinePlacement` reserves for it, never the
 	///   full card in a rect a third its height.
 	public init(
@@ -124,37 +124,52 @@ public struct LeadCardView: View {
 		}
 	}
 
-	/// The closed mission's node, in the design's form:
-	/// `#296 Slack digest bot · Merged · closed 10d` (PAPER-SPINE artboard 1
-	/// item 3, kept by Revision 2). The disposition word and the closing age
-	/// are what a closed mission is remembered by, so they hold their width
-	/// and the name is the one field that truncates inside the 180 pt node
-	/// Revision 4 reserves for it. Nothing here says `Closed`: the word the
-	/// node carries is `Merged` or `Abandoned`.
+	/// The closed mission's node: the number and name on one line, the
+	/// closing line under it — `#296 Slack digest bot` over
+	/// `Merged · closed 10d` (PAPER-SPINE artboard 1 item 3, kept by
+	/// Revision 2). Nothing here says `Closed`: the word the node carries is
+	/// `Merged` or `Abandoned`.
+	///
+	/// Two lines, not the single line the artboard draws, because Revision 4
+	/// later fixed the closed node near 180 pt and the two cannot both hold.
+	/// One line spends 157 pt of that on the number, the closing line and
+	/// the padding, leaving 23 pt for a name that needs 87 pt
+	/// (`Slack digest bot`) — the node read `#296 Slac… Merged · closed 10d`
+	/// and a closed mission was unidentifiable. Fitting one line instead
+	/// would take a 320 pt node, wider than the 210 pt lead card of a live
+	/// mission, which inverts the emphasis Revision 4's faded remnant is
+	/// for. BRIEF.md MUST — nodes "show their FULL task name" — is the rule
+	/// that breaks the tie: the name stays whole and the line wraps.
+	/// `SpineMetrics.closedNodeWidth` carries the 20 pt the design's longest
+	/// closed name needs on top of that; both are measured in
+	/// `NodeFramingTests.testTheClosedNodeHoldsTheDesignsNamesWhole`.
 	private var collapsedBody: some View {
-		HStack(spacing: 5) {
-			Text(model.numberText)
-				.font(Theme.mono(11, .semibold))
-				.foregroundStyle(CanvasStyle.text(
-					Theme.textPrimary, emphasis: emphasis, over: Theme.nodeFill))
-			Text(model.name)
-				.font(Theme.text(11, .medium))
-				.foregroundStyle(CanvasStyle.text(
-					Theme.textPrimary, emphasis: emphasis, over: Theme.nodeFill))
-				.lineLimit(1)
-				.truncationMode(.tail)
-			Spacer(minLength: 4)
+		VStack(alignment: .leading, spacing: 1) {
+			HStack(spacing: 5) {
+				Text(model.numberText)
+					.font(Theme.mono(11, .semibold))
+					.foregroundStyle(CanvasStyle.text(
+						Theme.textPrimary, emphasis: emphasis, over: Theme.nodeFill))
+				Text(model.name)
+					.font(Theme.text(11, .medium))
+					.foregroundStyle(CanvasStyle.text(
+						Theme.textPrimary, emphasis: emphasis, over: Theme.nodeFill))
+					.lineLimit(1)
+					.truncationMode(.tail)
+				Spacer(minLength: 0)
+			}
 			Text(model.closedText ?? model.stateLabel)
 				.font(Theme.text(10, .medium))
 				.foregroundStyle(CanvasStyle.text(
 					Theme.textSecondary, emphasis: emphasis, over: Theme.nodeFill))
 				.lineLimit(1)
-				.fixedSize()
+				.truncationMode(.tail)
 		}
 		.padding(.horizontal, 8)
 		.frame(
 			width: SpineMetrics.standard.closedNodeWidth,
-			height: SpineMetrics.standard.closedNodeHeight)
+			height: SpineMetrics.standard.closedNodeHeight,
+			alignment: .leading)
 		.background(RoundedRectangle(cornerRadius: Theme.Metric.leadCardRadius)
 			.fill(Theme.nodeFill))
 		.overlay(RoundedRectangle(cornerRadius: Theme.Metric.leadCardRadius)

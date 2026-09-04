@@ -237,7 +237,7 @@ final class SpinePlacementTests: XCTestCase {
 		let column = placed.columns[0]
 		XCTAssertTrue(column.collapsed)
 		XCTAssertTrue(column.rows.isEmpty)
-		XCTAssertEqual(column.card.width, 180)
+		XCTAssertEqual(column.card.width, metrics.closedNodeWidth)
 		XCTAssertEqual(column.card.height, metrics.closedNodeHeight)
 		XCTAssertEqual(column.card.midX, column.anchor.x, accuracy: 1e-9)
 		XCTAssertEqual(column.card.minY, 500 + metrics.spineOffset)

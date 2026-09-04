@@ -468,6 +468,44 @@ final class NodeFramingTests: XCTestCase {
 				height: metrics.closedNodeHeight))
 	}
 
+	/// A closed mission stays identifiable: its name is drawn whole inside
+	/// the 180 pt node, never clipped to `Slac…`. BRIEF.md MUST — nodes
+	/// "show their FULL task name" — is why the closing line went to a
+	/// second line when Revision 4 fixed the width at 180 pt.
+	///
+	/// Measured, not asserted from the source: the number's mono column plus
+	/// the name at the drawn font plus the node's 8 pt padding either side
+	/// must fit `closedNodeWidth`, for every closed mission name in the
+	/// design's dataset (PAPER-SPINE artboard 1 item 3 and Revision 2's
+	/// "Typical day" closed list).
+	func testTheClosedNodeHoldsTheDesignsNamesWhole() {
+		let names = [
+			"Password reset rate limits", "Docs site build cache",
+			"Slack digest bot", "Search index rebuild",
+			"Sentry noise reduction", "Audit log export",
+			"Rate limiter on /search", "Invoice PDF rendering",
+			"Flaky auth tests", "Postgres 16 upgrade", "Payments regression",
+		]
+		let number = measure(
+			Text("#296").font(Theme.mono(11, .semibold))).width
+		for name in names {
+			let width = measure(Text(name).font(Theme.text(11, .medium))).width
+			XCTAssertLessThanOrEqual(
+				8 + number + 5 + width + 8, metrics.closedNodeWidth,
+				"`\(name)` is truncated in the closed node")
+		}
+		// And the closing line fits the second line whole.
+		for line in [
+			"Merged · closed 10d", "Abandoned · closed 11d",
+			"Archived · closed 0m",
+		] {
+			let width = measure(Text(line).font(Theme.text(10, .medium))).width
+			XCTAssertLessThanOrEqual(
+				8 + width + 8, metrics.closedNodeWidth,
+				"`\(line)` is truncated in the closed node")
+		}
+	}
+
 	func testAgentRowsAreTheSizeOfTheirStackRects() {
 		let cases: [(String, AgentState, String?)] = [
 			("Task.", .completed, nil),
