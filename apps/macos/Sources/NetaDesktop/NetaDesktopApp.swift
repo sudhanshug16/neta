@@ -8,7 +8,10 @@ import SwiftUI
 /// went away, so the loop reconnects and replaces the cache whole with a full
 /// snapshot — the cache is never patched across connections.
 ///
-/// The window stays `.hiddenTitleBar`, 1600x1000 default, 1100x700 minimum.
+/// The window stays `.hiddenTitleBar`, 1600x1000 default, 1100x700 minimum,
+/// and `WindowChrome` pins it to the dark appearance and full-size content so
+/// the canvas runs under the traffic lights instead of starting below an
+/// empty strip.
 /// The store, shell and client are injected on the scene so `NetaCommands`
 /// (which reads them from the environment) sees them; values set inside the
 /// window content would not propagate to commands.
@@ -22,8 +25,15 @@ struct NetaDesktopApp: App {
 		WindowGroup {
 			RootView(store: store, shell: shell, client: client)
 				.preferredColorScheme(.dark)
+				// The window itself, not only the SwiftUI environment: the
+				// glass material and the title-bar strip are AppKit's.
+				.background(WindowChromeConfigurator())
+				.ignoresSafeArea(.all)
 				.frame(minWidth: 1100, minHeight: 700)
 				.task { await NodeSync.run(client: client, store: store) }
+				// Debug only, and dormant unless NETA_DEBUG_DRIVER names a
+				// directory: see DebugDriver.
+				.onAppear { DebugDriver.startIfEnabled(store: store, shell: shell) }
 		}
 		.windowStyle(.hiddenTitleBar)
 		.defaultSize(width: 1600, height: 1000)
