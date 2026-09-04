@@ -87,6 +87,9 @@ function resolveActor(store: NodeStore, actorId: string): Actor | undefined {
 			return { kind: "leader", workspaceId: leader.workspaceId, sessionId: leader.sessionId };
 		}
 	}
+	// An agent's actor id is its `agentId`: the Node mints that session's
+	// token under it, so the proxy's `--actor` is the agent id and nothing
+	// else resolves here.
 	const agent = store.getAgent(actorId);
 	if (agent === undefined) {
 		return undefined;

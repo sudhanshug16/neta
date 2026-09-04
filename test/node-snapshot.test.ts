@@ -187,6 +187,7 @@ function stubStore(): NodeStore {
 function deadAcp(): NodeAcp {
 	return {
 		createSession: () => Promise.reject(new Error("not implemented in this test")),
+		ensureSession: () => Promise.reject(new Error("not implemented in this test")),
 		prompt: () => Promise.reject(new Error("not implemented in this test")),
 		setModel: () => Promise.reject(new Error("not implemented in this test")),
 		listModels: () => Promise.reject(new Error("not implemented in this test")),

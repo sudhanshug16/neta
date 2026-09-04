@@ -21,11 +21,20 @@ export type ModeSubject =
 	| { kind: "leader"; workspaceId: WorkspaceId }
 	| { kind: "lead"; workspaceId: WorkspaceId; missionId: MissionId; agentId: string };
 
+// The five denial reasons are 07's grant rule: a denial is data, not an
+// error. `unavailable` is the sixth and different in kind — the Node cannot
+// answer the request at all — so it leaves this tool as an error instead.
 export type ModeApproval =
 	| { approved: true }
 	| {
 			approved: false;
-			reason: "incompleteRecord" | "missionMissing" | "missionClosed" | "notAuthorised" | "reservedByCharter";
+			reason:
+				| "incompleteRecord"
+				| "missionMissing"
+				| "missionClosed"
+				| "notAuthorised"
+				| "reservedByCharter"
+				| "unavailable";
 			detail: string;
 	  };
 
@@ -187,6 +196,9 @@ async function switchMode(ctx: LifecycleToolContext, params: ModeParams): Promis
 					agentId: ctx.actor.agentId,
 				};
 	const approval = await ctx.deps.modes.requestMode({ subject, mode: params.mode, record: params.record });
+	if (!approval.approved && approval.reason === "unavailable") {
+		return { ok: false, code: "unavailable", message: approval.detail };
+	}
 	return { ok: true, data: { ...approval } };
 }
 

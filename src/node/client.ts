@@ -4,6 +4,7 @@ import { spawn } from "node:child_process";
 import { connect, type Socket } from "node:net";
 import { join } from "node:path";
 import { ulid } from "../core/ids.ts";
+import { selfInvocation } from "../core/self.ts";
 import { type NodeDescriptor, netaDir, readDescriptor } from "./lockfile.ts";
 import {
 	type ClientKind,
@@ -109,17 +110,27 @@ export async function connectNode(o?: ConnectOptions): Promise<NodeClient> {
 	}
 }
 
-// Spawned once: a detached `neta node start --detach` that outlives us. The
+// Spawned once: a detached Node that outlives us. It is this same program
+// re-invoked through `core/self.ts`, never a bare `neta` from PATH — inside
+// `NetaDesktop.app` there is no `neta` on PATH, so the bundled CLI's
+// on-demand start could only ever have surfaced as a connect timeout. The
 // lock makes the autostart race harmless — the loser throws ALREADY_RUNNING
 // and its retry finds the winner's socket.
 function spawnNode(): void {
-	const child = spawn("neta", ["node", "start", "--detach"], {
+	const self = selfInvocation(process.execPath, process.argv[1]);
+	if (self === undefined) {
+		// Nothing to re-invoke (an embedder that imported the bundle): the
+		// caller's retry loop reports this as a connect timeout.
+		return;
+	}
+	const child = spawn(self.command, [...self.prefixArgs, "node", "start"], {
 		detached: true,
 		stdio: "ignore",
 	});
 	child.unref();
 	child.on("error", () => {
-		// A missing `neta` surfaces as a connect timeout, not a spawn crash.
+		// A CLI that cannot be re-run surfaces as a connect timeout, not a
+		// spawn crash.
 	});
 }
 

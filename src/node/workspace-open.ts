@@ -4,23 +4,21 @@
 // into one workspace.
 //
 // One narrow exception to the ports rule lives here: the leader needs the
-// settings provider/model and the Neta tools server spec, and neither fits
-// through `NodeStore`/`NodeAcp`, so this module imports three leaf builders
-// from 03 (`loadSettings`, `providerFor`, `netaMcpServer`). They start no
-// process, open no store and hold no state — `lifecycle.ts` still owns every
-// stateful adaptation, and tests still stub the ports.
+// settings provider and model, which do not fit through
+// `NodeStore`/`NodeAcp`, so this module imports two leaf builders from 03
+// (`loadSettings`, `providerFor`). They start no process, open no store and
+// hold no state — `lifecycle.ts` still owns every stateful adaptation, and
+// tests still stub the ports.
 import { execFile } from "node:child_process";
 import { realpath, stat } from "node:fs/promises";
-import { basename, join } from "node:path";
-import { netaMcpServer } from "../acp/mcp.ts";
+import { basename } from "node:path";
 import { loadSettings, providerFor } from "../acp/settings.ts";
-import { ulid } from "../core/ids.ts";
 import { pickName } from "../core/names.ts";
 import { nowIso } from "../core/time.ts";
 import type { Leader, Workspace, WorkspaceKind } from "../core/types.ts";
 import { canonicalRemote, workspaceIdFor } from "../core/workspace-id.ts";
 import { asString, parseParams } from "./handlers-registry.ts";
-import { netaDir, newToken } from "./lockfile.ts";
+import { netaDir } from "./lockfile.ts";
 import { NodeError } from "./protocol.ts";
 import type { NodeContext, NodeHandlers } from "./server.ts";
 
@@ -95,10 +93,11 @@ function takenNames(ctx: NodeContext, workspaceId: string): Set<string> {
 
 // The leader is a person to talk to, not the workspace: it gets its own name
 // from the pool, seeded by the workspace id so the same workspace always draws
-// the same one. `leader.name` in settings overrides it. The name is written
-// into the record and never picked again.
-function leaderName(ctx: NodeContext, workspaceId: string): string {
-	const { settings } = loadSettings({ netaDir: netaDir() });
+// the same one. `leader.name` in settings overrides it, and the workspace's
+// own `<root>/.neta/settings.json` layer wins over the user's. The name is
+// written into the record and never picked again.
+function leaderName(ctx: NodeContext, workspaceId: string, workspaceRoot: string): string {
+	const { settings } = loadSettings({ netaDir: netaDir(), workspaceRoot });
 	const override = settings.leader.name?.trim() ?? "";
 	return override === "" ? pickName(takenNames(ctx, workspaceId), workspaceId) : override;
 }
@@ -113,22 +112,21 @@ function storedName(leader: Leader): string {
 }
 
 async function createLeader(ctx: NodeContext, workspaceId: string, machineId: string, cwd: string): Promise<Leader> {
-	const { settings } = loadSettings({ netaDir: netaDir() });
+	const { settings } = loadSettings({ netaDir: netaDir(), workspaceRoot: cwd });
 	const providerName = settings.leader.provider;
 	const provider = providerFor(settings, providerName);
 	const model = settings.leader.model ?? provider.defaultModel;
-	const name = leaderName(ctx, workspaceId);
-	// Provisional actor identity: 05's token table mints the real actor token
-	// when the leader session is (re-)launched, so this entry carries the
-	// right shape (name neta, mcp --actor/--token) until then. The session id
-	// only exists after creation, so it cannot be the actor id yet.
+	const name = leaderName(ctx, workspaceId, cwd);
+	// The leader is an actor: 03 mints its token under the session id it is
+	// about to create and builds the `neta` MCP entry from it, so nothing
+	// here has to guess an actor id.
 	const created = await ctx.acp.createSession({
 		workspaceId,
 		cwd,
 		provider: providerName,
 		model,
 		access: "readOnly",
-		mcpServers: [netaMcpServer({ actorId: ulid(), token: newToken(), socketPath: join(netaDir(), "node.sock") })],
+		netaTools: true,
 	});
 	const leader: Leader = {
 		workspaceId,
@@ -145,6 +143,39 @@ async function createLeader(ctx: NodeContext, workspaceId: string, machineId: st
 	await ctx.store.putLeader(leader);
 	ctx.hub.broadcast("state", { kind: "leader", record: leader });
 	return leader;
+}
+
+// A leader outlives the Node, its ACP session does not: after a restart the
+// stored `sessionId` names a session no provider has any more, and every
+// prompt fails with `no such session`. Opening the workspace brings the
+// session back — resumed through the provider when the vendor session allows
+// it, else re-created under a fresh id, which is recorded on the leader and
+// announced so open clients follow the new conversation.
+async function reviveLeader(ctx: NodeContext, leader: Leader, cwd: string): Promise<Leader> {
+	let live: { sessionId: string; provider: string; model: string };
+	try {
+		live = await ctx.acp.ensureSession({
+			sessionId: leader.sessionId,
+			workspaceId: leader.workspaceId,
+			cwd,
+			provider: leader.provider,
+			model: leader.model,
+			access: leader.mode === "leadPlus" ? "readWrite" : "readOnly",
+			netaTools: true,
+		});
+	} catch {
+		// The provider is gone from settings, or will not start: the
+		// workspace still opens, and the mute leader says so on the next
+		// prompt rather than failing the open.
+		return leader;
+	}
+	if (live.sessionId === leader.sessionId && live.model === leader.model) {
+		return leader;
+	}
+	const updated: Leader = { ...leader, sessionId: live.sessionId, provider: live.provider, model: live.model };
+	await ctx.store.putLeader(updated);
+	ctx.hub.broadcast("state", { kind: "leader", record: updated });
+	return updated;
 }
 
 export async function openWorkspace(ctx: NodeContext, path: string): Promise<{ workspace: Workspace; leader: Leader }> {
@@ -169,13 +200,16 @@ export async function openWorkspace(ctx: NodeContext, path: string): Promise<{ w
 	let leader = ctx.store.getLeader(id);
 	if (leader === undefined) {
 		leader = await createLeader(ctx, id, machineId, detected.root);
-	} else if (storedName(leader) === "") {
-		// Backfill on read: a record from before the field existed keeps its
-		// session, mode and counters and gains a name here, once, so nothing
-		// downstream ever sees a leader without one.
-		leader = { ...leader, name: leaderName(ctx, id) };
-		await ctx.store.putLeader(leader);
-		ctx.hub.broadcast("state", { kind: "leader", record: leader });
+	} else {
+		if (storedName(leader) === "") {
+			// Backfill on read: a record from before the field existed keeps
+			// its session, mode and counters and gains a name here, once, so
+			// nothing downstream ever sees a leader without one.
+			leader = { ...leader, name: leaderName(ctx, id, detected.root) };
+			await ctx.store.putLeader(leader);
+			ctx.hub.broadcast("state", { kind: "leader", record: leader });
+		}
+		leader = await reviveLeader(ctx, leader, detected.root);
 	}
 	return { workspace, leader };
 }

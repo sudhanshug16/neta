@@ -86,6 +86,7 @@ async function startStub(seen: { list: unknown[]; call: unknown[] }): Promise<st
 			store: stubStore(),
 			acp: {
 				createSession: () => Promise.reject(new Error("unused")),
+				ensureSession: () => Promise.reject(new Error("unused")),
 				prompt: () => Promise.reject(new Error("unused")),
 				setModel: () => Promise.reject(new Error("unused")),
 				listModels: () => Promise.reject(new Error("unused")),

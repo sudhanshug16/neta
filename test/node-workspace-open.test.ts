@@ -55,10 +55,22 @@ interface World {
 	leaders: Map<string, Leader>;
 	sessions: CreatedSession[];
 	broadcasts: unknown[];
+	// What `ensureSession` was asked for, and the session ids the fake ACP
+	// still holds: anything else comes back under a fresh id, the way a
+	// provider that has forgotten the vendor session does.
+	ensured: Array<{ sessionId: string; cwd: string; access: string }>;
+	live: Set<string>;
 }
 
 function emptyWorld(): World {
-	return { workspaces: new Map(), leaders: new Map(), sessions: [], broadcasts: [] };
+	return {
+		workspaces: new Map(),
+		leaders: new Map(),
+		sessions: [],
+		broadcasts: [],
+		ensured: [],
+		live: new Set<string>(),
+	};
 }
 
 interface CreatedSession {
@@ -67,15 +79,11 @@ interface CreatedSession {
 	provider: string;
 	model: string;
 	access: string;
-	mcpServers: Array<{ name: string; command: string; args: string[]; env: Array<{ name: string; value: string }> }>;
+	netaTools: boolean;
+	actorId?: string;
 }
 
-function testCtx(world: {
-	workspaces: Map<string, Workspace>;
-	leaders: Map<string, Leader>;
-	sessions: CreatedSession[];
-	broadcasts: unknown[];
-}): NodeContext {
+function testCtx(world: World): NodeContext {
 	const store: NodeStore = {
 		machine: () => ({ id: "01ARZ3NDEKTSV4RRFFQ69G5FAV", name: "test", createdAt: "2026-01-01T00:00:00.000Z" }),
 		listWorkspaces: () => [...world.workspaces.values()],
@@ -102,8 +110,19 @@ function testCtx(world: {
 	};
 	const acp: NodeAcp = {
 		createSession: (o) => {
-			world.sessions.push({ ...o, mcpServers: o.mcpServers.map((s) => ({ ...s })) });
-			return Promise.resolve({ sessionId: ulid(), provider: o.provider, model: o.model });
+			world.sessions.push({ ...o });
+			const sessionId = ulid();
+			world.live.add(sessionId);
+			return Promise.resolve({ sessionId, provider: o.provider, model: o.model });
+		},
+		ensureSession: (o) => {
+			world.ensured.push({ sessionId: o.sessionId, cwd: o.cwd, access: o.access });
+			if (world.live.has(o.sessionId)) {
+				return Promise.resolve({ sessionId: o.sessionId, provider: o.provider, model: o.model });
+			}
+			const sessionId = ulid();
+			world.live.add(sessionId);
+			return Promise.resolve({ sessionId, provider: o.provider, model: o.model });
 		},
 		prompt: () => Promise.reject(new Error("not implemented in this test")),
 		setModel: () => Promise.reject(new Error("not implemented in this test")),
@@ -186,12 +205,7 @@ describe("detectWorkspace", () => {
 	test("leader creation draws a personal name from the pool, not the workspace name", async () => {
 		const repo = join(dir, "widget");
 		await initRepo(repo, "git@github.com:acme/widget.git");
-		const world = {
-			workspaces: new Map(),
-			leaders: new Map(),
-			sessions: [] as CreatedSession[],
-			broadcasts: [] as unknown[],
-		};
+		const world = emptyWorld();
 		const opened = await openWorkspace(testCtx(world), repo);
 		expect(NAME_POOL).toContain(opened.leader.name);
 		expect(opened.leader.name).not.toBe(opened.workspace.name);
@@ -200,10 +214,7 @@ describe("detectWorkspace", () => {
 		// opened into a fresh world, draws the same name.
 		const other = join(dir, "widget-clone");
 		await initRepo(other, "https://github.com/acme/widget.git");
-		const fresh = await openWorkspace(
-			testCtx({ workspaces: new Map(), leaders: new Map(), sessions: [], broadcasts: [] }),
-			other,
-		);
+		const fresh = await openWorkspace(testCtx(emptyWorld()), other);
 		expect(fresh.leader.name).toBe(opened.leader.name);
 	});
 
@@ -213,17 +224,56 @@ describe("detectWorkspace", () => {
 		const neta = process.env.NETA_DIR ?? "";
 		await mkdir(neta, { recursive: true });
 		await writeFile(join(neta, "settings.json"), JSON.stringify({ leader: { provider: "claude", name: "Halden" } }));
-		const named = await openWorkspace(
-			testCtx({ workspaces: new Map(), leaders: new Map(), sessions: [], broadcasts: [] }),
-			repo,
-		);
+		const named = await openWorkspace(testCtx(emptyWorld()), repo);
 		expect(named.leader.name).toBe("Halden");
 		await writeFile(join(neta, "settings.json"), JSON.stringify({ leader: { provider: "claude", name: "  " } }));
-		const blank = await openWorkspace(
-			testCtx({ workspaces: new Map(), leaders: new Map(), sessions: [], broadcasts: [] }),
-			repo,
-		);
+		const blank = await openWorkspace(testCtx(emptyWorld()), repo);
 		expect(NAME_POOL).toContain(blank.leader.name);
+	});
+
+	test("the workspace's own settings layer names the leader", async () => {
+		const repo = join(dir, "repo");
+		await initRepo(repo, "git@github.com:acme/widget.git");
+		const neta = process.env.NETA_DIR ?? "";
+		await mkdir(neta, { recursive: true });
+		await writeFile(join(neta, "settings.json"), JSON.stringify({ leader: { provider: "claude", name: "Halden" } }));
+		await mkdir(join(repo, ".neta"), { recursive: true });
+		await writeFile(join(repo, ".neta", "settings.json"), JSON.stringify({ leader: { name: "Wren" } }));
+		const opened = await openWorkspace(testCtx(emptyWorld()), repo);
+		expect(opened.leader.name).toBe("Wren");
+	});
+
+	test("an existing leader whose session is gone is revived and announced", async () => {
+		const repo = join(dir, "repo");
+		await initRepo(repo, "git@github.com:acme/widget.git");
+		const world = emptyWorld();
+		const first = await openWorkspace(testCtx(world), repo);
+		expect(world.ensured).toHaveLength(0);
+
+		// The node restarted: the ACP table is empty, so the stored session
+		// names nothing live.
+		world.live.clear();
+		world.broadcasts.length = 0;
+		const again = await openWorkspace(testCtx(world), repo);
+		expect(world.ensured.map((one) => one.sessionId)).toEqual([first.leader.sessionId]);
+		expect(world.ensured[0]?.cwd).toBe(await realpath(repo));
+		expect(again.leader.sessionId).not.toBe(first.leader.sessionId);
+		expect(again.leader.name).toBe(first.leader.name);
+		// Recorded, and announced so open clients follow the new session.
+		expect(world.leaders.get(again.workspace.id)?.sessionId).toBe(again.leader.sessionId);
+		expect(world.broadcasts).toEqual([{ method: "state", params: { kind: "leader", record: again.leader } }]);
+	});
+
+	test("a leader whose session is still live keeps it, silently", async () => {
+		const repo = join(dir, "repo");
+		await initRepo(repo, "git@github.com:acme/widget.git");
+		const world = emptyWorld();
+		const first = await openWorkspace(testCtx(world), repo);
+		world.broadcasts.length = 0;
+		const again = await openWorkspace(testCtx(world), repo);
+		expect(again.leader.sessionId).toBe(first.leader.sessionId);
+		expect(world.sessions).toHaveLength(1);
+		expect(world.broadcasts).toHaveLength(0);
 	});
 
 	test("the leader name round-trips through the real store and its broadcast", async () => {
@@ -282,12 +332,7 @@ describe("openWorkspace", () => {
 		const repoB = join(dir, "b");
 		await initRepo(repoA, "git@github.com:acme/widget.git");
 		await initRepo(repoB, "https://github.com/acme/widget.git");
-		const world = {
-			workspaces: new Map(),
-			leaders: new Map(),
-			sessions: [] as CreatedSession[],
-			broadcasts: [] as unknown[],
-		};
+		const world = emptyWorld();
 		const ctx = testCtx(world);
 		const first = await openWorkspace(ctx, repoA);
 		expect(first.workspace.id).toBe("git:github.com/acme/widget");
@@ -304,12 +349,7 @@ describe("openWorkspace", () => {
 	test("opening twice returns the same leader and creates one ACP session carrying the tools entry", async () => {
 		const repo = join(dir, "repo");
 		await initRepo(repo, "git@github.com:acme/widget.git");
-		const world = {
-			workspaces: new Map(),
-			leaders: new Map(),
-			sessions: [] as CreatedSession[],
-			broadcasts: [] as unknown[],
-		};
+		const world = emptyWorld();
 		const ctx = testCtx(world);
 		const first = await openWorkspace(ctx, repo);
 		const second = await openWorkspace(ctx, repo);
@@ -325,27 +365,17 @@ describe("openWorkspace", () => {
 		}
 		expect(session.workspaceId).toBe(first.workspace.id);
 		expect(session.cwd).toBe(await realpath(repo));
-		const tools = session.mcpServers.find((s) => s.name === "neta");
-		if (tools === undefined) {
-			throw new Error("expected a neta tools entry");
-		}
-		const mcpIndex = tools.args.indexOf("mcp");
-		expect(mcpIndex).toBeGreaterThanOrEqual(0);
-		expect(tools.args.slice(mcpIndex, mcpIndex + 3)).toEqual(["mcp", "--actor", tools.args[mcpIndex + 2]]);
-		expect(tools.args[mcpIndex + 3]).toBe("--token");
-		expect(typeof tools.args[mcpIndex + 4]).toBe("string");
+		// The leader is an actor: it asks 03 for the tools entry and never
+		// builds one, so no placeholder actor id or token can leak through.
+		expect(session.netaTools).toBe(true);
+		expect(session.actorId).toBeUndefined();
 		expect(world.broadcasts).toEqual([{ method: "state", params: { kind: "leader", record: first.leader } }]);
 	});
 
 	test("a plain folder gets kind folder, a missing path gives NOT_FOUND", async () => {
 		const folder = join(dir, "plain");
 		await mkdir(folder, { recursive: true });
-		const world = {
-			workspaces: new Map(),
-			leaders: new Map(),
-			sessions: [] as CreatedSession[],
-			broadcasts: [] as unknown[],
-		};
+		const world = emptyWorld();
 		const opened = await openWorkspace(testCtx(world), folder);
 		expect(opened.workspace.kind).toBe("folder");
 		expect(opened.workspace.id.startsWith("folder:")).toBe(true);

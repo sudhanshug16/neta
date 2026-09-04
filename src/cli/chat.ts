@@ -100,18 +100,37 @@ export async function attach(client: NodeClient, path: string): Promise<number> 
 	};
 
 	// History renders through the same renderer; a thought line in history is
-	// static, so its rewrite carriage becomes a newline.
+	// static, so its rewrite carriage becomes a newline. A replayed turn also
+	// needs the boundary the live path gets from `endTurn()`: text blocks are
+	// written verbatim with no terminator, so without one newline per turn
+	// change (and one after the last block) every reply runs into the next
+	// prompt line.
+	let historyTurn: string | undefined;
+	let wroteHistory = false;
 	for (const b of history) {
 		const rendered = renderBlock(b, ttyOut);
 		if (rendered === null) {
 			continue;
 		}
+		if (wroteHistory && b.turnId !== historyTurn) {
+			out("\n");
+		}
+		historyTurn = b.turnId;
+		wroteHistory = true;
 		out(rendered.endsWith("\r") ? `${rendered.slice(0, -1)}\n` : rendered);
+	}
+	if (wroteHistory) {
+		out("\n");
 	}
 
 	const ownTurns = new Set<string>();
 	let streaming = false;
 	let thoughtActive = false;
+	// A streamed text block is re-sent under one `seq` with the whole text so
+	// far, so only what is new since the last render is written: printing
+	// each notification verbatim would repeat the reply.
+	let openSeq: number | undefined;
+	let openText = "";
 	let cancelled = false;
 	let code: number | null = null;
 	let eof = false;
@@ -149,9 +168,26 @@ export async function attach(client: NodeClient, path: string): Promise<number> 
 			return;
 		}
 		streaming = false;
+		openSeq = undefined;
+		openText = "";
 		clearThought();
 		out("\n");
 		changed();
+	};
+
+	// What is new in this emission of `b`. A block at a new seq is new whole;
+	// a re-emission at the same seq contributes its tail, and a rewrite that
+	// is not an extension is written in full (nothing printed can be taken
+	// back).
+	const deltaOf = (b: Block): string => {
+		if (b.seq !== openSeq) {
+			openSeq = b.seq;
+			openText = b.text;
+			return b.text;
+		}
+		const grown = b.text.startsWith(openText) ? b.text.slice(openText.length) : b.text;
+		openText = b.text;
+		return grown;
 	};
 
 	const offTurn = client.on("turn", (params: unknown) => {
@@ -165,17 +201,25 @@ export async function attach(client: NodeClient, path: string): Promise<number> 
 			if (b.role === "user" && ownTurns.has(b.turnId)) {
 				return;
 			}
-			const rendered = renderBlock(b, ttyOut);
+			if (b.kind === "thought" && b.role !== "user") {
+				const rendered = renderBlock(b, ttyOut);
+				if (rendered !== null) {
+					out(rendered);
+					thoughtActive = true;
+				}
+				return;
+			}
+			// Text streams; every other kind arrives once, whole.
+			const shown = b.kind === "text" && b.role !== "user" ? { ...b, text: deltaOf(b) } : b;
+			if (shown.text === "") {
+				return;
+			}
+			const rendered = renderBlock(shown, ttyOut);
 			if (rendered === null) {
 				return;
 			}
-			if (b.kind === "thought" && b.role !== "user") {
-				out(rendered);
-				thoughtActive = true;
-			} else {
-				clearThought();
-				out(rendered);
-			}
+			clearThought();
+			out(rendered);
 			return;
 		}
 		if (n.turn !== undefined) {

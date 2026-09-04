@@ -2,7 +2,9 @@
 // reports the package version — `neta --version`, the Node's `hello` reply
 // and the MCP proxy's `serverInfo` — reads it through `netaVersion()`. The
 // one version literal lives in `package.json`; this module only reads it.
-// From this module's directory it walks up at most four directories and
+// `build-app.sh` bakes it in as `NETA_VERSION` when compiling the
+// single-file exe, which ships with no `package.json` beside it. Otherwise,
+// from this module's directory it walks up at most four directories and
 // returns the `version` of the first `package.json` named `@intervene/neta`,
 // so it works both from `src/` and from the bundled `dist/main.js`.
 // Anywhere else it reports `"0.0.0-dev"` instead of throwing.
@@ -10,10 +12,16 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+declare const NETA_VERSION: string | undefined;
+
 let cached: string | undefined;
 
 export function netaVersion(): string {
 	if (cached !== undefined) {
+		return cached;
+	}
+	if (typeof NETA_VERSION === "string" && NETA_VERSION.length > 0) {
+		cached = NETA_VERSION;
 		return cached;
 	}
 	let dir = dirname(fileURLToPath(import.meta.url));

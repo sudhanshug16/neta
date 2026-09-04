@@ -6,6 +6,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { detachSpawn } from "../src/cli/commands/node.ts";
 import { PROTOCOL_VERSION } from "../src/node/protocol.ts";
 import { type Harness, startNode as startHarness } from "./helpers/cli-harness.ts";
 
@@ -17,6 +18,30 @@ async function withHarness(fn: (harness: Harness) => Promise<void>): Promise<voi
 		await harness.stop();
 	}
 }
+
+// G4-1: inside the `bun build --compile` executable `process.argv[1]` is the
+// virtual `/$bunfs/root/main`, and passing it on made the child parse it as a
+// command and exit, so the app could never start a Node.
+describe("the detached child's argv", () => {
+	test("a bundle run under node keeps the script argument", () => {
+		expect(detachSpawn("/usr/local/bin/node", "/repo/dist/main.js")).toEqual({
+			command: "/usr/local/bin/node",
+			args: ["/repo/dist/main.js", "node", "start"],
+		});
+	});
+
+	test("the compiled exe re-runs itself with no script argument", () => {
+		expect(detachSpawn("/Apps/NetaDesktop.app/Contents/Resources/neta", "/$bunfs/root/main")).toEqual({
+			command: "/Apps/NetaDesktop.app/Contents/Resources/neta",
+			args: ["node", "start"],
+		});
+	});
+
+	test("no script and no exe is not detachable", () => {
+		expect(detachSpawn("/usr/local/bin/node", undefined)).toBeUndefined();
+		expect(detachSpawn("/usr/local/bin/node", "")).toBeUndefined();
+	});
+});
 
 describe("node status without a node", () => {
 	test("prints not running, exit 0", async () => {

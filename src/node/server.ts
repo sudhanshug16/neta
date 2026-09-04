@@ -3,7 +3,6 @@
 // the real 02 and 03 modules to them, so handlers stub against these.
 import { chmod, unlink } from "node:fs/promises";
 import { createServer as createNetServer, type Server as NetServer, type Socket } from "node:net";
-import type { McpServerSpec } from "../acp/mcp.ts";
 import { ulid } from "../core/ids.ts";
 import type {
 	Access,
@@ -58,15 +57,29 @@ export interface NodeStore {
 	): Promise<Omit<ConversationTailResult, "sessionId">>;
 }
 
+// `netaTools: true` asks for the Neta MCP entry; the adapter builds it,
+// because only the adapter knows the session id it mints the actor token
+// under. `actorId` names that actor when it is not the session itself: an
+// agent's session is minted under its `agentId`, per 05.
+export interface SessionRequest {
+	workspaceId: WorkspaceId;
+	cwd: string;
+	provider: string;
+	model: string;
+	access: Access;
+	netaTools: boolean;
+	actorId?: string;
+}
+
 export interface NodeAcp {
-	createSession(o: {
-		workspaceId: WorkspaceId;
-		cwd: string;
-		provider: string;
-		model: string;
-		access: Access;
-		mcpServers: McpServerSpec[];
-	}): Promise<{ sessionId: SessionId; provider: string; model: string }>;
+	createSession(o: SessionRequest): Promise<{ sessionId: SessionId; provider: string; model: string }>;
+	// A live session for one already on record: the same one when it is still
+	// live, else the provider's resume path, else a fresh session under a new
+	// id. The caller compares the returned id with the one it passed in and
+	// records the new one when they differ.
+	ensureSession(
+		o: SessionRequest & { sessionId: SessionId },
+	): Promise<{ sessionId: SessionId; provider: string; model: string }>;
 	prompt(id: SessionId, text: string): Promise<TurnId>;
 	setModel(id: SessionId, model: string): Promise<void>;
 	listModels(o: ModelsListParams): Promise<ModelsListResult["models"]>;

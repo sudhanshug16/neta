@@ -149,6 +149,63 @@ describe("attached chat", () => {
 		});
 	}, 90000);
 
+	test("a streamed reply prints once, not once per delta", async () => {
+		await withChat(async (harness, work) => {
+			const child = harness.spawn([], { cwd: work });
+			const cap = capture(child);
+			try {
+				// The fake agent streams this reply in three overlapping
+				// chunks under one seq; each one carries the whole text so
+				// far, so writing them verbatim printed the reply three times.
+				child.stdin?.write("STREAM please\n");
+				await waitFor(() => cap.stdout.includes("Second paragraph."), 20000, "the streamed reply");
+				child.stdin?.end();
+				expect(await waitExit(child, 20000)).toBe(0);
+				const whole = "First paragraph continues.\n\nSecond paragraph.";
+				expect(cap.stdout).toContain(whole);
+				expect(cap.stdout.split("First paragraph").length - 1).toBe(1);
+				expect(cap.stdout.split("Second paragraph.").length - 1).toBe(1);
+			} finally {
+				if (child.exitCode === null) {
+					child.kill("SIGKILL");
+				}
+			}
+		});
+	}, 90000);
+
+	test("replayed history keeps one turn per line instead of running them together", async () => {
+		await withChat(async (harness, work) => {
+			const first = harness.spawn([], { cwd: work });
+			const firstCap = capture(first);
+			try {
+				first.stdin?.write("one\ntwo\n");
+				await waitFor(() => firstCap.stdout.includes("echo:two"), 30000, "both replies");
+				first.stdin?.end();
+				expect(await waitExit(first, 20000)).toBe(0);
+			} finally {
+				if (first.exitCode === null) {
+					first.kill("SIGKILL");
+				}
+			}
+			// Re-attach: `conversation.tail` replays both turns, and a text
+			// block carries no terminator of its own, so without the turn
+			// boundary the reply and the next prompt land on one line.
+			const second = harness.spawn([], { cwd: work });
+			const cap = capture(second);
+			try {
+				second.stdin?.end();
+				expect(await waitExit(second, 20000)).toBe(0);
+				expect(cap.stdout).toContain("> one\necho:one\n");
+				expect(cap.stdout).toContain("> two\necho:two\n");
+				expect(cap.stdout).not.toContain("echo:one> two");
+			} finally {
+				if (second.exitCode === null) {
+					second.kill("SIGKILL");
+				}
+			}
+		});
+	}, 120000);
+
 	test("a second client on the same session sees the first client's user turn", async () => {
 		await withChat(async (harness, work) => {
 			const saved = process.env.NETA_DIR;

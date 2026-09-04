@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { basename } from "node:path";
 // The `neta` command entry: argument parsing, dispatch and exit codes (08).
 // Every command is a thin client of the Node over its socket; this module owns
 // the command line shape only. Later tasks fill in the handlers behind the
@@ -305,6 +306,13 @@ export async function main(argv: string[]): Promise<number> {
 	return handlers[parsed.name](parsed);
 }
 
-if (process.argv[1]?.endsWith("main.js")) {
+// Auto-run when executed as the program: `node dist/main.js` (argv[1] is
+// the bundle), the installed `neta` bin symlink (argv[1] is the link), or
+// the compiled single-file exe (its argv hides the exe path, but execPath
+// is the exe itself). Importing this module — tests, bundlers — never runs
+// it: then argv[1] is the runner or a test file and execPath is bun/node.
+const invoked = basename(process.argv[1] ?? "");
+const launcher = basename(process.execPath ?? "");
+if (invoked === "main.js" || invoked === "neta" || launcher === "neta") {
 	void main(process.argv.slice(2)).then((code) => process.exit(code));
 }

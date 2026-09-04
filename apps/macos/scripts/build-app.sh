@@ -20,8 +20,12 @@ mkdir -p "$OUT_DIR"
 OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 APP="$OUT_DIR/NetaDesktop.app"
 
+# One read of package.json for both the baked-in NETA_VERSION and the plist.
+v=$(node -p "require('./package.json').version")
+
 echo "building neta CLI..." >&2
-bun build --compile src/cli/main.ts --outfile "$APP_DIR/.build/neta" >&2
+# Bake the version in: the exe ships with no package.json beside it.
+bun build --compile --define "NETA_VERSION=\"$v\"" src/cli/main.ts --outfile "$APP_DIR/.build/neta" >&2
 
 echo "building NetaDesktop (release)..." >&2
 swift build -c release --package-path "$APP_DIR" >&2
@@ -39,7 +43,6 @@ done
 cp "$APP_DIR/.build/neta" "$APP/Contents/Resources/neta"
 chmod 755 "$APP/Contents/Resources/neta"
 
-v=$(node -p "require('./package.json').version")
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $v" "$APP/Contents/Info.plist" >&2
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $v" "$APP/Contents/Info.plist" >&2
 

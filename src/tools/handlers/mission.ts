@@ -21,6 +21,9 @@ import type { AgentParams, AgentSpec, LeadSpec, MissionParams } from "../schemas
 export interface SessionLaunch {
 	workspaceId: WorkspaceId;
 	missionId: MissionId;
+	// The actor id 05 names for an agent: the token for this session is
+	// minted under it, so the agent's own `agentId` reaches the router.
+	agentId: AgentId;
 	task: string;
 	access: Access;
 	provider: string;
@@ -34,10 +37,31 @@ export interface SessionLaunch {
 export interface MissionPorts {
 	numbers: { allocateNumber(workspaceId: WorkspaceId): Promise<number> };
 	missions: { save(mission: Mission): Promise<void> };
-	sessions: { launch(input: SessionLaunch): Promise<{ sessionId: SessionId }> };
+	sessions: {
+		// Two steps, in this order: the session exists, then the Agent record
+		// is on file, then the context prompt goes out. A fast agent's first
+		// `tools/call` has to find its own record, and the first prompt is
+		// what makes it call.
+		launch(input: SessionLaunch): Promise<{ sessionId: SessionId }>;
+		brief(input: SessionLaunch & { sessionId: SessionId }): Promise<void>;
+	};
 	worktrees: { prepare(mission: Mission, workspace: Workspace): Promise<Mission> };
-	skills: { check(names: string[]): { ok: true } | { ok: false; missing: string; available: string[] } };
-	leases: { acquire(key: string, holder: AgentId): Promise<"active" | "queued"> };
+	// The names resolve under the workspace root (`<root>/.neta/skills`, then
+	// `~/.neta/skills`), so the workspace travels with the request rather than
+	// the port guessing at a working directory.
+	skills: {
+		check(input: { workspaceId: WorkspaceId; names: string[] }):
+			| {
+					ok: true;
+			  }
+			| { ok: false; missing: string; available: string[] };
+	};
+	// 06 keys a writer lease on the worktree path for a Git mission and on the
+	// workspace root otherwise, so the mission and its workspace travel with
+	// the request rather than a key the caller had to derive.
+	leases: {
+		acquire(input: { mission: Mission; workspace: Workspace; holder: AgentId }): Promise<"active" | "queued">;
+	};
 }
 
 export interface MissionToolContext extends ToolContext {
@@ -87,9 +111,10 @@ async function launchAgent(
 	const name = pickName(input.taken, id);
 	input.taken.add(name);
 	const startedAt = nowIso();
-	const { sessionId } = await ctx.deps.sessions.launch({
+	const launch: SessionLaunch = {
 		workspaceId: mission.workspaceId,
 		missionId: mission.id,
+		agentId: id,
 		task: input.task,
 		access: input.access,
 		provider: input.provider,
@@ -98,7 +123,8 @@ async function launchAgent(
 		canSpawn: input.canSpawn,
 		name,
 		worktreePath: mission.worktree?.path,
-	});
+	};
+	const { sessionId } = await ctx.deps.sessions.launch(launch);
 	const agent: Agent = {
 		id,
 		missionId: mission.id,
@@ -114,7 +140,10 @@ async function launchAgent(
 		state: "starting",
 		startedAt,
 	};
+	// On file before the first prompt: the context prompt is what sets the
+	// agent working, and its first tool call resolves through this record.
 	await ctx.deps.store.putAgent(agent);
+	await ctx.deps.sessions.brief({ ...launch, sessionId });
 	return agent;
 }
 
@@ -150,7 +179,10 @@ async function createMission(ctx: MissionToolContext, params: MissionParams): Pr
 			return refused("a readWrite agent in a readOnly mission");
 		}
 	}
-	const skillCheck = ctx.deps.skills.check(allSkills(params.lead, params.agents ?? []));
+	const skillCheck = ctx.deps.skills.check({
+		workspaceId: workspace.id,
+		names: allSkills(params.lead, params.agents ?? []),
+	});
 	if (!skillCheck.ok) {
 		return { ok: false, code: "missingSkill", message: `unknown skill: ${skillCheck.missing}` };
 	}
@@ -231,7 +263,7 @@ async function createMission(ctx: MissionToolContext, params: MissionParams): Pr
 	let queued = false;
 	if (mission.access === "readWrite" && workspace.kind === "folder") {
 		const holder = mission.agentIds[0] ?? mission.id;
-		if ((await ctx.deps.leases.acquire(workspace.id, holder)) === "queued") {
+		if ((await ctx.deps.leases.acquire({ mission, workspace, holder })) === "queued") {
 			queued = true;
 		}
 	}
@@ -274,7 +306,7 @@ async function createAgent(ctx: MissionToolContext, params: AgentParams): Promis
 	if (aboveMission(params.access, mission.access)) {
 		return refused("a readWrite agent in a readOnly mission");
 	}
-	const skillCheck = ctx.deps.skills.check(params.skills ?? []);
+	const skillCheck = ctx.deps.skills.check({ workspaceId: mission.workspaceId, names: params.skills ?? [] });
 	if (!skillCheck.ok) {
 		return { ok: false, code: "missingSkill", message: `unknown skill: ${skillCheck.missing}` };
 	}

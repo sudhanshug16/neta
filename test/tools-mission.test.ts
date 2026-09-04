@@ -35,6 +35,7 @@ interface Fixture {
 	ports: MissionPorts;
 	events: EventKind[];
 	launches: SessionLaunch[];
+	briefs: string[];
 	prepares: string[];
 	saved: Mission[];
 	leaderActor: Actor;
@@ -47,6 +48,7 @@ function fixture(kind: Workspace["kind"], opts?: { lease?: "active" | "queued"; 
 	const missions = new Map<string, Mission>();
 	const events: EventKind[] = [];
 	const launches: SessionLaunch[] = [];
+	const briefs: string[] = [];
 	const prepares: string[] = [];
 	const saved: Mission[] = [];
 	const leaderId = ulid();
@@ -92,6 +94,9 @@ function fixture(kind: Workspace["kind"], opts?: { lease?: "active" | "queued"; 
 				launches.push(input);
 				return { sessionId: ulid() };
 			},
+			brief: async (input) => {
+				briefs.push(input.agentId);
+			},
 		},
 		worktrees: {
 			prepare: async (mission) => {
@@ -108,9 +113,9 @@ function fixture(kind: Workspace["kind"], opts?: { lease?: "active" | "queued"; 
 			},
 		},
 		skills: {
-			check: (names) => {
+			check: (input) => {
 				const known = new Set(opts?.skills ?? ["git", "notes"]);
-				for (const name of names) {
+				for (const name of input.names) {
 					if (!known.has(name)) {
 						return { ok: false, missing: name, available: [...known] };
 					}
@@ -127,6 +132,7 @@ function fixture(kind: Workspace["kind"], opts?: { lease?: "active" | "queued"; 
 		ports,
 		events,
 		launches,
+		briefs,
 		prepares,
 		saved,
 		leaderActor: { kind: "leader", workspaceId: ws.id, sessionId: leaderId },

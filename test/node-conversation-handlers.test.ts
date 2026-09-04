@@ -112,6 +112,7 @@ function stubAcp(captured: { onTurn?: (n: TurnNotification) => void }): NodeAcp 
 	};
 	return {
 		createSession: () => Promise.reject(new Error("not implemented in this test")),
+		ensureSession: () => Promise.reject(new Error("not implemented in this test")),
 		prompt: (id, text) => {
 			acpCalls.push({ op: "prompt", args: [id, text] });
 			if (acpPromptReject !== undefined) {

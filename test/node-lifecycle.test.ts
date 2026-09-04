@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadSettings } from "../src/acp/settings.ts";
@@ -114,6 +114,7 @@ function stubStore(world: StubWorld): NodeStore {
 function stubAcp(world: StubWorld): NodeAcp {
 	return {
 		createSession: () => Promise.reject(new Error("not implemented in this test")),
+		ensureSession: () => Promise.reject(new Error("not implemented in this test")),
 		prompt: () => Promise.reject(new Error("not implemented in this test")),
 		setModel: () => Promise.reject(new Error("not implemented in this test")),
 		listModels: () => Promise.resolve([]),
@@ -410,6 +411,29 @@ describe("adaptStore against the real store", () => {
 	});
 });
 
+// The socket path is judged before the lock is taken and before the store is
+// opened: a directory the node can never serve from is left exactly as it was
+// found, with no `node.lock` and no store tree in it.
+describe("startNode on an unusable NETA_DIR", () => {
+	test("fails with the socket path error and writes nothing", async () => {
+		const long = join(dir, "x".repeat(120));
+		await mkdir(long, { recursive: true });
+		process.env.NETA_DIR = long;
+		try {
+			let message = "";
+			try {
+				await startNode();
+			} catch (error) {
+				message = (error as Error).message;
+			}
+			expect(message).toContain("unix socket limit");
+			expect(await readdir(long)).toEqual([]);
+		} finally {
+			process.env.NETA_DIR = dir;
+		}
+	});
+});
+
 describe("adaptAcp against the fake provider", () => {
 	test("sessions live, prompt, carry a rewritten tools entry, and close", async () => {
 		await writeFile(
@@ -428,14 +452,7 @@ describe("adaptAcp against the fake provider", () => {
 			provider: "fake",
 			model: "test-model",
 			access: "readOnly",
-			mcpServers: [
-				{
-					name: "neta",
-					command: "neta",
-					args: ["mcp", "--actor", "provisional", "--token", "provisional"],
-					env: [],
-				},
-			],
+			netaTools: true,
 		});
 		try {
 			expect(typeof created.sessionId).toBe("string");
@@ -478,6 +495,40 @@ describe("adaptAcp against the fake provider", () => {
 			}
 			expect((missing as { symbol?: string }).symbol).toBe("NOT_FOUND");
 			await acp.close(created.sessionId);
+			expect(acp.actorToken(created.sessionId)).toBeUndefined();
+		} finally {
+			await acp.closeAll();
+		}
+	});
+
+	// 05 mints an agent's token under its `agentId`, not its session id, so
+	// closing the session has to revoke that key: a surviving proxy must not
+	// keep calling tools as an agent that is gone.
+	test("closing an agent session revokes the token minted under its agent id", async () => {
+		await writeFile(
+			join(dir, "settings.json"),
+			JSON.stringify({
+				providers: { fake: { command: process.execPath, args: [FIXTURE], defaultModel: "test-model" } },
+				leader: { provider: "fake" },
+			}),
+		);
+		const acp = adaptAcp(loadSettings({ netaDir: dir }).settings);
+		try {
+			const agentId = ulid();
+			const created = await acp.createSession({
+				workspaceId: "w1",
+				cwd: dir,
+				provider: "fake",
+				model: "test-model",
+				access: "readOnly",
+				netaTools: true,
+				actorId: agentId,
+			});
+			const token = acp.actorToken(created.sessionId);
+			expect(token).toMatch(/^[0-9a-f]{64}$/);
+			expect(acp.tokens.verify(agentId, token ?? "")).toBe(true);
+			await acp.close(created.sessionId);
+			expect(acp.tokens.verify(agentId, token ?? "")).toBe(false);
 			expect(acp.actorToken(created.sessionId)).toBeUndefined();
 		} finally {
 			await acp.closeAll();

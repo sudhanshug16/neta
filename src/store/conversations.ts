@@ -300,14 +300,21 @@ export function openConversationStore(): ConversationStore {
 		turnRange: async (sessionId, turnId) =>
 			mutexFor(sessionId)(async () => {
 				await repairTornTail(paths().conversation(sessionId));
+				// A turn is written twice — once when it opens, once closed —
+				// and its blocks lie between the two. `start` therefore
+				// anchors on the first line carrying the id, so
+				// `tail({cursor: start})` still covers the turn's blocks,
+				// while the payload kept is the last, most complete one.
 				let turn: Turn | undefined;
 				let start = 0;
 				let end = 0;
 				await scanLines(sessionId, (line, offset) => {
 					if (line.t === "turn" && line.turn.id === turnId) {
+						if (turn === undefined) {
+							start = offset;
+						}
 						turn = line.turn;
-						start = offset;
-						end = offset + lineBytes(line);
+						end = Math.max(end, offset + lineBytes(line));
 					} else if (line.t === "block" && turn !== undefined && line.block.turnId === turnId) {
 						end = offset + lineBytes(line);
 					}

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Machine } from "../src/core/types.ts";
@@ -49,6 +49,7 @@ function stubStore(): NodeStore {
 function stubAcp(): NodeAcp {
 	return {
 		createSession: () => Promise.reject(new Error("not implemented in this test")),
+		ensureSession: () => Promise.reject(new Error("not implemented in this test")),
 		prompt: () => Promise.reject(new Error("not implemented in this test")),
 		setModel: () => Promise.reject(new Error("not implemented in this test")),
 		listModels: () => Promise.reject(new Error("not implemented in this test")),
@@ -65,12 +66,12 @@ type Handler = (ctx: NodeContext, params: unknown, conn: Connection) => Promise<
 
 let dir = "";
 let savedNetadir: string | undefined;
-let savedPath: string | undefined;
+let savedSelf: string | undefined;
 const closers: Array<() => Promise<void>> = [];
 
 beforeEach(async () => {
 	savedNetadir = process.env.NETA_DIR;
-	savedPath = process.env.PATH;
+	savedSelf = process.argv[1];
 	dir = await mkdtemp(join(tmpdir(), "neta-client-"));
 	process.env.NETA_DIR = dir;
 });
@@ -84,8 +85,8 @@ afterEach(async () => {
 	} else {
 		process.env.NETA_DIR = savedNetadir;
 	}
-	if (savedPath !== undefined) {
-		process.env.PATH = savedPath;
+	if (savedSelf !== undefined) {
+		process.argv[1] = savedSelf;
 	}
 	await rm(dir, { recursive: true, force: true });
 });
@@ -172,13 +173,13 @@ const server = createServer((socket) => {
 server.listen(join(dir, "node.sock"));
 `;
 
+// The autostart no longer shells out to a bare `neta` from PATH — inside
+// `NetaDesktop.app` there is none — but re-invokes this program through
+// `core/self.ts`, so the fake goes where `process.argv[1]` points.
 async function installFakeNeta(script: string): Promise<void> {
-	const bin = join(dir, "bin");
-	await writeFile(join(dir, "fake-neta.mjs"), script);
-	await mkdir(bin, { recursive: true });
-	await writeFile(join(bin, "neta"), `#!/bin/sh\nexec node "${join(dir, "fake-neta.mjs")}" "$@"\n`);
-	await chmod(join(bin, "neta"), 0o755);
-	process.env.PATH = `${bin}:${savedPath ?? ""}`;
+	const fake = join(dir, "fake-neta.mjs");
+	await writeFile(fake, script);
+	process.argv[1] = fake;
 }
 
 describe("autostart", () => {

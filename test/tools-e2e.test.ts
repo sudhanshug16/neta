@@ -159,7 +159,7 @@ test("session tool wiring and end-to-end mission creation", async () => {
 		provider: "fake",
 		model: "test-model",
 		access: "readWrite",
-		mcpServers: [{ name: "neta", command: "", args: [], env: [] }],
+		netaTools: true,
 	});
 	const leaderSession = created.sessionId;
 	const leaderToken = acp.actorToken(leaderSession);
@@ -270,9 +270,13 @@ test("session tool wiring and end-to-end mission creation", async () => {
 					provider: input.provider,
 					model: input.model,
 					access: input.access,
-					mcpServers: [{ name: "neta", command: "", args: [], env: [] }],
+					netaTools: true,
+					actorId: input.agentId,
 				});
 				return { sessionId: session.sessionId };
+			},
+			brief: async (input: SessionLaunch & { sessionId: string }) => {
+				await acp.prompt(input.sessionId, input.task);
 			},
 			cancel: (id: string) => acp.cancel(id),
 			prompt: (id: string, text: string) => acp.prompt(id, text).then(() => undefined),
@@ -282,8 +286,8 @@ test("session tool wiring and end-to-end mission creation", async () => {
 			prepare: async (mission: Mission) => mission,
 			close: () => Promise.reject(new Error("closeout lands in 06")),
 		},
-		skills: { check: (_names: string[]) => ({ ok: true as const }) },
-		leases: { acquire: (_key: string, _holder: string) => Promise.resolve("active" as const) },
+		skills: { check: () => ({ ok: true as const }) },
+		leases: { acquire: () => Promise.resolve("active" as const) },
 		modes: { requestMode: () => Promise.resolve({ approved: true as const }) },
 	};
 	const router = createRouter(deps, toolHandlers(), tokens);

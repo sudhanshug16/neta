@@ -114,6 +114,53 @@ describe("conversation store", () => {
 		expect(all[5009]).toBe("late 9");
 	}, 120000);
 
+	// The pump writes a turn twice: once when it opens, once closed, with the
+	// turn's blocks between them. A range anchored on the closing line would
+	// start past every block the turn produced.
+	test("turnRange spans a closed turn's blocks, not just its closing line", async () => {
+		useTempDir();
+		const sessionId = ulid();
+		const store = openConversationStore();
+		await store.create({
+			sessionId,
+			provider: "claude",
+			model: "sonnet",
+			createdAt: "2026-09-03T17:00:00.000Z",
+		});
+		const first: Turn = {
+			id: ulid(Date.parse("2026-09-03T17:00:00.000Z")),
+			sessionId,
+			startedAt: "2026-09-03T17:00:00.000Z",
+			role: "user",
+		};
+		await store.appendTurn(first);
+		await store.appendBlock(sessionId, {
+			turnId: first.id,
+			seq: 1,
+			at: "2026-09-03T17:00:00.000Z",
+			role: "user",
+			kind: "text",
+			text: "the question",
+		});
+		await store.appendBlock(sessionId, {
+			turnId: first.id,
+			seq: 2,
+			at: "2026-09-03T17:00:01.000Z",
+			role: "agent",
+			kind: "text",
+			text: "the answer",
+		});
+		await store.appendTurn({ ...first, endedAt: "2026-09-03T17:00:02.000Z" });
+
+		const range = await store.turnRange(sessionId, first.id);
+		expect(range).toBeDefined();
+		// The payload is the closed turn, the offsets still cover its blocks.
+		expect(range?.turn.endedAt).toBe("2026-09-03T17:00:02.000Z");
+		const page = await store.tail({ sessionId, cursor: range?.start });
+		expect(page.blocks.map((b) => b.text)).toEqual(["the question", "the answer"]);
+		expect(range?.end).toBeGreaterThan(page.cursor - 1);
+	});
+
 	test("setMeta changes the model and keeps createdAt", async () => {
 		useTempDir();
 		const sessionId = ulid();

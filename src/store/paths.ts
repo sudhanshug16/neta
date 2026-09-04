@@ -33,6 +33,20 @@ export function netaDir(): string {
 	return join(homedir(), ".neta");
 }
 
+// A Unix socket address is a fixed `sun_path` buffer: 104 bytes on macOS,
+// 108 on Linux, both including the terminating NUL. The shorter one wins so
+// one `NETA_DIR` works on both. Over the limit `bind` fails with a misleading
+// EADDRINUSE for a path that does not exist, so the length is checked first.
+export const MAX_SOCKET_PATH_BYTES = 103;
+
+export function socketPathError(path: string): string | undefined {
+	const bytes = Buffer.byteLength(path, "utf8");
+	if (bytes <= MAX_SOCKET_PATH_BYTES) {
+		return undefined;
+	}
+	return `the socket path is ${bytes} bytes, over the ${MAX_SOCKET_PATH_BYTES} byte unix socket limit: ${path}. Set NETA_DIR to a shorter directory.`;
+}
+
 export function encodeWorkspaceId(id: WorkspaceId): string {
 	return encodeURIComponent(id);
 }

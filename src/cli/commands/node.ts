@@ -3,11 +3,15 @@
 // start anything; `open` connects with `start: true` so the Node starts on
 // demand. Text goes to stdout, errors to stderr as `neta: <msg>`.
 import { spawn } from "node:child_process";
-import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { appendFileSync } from "node:fs";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { selfInvocation } from "../../core/self.ts";
 import type { Workspace } from "../../core/types.ts";
 import { startNode } from "../../node/lifecycle.ts";
 import { type NodeDescriptor, netaDir, readDescriptor } from "../../node/lockfile.ts";
+import { socketPathError } from "../../store/paths.ts";
 import { CliError, NodeClient } from "../client.ts";
 
 const START_WAIT_MS = 10000;
@@ -69,11 +73,31 @@ async function liveDescriptor(): Promise<NodeDescriptor | undefined> {
 	return isLive(descriptor) ? descriptor : undefined;
 }
 
+// A detached child's own stderr is /dev/null, so the one message that
+// explains a child that never came up goes into the file `NETA_START_LOG`
+// names — and nothing else does. A Node that runs for days must not hold an
+// unlinked log open that nobody can read.
+const START_LOG = "NETA_START_LOG";
+
+function reportStartFailure(message: string): void {
+	const path = process.env[START_LOG];
+	if (path === undefined || path === "") {
+		return;
+	}
+	try {
+		appendFileSync(path, `${message}\n`);
+	} catch {
+		// The parent has given up on the file; the message still went to
+		// stderr, and the parent still reports the failure itself.
+	}
+}
+
 async function startForeground(): Promise<number> {
 	let node: Awaited<ReturnType<typeof startNode>>;
 	try {
 		node = await startNode();
 	} catch (error) {
+		reportStartFailure(messageOf(error));
 		process.stderr.write(`neta: ${messageOf(error)}\n`);
 		return 1;
 	}
@@ -87,27 +111,86 @@ async function startForeground(): Promise<number> {
 	return 0;
 }
 
+export interface DetachSpawn {
+	command: string;
+	args: string[];
+}
+
+// How the detached `node start` child is invoked: this process's own argv
+// (`core/self.ts`) with the foreground command appended.
+export function detachSpawn(execPath: string, script: string | undefined): DetachSpawn | undefined {
+	const self = selfInvocation(execPath, script);
+	if (self === undefined) {
+		return undefined;
+	}
+	return { command: self.command, args: [...self.prefixArgs, "node", "start"] };
+}
+
 // Spawn the foreground form above as a detached child, then wait for
 // `node.json` to name a live pid (plus a hello, so `started` means
-// reachable) and print it.
+// reachable) and print it. The child writes why it could not start into
+// `NETA_START_LOG`, so a child that dies before the descriptor appears is
+// reported with its own words instead of only as a timeout.
 async function startDetached(): Promise<number> {
 	const existing = await liveDescriptor();
 	if (existing !== undefined) {
 		process.stdout.write(`started  pid ${existing.pid}  ${existing.socket}\n`);
 		return 0;
 	}
-	const script = process.argv[1];
-	if (script === undefined || script === "") {
+	const socketError = socketPathError(join(netaDir(), "node.sock"));
+	if (socketError !== undefined) {
+		process.stderr.write(`neta: ${socketError}\n`);
+		return 1;
+	}
+	const spec = detachSpawn(process.execPath, process.argv[1]);
+	if (spec === undefined) {
 		process.stderr.write("neta: cannot detach without a bundle path\n");
 		return 1;
 	}
-	const child = spawn(process.execPath, [script, "node", "start"], {
+	// In the system temp dir, not `NETA_DIR`: the most common reason the
+	// child dies is that `NETA_DIR` itself cannot be used. The directory is
+	// made with `mkdtemp`, so the name is unguessable and the child's append
+	// cannot land on somebody else's file or follow a symlink into one.
+	let errDir: string | undefined;
+	let errPath = "";
+	try {
+		errDir = await mkdtemp(join(tmpdir(), "neta-node-start-"));
+		errPath = join(errDir, "start.err");
+	} catch {
+		errDir = undefined;
+	}
+	const discardErr = async (): Promise<void> => {
+		if (errDir === undefined) {
+			return;
+		}
+		await rm(errDir, { recursive: true, force: true }).catch(() => undefined);
+	};
+	const child = spawn(spec.command, spec.args, {
 		detached: true,
-		stdio: "ignore",
-		env: process.env,
+		stdio: ["ignore", "ignore", "ignore"],
+		env: errDir === undefined ? process.env : { ...process.env, [START_LOG]: errPath },
 	});
 	child.unref();
-	child.on("error", () => undefined);
+	let died = false;
+	child.on("error", () => {
+		died = true;
+	});
+	child.on("exit", () => {
+		died = true;
+	});
+	const failed = async (reason: string): Promise<number> => {
+		let why = "";
+		try {
+			// The last few lines the dead child wrote, so a detached start
+			// says why it died instead of only that it timed out.
+			why = errDir === undefined ? "" : (await readFile(errPath, "utf8")).trimEnd().split("\n").slice(-5).join("\n");
+		} catch {
+			why = "";
+		}
+		await discardErr();
+		process.stderr.write(why === "" ? `neta: ${reason}\n` : `neta: ${reason}\n${why}\n`);
+		return 2;
+	};
 	const deadline = Date.now() + START_WAIT_MS;
 	for (;;) {
 		const descriptor = await liveDescriptor();
@@ -121,13 +204,16 @@ async function startDetached(): Promise<number> {
 				reachable = false;
 			}
 			if (reachable) {
+				await discardErr();
 				process.stdout.write(`started  pid ${descriptor.pid}  ${descriptor.socket}\n`);
 				return 0;
 			}
 		}
+		if (died) {
+			return failed(`the node exited before it started in ${netaDir()}`);
+		}
 		if (Date.now() >= deadline) {
-			process.stderr.write(`neta: timed out waiting for the node to start in ${netaDir()}\n`);
-			return 2;
+			return failed(`timed out waiting for the node to start in ${netaDir()}`);
 		}
 		await sleep(POLL_MS);
 	}

@@ -1,6 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { sep } from "node:path";
-import { decodeWorkspaceId, encodeWorkspaceId, monthKey, netaDir, paths } from "../src/store/paths.ts";
+import {
+	decodeWorkspaceId,
+	encodeWorkspaceId,
+	MAX_SOCKET_PATH_BYTES,
+	monthKey,
+	netaDir,
+	paths,
+	socketPathError,
+} from "../src/store/paths.ts";
 
 describe("store paths", () => {
 	test("a NETA_DIR change between calls is picked up", () => {
@@ -72,5 +80,31 @@ describe("store paths", () => {
 				process.env.NETA_DIR = prev;
 			}
 		}
+	});
+});
+
+// G4-10: over the sun_path limit `bind` reports EADDRINUSE for a path that
+// does not exist, so the length is judged before anything is bound.
+describe("the unix socket path limit", () => {
+	test("a short path passes", () => {
+		expect(socketPathError("/tmp/neta/node.sock")).toBeUndefined();
+	});
+
+	test("a path at the limit passes and one byte more fails", () => {
+		const at = `/tmp/${"n".repeat(MAX_SOCKET_PATH_BYTES - 5)}`;
+		expect(at.length).toBe(MAX_SOCKET_PATH_BYTES);
+		expect(socketPathError(at)).toBeUndefined();
+		const over = `${at}x`;
+		const message = socketPathError(over);
+		expect(message).toContain(over);
+		expect(message).toContain(String(MAX_SOCKET_PATH_BYTES));
+		expect(message).toContain("NETA_DIR");
+	});
+
+	test("bytes, not characters, are counted", () => {
+		const over = `/tmp/${"é".repeat(50)}`;
+		expect(over.length).toBeLessThan(MAX_SOCKET_PATH_BYTES);
+		expect(Buffer.byteLength(over, "utf8")).toBeGreaterThan(MAX_SOCKET_PATH_BYTES);
+		expect(socketPathError(over)).toContain("bytes");
 	});
 });
