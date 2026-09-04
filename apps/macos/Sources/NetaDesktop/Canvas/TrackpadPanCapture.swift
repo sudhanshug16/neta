@@ -7,9 +7,11 @@ import SwiftUI
 /// A transparent overlay view installs a local scroll-wheel monitor. Events
 /// are swallowed only inside the uncovered canvas region: the event must
 /// belong to the view's own window, and its location must land in `bounds`
-/// minus `interactionInsets` — the shell's insets for the surfaces covering
-/// the canvas (chat trailing, mission bar bottom) — so those surfaces keep
-/// their own scrolling. Non-precise (line-based) deltas are scaled by
+/// and outside every `excludedRects` entry — the rects the shell's floating
+/// surfaces actually cover (`ShellLayout.covered`) — so those surfaces keep
+/// their own scrolling and the canvas beside them keeps its panning. The
+/// rects are in the SwiftUI coordinate space of the canvas, origin top left.
+/// Non-precise (line-based) deltas are scaled by
 /// `nonPreciseScale`; deltas are coalesced per run-loop turn and delivered
 /// once to `onScroll`. Nodes never scale here; the parent maps the delta to
 /// `SpineViewportState.pan`.
@@ -17,22 +19,22 @@ public struct TrackpadPanCapture: NSViewRepresentable {
 	public typealias NSViewType = TrackpadPanCaptureView
 
 	private var isEnabled: Bool
-	private var interactionInsets: EdgeInsets
+	private var excludedRects: [CGRect]
 	private var onScroll: (CGSize) -> Void
 
 	public init(
-		isEnabled: Bool, interactionInsets: EdgeInsets,
+		isEnabled: Bool, excludedRects: [CGRect],
 		onScroll: @escaping (CGSize) -> Void
 	) {
 		self.isEnabled = isEnabled
-		self.interactionInsets = interactionInsets
+		self.excludedRects = excludedRects
 		self.onScroll = onScroll
 	}
 
 	public func makeNSView(context: Context) -> TrackpadPanCaptureView {
 		let view = TrackpadPanCaptureView()
 		view.configure(
-			isEnabled: isEnabled, interactionInsets: nsInsets,
+			isEnabled: isEnabled, excludedRects: excludedRects,
 			onScroll: onScroll)
 		return view
 	}
@@ -41,7 +43,7 @@ public struct TrackpadPanCapture: NSViewRepresentable {
 		_ nsView: TrackpadPanCaptureView, context: Context
 	) {
 		nsView.configure(
-			isEnabled: isEnabled, interactionInsets: nsInsets,
+			isEnabled: isEnabled, excludedRects: excludedRects,
 			onScroll: onScroll)
 	}
 
@@ -49,12 +51,6 @@ public struct TrackpadPanCapture: NSViewRepresentable {
 		_ nsView: TrackpadPanCaptureView, coordinator: ()
 	) {
 		nsView.teardown()
-	}
-
-	private var nsInsets: NSEdgeInsets {
-		NSEdgeInsets(
-			top: interactionInsets.top, left: interactionInsets.leading,
-			bottom: interactionInsets.bottom, right: interactionInsets.trailing)
 	}
 }
 
@@ -73,7 +69,7 @@ public final class TrackpadPanCaptureView: NSView {
 	}
 
 	private var isEnabled = true
-	private var interactionInsets = NSEdgeInsets()
+	private var excludedRects: [CGRect] = []
 	private var onScroll: ((CGSize) -> Void)?
 	/// Installed monitor token. Main-thread confined like the view;
 	/// `nonisolated(unsafe)` so `deinit` can remove it.
@@ -90,11 +86,11 @@ public final class TrackpadPanCaptureView: NSView {
 	}
 
 	func configure(
-		isEnabled: Bool, interactionInsets: NSEdgeInsets,
+		isEnabled: Bool, excludedRects: [CGRect],
 		onScroll: @escaping (CGSize) -> Void
 	) {
 		self.isEnabled = isEnabled
-		self.interactionInsets = interactionInsets
+		self.excludedRects = excludedRects
 		self.onScroll = onScroll
 		ensureMonitor()
 	}
@@ -112,19 +108,18 @@ public final class TrackpadPanCaptureView: NSView {
 		}
 	}
 
-	/// The canvas region that swallows scrolls: `bounds` minus the shell's
-	/// covering-surface insets. `top`/`bottom` are distance from the upper /
-	/// lower edge, `left`/`right` from the leading / trailing edge.
-	func captureRect(in bounds: NSRect) -> NSRect {
-		NSRect(
-			x: bounds.minX + interactionInsets.left,
-			y: bounds.minY + interactionInsets.bottom,
-			width: max(
-				0, bounds.width - interactionInsets.left
-					- interactionInsets.right),
-			height: max(
-				0, bounds.height - interactionInsets.top
-					- interactionInsets.bottom))
+	/// Whether a point in the view's own coordinates is canvas the capture
+	/// owns: inside `bounds` and outside every covered rect.
+	///
+	/// The rects arrive in SwiftUI's space (origin top left) and this view
+	/// is unflipped (origin bottom left), so the point is mapped once here
+	/// rather than every rect being flipped.
+	func capturesPoint(_ point: NSPoint, in bounds: NSRect) -> Bool {
+		guard bounds.contains(point) else { return false }
+		let topLeft = CGPoint(
+			x: point.x - bounds.minX,
+			y: bounds.maxY - point.y)
+		return !excludedRects.contains { $0.contains(topLeft) }
 	}
 
 	private func ensureMonitor() {
@@ -142,7 +137,7 @@ public final class TrackpadPanCaptureView: NSView {
 			return false
 		}
 		let point = convert(event.locationInWindow, from: nil)
-		guard captureRect(in: bounds).contains(point) else { return false }
+		guard capturesPoint(point, in: bounds) else { return false }
 		let delta = CGSize(
 			width: Self.scaledDelta(
 				event.scrollingDeltaX,

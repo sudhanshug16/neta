@@ -50,7 +50,17 @@ final class SpineTicksTests: XCTestCase {
 		for tick in ticks {
 			let t = tick.at
 			if tick.label == "now" {
-				XCTAssertEqual(tick.x, index.x(index.count - 1))
+				// `now` sits in the last gap — the clear axis between the
+				// newest item and the leader card — not on the newest item's
+				// own x, where it crowded whatever icon sits at the live edge.
+				XCTAssertEqual(
+					tick.x,
+					index.x(index.count - 1) + SpinePlacement.leaderGap / 2,
+					accuracy: 1e-9)
+				XCTAssertLessThan(
+					tick.x,
+					index.x(index.count - 1) + SpinePlacement.leaderGap,
+					"and clear of the leader card's left edge")
 				continue
 			}
 			var lo = 0

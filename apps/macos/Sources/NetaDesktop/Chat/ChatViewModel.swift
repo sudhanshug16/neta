@@ -19,6 +19,14 @@ import Observation
 	let client: any NodeClient
 	let sessionId: SessionId
 	private var streamTask: Task<Void, Never>?
+	/// Bumped by every `start()`. Two tails can be in flight at once — a
+	/// fresh `start()` while the resubscribe loop is already re-tailing —
+	/// and a page rebuilds the whole window, so the older answer landing
+	/// last rebuilt the window from a page taken before the newest blocks
+	/// existed and dropped them for good (the re-tail after a session change
+	/// showed the person's block and not the agent's). A tail whose
+	/// generation is stale is discarded instead.
+	private var tailGeneration = 0
 
 	/// Called whenever `openTurnId` changes, so the owning panel can follow
 	/// the open turn immediately instead of only after a tail or a select
@@ -41,11 +49,24 @@ import Observation
 	var windowHasNewer = false
 	/// True once a trim has dropped turns older than the loaded window.
 	var droppedOlderTurns = false
+	/// The locally echoed user turns, oldest first. Held apart from `turns`
+	/// so a re-tail (which rebuilds `turns` from the page) cannot swallow
+	/// the message the person just sent.
+	private var echoes: [ChatTurn] = []
 
-	/// The newest turn id while the transcript sits at the bottom, else nil.
+	/// The turns that actually draw something. A turn with no blocks draws
+	/// nothing (the Node opens the user turn before any block exists), and a
+	/// `LazyVStack` still reserves its spacing, so the transcript renders
+	/// this list rather than `turns`.
+	public var visibleTurns: [ChatTurn] {
+		turns.filter { !$0.blocks.isEmpty }
+	}
+
+	/// The newest drawn turn id while the transcript sits at the bottom, else
+	/// nil. A blockless turn has no view to scroll to.
 	public var autoScrollTarget: TurnId? {
 		guard atBottom else { return nil }
-		return turns.last?.id
+		return visibleTurns.last?.id
 	}
 
 	public init(client: any NodeClient, sessionId: SessionId) {
@@ -66,13 +87,15 @@ import Observation
 	/// listening to a session it is not subscribed to.
 	public func start() async {
 		streamTask?.cancel()
+		tailGeneration += 1
+		let generation = tailGeneration
 		let sessionId = sessionId
 		// Subscribe before the tail request, not after: a subscription
 		// carries only what is broadcast from the moment it is taken, so a
 		// notification the Node sends while the tail is in flight would
 		// otherwise fall between the two calls and be lost for good.
 		let first = client.notifications
-		let firstTailed = await tailLatest()
+		let firstTailed = await tailLatest(generation: generation)
 		streamTask = Task { [weak self] in
 			var stream = first
 			var tailed = firstTailed
@@ -94,8 +117,11 @@ import Observation
 				try? await Task.sleep(for: Self.resubscribeDelay)
 				if Task.isCancelled { return }
 				guard let self else { return }
+				// A newer `start()` owns the transcript now: stop rather
+				// than re-tail into a window this loop no longer owns.
+				guard self.tailGeneration == generation else { return }
 				stream = self.client.notifications
-				tailed = await self.tailLatest()
+				tailed = await self.tailLatest(generation: generation)
 			}
 		}
 	}
@@ -104,13 +130,27 @@ import Observation
 	/// `conversation.tail` that subscribes this peer to the session. Returns
 	/// whether the tail actually landed: during a reconnect it throws
 	/// `.disconnected`, and a caller that treats that as success stops
-	/// listening to a session the Node never re-subscribed it to.
-	private func tailLatest() async -> Bool {
+	/// listening to a session the Node never re-subscribed it to. A page
+	/// from a superseded generation is dropped, never applied.
+	private func tailLatest(generation: Int) async -> Bool {
 		guard let page = try? await client.conversationTail(
 			sessionId: sessionId, cursor: nil, limit: Self.tailLimit)
 		else { return false }
+		// A tail that a newer `start()` has superseded must not rebuild the
+		// window: its page is older than what the window already holds.
+		guard generation == tailGeneration else { return false }
 		resetToLatest(with: page)
 		return true
+	}
+
+	/// Whether this transcript is actually live: `start()` has taken a
+	/// subscription and a task is listening on it. A `ChatViewModel` that was
+	/// built and installed but never started is not streaming, and neither is
+	/// one that has been stopped — which is what an unstarted rebuild left
+	/// behind the chat panel.
+	public var isStreaming: Bool {
+		guard let streamTask else { return false }
+		return !streamTask.isCancelled
 	}
 
 	/// Stops the live stream. The panel calls it when it drops this
@@ -130,6 +170,28 @@ import Observation
 		if let block = payload.block {
 			insert(block)
 		}
+	}
+
+	/// Shows the person's own message at once (FIXPASS "the person's own
+	/// message never appears in the chat").
+	///
+	/// The Node opens the user turn with no blocks at all, so a prompt was
+	/// invisible until the agent answered. The echo is a local turn with a
+	/// `local-` id carrying the text that was just sent. If the Node ever
+	/// does deliver the user's own text, `insert(_:)` drops the echo that
+	/// matches it, so the message is never shown twice.
+	@discardableResult
+	public func echoUserMessage(_ text: String, at date: Date = Date()) -> TurnId? {
+		guard !text.isEmpty else { return nil }
+		let id = "local-\(UUID().uuidString)"
+		var turn = ChatTurn(id: id, role: .user, startedAt: date, endedAt: date)
+		turn.blocks = [Block(
+			turnId: id, seq: 0, at: date, role: .user, kind: .text,
+			text: text, data: nil)]
+		turns.append(turn)
+		turns.sort(by: Self.turnOrder)
+		echoes.append(turn)
+		return id
 	}
 
 	/// Takes the pending scroll request, leaving none behind.
@@ -154,6 +216,11 @@ import Observation
 				id: block.turnId, role: block.role, startedAt: block.at)]
 				.insert(block)
 		}
+		// A page rebuild must not swallow a message the person sent a
+		// moment ago: echoes the page does not carry itself survive it.
+		let delivered = Set(page.blocks.filter { $0.role == .user }.map(\.text))
+		echoes.removeAll { delivered.contains($0.blocks.first?.text ?? "") }
+		for echo in echoes { merged[echo.id] = echo }
 		turns = merged.values.sorted(by: Self.turnOrder)
 		setOpenTurn(turns.last(where: \.isOpen)?.id)
 	}
@@ -176,8 +243,11 @@ import Observation
 		}
 	}
 
-	/// Files a block into its turn by `seq`; a repeat replaces.
+	/// Files a block into its turn by `seq`; a repeat replaces. A user block
+	/// arriving from the Node retires the local echo carrying the same text,
+	/// so the person's message is shown exactly once.
 	func insert(_ block: Block) {
+		if block.role == .user { dropEcho(matching: block.text) }
 		if let index = turns.firstIndex(where: { $0.id == block.turnId }) {
 			turns[index].insert(block)
 		} else {
@@ -187,6 +257,22 @@ import Observation
 			turns.sort(by: Self.turnOrder)
 			setOpenTurn(block.turnId)
 		}
+	}
+
+	/// Retires the echo for a message the Node never received: the prompt
+	/// threw, so the transcript must not keep showing it as delivered
+	/// (11-desktop-chat T11.6).
+	public func retireEcho(_ text: String) {
+		dropEcho(matching: text)
+	}
+
+	/// Retires the echo whose text the Node has now delivered itself.
+	private func dropEcho(matching text: String) {
+		guard let index = echoes.firstIndex(where: {
+			$0.blocks.first?.text == text
+		}) else { return }
+		let id = echoes.remove(at: index).id
+		turns.removeAll { $0.id == id }
 	}
 
 	/// The one writer of `openTurnId`, so the panel hears every change.

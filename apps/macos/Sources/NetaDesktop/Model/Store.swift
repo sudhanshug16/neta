@@ -49,6 +49,12 @@ import Observation
 		return leaders[currentWorkspaceId]
 	}
 	/// Sorted by `createdAt` ascending (ties by number).
+	///
+	/// Every open workspace's missions, because the Node lists them all in
+	/// one snapshot. Nothing that draws the current workspace may read this:
+	/// the spine, the mission bar and the navigator read `currentMissions`,
+	/// or two open workspaces interleave on the spine and the bar draws two
+	/// `#1`s.
 	public private(set) var missions: [Mission] = []
 	public private(set) var missionsById: [Ulid: Mission] = [:]
 	public private(set) var missionsByNumber: [Int: Mission] = [:]
@@ -64,6 +70,40 @@ import Observation
 	private var recency: [SessionId] = []
 
 	public init() {}
+
+	/// The current workspace's missions, in the same order. The one list
+	/// the shell draws: `Shell/RootView.swift`'s mission bar and
+	/// `Canvas/SpineCanvasView.swift`'s index and agent map both read it,
+	/// the way `Shell/Navigator.swift` already filtered for itself.
+	///
+	/// Before the first snapshot names a workspace there is nothing to
+	/// filter against, so every mission stands; that is also what keeps a
+	/// fixture with no workspace record drawing.
+	public var currentMissions: [Mission] {
+		guard let currentWorkspaceId else { return missions }
+		return missions.filter { $0.workspaceId == currentWorkspaceId }
+	}
+
+	/// The current workspace's agents, keyed by mission, for the spine's
+	/// stacks. Filtered on the agent's own workspace, so an agent whose
+	/// mission has aged out of the window still lands under the right
+	/// workspace.
+	public var currentAgentsByMission: [MissionId: [Agent]] {
+		guard let currentWorkspaceId else {
+			return Dictionary(grouping: agentsById.values, by: \.missionId)
+		}
+		return Dictionary(
+			grouping: agentsById.values.filter {
+				$0.workspaceId == currentWorkspaceId
+			},
+			by: \.missionId)
+	}
+
+	/// The current workspace's events, for the spine's checkpoints.
+	public var currentEvents: [Event] {
+		guard let currentWorkspaceId else { return events }
+		return events.filter { $0.workspaceId == currentWorkspaceId }
+	}
 
 	/// Derived on every read, never stored: missions needing the person,
 	/// ordered blocked, failed, readyToClose, mergedNotClosed, then by number.

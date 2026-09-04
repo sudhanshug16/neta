@@ -12,22 +12,27 @@ import SwiftUI
 /// back control to the transcript.
 public struct ChatPanel: View {
 	@Bindable private var model: ChatPanelModel
+	private let router: CheckpointRouter?
 	private let windowWidth: CGFloat?
 	@State private var flashingTurnId: TurnId?
 	@State private var scrollPosition: TurnId?
 
-	public init(model: ChatPanelModel, windowWidth: CGFloat? = nil) {
-		self.model = model
-		self.windowWidth = windowWidth
-	}
-
+	/// - Parameters:
+	///   - model: The panel's state, owned by `RootView` in `@State`. There
+	///     is deliberately no convenience initializer that builds one here:
+	///     a model built inside `body` is rebuilt on every parent update,
+	///     which threw the transcript, the draft and the open inspector away
+	///     on the first live notification.
+	///   - router: The canvas's checkpoint router (10). The panel drains it:
+	///     a checkpoint on a turn scrolls the transcript there, anything
+	///     else opens Details.
 	public init(
-		client: any NodeClient, store: Store, shell: ShellState,
+		model: ChatPanelModel, router: CheckpointRouter? = nil,
 		windowWidth: CGFloat? = nil
 	) {
-		self.init(
-			model: ChatPanelModel(client: client, store: store, shell: shell),
-			windowWidth: windowWidth)
+		self.model = model
+		self.router = router
+		self.windowWidth = windowWidth
 	}
 
 	public var body: some View {
@@ -38,19 +43,19 @@ public struct ChatPanel: View {
 					selection: model.selection, store: model.store,
 					onDetails: { model.isDetailsOpen.toggle() },
 					onSelect: { model.select($0) })
-					.padding(.horizontal, 12)
+					.padding(.horizontal, Theme.Metric.chatPadding)
 					.padding(.top, 10)
 					.padding(.bottom, 8)
 				if LeadPlusStripModel.isVisible(model.store.leader, model.selection) {
 					LeadPlusStrip(minutes: activeMinutes, mission: activeMission)
-						.padding(.horizontal, 12)
+						.padding(.horizontal, Theme.Metric.chatPadding)
 						.padding(.bottom, 8)
 				}
 				content(placement: placement)
 					.frame(maxWidth: .infinity, maxHeight: .infinity)
-				Divider()
+				hairline
 				ComposerView(model: model.composer)
-					.padding(.horizontal, 12)
+					.padding(.horizontal, Theme.Metric.chatPadding)
 					.padding(.vertical, 10)
 			}
 			.frame(width: proxy.size.width, height: proxy.size.height)
@@ -58,13 +63,54 @@ public struct ChatPanel: View {
 		.task {
 			await model.start()
 		}
-		.onChange(of: model.selection) { _, _ in
+		// The panel follows the shell, not only its own header: a click on
+		// the canvas or a chip in the mission bar moves `shell.selection`
+		// without going through `model.select`.
+		.onChange(of: model.shell.selection) { _, _ in
+			model.sync()
+		}
+		// And it follows the session the selection resolves to. The leader
+		// (and with it the session id) arrives with the first snapshot,
+		// after the panel is built, and changes again on a workspace switch
+		// or a reconnect; the selection is `.leader` throughout.
+		.onChange(of: model.currentSessionId) { _, _ in
+			model.sync()
+		}
+		// The restart watches the transcript itself, not the session id.
+		// `select`/`sync` can install a fresh, untailed `ChatViewModel`
+		// while the id stands still (every leader-led mission resolves to
+		// the leader's session), and a session-id watch left that
+		// transcript unstarted: it never tailed and never streamed, so the
+		// conversation blanked and a prompt streamed into nothing.
+		.onChange(of: model.transcriptId) { _, _ in
 			flashingTurnId = nil
 			Task { await model.start() }
 		}
 		.onChange(of: model.transcript.openTurnId) { _, _ in
 			model.syncComposer()
 		}
+		.onChange(of: router?.pending) { _, _ in
+			guard let action = router?.consume() else { return }
+			Task { await model.handle(action) }
+		}
+	}
+
+	// MARK: - Rules
+
+	/// The panel's rules are `Theme.divider` hairlines, never the system
+	/// `Divider`, which paints its own separator colour. The thickness is
+	/// `Theme.Metric.ruleWidth`, not the glass rim: a rule is not part of
+	/// the material and must not follow it.
+	private var hairline: some View {
+		Rectangle()
+			.fill(Theme.divider)
+			.frame(height: Theme.Metric.ruleWidth)
+	}
+
+	private var verticalHairline: some View {
+		Rectangle()
+			.fill(Theme.divider)
+			.frame(width: Theme.Metric.ruleWidth)
 	}
 
 	// MARK: - Content
@@ -76,19 +122,19 @@ public struct ChatPanel: View {
 				selection: model.selection, store: model.store,
 				decision: model.decision, placement: placement,
 				onBack: { model.isDetailsOpen = false })
-				.padding(.horizontal, 12)
+				.padding(.horizontal, Theme.Metric.chatPadding)
 				.padding(.vertical, 8)
 		} else if model.isDetailsOpen {
 			HStack(alignment: .top, spacing: 0) {
 				transcript
 					.frame(maxWidth: .infinity, maxHeight: .infinity)
-				Divider()
+				verticalHairline
 				DetailsView(
 					selection: model.selection, store: model.store,
 					decision: model.decision, placement: placement,
 					onBack: { model.isDetailsOpen = false })
 					.frame(width: 180)
-					.padding(.horizontal, 12)
+					.padding(.horizontal, Theme.Metric.chatPadding)
 					.padding(.vertical, 8)
 			}
 		} else {
@@ -97,23 +143,32 @@ public struct ChatPanel: View {
 	}
 
 	/// The transcript: every loaded turn in a `LazyVStack`, pinned to the
-	/// live end while `atBottom`, with one-shot scroll-to-turn reveals
-	/// drained from `pendingScroll` via `consumeScroll`.
+	/// live end while `atBottom` by an explicit `scrollTo` (never a
+	/// default scroll anchor, which hid the stack entirely), with one-shot
+	/// scroll-to-turn reveals drained from `pendingScroll` via
+	/// `consumeScroll`. An empty transcript is simply empty: the design has
+	/// no empty-state placeholder.
 	private var transcript: some View {
 		ScrollViewReader { scroll in
 			ScrollView {
 				LazyVStack(alignment: .leading, spacing: 12) {
-					ForEach(model.transcript.turns) { turn in
+					ForEach(model.transcript.visibleTurns) { turn in
 						TurnView(turn: turn, flashing: flashingTurnId == turn.id)
 							.id(turn.id)
 					}
 				}
 				.scrollTargetLayout()
-				.padding(.horizontal, 12)
+				.padding(.horizontal, Theme.Metric.chatPadding)
 				.padding(.vertical, 8)
 			}
 			.scrollPosition(id: $scrollPosition)
-			.defaultScrollAnchor(.bottom)
+			// Deliberately no default scroll anchor here. On this system
+			// it moved the whole stack out of the clip view and the transcript
+			// drew nothing at all — a tailed, streaming conversation rendered
+			// as an empty panel (seen with two turns and four blocks loaded).
+			// The live end is pinned explicitly instead: `.onAppear` and the
+			// `autoScrollTarget` watch below scroll to the newest drawn turn,
+			// which is what `atBottom` gates anyway.
 			.onAppear {
 				model.transcript.atBottom = true
 				drainScroll(scroll)
@@ -129,7 +184,7 @@ public struct ChatPanel: View {
 				drainScroll(scroll)
 			}
 			.onChange(of: scrollPosition) { _, position in
-				if let last = model.transcript.turns.last?.id {
+				if let last = model.transcript.visibleTurns.last?.id {
 					model.transcript.atBottom = (position == last)
 				} else {
 					model.transcript.atBottom = true

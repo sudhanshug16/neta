@@ -26,6 +26,11 @@ public enum ZoomStep: Sendable {
 	public static let defaultMaxPitch: CGFloat = 320
 	/// The minimum column never changes under zoom.
 	public static let minPitch: CGFloat = 120
+	/// Breathing room Fit leaves to the left of the oldest open mission's
+	/// widest node. Fit solved for the exact usable width, so that node's
+	/// left border landed on the viewport edge with nothing beside it and the
+	/// oldest column read as clipped even though nothing was cut off.
+	public static let fitLeadingMargin: CGFloat = 12
 
 	public private(set) var pxPerHour: Double
 	public private(set) var maxPitch: CGFloat
@@ -49,33 +54,46 @@ public enum ZoomStep: Sendable {
 				pxPerHour / Self.defaultPxPerHour))
 	}
 
-	/// Horizontal delta changes `scrollX`, clamped to
-	/// `0...max(0, index.contentWidth - viewport.width)`; vertical changes
-	/// `scrollY`, clamped to `0...max(0, contentHeight - viewport.height)`;
-	/// neither touches the spacing.
+	/// Horizontal delta changes `scrollX`, clamped by
+	/// `SpinePlacement.clampScrollX`: back to the oldest item at the left
+	/// edge, forward no further than the live edge. Nothing exists right of
+	/// Now, so the live edge is always the forward limit — including when it
+	/// is negative, which is every sequence narrower than the usable width.
+	/// Vertical changes `scrollY`, clamped to
+	/// `0...max(0, contentHeight - viewport.height)`. Neither touches the
+	/// spacing.
 	public func pan(
 		by delta: CGSize, index: SpineIndex, viewport: CGRect,
-		contentHeight: CGFloat
+		contentHeight: CGFloat, trailingInset: CGFloat = 0
 	) {
-		let maxX = max(0, index.contentWidth - viewport.width)
-		scrollX = min(max(scrollX + delta.width, 0), maxX)
+		scrollX = SpinePlacement.clampScrollX(
+			scrollX + delta.width, index: index, viewport: viewport,
+			trailingInset: trailingInset)
 		let maxY = max(0, contentHeight - viewport.height)
 		scrollY = min(max(scrollY + delta.height, 0), maxY)
 	}
 
-	/// Applies a staged Now jump: the live edge moves to the viewport's
-	/// right. T10.10 calls this with `NowState.consumeJump()`.
+	/// Applies a resolved scroll target: a staged Now jump (T10.10 calls
+	/// this with `NowState.consumeJump()`) or the first layout's jump to
+	/// Now. The target is already the live edge, which is negative when the
+	/// sequence is narrower than the viewport, so nothing is clamped here.
 	public func jump(to scrollX: CGFloat) {
-		self.scrollX = max(0, scrollX)
+		self.scrollX = scrollX
 	}
 
 	/// Pinch zoom: scales the spacing about the cursor, re-solving `scrollX`
 	/// after the rebuild so the content under the cursor holds.
 	///
 	/// `atCursorX` is a viewport-local offset (canvases resolve viewports at
-	/// the origin, so a gesture location is already the offset).
+	/// the origin, so a gesture location is already the offset). The
+	/// re-solved scroll is clamped into the same range a pan uses, so a
+	/// zoom on a sequence narrower than the usable width leaves the leader
+	/// at Now instead of snapping it back to content x 0. Pass the canvas's
+	/// viewport and trailing inset: with no viewport the usable width is
+	/// zero and the clamp degenerates to `0...contentWidth`.
 	public func zoom(
-		factor: Double, atCursorX: CGFloat, index: SpineIndex
+		factor: Double, atCursorX: CGFloat, index: SpineIndex,
+		viewport: CGRect = .zero, trailingInset: CGFloat = 0
 	) {
 		guard factor.isFinite, factor > 0, atCursorX.isFinite else { return }
 		guard index.count > 0 else {
@@ -95,63 +113,71 @@ public enum ZoomStep: Sendable {
 		let rebuilt = index.respaced(pxPerHour: next, maxPitch: maxPitch)
 		let nextX = SpineTicks.x(
 			index: rebuilt, t: t, now: .infinity)
-		scrollX = max(0, nextX - atCursorX)
+		scrollX = SpinePlacement.clampScrollX(
+			nextX - atCursorX, index: rebuilt, viewport: viewport,
+			trailingInset: trailingInset)
 	}
 
 	/// ⌘= zooms in ×1.25, ⌘- zooms out ×0.8, about the viewport centre.
 	public func zoom(
-		_ step: ZoomStep, index: SpineIndex, viewport: CGRect
+		_ step: ZoomStep, index: SpineIndex, viewport: CGRect,
+		trailingInset: CGFloat = 0
 	) {
 		switch step {
 		case .zoomIn:
 			zoom(
 				factor: 1.25, atCursorX: viewport.midX - viewport.minX,
-				index: index)
+				index: index, viewport: viewport,
+				trailingInset: trailingInset)
 		case .zoomOut:
 			zoom(
 				factor: 0.8, atCursorX: viewport.midX - viewport.minX,
-				index: index)
+				index: index, viewport: viewport,
+				trailingInset: trailingInset)
 		}
 	}
 
 	/// ⌘0: the largest `pxPerHour` at which every open mission from
-	/// `index.earliestOpen` to the newest fits in `viewport.width`, else the
-	/// minimum with a pan to the newest. Resets `scrollY`.
-	public func fit(index: SpineIndex, viewport: CGRect) {
-		defer { scrollY = 0 }
+	/// `index.earliestOpen` through the leader card fits in the usable
+	/// width, else the minimum. Either way the view ends right-aligned at
+	/// the live edge, exactly where `NowState.jumpToNow` lands. Resets
+	/// `scrollY`.
+	public func fit(
+		index: SpineIndex, viewport: CGRect, trailingInset: CGFloat = 0
+	) {
+		scrollY = 0
+		let usable = max(0, viewport.width - trailingInset)
 		guard let first = index.earliestOpen, index.count > 0 else {
+			scrollX = SpinePlacement.liveScrollX(
+				index: index, viewport: viewport,
+				trailingInset: trailingInset)
 			return
 		}
-		let last = index.count - 1
-		if !spanFits(
-			index: index, from: first, to: last, width: viewport.width,
+		if spanFits(
+			index: index, from: first, width: usable,
 			pxPerHour: Self.minPxPerHour)
 		{
-			pxPerHour = Self.minPxPerHour
-			maxPitch = Self.maxPitch(for: pxPerHour)
-			scrollX = max(
-				0,
-				index.respaced(pxPerHour: pxPerHour, maxPitch: maxPitch)
-					.contentWidth - viewport.width)
-			return
-		}
-		var lo = Self.minPxPerHour
-		var hi = Self.maxPxPerHour
-		for _ in 0 ..< 40 {
-			let mid = (lo + hi) / 2
-			if spanFits(
-				index: index, from: first, to: last, width: viewport.width,
-				pxPerHour: mid)
-			{
-				lo = mid
-			} else {
-				hi = mid
+			var lo = Self.minPxPerHour
+			var hi = Self.maxPxPerHour
+			for _ in 0 ..< 40 {
+				let mid = (lo + hi) / 2
+				if spanFits(
+					index: index, from: first, width: usable,
+					pxPerHour: mid)
+				{
+					lo = mid
+				} else {
+					hi = mid
+				}
 			}
+			pxPerHour = lo
+		} else {
+			pxPerHour = Self.minPxPerHour
 		}
-		pxPerHour = lo
-		maxPitch = Self.maxPitch(for: lo)
-		let rebuilt = index.respaced(pxPerHour: lo, maxPitch: maxPitch)
-		scrollX = max(0, rebuilt.x(first))
+		maxPitch = Self.maxPitch(for: pxPerHour)
+		scrollX = SpinePlacement.liveScrollX(
+			index: index.respaced(pxPerHour: pxPerHour, maxPitch: maxPitch),
+			viewport: viewport, trailingInset: trailingInset)
 	}
 
 	/// Expands or collapses a mission's completed-agent stack in place.
@@ -165,14 +191,26 @@ public enum ZoomStep: Sendable {
 
 	// MARK: - Private
 
-	/// Whether items `from...to` fit in `width` at `pxPerHour`.
+	/// Whether item `from` through the leader card's far edge fits in
+	/// `width` at `pxPerHour`. The leader is pinned at the live edge, so the
+	/// span that has to fit ends at `contentWidth`, not at the newest item.
+	///
+	/// It starts at `from`'s LEFT EDGE, not at its anchor: nodes are centred
+	/// on their anchors, so measuring from the anchor left half the oldest
+	/// open mission's card outside the band and Fit cut its number, name and
+	/// state off the left window edge (10-desktop-spine T10.9 item 7: Fit
+	/// brings every open mission into view).
+	/// The span also has to leave `fitLeadingMargin` beside that left edge:
+	/// solving for the exact width put the oldest open column's border on the
+	/// viewport edge, which reads as clipped.
 	private func spanFits(
-		index: SpineIndex, from: Int, to: Int, width: CGFloat,
-		pxPerHour: Double
+		index: SpineIndex, from: Int, width: CGFloat, pxPerHour: Double
 	) -> Bool {
 		let rebuilt = index.respaced(
 			pxPerHour: pxPerHour,
 			maxPitch: Self.maxPitch(for: pxPerHour))
-		return rebuilt.x(to) - rebuilt.x(from) <= width
+		let left = rebuilt.x(from)
+			- SpinePlacement.halfWidth(of: from, in: rebuilt)
+		return rebuilt.contentWidth - left <= max(0, width - Self.fitLeadingMargin)
 	}
 }

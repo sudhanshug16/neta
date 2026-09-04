@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SwiftUI
 import XCTest
@@ -192,7 +193,7 @@ final class NodeViewTests: XCTestCase {
 		let card = LeadCardView(model: cardModel, emphasis: 1, selected: false)
 		XCTAssertEqual(
 			Mirror(reflecting: card).children.compactMap(\.label).sorted(),
-			["emphasis", "model", "selected"])
+			["collapsed", "emphasis", "model", "selected"])
 		let rowModel = AgentRowModel(agent: makeAgent())
 		let row = AgentRowView(model: rowModel, emphasis: 1, selected: false)
 		XCTAssertEqual(
@@ -234,6 +235,56 @@ final class NodeViewTests: XCTestCase {
 			floor, "completed chip")
 	}
 
+	/// The `+N completed` chip is a glass capsule with a chevron, never a
+	/// circle or a bubble (BRIEF MUST). Revision 3 lists it under "Controls
+	/// on glass": "capsule glass with the same rim" — the rim, not the
+	/// `0 18 40` outer shadow. Its silhouette is a capsule, which would
+	/// otherwise float, so the control weight is named (see the elevation
+	/// rule in Glass.swift).
+	func testCompletedChipIsAGlassCapsuleWithAChevron() throws {
+		let source = try nodeViewsSource()
+		let chip = try XCTUnwrap(source.range(of: "public struct CompletedChip"))
+		let body = String(source[chip.lowerBound...])
+		XCTAssertTrue(
+			body.contains("netaControlGlass(.capsule"), "the chip is a glass capsule")
+		XCTAssertFalse(
+			body.contains("netaFloatingGlass"), "a small pill between agent rows casts no 40 pt shadow")
+		XCTAssertTrue(body.contains("chevron.right"), "collapsed chevron")
+		XCTAssertTrue(body.contains("chevron.down"), "expanded chevron")
+		XCTAssertFalse(body.contains("Circle()"), "never a circle")
+	}
+
+	/// The leader card keeps the Revision 3 rim and sheen, and takes them
+	/// from Glass rather than restating the gradient.
+	func testLeaderCardBorrowsTheGlassSpecular() throws {
+		let source = try nodeViewsSource()
+		XCTAssertTrue(source.contains("netaSpecular(.rounded("), "sheen comes from Glass")
+		XCTAssertTrue(source.contains("Theme.Glass.leaderTint"), "violet tint token")
+		XCTAssertFalse(source.contains("LinearGradient"), "no second copy of the sheen")
+		XCTAssertTrue(
+			source.contains("Theme.Glass.leaderBorder"),
+			"the violet rim stays, as a token (PAPER-SPINE item 11)")
+	}
+
+	/// Item 1 of the fix pass: no colour or font literal in the node views.
+	/// Every size goes through `Theme.text` / `Theme.mono` and every colour
+	/// through `Theme`, so the design numbers have exactly one home.
+	func testNodeViewsCarryNoColourOrFontLiterals() throws {
+		let source = try nodeViewsSource()
+		XCTAssertEqual(
+			occurrences(of: ".system(size:", in: source), 0,
+			"fonts route through Theme.text and Theme.mono")
+		XCTAssertEqual(
+			occurrences(of: "Color.white", in: source), 0,
+			"the crown takes Theme.textPrimary")
+		XCTAssertEqual(
+			occurrences(of: "Color(", in: source), 0,
+			"no colour is constructed here")
+		XCTAssertEqual(
+			occurrences(of: ".opacity(", in: source), 0,
+			"an opacity belongs to the token, not the view")
+	}
+
 	func testNodeViewsNeverScaleAndTintThroughCanvasStyle() throws {
 		let source = try nodeViewsSource()
 		XCTAssertFalse(source.contains(".scaleEffect"), "nodes never scale")
@@ -243,6 +294,10 @@ final class NodeViewTests: XCTestCase {
 	}
 
 	// MARK: - Helpers
+
+	private func occurrences(of token: String, in contents: String) -> Int {
+		contents.components(separatedBy: token).count - 1
+	}
 
 	private func hostedHeight<V: View>(of view: V, width: CGFloat = 240) -> CGFloat {
 		let hosting = NSHostingView(rootView: view)
@@ -260,5 +315,202 @@ final class NodeViewTests: XCTestCase {
 		XCTAssertTrue(
 			age.dropLast().allSatisfy(\.isNumber) && age.count > 1,
 			"age \(age) is digits plus a bucket", file: file, line: line)
+	}
+}
+
+// MARK: - Framing
+
+/// Every materialised node view is exactly the size of the rect the layout
+/// reserved for it.
+///
+/// `.position` centres a view on a point, so a view left to its intrinsic
+/// size does not become a smaller node — it paints over its neighbours. The
+/// render for the 2026-09-04 fix pass showed an agent row across its own lead
+/// card, hiding the mission number line: the rows were placed on 40 pt rects
+/// and drew 85 pt tall, and the leader card was positioned with no frame at
+/// all. Sizes are measured the way AppKit measures them,
+/// `NSHostingView.fittingSize`, against the same `SpineMetrics` the placement
+/// uses, and the worst content each view can draw (a two-line mission name, a
+/// two-line attention note, a two-line task, an activity line) is included so
+/// the rect holds the biggest node, not the smallest.
+@MainActor
+final class NodeFramingTests: XCTestCase {
+	private let metrics = SpineMetrics.standard
+
+	private func measure(_ view: some View) -> CGSize {
+		NSHostingView(rootView: view.fixedSize()).fittingSize
+	}
+
+	func testLeaderCardIsTheSizeOfItsPlacementRect() {
+		let index = SpineIndex(
+			missions: [], pxPerHour: 48, maxPitch: 320)
+		let rect = SpinePlacement.leaderRect(
+			index: index, scrollX: 0,
+			viewport: CGRect(x: 0, y: 0, width: 1600, height: 1000),
+			spineY: 500)
+		for name in ["Ada", "Hollis", "Bartholomew Winterbourne"] {
+			for mode in [LeaderMode.lead, .leadPlus] {
+				XCTAssertEqual(
+					measure(LeaderCardView(name: name, mode: mode, selected: false)),
+					rect.size,
+					"the leader card at Now is its rect, whatever the name")
+			}
+		}
+	}
+
+	func testLeadCardsAreTheSizeOfTheirPlacementRects() {
+		let cases: [(String, MissionState, String?)] = [
+			("Payments regression", .running, nil),
+			("Remove every legacy feature flag from the checkout", .running, nil),
+			("settings migration", .blocked, "Which API should the widget use?"),
+			(
+				"Remove every legacy feature flag from the checkout", .blocked,
+				"Which API should the widget use for partial captures, refunds or voids?"
+			),
+		]
+		for (name, state, attention) in cases {
+			let mission = makeMission(
+				number: 311, name: name, state: state, attention: attention)
+			let model = LeadCardModel(
+				mission: mission, lead: makeAgent(name: "Tamsin"),
+				leaderName: "Hollis", now: baseNow)
+			let size = measure(LeadCardView(
+				model: model, emphasis: 1, selected: false))
+			XCTAssertEqual(size.width, metrics.leadCardWidth)
+			XCTAssertEqual(
+				size.height, metrics.cardHeight(attention: attention != nil),
+				"\(name) must fit the rect its column reserved")
+		}
+	}
+
+	func testClosedMissionsDrawTheCollapsedNodeAtItsRect() {
+		let mission = makeMission(
+			number: 296, name: "Slack digest bot", state: .closed)
+		let model = LeadCardModel(
+			mission: mission, lead: nil, leaderName: "Hollis", now: baseNow)
+		XCTAssertEqual(
+			measure(LeadCardView(
+				model: model, emphasis: 0.55, selected: false, collapsed: true)),
+			CGSize(
+				width: metrics.closedNodeWidth,
+				height: metrics.closedNodeHeight))
+	}
+
+	func testAgentRowsAreTheSizeOfTheirStackRects() {
+		let cases: [(String, AgentState, String?)] = [
+			("Task.", .completed, nil),
+			("Rework the socket reconnect backoff and every one of its tests", .completed, nil),
+			("Seeded task 1.", .running, "k6 at 400 rps: p95 212 ms"),
+			(
+				"Rework the socket reconnect backoff and every one of its tests",
+				.running,
+				"k6 at 400 rps: p95 212 ms, no 429s yet. Raising to 600."
+			),
+		]
+		for (task, state, activity) in cases {
+			let agent = makeAgent(
+				name: "Bartholomew", task: task, state: state,
+				activity: activity)
+			let stack = AgentStack.build(agents: [agent], expanded: false, metrics: metrics)
+			let item = try? XCTUnwrap(stack.items.first)
+			let size = measure(AgentRowView(
+				model: AgentRowModel(agent: agent), emphasis: 1,
+				selected: false))
+			XCTAssertEqual(size.width, metrics.agentRowWidth)
+			XCTAssertEqual(size.height, item?.height)
+			XCTAssertEqual(
+				size.height, metrics.rowHeight(running: state == .running))
+		}
+	}
+
+	func testTheCompletedChipIsTheSizeOfItsStackRect() {
+		let size = measure(CompletedChip(count: 7, expanded: false, action: {}))
+		XCTAssertEqual(size.height, metrics.chipHeight)
+	}
+
+	/// No two columns paint through each other, whatever order the permanent
+	/// numbers arrive in. The side is a pure function of the number, so a
+	/// sequence whose numbers do not run in time order puts two neighbours
+	/// on the same side; the spacing rule gives those the wider column.
+	func testNeighbouringColumnsNeverOverlap() throws {
+		let base = baseNow
+		// Numbers deliberately out of time order: #3 then #1 are neighbours
+		// and both sit above the spine.
+		let numbers = [5, 4, 3, 1, 2]
+		let missions = numbers.enumerated().map { i, number in
+			makeMission(
+				number: number, name: "mission \(number)",
+				createdAt: base.addingTimeInterval(Double(i) * 600))
+		}
+		let agents = Dictionary(uniqueKeysWithValues: missions.map { mission in
+			(mission.id, [
+				makeAgent(name: "a\(mission.number)", task: "Task.", state: .running),
+			])
+		})
+		// Every zoom, not only the default one: `maxPitch` shrinks with zoom
+		// and floors at the 120 pt minimum column, so a cap under the 230 pt
+		// same-side pitch used to squash two same-side columns into each
+		// other (⌘- ⌘- from 100% reaches maxPitch 204.8).
+		let zooms: [Double] = [
+			SpineViewportState.defaultPxPerHour,
+			SpineViewportState.defaultPxPerHour * 0.8 * 0.8,
+			SpineViewportState.defaultPxPerHour * 0.8 * 0.8 * 0.8 * 0.8,
+			SpineViewportState.minPxPerHour,
+		]
+		for pxPerHour in zooms {
+			let index = SpineIndex(
+				missions: missions, pxPerHour: pxPerHour,
+				maxPitch: SpineViewportState.maxPitch(for: pxPerHour))
+			let placed = SpinePlacement.place(
+				index: index, agents: agents, range: 0 ..< index.count,
+				scrollX: 0,
+				viewport: CGRect(x: 0, y: 0, width: 4000, height: 1000))
+			var painted: [(Int, CGRect)] = []
+			for column in placed.columns {
+				painted.append((column.number, column.card))
+				for row in column.rows { painted.append((column.number, row)) }
+			}
+			for (i, a) in painted.enumerated() {
+				for b in painted[(i + 1)...] where a.0 != b.0 {
+					XCTAssertFalse(
+						a.1.intersects(b.1),
+						"#\(a.0) and #\(b.0) paint through each other "
+							+ "at \(pxPerHour) px/h")
+				}
+			}
+		}
+	}
+
+	/// The stack starts `leadGap` past the card's far edge and never
+	/// overlaps it, on both sides of the spine.
+	func testTheStackClearsItsLeadCard() {
+		let agents = (0 ..< 3).map { i in
+			makeAgent(
+				name: "a\(i)", task: "Task \(i).",
+				state: i == 0 ? .running : .completed)
+		}
+		let missions = [
+			makeMission(number: 310, name: "even", state: .running),
+			makeMission(number: 311, name: "odd", state: .running),
+		]
+		let index = SpineIndex(
+			missions: missions, pxPerHour: 48, maxPitch: 320)
+		let placed = SpinePlacement.place(
+			index: index,
+			agents: [missions[0].id: agents, missions[1].id: agents],
+			range: 0 ..< index.count, scrollX: 0,
+			viewport: CGRect(x: 0, y: 0, width: 1600, height: 1000))
+		for column in placed.columns {
+			for row in column.rows {
+				XCTAssertFalse(
+					row.intersects(column.card),
+					"#\(column.number)'s stack must clear its own card")
+			}
+			guard let nearest = column.rows.first else { continue }
+			let gap = column.side == .above
+				? column.card.minY - nearest.maxY
+				: nearest.minY - column.card.maxY
+			XCTAssertEqual(gap, SpineMetrics.standard.leadGap)
+		}
 	}
 }

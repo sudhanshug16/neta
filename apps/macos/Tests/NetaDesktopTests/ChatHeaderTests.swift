@@ -91,6 +91,81 @@ final class ChatHeaderTests: XCTestCase {
 			"Codex · gpt-5-codex · read-write · Blocked")
 	}
 
+	/// The header prints one name line. It used to print the leader twice —
+	/// once as the path, once as an identity row — so count the occurrences.
+	func testHeaderPrintsTheNameExactlyOnce() {
+		let store = store()
+		for selection in [Selection.leader, .mission("m304"), .agent("ag-thane")] {
+			let model = ChatHeaderModel.make(selection: selection, store: store)
+			let name = model.name
+			XCTAssertFalse(name.isEmpty)
+			XCTAssertEqual(
+				model.labels.filter { $0 == name }.count, 1,
+				"\(selection) prints \(name) once")
+		}
+	}
+
+	/// The model above cannot see a second name line: `labels` is built as
+	/// segments + tag + subtitle + Details, so it prints the name once by
+	/// construction. The deviation was in the view — the leader printed once
+	/// as the path and once as an identity row under it — so pin the view's
+	/// structure as well: one primary-weight name Text, one avatar, no row
+	/// that prints the identity again.
+	func testHeaderViewDrawsOneNameLineAndNoIdentityRow() throws {
+		let source = try chatHeaderViewSource()
+		XCTAssertEqual(
+			occurrences(of: "Theme.text(14, .semibold)", in: source), 1,
+			"exactly one primary-weight name Text")
+		XCTAssertEqual(
+			occurrences(of: "nameLine(", in: source), 2,
+			"the name line is declared once and drawn once")
+		for identityRow in ["Text(model.name)", "model.name)", "SigilView", "monogram"] {
+			XCTAssertFalse(
+				source.contains(identityRow),
+				"no identity row: the path's last segment is the name")
+		}
+		XCTAssertEqual(
+			occurrences(of: "Circle()", in: source), 1,
+			"one avatar circle, no second monogram")
+		XCTAssertEqual(occurrences(of: "crown.fill", in: source), 1)
+	}
+
+	/// The leader header, line by line: avatar, name, tag, subtitle, Details.
+	func testLeaderHeaderLabels() {
+		let model = ChatHeaderModel.make(selection: .leader, store: store())
+		XCTAssertEqual(model.labels, [
+			"Halden", "WORKSPACE LEADER",
+			"Claude · claude-opus-5 · Running", "Details",
+		])
+		XCTAssertEqual(model.name, "Halden")
+		XCTAssertTrue(model.showsAvatar, "the leader gets the violet crown avatar")
+	}
+
+	/// An agent header: the path is the name line, no tag, no avatar.
+	func testAgentHeaderLabels() {
+		let model = ChatHeaderModel.make(selection: .agent("ag-thane"), store: store())
+		XCTAssertEqual(model.labels, [
+			"Halden", "#304 Rate limiter on /search", "Thane",
+			"Codex · gpt-5-codex · read-only · Running", "Details",
+		])
+		XCTAssertFalse(model.showsLeaderTag)
+		XCTAssertFalse(model.showsAvatar)
+	}
+
+	/// Revision 2 removed Stop and the mode control from this header.
+	func testHeaderHasNoStopOrModeControl() throws {
+		let source = try chatHeaderViewSource()
+		XCTAssertFalse(source.contains("\"Stop\""), "Stop lives on the composer")
+		XCTAssertFalse(source.contains("Lead++"), "the mode control lives on the composer")
+		XCTAssertTrue(source.contains("crown.fill"), "the leader avatar carries a crown")
+		XCTAssertTrue(source.contains("Theme.Metric.headerAvatar"), "28 pt avatar")
+		// Details is a control on the chat panel, so it names the control
+		// weight: a bare capsule silhouette would float (Glass.swift).
+		XCTAssertTrue(
+			source.contains("netaControlGlass(.capsule"), "Details is a glass capsule")
+		XCTAssertFalse(source.contains("netaFloatingGlass"), "Details sits on the panel")
+	}
+
 	func testStripVisibleOnlyForLeaderInLeadPlus() {
 		let lead = leader(mode: .lead)
 		let leadPlus = leader(mode: .leadPlus)
@@ -124,6 +199,40 @@ final class ChatHeaderTests: XCTestCase {
 	}
 
 	// MARK: - Helpers
+
+	private func occurrences(of token: String, in contents: String) -> Int {
+		contents.components(separatedBy: token).count - 1
+	}
+
+	/// Revision 3 surface 2 gives the strip violet glass at 0.18. The tone is
+	/// a token, not a literal restated in the view.
+	func testLeadPlusStripTakesItsToneFromGlass() throws {
+		let source = try chatSource(named: "LeadPlusStrip.swift")
+		XCTAssertTrue(
+			source.contains("tint: Theme.Glass.leadPlusStrip"),
+			"the strip takes the 0.18 violet from Theme.Glass")
+		XCTAssertFalse(source.contains("opacity(0.18)"), "no restated literal")
+		// Nested inside the chat panel, so no outer shadow.
+		XCTAssertFalse(source.contains("netaFloatingGlass"), "the strip sits on the chat panel")
+	}
+
+	private func chatSource(named name: String) throws -> String {
+		var url = URL(fileURLWithPath: #filePath, isDirectory: false)
+			.deletingLastPathComponent()
+		url.deleteLastPathComponent()
+		url.deleteLastPathComponent()
+		url.appendPathComponent("Sources/NetaDesktop/Chat/\(name)")
+		return try String(contentsOf: url, encoding: .utf8)
+	}
+
+	private func chatHeaderViewSource() throws -> String {
+		var url = URL(fileURLWithPath: #filePath, isDirectory: false)
+			.deletingLastPathComponent()
+		url.deleteLastPathComponent()
+		url.deleteLastPathComponent()
+		url.appendPathComponent("Sources/NetaDesktop/Chat/ChatHeaderView.swift")
+		return try String(contentsOf: url, encoding: .utf8)
+	}
 
 	private func store() -> Store {
 		let store = Store()

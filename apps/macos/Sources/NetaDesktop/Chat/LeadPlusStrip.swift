@@ -41,7 +41,7 @@ public struct LeadPlusStrip: View {
 		.padding(.horizontal, 10)
 		.padding(.vertical, 6)
 		.frame(maxWidth: .infinity, alignment: .leading)
-		.netaGlass(.rounded(12), tint: Theme.violet.opacity(0.18))
+		.netaGlass(.rounded(12), tint: Theme.Glass.leadPlusStrip)
 		.accessibilityLabel(LeadPlusStripModel.text(minutes: minutes, mission: mission))
 	}
 }

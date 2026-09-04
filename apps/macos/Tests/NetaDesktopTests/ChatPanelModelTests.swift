@@ -81,11 +81,162 @@ final class ChatPanelModelTests: XCTestCase {
 		XCTAssertEqual(model.composer.button, .stop, "the rebuilt transcript is followed too")
 	}
 
+	// MARK: - Survival across live updates (FIXPASS blocker)
+
+	/// The panel model is owned by `RootView` in `@State` and outlives every
+	/// body pass, so it has to re-resolve itself instead of being rebuilt.
+	/// The leader — and with it the session id — arrives with the first
+	/// snapshot, long after the panel is built, and the selection is
+	/// `.leader` throughout: keyed on the selection alone the panel keeps a
+	/// transcript for session "" for the life of the window.
+	func testTheSessionArrivingWithTheSnapshotRebuildsTheTranscript() {
+		let empty = Store()
+		let shell = ShellState()
+		let model = ChatPanelModel(
+			client: FixtureNodeClient(), store: empty, shell: shell)
+		XCTAssertEqual(model.sessionId, "", "no leader yet, no session")
+		let before = ObjectIdentifier(model.transcript)
+
+		empty.replace(snapshot: snapshot())
+		XCTAssertEqual(model.currentSessionId, "s-leader")
+		model.sync()
+
+		XCTAssertEqual(model.sessionId, "s-leader")
+		XCTAssertNotEqual(ObjectIdentifier(model.transcript), before)
+		XCTAssertEqual(model.selection, .leader, "the selection never moved")
+	}
+
+	/// A click on the canvas or a chip in the mission bar moves
+	/// `shell.selection` without going through `model.select`.
+	func testAnExternalSelectionChangeReachesThePanel() {
+		let model = ChatPanelModel(
+			client: FixtureNodeClient(), store: store(), shell: ShellState())
+		model.shell.select(.agent("ag-thane"))
+		model.sync()
+		XCTAssertEqual(model.selection, .agent("ag-thane"))
+		XCTAssertEqual(model.sessionId, "s-ag-thane")
+	}
+
+	/// And a store update that moves neither the selection nor its session
+	/// leaves everything alone: the draft, the open inspector and the
+	/// transcript all survive, which is exactly what a rebuilt-in-`body`
+	/// model threw away on the first live notification.
+	func testAStoreUpdateKeepsTheDraftAndTheInspector() {
+		let store = store()
+		let model = ChatPanelModel(
+			client: FixtureNodeClient(), store: store, shell: ShellState())
+		model.composer.draft = "Close #305 once the checks pass."
+		model.isDetailsOpen = true
+		let transcript = ObjectIdentifier(model.transcript)
+
+		store.apply(notification: .state(StateChange(
+			kind: .mission,
+			record: .mission(Mission(
+				id: "m1", number: 1, workspaceId: workspaceId, machineId: "m1",
+				name: "socket reconnect", objective: "Objective.", changes: [],
+				lead: .leader, agentIds: [], access: .readOnly, worktree: nil,
+				state: .running, attention: nil, createdAt: base, closedAt: nil,
+				disposition: nil, closeReason: nil, integration: nil,
+				continuesMissionId: nil)))))
+		model.sync()
+
+		XCTAssertEqual(model.composer.draft, "Close #305 once the checks pass.")
+		XCTAssertTrue(model.isDetailsOpen)
+		XCTAssertEqual(ObjectIdentifier(model.transcript), transcript)
+	}
+
+	/// `send` shows the person's own message at once. The Node opens the
+	/// user turn with no blocks at all, so the prompt was invisible until
+	/// the agent answered.
+	func testSendingEchoesThePersonsOwnMessage() async {
+		let model = ChatPanelModel(
+			client: FixtureNodeClient(), store: store(), shell: ShellState())
+		model.composer.draft = "  Void them. Merge #305 when green.  "
+		await model.composer.send()
+		XCTAssertEqual(
+			model.transcript.turns.map { $0.blocks.map(\.text) },
+			[["Void them. Merge #305 when green."]])
+		XCTAssertEqual(model.transcript.turns[0].role, .user)
+		XCTAssertEqual(model.composer.draft, "")
+
+		// And when the Node delivers the same text itself, it is shown once.
+		model.transcript.apply(TurnChange(
+			sessionId: "s-leader",
+			turn: Turn(
+				id: "t-user", sessionId: "s-leader", startedAt: base,
+				endedAt: base, role: .user, cancelled: nil),
+			block: Block(
+				turnId: "t-user", seq: 0, at: base, role: .user, kind: .text,
+				text: "Void them. Merge #305 when green.", data: nil)))
+		XCTAssertEqual(
+			model.transcript.turns.map { $0.blocks.map(\.text) },
+			[["Void them. Merge #305 when green."]])
+	}
+
+	// MARK: - Checkpoint routing (10 fills the router, 11 consumes it)
+
+	func testACheckpointOnATurnScrollsTheTranscriptToIt() async {
+		let model = ChatPanelModel(
+			client: FixtureNodeClient(), store: store(), shell: ShellState())
+		model.transcript.apply(TurnChange(
+			sessionId: "s-leader",
+			turn: Turn(
+				id: "t-pinned", sessionId: "s-leader", startedAt: base,
+				endedAt: base, role: .agent, cancelled: nil),
+			block: Block(
+				turnId: "t-pinned", seq: 0, at: base, role: .agent, kind: .text,
+				text: "pinned", data: nil)))
+
+		let router = CheckpointRouter()
+		router.open(Checkpoint(
+			id: "9", seq: 9, at: base, kind: .userPinned, icon: .diamond,
+			label: "Pinned message", relative: "3h ago", x: 100,
+			missionId: nil, sessionId: "s-leader", turnId: "t-pinned"))
+		guard let action = router.consume() else {
+			return XCTFail("the router staged nothing")
+		}
+		await model.handle(action)
+
+		XCTAssertEqual(model.transcript.consumeScroll()?.turnId, "t-pinned")
+	}
+
+	func testACheckpointWithNoTurnOpensTheDecisionRecord() async {
+		let store = store()
+		store.apply(notification: .state(StateChange(
+			kind: .mission,
+			record: .mission(Mission(
+				id: "m1", number: 1, workspaceId: workspaceId, machineId: "m1",
+				name: "socket reconnect", objective: "Objective.", changes: [],
+				lead: .leader, agentIds: [], access: .readOnly, worktree: nil,
+				state: .running, attention: nil, createdAt: base, closedAt: nil,
+				disposition: nil, closeReason: nil, integration: nil,
+				continuesMissionId: nil)))))
+		let model = ChatPanelModel(
+			client: FixtureNodeClient(), store: store, shell: ShellState())
+		let router = CheckpointRouter()
+		router.open(Checkpoint(
+			id: "4", seq: 4, at: base, kind: .leaderModeChanged, icon: .bolt,
+			label: "Lead++ · #1", relative: "14m ago", x: 100,
+			missionId: "m1", sessionId: nil, turnId: nil))
+		guard let action = router.consume() else {
+			return XCTFail("the router staged nothing")
+		}
+		await model.handle(action)
+
+		XCTAssertTrue(model.isDetailsOpen, "Details opens on the decision record")
+		XCTAssertEqual(model.selection, .mission("m1"))
+	}
+
 	// MARK: - Helpers
 
 	private func store() -> Store {
 		let store = Store()
-		store.replace(snapshot: Snapshot(
+		store.replace(snapshot: snapshot())
+		return store
+	}
+
+	private func snapshot() -> Snapshot {
+		Snapshot(
 			machine: Machine(id: "m1", name: "mac-studio", createdAt: base),
 			workspaces: [Workspace(
 				id: workspaceId, kind: .git, name: "NoScrubs",
@@ -106,7 +257,6 @@ final class ChatPanelModelTests: XCTestCase {
 				stateBefore: nil, activity: nil, pendingQuestion: nil,
 				startedAt: base, endedAt: nil, outcome: nil)],
 			completedCounts: [:], events: [], attention: [],
-			windowDays: 14, protocolVersion: 1, at: base))
-		return store
+			windowDays: 14, protocolVersion: 1, at: base)
 	}
 }

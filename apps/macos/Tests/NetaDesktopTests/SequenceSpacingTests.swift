@@ -5,6 +5,7 @@ import XCTest
 @testable import NetaDesktop
 
 /// T10.1 contract: the pure sequence gap rule.
+@MainActor
 final class SequenceSpacingTests: XCTestCase {
 	private let hourMs = 3_600_000.0
 
@@ -53,6 +54,87 @@ final class SequenceSpacingTests: XCTestCase {
 			],
 			pxPerHour: 48)
 		XCTAssertEqual(xs, [0, 120])
+	}
+
+	/// Revision 4 rests the 120 pt minimum column on alternation
+	/// ("Neighbours alternate sides, so 120 px never overlaps 220 px
+	/// cards"), and the side is a pure function of the permanent number, so
+	/// two neighbours share a side whenever the numbers do not run in time
+	/// order. At 120 pt their 210 pt cards and 220 pt stacks draw through
+	/// each other — the fix-pass render showed exactly that, an agent row of
+	/// one column cutting the state label off its neighbour.
+	func testSameSideNeighboursGetTheWiderColumn() {
+		let sameSide = SequenceSpacing.spacing(
+			items: [
+				mission("m3", hoursAgo: 1 / 60, number: 3),
+				mission("m1", hoursAgo: 0, number: 1),
+			],
+			pxPerHour: 48)
+		XCTAssertEqual(sameSide, [0, SequenceSpacing.defaultSameSidePitch])
+		XCTAssertGreaterThanOrEqual(
+			SequenceSpacing.defaultSameSidePitch,
+			SpineMetrics.standard.agentRowWidth,
+			"wider than the widest node, so neither stack reaches the other")
+
+		let alternating = SequenceSpacing.spacing(
+			items: [
+				mission("m2", hoursAgo: 1 / 60, number: 2),
+				mission("m1", hoursAgo: 0, number: 1),
+			],
+			pxPerHour: 48)
+		XCTAssertEqual(alternating, [0, 120], "ordinary sequences are untouched")
+
+		// A checkpoint run between two same-side missions widens to the same
+		// floor, not to the alternating one.
+		let withCheckpoints = SequenceSpacing.spacing(
+			items: [
+				mission("m3", hoursAgo: 1 / 60, number: 3),
+				.checkpoint(eventSeq: 1, at: -0.9 / 60 * 3_600_000),
+				mission("m1", hoursAgo: 0, number: 1),
+			],
+			pxPerHour: 48)
+		XCTAssertEqual(
+			withCheckpoints[2], SequenceSpacing.defaultSameSidePitch)
+	}
+
+	/// The same-side floor is not a default-zoom luxury: `maxPitch` scales
+	/// with zoom (`SpineViewportState.maxPitch(for:)`) and floors at the
+	/// 120 pt minimum column, so two zoom-outs put it at 204.8 — below the
+	/// 230 pt same-side pitch. Clamping the cap after the floor emitted
+	/// 204.8 for a same-side pair and drew 220 pt agent rows 15 pt through
+	/// each other. The floor wins.
+	func testTheSameSideFloorSurvivesAMaxPitchBelowIt() {
+		let floor = SequenceSpacing.defaultSameSidePitch
+		// 64% time zoom: pxPerHour 30.72, maxPitch 320 * 0.64.
+		for maxPitch in [204.8 as CGFloat, SpineViewportState.minPitch, 60] {
+			let sameSide = SequenceSpacing.spacing(
+				items: [
+					mission("m3", hoursAgo: 6, number: 3),
+					mission("m1", hoursAgo: 3, number: 1),
+				],
+				pxPerHour: 30.72, maxPitch: maxPitch)
+			XCTAssertEqual(
+				sameSide, [0, floor],
+				"the same-side floor holds at maxPitch \(maxPitch)")
+			// Alternating neighbours still collapse to the minimum column.
+			let alternating = SequenceSpacing.spacing(
+				items: [
+					mission("m2", hoursAgo: 6, number: 2),
+					mission("m1", hoursAgo: 3, number: 1),
+				],
+				pxPerHour: 30.72, maxPitch: maxPitch)
+			XCTAssertEqual(alternating, [0, 120])
+		}
+	}
+
+	/// `SpineViewportState.maxPitch(for:)` really does go under the same-side
+	/// floor at the zoom two ⌘- presses reach, which is what made the clamp
+	/// order load-bearing.
+	func testTwoZoomOutsPutMaxPitchUnderTheSameSideFloor() {
+		let zoomed = SpineViewportState.defaultPxPerHour * 0.8 * 0.8
+		XCTAssertLessThan(
+			SpineViewportState.maxPitch(for: zoomed),
+			SequenceSpacing.defaultSameSidePitch)
 	}
 
 	func testThreeWeeksApartSitsExactlyMaxPitch() {

@@ -11,6 +11,96 @@ final class SpinePlacementTests: XCTestCase {
 	private let base = Date(timeIntervalSince1970: 1_780_315_200)
 	private let viewport = CGRect(x: 0, y: 0, width: 1600, height: 1000)
 
+	// MARK: - revealScrollX (T10.3)
+
+	/// The pure reveal rule, which only `SpineCanvasTests` exercised through
+	/// the view: a column already inside the usable band moves nothing, one
+	/// off either edge is centred in the band, and the result is clamped so
+	/// a jump can never push the leader off Now.
+	func testRevealScrollXCases() throws {
+		let missions = (0 ..< 10).map { i in
+			makeMission(
+				id: "m\(i)", number: i + 1,
+				createdAt: base.addingTimeInterval(Double(i - 9) * 86_400))
+		}
+		let index = SpineIndex(
+			missions: missions, pxPerHour: 48,
+			maxPitch: 320)
+		let trailing: CGFloat = 450
+		let right = viewport.maxX - trailing
+		let half = metrics.leadCardWidth / 2
+		func reveal(_ id: MissionId, from scrollX: CGFloat) -> CGFloat? {
+			SpinePlacement.revealScrollX(
+				mission: id, index: index, scrollX: scrollX,
+				viewport: viewport, trailingInset: trailing)
+		}
+		func screenX(_ id: MissionId, at scrollX: CGFloat) throws -> CGFloat {
+			let position = try XCTUnwrap(
+				(0 ..< index.count).first { index.mission($0)?.id == id })
+			return index.x(position) - scrollX + viewport.minX
+		}
+
+		// Already in view: nothing moves.
+		let live = SpinePlacement.liveScrollX(
+			index: index, viewport: viewport, trailingInset: trailing)
+		let newest = try XCTUnwrap(missions.last).id
+		let newestX = try screenX(newest, at: live)
+		XCTAssertGreaterThanOrEqual(newestX - half, viewport.minX)
+		XCTAssertLessThanOrEqual(newestX + half, right)
+		XCTAssertNil(reveal(newest, from: live), "a column in the band never moves")
+
+		// Off the left edge: centred in the usable band.
+		let oldest = try XCTUnwrap(missions.first).id
+		XCTAssertLessThan(try screenX(oldest, at: live), viewport.minX + half)
+		let toOldest = try XCTUnwrap(reveal(oldest, from: live))
+		XCTAssertLessThan(toOldest, live, "the view moves back in time")
+		let landed = try screenX(oldest, at: toOldest)
+		XCTAssertLessThanOrEqual(landed + half, right, "inside the usable band")
+		// The oldest item sits at content x 0 and every node is centred on
+		// that anchor, so centring it in the band wants a negative `scrollX`
+		// and the clamp stops where the item's LEFT EDGE meets the band, not
+		// where its anchor does: the whole column is readable. Flooring at 0
+		// left half of the oldest node off the window edge for good.
+		let overhang = SpinePlacement.halfWidth(of: 0, in: index)
+		XCTAssertEqual(overhang, metrics.agentRowWidth / 2)
+		XCTAssertEqual(toOldest, -overhang)
+		XCTAssertEqual(landed, viewport.minX + overhang)
+		XCTAssertGreaterThanOrEqual(
+			landed - overhang, viewport.minX,
+			"the oldest item's left edge is on screen")
+
+		// Off the right edge, from a view scrolled back: forward again, and
+		// never past the live edge.
+		let toNewest = try XCTUnwrap(reveal(newest, from: toOldest))
+		XCTAssertGreaterThan(toNewest, toOldest)
+		XCTAssertLessThanOrEqual(toNewest, live, "a jump cannot push the leader off Now")
+
+		// Clamped at the far end: the oldest cannot pan further back than
+		// its own left edge, and asking twice is a fixpoint.
+		XCTAssertGreaterThanOrEqual(toOldest, -overhang)
+		XCTAssertNil(
+			reveal(oldest, from: toOldest),
+			"the same request twice moves nothing")
+
+		// Unknown mission, and a usable band of zero width: nothing to do.
+		XCTAssertNil(reveal("nope", from: live))
+		XCTAssertNil(
+			SpinePlacement.revealScrollX(
+				mission: newest, index: index, scrollX: live,
+				viewport: viewport, trailingInset: viewport.width),
+			"no usable band, no reveal")
+	}
+
+	/// An empty index has no column to reveal.
+	func testRevealScrollXOnAnEmptyIndex() {
+		let index = SpineIndex(
+			missions: [], pxPerHour: 48,
+			maxPitch: 320)
+		XCTAssertNil(SpinePlacement.revealScrollX(
+			mission: "m1", index: index, scrollX: 0, viewport: viewport,
+			trailingInset: 450))
+	}
+
 	private func makeMission(
 		id: String, number: Int, state: MissionState = .running,
 		attention: String? = nil, createdAt: Date

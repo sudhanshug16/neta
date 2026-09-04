@@ -1,13 +1,52 @@
 import SwiftUI
 
+/// What the chat header prints (11-desktop-chat T11.5).
+///
+/// One name line, and one only: the path from `ChatPath.segments`, whose last
+/// segment *is* the selected identity. There is no second identity row, so a
+/// name can never appear twice. `labels` is the header's text in reading
+/// order, which is what the tests assert against.
+public struct ChatHeaderModel: Equatable, Sendable {
+	public static let leaderTag = "WORKSPACE LEADER"
+	public static let detailsLabel = "Details"
+
+	public let segments: [ChatPathSegment]
+	public let subtitle: String
+	public let showsLeaderTag: Bool
+
+	@MainActor public static func make(selection: Selection, store: Store) -> ChatHeaderModel {
+		ChatHeaderModel(
+			segments: ChatPath.segments(for: selection, store: store),
+			subtitle: ChatPath.subtitle(for: selection, store: store),
+			showsLeaderTag: ChatPath.showsLeaderTag(for: selection))
+	}
+
+	/// The violet crown avatar belongs to the workspace leader; an agent or
+	/// mission is identified by its path alone (PAPER-SPINE artboard 2).
+	public var showsAvatar: Bool { showsLeaderTag }
+
+	/// The selected identity: the last path segment.
+	public var name: String { segments.last?.label ?? "" }
+
+	/// Every line the header prints, in order.
+	public var labels: [String] {
+		var out = segments.map(\.label)
+		if showsLeaderTag { out.append(Self.leaderTag) }
+		out.append(subtitle)
+		out.append(Self.detailsLabel)
+		return out
+	}
+}
+
 /// The chat panel header (11-desktop-chat T11.5).
 ///
-/// The path breadcrumb (`ChatPath.segments`), the identity row (avatar, name,
-/// `WORKSPACE LEADER` tag for the leader), the subtitle, and the trailing
-/// `Details` capsule. Earlier path segments are secondary links back to
-/// their selections; only the last is primary 14/600. There is no Stop
-/// button and no mode control here: Stop lives on the composer (T11.6) and
-/// PAPER-SPINE Revision 2 removed both from this header.
+/// A 28 pt violet crown avatar for the leader, then the one name line — the
+/// path, earlier segments secondary links back to their selections, the last
+/// primary 14/600 — the `WORKSPACE LEADER` tag for the leader alone, the
+/// `provider · model · State` subtitle, and a trailing `Details` glass
+/// capsule. There is no Stop button and no mode control here: Stop lives on
+/// the composer (T11.6) and PAPER-SPINE Revision 2 removed both from this
+/// header.
 public struct ChatHeaderView: View {
 	private let selection: Selection
 	private let store: Store
@@ -25,38 +64,42 @@ public struct ChatHeaderView: View {
 	}
 
 	public var body: some View {
-		HStack(alignment: .top, spacing: 8) {
-			VStack(alignment: .leading, spacing: 4) {
-				pathRow
-				identityRow
-				Text(ChatPath.subtitle(for: selection, store: store))
+		let model = ChatHeaderModel.make(selection: selection, store: store)
+		HStack(alignment: .center, spacing: 8) {
+			if model.showsAvatar {
+				avatar
+			}
+			VStack(alignment: .leading, spacing: 3) {
+				nameLine(model)
+				Text(model.subtitle)
 					.font(Theme.text(10, .medium))
 					.foregroundStyle(Theme.textSecondary)
 					.lineLimit(1)
 			}
 			Spacer(minLength: 0)
-			Button { onDetails() } label: {
-				Text("Details")
-					.font(Theme.text(12, .medium))
-					.foregroundStyle(Theme.textPrimary)
-					.padding(.horizontal, 12)
-					.padding(.vertical, 6)
-			}
-			.buttonStyle(.plain)
-			.netaGlass(.capsule)
-			.accessibilityLabel("Show details")
+			detailsButton
 		}
 	}
 
 	// MARK: - Private
 
-	private var segments: [ChatPathSegment] {
-		ChatPath.segments(for: selection, store: store)
+	private var avatar: some View {
+		ZStack {
+			Circle()
+				.fill(Theme.violet)
+				.frame(
+					width: Theme.Metric.headerAvatar,
+					height: Theme.Metric.headerAvatar)
+			Image(systemName: "crown.fill")
+				.font(Theme.text(13, .semibold))
+				.foregroundStyle(Theme.textPrimary)
+		}
+		.accessibilityHidden(true)
 	}
 
-	private var pathRow: some View {
+	private func nameLine(_ model: ChatHeaderModel) -> some View {
 		HStack(spacing: 4) {
-			ForEach(Array(segments.enumerated()), id: \.element.id) { index, segment in
+			ForEach(Array(model.segments.enumerated()), id: \.element.id) { index, segment in
 				if index > 0 {
 					Text("›")
 						.font(Theme.text(14, .regular))
@@ -78,37 +121,26 @@ public struct ChatHeaderView: View {
 					.accessibilityLabel("Open \(segment.label)")
 				}
 			}
-		}
-	}
-
-	private var identityRow: some View {
-		HStack(spacing: 8) {
-			Text(monogram(for: displayName))
-				.font(Theme.text(12, .semibold))
-				.foregroundStyle(Theme.textPrimary)
-				.frame(width: 22, height: 22)
-				.background(Theme.subtleSurface)
-				.clipShape(Circle())
-			Text(displayName)
-				.font(Theme.text(13, .semibold))
-				.foregroundStyle(Theme.textPrimary)
-				.lineLimit(1)
-			if ChatPath.showsLeaderTag(for: selection) {
-				Text("WORKSPACE LEADER")
+			if model.showsLeaderTag {
+				Text(ChatHeaderModel.leaderTag)
 					.font(Theme.text(10, .semibold))
+					.tracking(Theme.Metric.tagTracking)
 					.foregroundStyle(Theme.textSecondary)
+					.lineLimit(1)
 			}
 		}
 	}
 
-	/// The identity name is the head of the path: the leader, the mission's
-	/// `#<number> <name>`, or the agent's name.
-	private var displayName: String {
-		segments.last?.label ?? "Leader"
-	}
-
-	private func monogram(for name: String) -> String {
-		guard let first = name.first else { return "·" }
-		return String(first).uppercased()
+	private var detailsButton: some View {
+		Button { onDetails() } label: {
+			Text(ChatHeaderModel.detailsLabel)
+				.font(Theme.text(12, .medium))
+				.foregroundStyle(Theme.textPrimary)
+				.padding(.horizontal, 12)
+				.frame(minHeight: Theme.Metric.minHitHeight)
+		}
+		.buttonStyle(.plain)
+		.netaControlGlass(.capsule)
+		.accessibilityLabel("Show details")
 	}
 }

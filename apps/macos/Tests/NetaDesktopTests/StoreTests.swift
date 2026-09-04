@@ -343,6 +343,60 @@ final class StoreTests: XCTestCase {
 			nextCursor: nil, prevCursor: nil)
 	}
 
+	/// The Node lists every open workspace in one snapshot, so the shell's
+	/// own views read the current workspace's slice: two workspaces used to
+	/// interleave on the spine and put two `#1`s in the mission bar.
+	func testCurrentWorkspaceSlicesMissionsAgentsAndEvents() {
+		let store = Store()
+		let other = "git:github.com/acme/other"
+		var snapshot = snapshot(
+			missions: [mission(
+				id: "m1", number: 1, state: .running, createdAt: base)],
+			agents: [agent(id: "a1", missionId: "m1", sessionId: "s-a1")],
+			events: [event(seq: 1, missionId: "m1")])
+		snapshot = Snapshot(
+			machine: snapshot.machine,
+			workspaces: snapshot.workspaces + [Workspace(
+				id: other, kind: .git, name: "other", remote: nil, roots: [],
+				createdAt: base)],
+			leaders: snapshot.leaders,
+			missions: snapshot.missions + [Mission(
+				id: "m2", number: 1, workspaceId: other, machineId: "m1",
+				name: "theirs", objective: "Objective.", changes: [],
+				lead: .leader, agentIds: [], access: .readOnly, worktree: nil,
+				state: .running, attention: nil, createdAt: base,
+				closedAt: nil, disposition: nil, closeReason: nil,
+				integration: nil, continuesMissionId: nil)],
+			hasOlder: false,
+			agents: snapshot.agents + [Agent(
+				id: "a2", missionId: "m2", workspaceId: other, name: "Zed",
+				task: "Task.", access: .readOnly, provider: "fake",
+				model: "test-model", skills: [], sessionId: "s-a2",
+				canSpawn: false, state: .running, stateBefore: nil,
+				activity: nil, pendingQuestion: nil, startedAt: base,
+				endedAt: nil, outcome: nil)],
+			completedCounts: [:],
+			events: snapshot.events + [Event(
+				seq: 2, at: base, workspaceId: other, kind: .missionCreated,
+				missionId: "m2", agentId: nil, sessionId: nil, turnId: nil,
+				data: [:])],
+			attention: [], windowDays: 14, protocolVersion: 1, at: base)
+		store.replace(snapshot: snapshot)
+
+		XCTAssertEqual(store.missions.count, 2, "the cache keeps both")
+		XCTAssertEqual(store.currentMissions.map(\.id), ["m1"])
+		XCTAssertEqual(store.currentAgentsByMission["m1"]?.map(\.id), ["a1"])
+		XCTAssertNil(store.currentAgentsByMission["m2"])
+		XCTAssertEqual(store.currentEvents.map(\.seq), [1])
+
+		store.setCurrentWorkspace(other)
+		XCTAssertEqual(store.currentMissions.map(\.id), ["m2"])
+		XCTAssertEqual(store.currentAgentsByMission["m2"]?.map(\.id), ["a2"])
+		XCTAssertEqual(store.currentEvents.map(\.seq), [2])
+	}
+
+	// MARK: - Helpers
+
 	private func snapshot(
 		machineId: MachineId = "m1",
 		leaderSession: SessionId = "s-leader",

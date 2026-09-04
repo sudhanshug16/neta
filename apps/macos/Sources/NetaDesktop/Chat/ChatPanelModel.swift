@@ -6,8 +6,16 @@ import Observation
 ///
 /// The panel owns nothing itself: `client` is the Node transport, `store`
 /// the app's picture of the Node, `shell` the person's view. `select`
-/// moves the shell and rebuilds both view models for the new selection's
-/// session, so a stale transcript can never linger behind a breadcrumb.
+/// moves the shell and rebuilds the composer for the new selection, plus
+/// the transcript when the selection opens a different session, so a stale
+/// transcript can never linger behind a breadcrumb and a live one is never
+/// replaced by a blank.
+/// `sync` re-resolves the selection and the session against the shell and
+/// the store and rebuilds when either moved, which is how a workspace
+/// switch, a reconnect or the first snapshot (the leader, and with it the
+/// session id, arrives after the panel is built) reaches the panel: the
+/// panel model itself is owned by `RootView` in `@State` and outlives every
+/// body pass, so nothing else rebuilds it.
 /// `scrollTo` forwards to the transcript; `start` tails the live end.
 /// `syncComposer` re-derives the composer's `hasOpenTurn` from the
 /// transcript's open turn and its `isArchived` from the store, and runs
@@ -46,21 +54,97 @@ import Observation
 		syncComposer()
 	}
 
-	/// Moves to `selection` and rebuilds both view models for its session:
-	/// a fresh transcript and a fresh composer, so the panel never shows
-	/// one selection's turns under another's header.
+	/// The session the shell's current selection resolves to right now.
+	/// Reading it tracks both the shell and the store, so a view can observe
+	/// it and call `sync()` when the store brings the leader in or the person
+	/// switches workspace.
+	public var currentSessionId: SessionId {
+		Self.sessionId(for: shell.selection, in: store)
+	}
+
+	/// Moves to `selection` and rebuilds for its session: a fresh composer,
+	/// and a fresh transcript when the session changed, so the panel never
+	/// shows one selection's turns under another's header.
+	///
+	/// The rebuild is conditional: the same selection resolving to the same
+	/// session is left exactly as it is, draft, scroll position and open
+	/// inspector included, so a live update that re-runs this cannot wipe
+	/// what the person is typing.
 	public func select(_ selection: Selection) {
 		shell.select(selection)
+		rebuild(selection: selection, sessionId: Self.sessionId(for: selection, in: store))
+	}
+
+	/// Re-resolves against the shell and the store, rebuilding only when the
+	/// selection or its session moved. The panel view calls it when either
+	/// changes; `select` is the same thing with the shell moved first.
+	public func sync() {
+		rebuild(selection: shell.selection, sessionId: currentSessionId)
+	}
+
+	/// Routes a checkpoint the canvas opened (10-desktop-spine T10.8: the
+	/// canvas fills `CheckpointRouter` and 11 consumes it). A checkpoint on
+	/// a conversation turn scrolls the transcript to that turn; anything
+	/// else opens the decision record in Details, on that mission's
+	/// conversation when the checkpoint names one.
+	public func handle(_ action: CheckpointAction) async {
+		switch action {
+		case .scrollToTurn(let sessionId, let turnId):
+			if sessionId != self.sessionId,
+				let selection = Self.selection(forSession: sessionId, in: store)
+			{
+				select(selection)
+				await start()
+			}
+			await scrollTo(turnId: turnId)
+		case .openDecisionRecord(let missionId, _):
+			if !missionId.isEmpty, store.missionsById[missionId] != nil {
+				select(.mission(missionId))
+			}
+			isDetailsOpen = true
+		}
+	}
+
+	// MARK: - Rebuild
+
+	/// The one rebuild path: a fresh composer for a selection that moved, and
+	/// a fresh transcript only for a session that actually changed.
+	///
+	/// The transcript is deliberately kept when the session id is unchanged.
+	/// A fresh `ChatViewModel` has neither tailed nor subscribed until
+	/// something calls `start()`, and nothing here can call it — `start()` is
+	/// async and this path is not. Every leader-led mission resolves to the
+	/// leader's session, so `.leader -> .mission(m)` used to stop the live
+	/// transcript and install a blank one that never tailed and never
+	/// streamed: the conversation blanked and a prompt sent from that
+	/// composer streamed into nothing. Keeping the live transcript is the
+	/// fix; `transcriptId` is the backstop that makes an unstarted one
+	/// visible to the panel view.
+	///
+	/// The composer is rebuilt whenever the selection or the session moved,
+	/// because its placeholder, its mode control, its provider and its model
+	/// all read the selection, not only the session.
+	private func rebuild(selection: Selection, sessionId sid: SessionId) {
+		guard selection != self.selection || sid != sessionId else { return }
 		self.selection = selection
-		let sid = Self.sessionId(for: selection, in: store)
-		sessionId = sid
-		transcript.stop()
-		transcript = ChatViewModel(client: client, sessionId: sid)
+		if sid != sessionId {
+			sessionId = sid
+			transcript.stop()
+			transcript = ChatViewModel(client: client, sessionId: sid)
+		}
 		composer = ComposerModel(
 			client: client, store: store, sessionId: sid, selection: selection)
 		followOpenTurn()
 		syncComposer()
 	}
+
+	/// Identifies the transcript now installed. `ChatPanel` observes this
+	/// rather than `sessionId`, so that any path which does install a fresh
+	/// `ChatViewModel` restarts it. A session-id watch missed exactly the
+	/// case above: the transcript was replaced while the id stood still, and
+	/// the replacement was left untailed and unstreamed for the life of the
+	/// selection.
+	public var transcriptId: ObjectIdentifier { ObjectIdentifier(transcript) }
 
 	/// Reveals `turnId`, flashing it when it is already loaded; otherwise
 	/// pages back until it arrives. Forwards to the transcript, whose
@@ -90,6 +174,26 @@ import Observation
 		transcript.onOpenTurnChange = { [weak self] in
 			self?.syncComposer()
 		}
+		composer.onSend = { [weak self] text in
+			self?.transcript.echoUserMessage(text)
+		}
+		composer.onSendFailed = { [weak self] text in
+			self?.transcript.retireEcho(text)
+		}
+	}
+
+	/// Which selection owns a session, for a checkpoint that names one.
+	/// The leader first, then agents; an unknown session has no selection.
+	private static func selection(
+		forSession sessionId: SessionId, in store: Store
+	) -> Selection? {
+		if store.leader?.sessionId == sessionId { return .leader }
+		if let agent = store.agentsById.values.first(where: {
+			$0.sessionId == sessionId
+		}) {
+			return .agent(agent.id)
+		}
+		return nil
 	}
 
 	// MARK: - Private

@@ -308,6 +308,21 @@ final class ShellStateTests: XCTestCase {
 		XCTAssertEqual(shell.timeZoom, ShellState.minZoom)
 	}
 
+	/// The Now ask lives on the shell, not on the canvas's own `NowState`:
+	/// the mission bar's Now pill and the debug driver are both outside the
+	/// canvas, and the canvas is the only thing that knows where the live
+	/// edge is.
+	func testJumpToNowBumpsNowRequested() {
+		let shell = ShellState()
+		XCTAssertEqual(shell.nowRequested, 0)
+		shell.jumpToNow()
+		XCTAssertEqual(shell.nowRequested, 1)
+		shell.jumpToNow()
+		XCTAssertEqual(shell.nowRequested, 2)
+		XCTAssertEqual(shell.timeZoom, 1.0, "asking for Now is not a zoom")
+		XCTAssertEqual(shell.fitRequested, 0, "and it is not a Fit")
+	}
+
 	func testFitResetsZoomAndBumpsFitRequested() {
 		let shell = ShellState()
 		XCTAssertEqual(shell.fitRequested, 0)

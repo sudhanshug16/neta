@@ -65,12 +65,19 @@ public struct CheckpointLayer: View {
 					}
 					.padding(.horizontal, 10)
 					.padding(.vertical, 6)
-					.netaGlass(.rounded(10))
+					// PAPER-SPINE Revision 3 "Surfaces to convert" item 5:
+					// the tooltip is a floating glass surface, so it carries
+					// the outer shadow even though its silhouette is the
+					// nested radius. See the elevation rule on `netaGlass`.
+					.netaFloatingGlass(.rounded(Self.tooltipRadius))
 				}
 				.offset(y: 32)
 			}
 		}
 	}
+
+	/// The tooltip's radius.
+	static let tooltipRadius: CGFloat = 10
 
 	/// The 6 pt caret between the icon and its tooltip, pointing up at the
 	/// icon while the tooltip floats beneath the axis.

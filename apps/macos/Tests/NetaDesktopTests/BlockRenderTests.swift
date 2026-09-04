@@ -1,3 +1,4 @@
+import Foundation
 import XCTest
 
 @testable import NetaDesktop
@@ -147,5 +148,67 @@ final class BlockRenderTests: XCTestCase {
 	func testDiffLinesBareContextLine() {
 		let lines = BlockText.diffLines("unchanged")
 		XCTAssertEqual(lines, [DiffLine(kind: .context, text: "unchanged")])
+	}
+
+	// MARK: - TurnView bubbles
+
+	/// PAPER-SPINE Revision 3 surface 2: user bubbles violet glass at 0.35
+	/// with the rim, agent bubbles white at 0.06. The tree carried 0.25 and
+	/// the 0.045 `subtleSurface` instead. The tones are tokens, never
+	/// literals restated in the view.
+	func testTurnBubblesTakeTheirTonesFromGlass() throws {
+		let source = try turnViewSource()
+		XCTAssertTrue(
+			source.contains("tint: Theme.Glass.userBubble"), "user bubble is violet 0.35")
+		XCTAssertTrue(
+			source.contains("Theme.Glass.agentBubble"), "agent bubble is white 0.06")
+		XCTAssertFalse(source.contains("Theme.subtleSurface"), "0.045 is not the bubble tone")
+		XCTAssertFalse(source.contains("opacity(0.25)"), "no restated literal")
+		// A bubble is content inside the chat panel, so it draws on the
+		// nested `.rounded(_)` radius and never takes the outer shadow.
+		XCTAssertFalse(source.contains("netaFloatingGlass"), "bubbles sit on the chat panel")
+		XCTAssertTrue(source.contains("netaGlass(.rounded("), "bubbles use the nested radius")
+	}
+
+	/// The Node opens ONE turn with role `user` and files the agent's reply
+	/// into it as further blocks (seq 1 role user, seq 2 role agent, verified
+	/// on the wire), so a bubble styled by `turn.role` drew the leader's
+	/// answer inside the person's violet bubble. Runs follow the blocks'
+	/// own roles.
+	func testBlocksSplitIntoRunsByTheirOwnRole() {
+		let at = Date(timeIntervalSince1970: 1_780_315_200)
+		func block(_ seq: Int, _ role: Role, _ text: String) -> Block {
+			Block(
+				turnId: "t1", seq: seq, at: at, role: role, kind: .text,
+				text: text, data: nil)
+		}
+		let runs = TurnView.runs(of: [
+			block(1, .user, "Where are we this morning?"),
+			block(2, .agent, "First paragraph continues."),
+			block(3, .agent, "Second paragraph."),
+			block(4, .user, "Void them."),
+		])
+		XCTAssertEqual(runs.map(\.role), [.user, .agent, .user])
+		XCTAssertEqual(runs.map { $0.blocks.map(\.seq) }, [[1], [2, 3], [4]])
+		XCTAssertEqual(runs.map(\.id), [1, 2, 4])
+		XCTAssertEqual(TurnView.runs(of: []).count, 0)
+	}
+
+	/// And the view styles the run, not the turn.
+	func testTurnViewStylesEachRunByItsOwnRole() throws {
+		let source = try turnViewSource()
+		XCTAssertFalse(
+			source.contains("turn.role =="),
+			"a bubble follows its blocks' roles, never the turn's")
+		XCTAssertTrue(source.contains("run.role == .user"))
+	}
+
+	private func turnViewSource() throws -> String {
+		var url = URL(fileURLWithPath: #filePath, isDirectory: false)
+			.deletingLastPathComponent()
+		url.deleteLastPathComponent()
+		url.deleteLastPathComponent()
+		url.appendPathComponent("Sources/NetaDesktop/Chat/TurnView.swift")
+		return try String(contentsOf: url, encoding: .utf8)
 	}
 }

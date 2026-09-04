@@ -16,39 +16,70 @@ import SwiftUI
 	public private(set) var leaderOffScreen = false
 	public private(set) var label = "Now"
 	public private(set) var jumpRequest: CGFloat?
+	/// The `scrollX` that last put the live edge at the usable right edge,
+	/// `nil` until the canvas has resolved a frame. The mission bar's Now
+	/// control jumps here without rebuilding the index; before the canvas
+	/// has recorded an edge the control has nowhere to jump to and does
+	/// nothing, rather than staging a jump to content x 0.
+	public private(set) var liveScrollX: CGFloat?
 
 	public init() {}
 
-	/// `isLive` when the newest item's x sits at or inside the viewport's
-	/// right edge (half a point of grace); otherwise `label` is
-	/// `Now · <n> back` with `n` the coarsest of days, hours, minutes from
-	/// the newest item back to `now`. `leaderOffScreen` is true exactly when
-	/// `leader` does not intersect `viewport`.
+	/// Live means the leader card sits exactly at the live edge: its far
+	/// edge on the canvas's usable right edge
+	/// (`viewport.maxX - trailingInset`, half a point of grace either way).
+	/// The test is two-sided on purpose — a leader pushed right is scrolled
+	/// back in time, a leader left of the edge is the un-anchored far-left
+	/// placement — and neither is Now.
+	///
+	/// It is a test on the time axis alone. Whether the leader card happens
+	/// to be scrolled off vertically is the other signal, `leaderOffScreen`,
+	/// which drives `OffScreenLeaderMarker`; a Now jump never touches
+	/// `scrollY`, so folding it in here would report `Now · <n> back` for a
+	/// view that has not moved in time and leave the control dead.
+	///
+	/// Off the edge, `label` is `Now · <n> back` with `n` the coarsest of
+	/// days, hours, minutes from the time under the usable right edge back
+	/// to `now`. An empty index has no time to be back from: with the leader
+	/// in view it is live and reads `Now`.
 	public func update(
 		index: SpineIndex, scrollX: CGFloat, viewport: CGRect,
-		leader: CGRect, now: Date
+		leader: CGRect, now: Date, trailingInset: CGFloat = 0
 	) {
-		guard index.count > 0 else {
-			isLive = true
-			label = "Now"
-			leaderOffScreen = !leader.intersects(viewport)
-			return
-		}
-		let newestX = index.x(index.count - 1) - scrollX + viewport.minX
-		isLive = newestX <= viewport.maxX + 0.5
-		if isLive {
-			label = "Now"
+		let offScreen = !leader.intersects(viewport)
+		let rightEdge = viewport.maxX - trailingInset
+		let live = abs(leader.maxX - rightEdge) <= 0.5
+		let text: String
+		if live || index.count == 0 {
+			text = "Now"
 		} else {
-			let backMs =
-				now.timeIntervalSince1970 * 1000 - index[index.count - 1].at
-			label = "Now · \(Self.backText(max(0, backMs))) back"
+			let nowMs = now.timeIntervalSince1970 * 1000
+			let at = SpineTicks.time(
+				index: index, x: scrollX + (rightEdge - viewport.minX),
+				now: nowMs)
+			text = "Now · \(Self.backText(max(0, nowMs - at))) back"
 		}
-		leaderOffScreen = !leader.intersects(viewport)
+		set(isLive: live, label: text, offScreen: offScreen)
+		let edge = SpinePlacement.liveScrollX(
+			index: index, viewport: viewport, trailingInset: trailingInset)
+		if liveScrollX != edge { liveScrollX = edge }
 	}
 
-	/// Stages the `scrollX` putting the live edge at the viewport's right.
-	public func jumpToNow(index: SpineIndex, viewport: CGRect) {
-		jumpRequest = max(0, index.contentWidth - viewport.width)
+	/// Stages the `scrollX` putting the live edge at the usable right edge.
+	public func jumpToNow(
+		index: SpineIndex, viewport: CGRect, trailingInset: CGFloat = 0
+	) {
+		jumpRequest = SpinePlacement.liveScrollX(
+			index: index, viewport: viewport, trailingInset: trailingInset)
+	}
+
+	/// Stages a jump to the live edge recorded by the last `update`. The
+	/// mission bar's Now control taps this; the canvas applies it. Before
+	/// the canvas has recorded an edge there is no Now to jump to, so this
+	/// does nothing.
+	public func jumpToNow() {
+		guard let liveScrollX else { return }
+		jumpRequest = liveScrollX
 	}
 
 	/// Returns the staged jump and clears it.
@@ -59,6 +90,14 @@ import SwiftUI
 	}
 
 	// MARK: - Private
+
+	/// Writes only what changed: the canvas recomputes inside a layout pass,
+	/// so an unconditional write would invalidate the view every frame.
+	private func set(isLive live: Bool, label text: String, offScreen: Bool) {
+		if isLive != live { isLive = live }
+		if label != text { label = text }
+		if leaderOffScreen != offScreen { leaderOffScreen = offScreen }
+	}
 
 	/// Coarsest whole unit of days, hours, minutes; at least one minute.
 	static func backText(_ backMs: Double) -> String {

@@ -13,15 +13,25 @@ final class AgentStackTests: XCTestCase {
 
 	// MARK: - Metrics
 
+	/// The node heights are the rendered heights of the node views, not
+	/// design guesses: `NodeFramingTests` measures every view against these
+	/// with `NSHostingView.fittingSize`, so a change here without a change
+	/// to the view (or the other way round) reddens that suite.
 	func testStandardMetricValues() {
 		XCTAssertEqual(metrics.leadCardWidth, 210)
-		XCTAssertEqual(metrics.leadCardHeight, 74)
-		XCTAssertEqual(metrics.leadAttentionHeight, 104)
+		XCTAssertEqual(metrics.leadCardHeight, 112)
+		XCTAssertEqual(metrics.leadAttentionHeight, 148)
+		XCTAssertEqual(metrics.leaderCardHeight, 74)
+		XCTAssertEqual(metrics.leaderCardWidth, 240)
 		XCTAssertEqual(metrics.closedNodeWidth, 180)
 		XCTAssertEqual(metrics.closedNodeHeight, 34)
 		XCTAssertEqual(metrics.agentRowWidth, 220)
-		XCTAssertEqual(metrics.agentRowHeight, 40)
-		XCTAssertEqual(metrics.runningRowHeight, 52)
+		XCTAssertEqual(metrics.agentRowHeight, 68)
+		XCTAssertEqual(metrics.runningRowHeight, 84)
+		XCTAssertEqual(metrics.rowHeight(running: true), metrics.runningRowHeight)
+		XCTAssertEqual(metrics.rowHeight(running: false), metrics.agentRowHeight)
+		XCTAssertEqual(metrics.cardHeight(attention: true), metrics.leadAttentionHeight)
+		XCTAssertEqual(metrics.cardHeight(attention: false), metrics.leadCardHeight)
 		XCTAssertEqual(metrics.chipHeight, 26)
 		XCTAssertEqual(metrics.rowGap, 10)
 		XCTAssertEqual(metrics.leadGap, 10)

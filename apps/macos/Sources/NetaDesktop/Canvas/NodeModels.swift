@@ -49,10 +49,15 @@ public struct AgentRowModel: Sendable, Equatable {
 		model = agent.model
 		accessGlyph = agent.access == .readOnly ? "eye" : "pencil"
 		activity = agent.state == .running ? agent.activity?.text : nil
+		isRunning = agent.state == .running
 	}
 
 	public let sigil: Sigil
 	public let stateColor: Color
 	public let name, task, stateLabel, model, accessGlyph: String
 	public let activity: String?
+	/// Running rows are the taller ones (they carry the activity line), so
+	/// the row view and `AgentStack` size them the same way through
+	/// `SpineMetrics.rowHeight(running:)`.
+	public let isRunning: Bool
 }

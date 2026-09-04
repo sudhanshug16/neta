@@ -55,6 +55,14 @@ public enum NavigatorHoverRegion: Hashable, Sendable {
 	public var timeZoom: Double = 1.0
 	/// Bumped by every `fit()`; the spine canvas (10) observes it.
 	public private(set) var fitRequested = 0
+	/// Bumped by every `jumpToNow()`; the spine canvas (10) observes it and
+	/// jumps the view to the live edge.
+	///
+	/// The request lives here, not on the canvas's own `NowState`, because
+	/// everything that asks for Now is outside the canvas: the mission bar's
+	/// Now pill (09) and the debug driver. `NowState` still owns the two
+	/// states the control renders; the shell owns the ask.
+	public private(set) var nowRequested = 0
 	/// How long the navigator stays up after the pointer leaves it. It
 	/// covers the gap between the 6 pt edge strip and the panel, so crossing
 	/// that gap does not close what the crossing just opened. One cancellable
@@ -197,6 +205,12 @@ public enum NavigatorHoverRegion: Hashable, Sendable {
 			return true
 		}
 		return false
+	}
+
+	/// Asks the canvas to jump the view back to the live edge. The mission
+	/// bar's Now control and the debug driver's `now` both land here.
+	public func jumpToNow() {
+		nowRequested += 1
 	}
 
 	/// Resets zoom to 1.0 and tells the canvas to fit its time window.

@@ -6,7 +6,7 @@ import XCTest
 /// T9.9 contract: leader, Now, divider, waiting grouped blocked, failed,
 /// readyToClose, mergedNotClosed by number ascending, then running by number
 /// ascending; closed never appear; every waiting item has a text state label;
-/// `now(lit:)` follows the flag.
+/// `now(label:lit:)` carries both halves of 10's Now state.
 @MainActor
 final class MissionBarTests: XCTestCase {
 	func testPrefixIsLeaderNowDivider() async throws {
@@ -18,7 +18,7 @@ final class MissionBarTests: XCTestCase {
 			return XCTFail("first item is the leader, got \(items[0])")
 		}
 		XCTAssertEqual(mode, store.leader?.mode)
-		XCTAssertEqual(items[1], .now(lit: true))
+		XCTAssertEqual(items[1], .now(label: "Now", lit: true))
 		XCTAssertEqual(items[2], .divider)
 	}
 
@@ -97,20 +97,28 @@ final class MissionBarTests: XCTestCase {
 		}
 	}
 
-	func testNowLitFollowsFlag() async throws {
+	/// The Now item carries both halves of 10's `NowState`: the label and
+	/// the lit flag. A bar that only took the flag could never show
+	/// `Now · 3h back`, which is the whole second state of the control.
+	func testNowItemCarriesLabelAndLitFlag() async throws {
 		let store = try await fixtureStore()
 		XCTAssertEqual(
-			MissionBarModel.items(missions: store.missions, leader: store.leader, nowLit: true)[1],
-			.now(lit: true))
-		XCTAssertEqual(
-			MissionBarModel.items(missions: store.missions, leader: store.leader, nowLit: false)[1],
-			.now(lit: false))
+			MissionBarModel.items(
+				missions: store.missions, leader: store.leader, nowLit: true)[1],
+			.now(label: "Now", lit: true))
+		let back = MissionBarModel.items(
+			missions: store.missions, leader: store.leader,
+			nowLabel: "Now · 3h back", nowLit: false)
+		XCTAssertEqual(back[1], .now(label: "Now · 3h back", lit: false))
+		XCTAssertEqual(back[1].stateLabel, "Now · 3h back")
+		// The label is the state; the flag alone never carries it.
+		XCTAssertNotEqual(back[1], .now(label: "Now", lit: false))
 	}
 
 	func testNilLeaderOmitsLeaderItem() async throws {
 		let store = try await fixtureStore()
 		let items = MissionBarModel.items(missions: store.missions, leader: nil, nowLit: false)
-		XCTAssertEqual(items.first, .now(lit: false))
+		XCTAssertEqual(items.first, .now(label: "Now", lit: false))
 		XCTAssertFalse(items.contains { item in
 			guard case .leader = item else { return false }
 			return true
@@ -155,16 +163,64 @@ final class MissionBarTests: XCTestCase {
 		let items = MissionBarModel.items(
 			missions: store.missions, leader: store.leader, nowLit: true)
 		var selected: Selection?
-		let view = MissionBarView(items: items, selection: shell.selection) { selected = $0 }
+		var jumped = false
+		let view = MissionBarView(
+			items: items, selection: shell.selection,
+			onSelect: { selected = $0 }, onNow: { jumped = true })
 		_ = view
-		// The view holds items, selection and the callback only: no counts,
-		// no cards, and never the Lead/Lead++ control.
+		// The view holds items, selection and the two callbacks only: no
+		// counts, no cards, and never the Lead/Lead++ control.
 		let labels = Mirror(reflecting: view).children.compactMap(\.label).sorted()
-		XCTAssertEqual(labels, ["items", "onSelect", "selection"])
+		XCTAssertEqual(labels, ["items", "onNow", "onSelect", "selection"])
 		XCTAssertNil(selected)
+		XCTAssertFalse(jumped)
+	}
+
+	/// The running chip is the design's compact form — sigil, number, mint
+	/// dot (PAPER-SPINE item 5, plan T9.9) — so its state label is not
+	/// painted on the chip. MANIFESTO.md still forbids state carried by
+	/// colour alone, so the text state has to be reachable: on hover for the
+	/// pointer, on the accessibility label for VoiceOver. The file's own
+	/// header used to claim every item shows a visible text label, which was
+	/// false for exactly this chip.
+	func testTheRunningChipHasAReachableTextState() throws {
+		let source = try missionBarSource()
+		XCTAssertTrue(
+			source.contains(##".help("#\(mission.number) \(mission.name) · Running")"##),
+			"the compact running chip says Running on hover")
+		XCTAssertTrue(
+			source.contains(##".accessibilityLabel("#\(mission.number) \(mission.name), Running")"##),
+			"and to VoiceOver")
+		XCTAssertFalse(
+			source.contains("Every state-carrying item shows a text state label"),
+			"the header no longer claims a visible label the chip does not have")
+	}
+
+	/// The leader mark has ONE definition. The bar's crown carried a
+	/// `Color.white` and a `.system(size:weight:)` literal while the canvas
+	/// leader card routed the same glyph through `Theme` — the two literals
+	/// `NodeViewTests.testNodeViewsCarryNoColourOrFontLiterals` forbids there.
+	func testTheLeaderCrownTakesItsColourAndFontFromTheme() throws {
+		let source = try missionBarSource()
+		XCTAssertFalse(source.contains("Color.white"), "no colour literal")
+		XCTAssertFalse(
+			source.contains(".system(size: 13"), "no font literal on the crown")
+		XCTAssertTrue(
+			source.contains(##"Image(systemName: "crown.fill")"##))
+		XCTAssertTrue(source.contains(".font(Theme.text(13, .semibold))"))
+		XCTAssertTrue(source.contains(".foregroundStyle(Theme.textPrimary)"))
 	}
 
 	// MARK: - Helpers
+
+	private func missionBarSource() throws -> String {
+		var url = URL(fileURLWithPath: #filePath, isDirectory: false)
+			.deletingLastPathComponent()
+		url.deleteLastPathComponent()
+		url.deleteLastPathComponent()
+		url.appendPathComponent("Sources/NetaDesktop/Shell/MissionBar.swift")
+		return try String(contentsOf: url, encoding: .utf8)
+	}
 
 	/// The recorded fixture snapshot in a store: the only data tests use.
 	private func fixtureStore() async throws -> Store {

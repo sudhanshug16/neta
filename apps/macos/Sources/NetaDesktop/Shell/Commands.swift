@@ -58,6 +58,26 @@ public struct NetaCommands: Commands {
 	/// The `⌘L` menu item's title, which says what the item will do:
 	/// "Hide Navigator" while the overlay is up, "Show Navigator" while it is
 	/// not (the macOS convention). The action is one toggle either way.
+	///
+	/// **Open question, needs a human with a real screen.** Driven from a
+	/// headless rig the item's title never changes: it reads "Show Navigator"
+	/// with the navigator up, even after `NSMenu.update` on the View submenu.
+	/// Three routes were measured and all three failed identically — the
+	/// observable read inline here, the read moved into a nested `View` with
+	/// the shell injected, and the title passed in as a plain `Bool` from an
+	/// App-level `@State` flipped at runtime. So the `NSMenuItem` title looks
+	/// captured when the menu is built and never re-read, and no arrangement
+	/// of *this* code changed that.
+	///
+	/// The caveat that keeps this open rather than closed: every measurement
+	/// came from an app that could never be frontmost, and SwiftUI may simply
+	/// not rebuild menus for a background app. One look at the View menu with
+	/// the navigator open, on a real desktop, settles it. Until then do not
+	/// refactor against the failure — a nested `View` here is a trap, because
+	/// `@Environment(ShellState.self)` inside a view built in a `Commands`
+	/// body resolves to **nil** (the view is not in the window hierarchy), and
+	/// that silently turns `⌘L` into a no-op. That regression was shipped
+	/// once and caught by the rig.
 	static func navigatorTitle(visible: Bool) -> String {
 		visible ? "Hide Navigator" : "Show Navigator"
 	}

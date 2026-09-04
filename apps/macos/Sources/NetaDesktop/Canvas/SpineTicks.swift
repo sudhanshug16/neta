@@ -51,7 +51,11 @@ public enum SpineTicks {
 		var positioned: [(label: String, at: Double, x: CGFloat)] = []
 		positioned.reserveCapacity(labels.count)
 		for label in labels {
-			let age = label == "now" ? now : now - ageMs(for: label)
+			if label == "now" {
+				positioned.append((label, now, nowLabelX(index: index)))
+				continue
+			}
+			let age = now - ageMs(for: label)
 			positioned.append((label, age, x(index: index, t: age, now: now)))
 		}
 		var kept: [(label: String, at: Double, x: CGFloat)] = []
@@ -66,6 +70,22 @@ public enum SpineTicks {
 		return kept.reversed().map {
 			SpineTick(id: $0.label, label: $0.label, at: $0.at, x: $0.x)
 		}
+	}
+
+	/// Where the `now` label sits: the middle of the last gap, the clear
+	/// `SpinePlacement.leaderGap` of axis between the newest item and the
+	/// leader card.
+	///
+	/// Now itself is the leader's anchor, but the leader card is centred on
+	/// the spine and a label at its x would be drawn inside it. Pinning
+	/// `now` to the newest item instead — what the general rule below does
+	/// for any time at or past `now` — put the label directly beneath
+	/// whatever sits at the live edge, and a checkpoint icon there (a Node
+	/// restart, say) crowded it. The last gap carries nothing else, so the
+	/// label is clear of both.
+	static func nowLabelX(index: SpineIndex) -> CGFloat {
+		guard index.count > 0 else { return 0 }
+		return index.x(index.count - 1) + SpinePlacement.leaderGap / 2
 	}
 
 	/// Content x for time `t`: proportional by time inside the bracketing

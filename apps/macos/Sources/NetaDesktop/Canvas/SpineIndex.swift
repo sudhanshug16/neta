@@ -78,7 +78,7 @@ public struct SpineIndex: Sendable {
 	/// always reachable by pan and `jumpToNow`.
 	public var contentWidth: CGFloat {
 		(xs.last ?? 0) + SpinePlacement.leaderGap
-			+ SpineMetrics.standard.leadCardWidth
+			+ SpineMetrics.standard.leaderCardWidth
 	}
 
 	/// Index of the earliest mission whose state is not `closed`, or `nil`

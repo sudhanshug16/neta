@@ -3,6 +3,96 @@ import XCTest
 
 @testable import NetaDesktop
 
+/// A client whose `conversation.tail` blocks until released, so two tails
+/// can be put in flight and answered out of order.
+private actor GatedTailClient: NodeClient {
+	let notifications: AsyncStream<NodeNotification>
+	private let session: SessionId
+	private var seqs: [Int] = []
+	private var waiting: [CheckedContinuation<Void, Never>] = []
+	private var arrived: [CheckedContinuation<Void, Never>] = []
+	private var pending = 0
+
+	init(session: SessionId) {
+		self.session = session
+		let (stream, continuation) = AsyncStream<NodeNotification>.makeStream()
+		notifications = stream
+		continuation.finish()
+	}
+
+	func setPage(blocks seqs: [Int]) {
+		self.seqs = seqs
+	}
+
+	/// Waits until a `conversation.tail` is parked inside the client.
+	func waitForRequest() async {
+		if pending > 0 {
+			pending -= 1
+			return
+		}
+		await withCheckedContinuation { continuation in
+			arrived.append(continuation)
+		}
+	}
+
+	/// Lets the oldest parked tail answer.
+	func release() {
+		guard !waiting.isEmpty else { return }
+		waiting.removeFirst().resume()
+	}
+
+	/// Lets the newest parked tail answer, so two tails can be answered out
+	/// of order.
+	func releaseNewest() {
+		guard !waiting.isEmpty else { return }
+		waiting.removeLast().resume()
+	}
+
+	func conversationTail(
+		sessionId: Ulid, cursor: String? = nil, limit: Int,
+		direction: String? = nil, turnId: TurnId? = nil
+	) async throws -> ConversationPage {
+		let page = self.page()
+		if let continuation = arrived.first {
+			arrived.removeFirst()
+			continuation.resume()
+		} else {
+			pending += 1
+		}
+		await withCheckedContinuation { continuation in
+			waiting.append(continuation)
+		}
+		return page
+	}
+
+	private func page() -> ConversationPage {
+		let at = Date(timeIntervalSince1970: 1_780_315_200)
+		return ConversationPage(
+			turns: [Turn(
+				id: "t1", sessionId: session, startedAt: at,
+				endedAt: at, role: .user, cancelled: nil)],
+			blocks: seqs.map { seq in
+				Block(
+					turnId: "t1", seq: seq, at: at,
+					role: seq == 1 ? .user : .agent, kind: .text,
+					text: "block \(seq)", data: nil)
+			},
+			nextCursor: nil, prevCursor: nil)
+	}
+
+	func connect() async throws {}
+	func snapshot() async throws -> Snapshot { throw NodeClientError.disconnected }
+	func missionsList(workspaceId: String, before: Date?, limit: Int) async throws -> [Mission] { [] }
+	func eventsList(workspaceId: String, before: Date?, limit: Int) async throws -> [Event] { [] }
+	func prompt(sessionId: Ulid, text: String) async throws -> Ulid { "t-new" }
+	func cancel(sessionId: Ulid) async throws {}
+	func setModel(sessionId: Ulid, model: String) async throws {}
+	func listModels(provider: String) async throws -> [ModelInfo] { [] }
+	func setMode(workspaceId: String, mode: LeaderMode) async throws {}
+	func pin(missionId: Ulid, pinned: Bool) async throws {}
+	func archiveAgent(agentId: Ulid, confirmRunning: Bool) async throws {}
+}
+
 /// T11.1: the chat view model holds turns and applies streaming deltas.
 @MainActor
 final class ChatViewModelTests: XCTestCase {
@@ -113,16 +203,69 @@ final class ChatViewModelTests: XCTestCase {
 		XCTAssertTrue(vm.turns[1].cancelled)
 	}
 
+	/// The target is the newest turn that actually DRAWS. A turn with no
+	/// blocks renders nothing and has no view to scroll to (the Node opens
+	/// the user turn before any block exists), so scrolling to it left the
+	/// transcript stuck short of the bottom.
 	func testAutoScrollTargetFollowsAtBottom() {
 		let vm = makeViewModel()
 		XCTAssertNil(vm.autoScrollTarget)
 		vm.apply(makeChange(turn: makeTurn("t1", startedAt: 1_000)))
 		vm.apply(makeChange(turn: makeTurn("t2", startedAt: 2_000)))
+		XCTAssertNil(vm.autoScrollTarget, "no blocks yet, so nothing is drawn")
+		vm.apply(makeChange(block: makeBlock(0, turnId: "t1")))
+		XCTAssertEqual(vm.autoScrollTarget, "t1")
+		vm.apply(makeChange(block: makeBlock(0, turnId: "t2", at: 2_001)))
 		XCTAssertEqual(vm.autoScrollTarget, "t2")
 		vm.atBottom = false
 		XCTAssertNil(vm.autoScrollTarget)
 		vm.atBottom = true
 		XCTAssertEqual(vm.autoScrollTarget, "t2")
+	}
+
+	/// A blockless turn reserves no room in the transcript: the panel
+	/// renders `visibleTurns`, so a `LazyVStack` cannot leave a 24 pt gap
+	/// where nothing is drawn.
+	func testVisibleTurnsDropTurnsWithNoBlocks() {
+		let vm = makeViewModel()
+		vm.apply(makeChange(turn: makeTurn("t1", startedAt: 1_000)))
+		vm.apply(makeChange(turn: makeTurn("t2", startedAt: 2_000)))
+		vm.apply(makeChange(block: makeBlock(0, turnId: "t2", at: 2_001)))
+		XCTAssertEqual(vm.turns.map(\.id), ["t1", "t2"])
+		XCTAssertEqual(vm.visibleTurns.map(\.id), ["t2"])
+	}
+
+	/// A tail a newer `start()` has superseded must not rebuild the window.
+	/// Two tails can be in flight at once (a fresh `start()` while the
+	/// resubscribe loop is re-tailing), and a page replaces every turn, so
+	/// the older answer landing last threw away blocks that had arrived in
+	/// the meantime — the re-tail after a session change showed the person's
+	/// block and not the agent's.
+	func testAStaleTailNeverRebuildsTheWindow() async {
+		let client = GatedTailClient(session: Self.session)
+		let vm = ChatViewModel(client: client, sessionId: Self.session)
+
+		// The first tail is held open, with only the user block in its page.
+		await client.setPage(blocks: [1])
+		let firstStart = Task { await vm.start() }
+		await client.waitForRequest()
+
+		// A second start supersedes it and tails the full page. Its answer
+		// comes back FIRST; the stale one is still parked.
+		await client.setPage(blocks: [1, 2])
+		let secondStart = Task { await vm.start() }
+		await client.waitForRequest()
+		await client.releaseNewest()
+		await secondStart.value
+		XCTAssertEqual(vm.turns.first?.blocks.map(\.seq), [1, 2])
+
+		// Now the first, stale tail lands. It must change nothing.
+		await client.release()
+		await firstStart.value
+		XCTAssertEqual(
+			vm.turns.first?.blocks.map(\.seq), [1, 2],
+			"a superseded tail cannot roll the window back")
+		vm.stop()
 	}
 
 	func testConsumeScrollStartsEmpty() {
@@ -139,7 +282,10 @@ final class ChatViewModelTests: XCTestCase {
 		await vm.start()
 		XCTAssertEqual(vm.turns.map(\.id), [first, second])
 		XCTAssertEqual(vm.openTurnId, second)
-		XCTAssertEqual(vm.autoScrollTarget, second)
+		// Both tailed turns are the Node's blockless user turns, so neither
+		// draws and there is nothing to scroll to yet.
+		XCTAssertEqual(vm.visibleTurns, [])
+		XCTAssertNil(vm.autoScrollTarget)
 	}
 
 	/// FIXPASS G4-7: the client finishes every subscription when the

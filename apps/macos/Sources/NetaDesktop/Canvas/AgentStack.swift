@@ -97,11 +97,13 @@ public struct AgentStack: Sendable, Equatable {
 		}
 		for agent in live {
 			let rowHeight: CGFloat =
-				agent.state == .running ? metrics.runningRowHeight : metrics.agentRowHeight
+				metrics.rowHeight(running: agent.state == .running)
 			append(id: agent.id, content: .agent(agent.id), rowHeight: rowHeight)
 		}
 		for agent in shownCompleted {
-			append(id: agent.id, content: .agent(agent.id), rowHeight: metrics.agentRowHeight)
+			append(
+				id: agent.id, content: .agent(agent.id),
+				rowHeight: metrics.rowHeight(running: false))
 		}
 		if hiddenCompleted > 0 {
 			append(

@@ -17,6 +17,8 @@ private actor ComposerStub: NodeClient {
 
 	private(set) var calls: [Call] = []
 	var listedModels: [ModelInfo] = []
+	/// When true, `prompt` throws the way a disconnected Node does.
+	var promptFails = false
 	let notifications: AsyncStream<NodeNotification>
 
 	init() {
@@ -31,6 +33,10 @@ private actor ComposerStub: NodeClient {
 
 	func setListedModels(_ models: [ModelInfo]) {
 		listedModels = models
+	}
+
+	func setPromptFails(_ fails: Bool) {
+		promptFails = fails
 	}
 
 	func methods(named method: String) -> [Call] {
@@ -52,6 +58,7 @@ private actor ComposerStub: NodeClient {
 		calls.append(Call(
 			method: "prompt", sessionId: sessionId, text: text,
 			model: nil, workspaceId: nil, mode: nil))
+		if promptFails { throw NodeClientError.disconnected }
 		return "t-new"
 	}
 
@@ -153,6 +160,45 @@ final class ComposerTests: XCTestCase {
 		XCTAssertEqual(model.draft, "")
 	}
 
+	/// A prompt that throws reached no Node, so the message it echoed must
+	/// come back out of the transcript and the draft must come back to the
+	/// field: the person must never see their own message sitting in the
+	/// chat as though it had been delivered.
+	func testFailedPromptRetiresTheEchoAndReturnsTheDraft() async {
+		let stub = ComposerStub()
+		await stub.setPromptFails(true)
+		let model = leaderModel(client: stub)
+		var echoed: [String] = []
+		var retired: [String] = []
+		model.onSend = { echoed.append($0) }
+		model.onSendFailed = { retired.append($0) }
+		model.draft = "Void them."
+		await model.send()
+		XCTAssertEqual(echoed, ["Void them."])
+		XCTAssertEqual(retired, ["Void them."], "the echo is retired")
+		XCTAssertEqual(model.draft, "Void them.", "the draft comes back")
+
+		// A draft typed while the prompt was in flight is not overwritten.
+		await stub.setPromptFails(true)
+		let second = leaderModel(client: stub)
+		second.onSendFailed = { _ in second.draft = "typed since" }
+		second.draft = "Merge it."
+		await second.send()
+		XCTAssertEqual(second.draft, "typed since")
+	}
+
+	/// A successful prompt keeps the echo and leaves the field empty.
+	func testSuccessfulPromptKeepsTheEcho() async {
+		let stub = ComposerStub()
+		let model = leaderModel(client: stub)
+		var retired: [String] = []
+		model.onSendFailed = { retired.append($0) }
+		model.draft = "Void them."
+		await model.send()
+		XCTAssertTrue(retired.isEmpty)
+		XCTAssertEqual(model.draft, "")
+	}
+
 	func testSendNeverPromptsEmptyOrArchived() async {
 		let stub = ComposerStub()
 		let model = leaderModel(client: stub)
@@ -239,6 +285,125 @@ final class ComposerTests: XCTestCase {
 		XCTAssertEqual(archived.mode, .leadPlus)
 	}
 
+	/// The `Lead | Lead++` control is compact glass segments, not a stock
+	/// 150-wide segmented picker: both labels always show and the model says
+	/// which one is selected.
+	func testModeSegmentsCarryBothLabelsAndTheSelection() {
+		let leadPlus = ModeSegments(selected: .leadPlus)
+		XCTAssertEqual(leadPlus.labels, ["Lead", "Lead++"])
+		XCTAssertEqual(leadPlus.selectedLabel, "Lead++")
+		XCTAssertEqual(leadPlus.segments.map(\.isSelected), [false, true])
+		let lead = ModeSegments(selected: .lead)
+		XCTAssertEqual(lead.labels, ["Lead", "Lead++"], "both segments carry text")
+		XCTAssertEqual(lead.selectedLabel, "Lead")
+		XCTAssertEqual(lead.segments.map(\.mode), [.lead, .leadPlus])
+		XCTAssertEqual(ModeSegments.helpText, "build access")
+	}
+
+	/// The picker's pill reads the model id until the provider list names it.
+	func testModelPickerLabelIsTheModelId() {
+		let bare = ModelPicker(selected: "claude-opus-5", models: [])
+		XCTAssertEqual(bare.label, "claude-opus-5")
+		XCTAssertEqual(bare.options.map(\.id), ["claude-opus-5"])
+		let listed = ModelPicker(selected: "claude-opus-5", models: [
+			ModelInfo(id: "claude-opus-5", provider: "Claude", label: "Opus 5"),
+			ModelInfo(id: "claude-sonnet-4", provider: "Claude", label: ""),
+		])
+		XCTAssertEqual(listed.label, "Opus 5")
+		XCTAssertEqual(listed.options.map(\.label), ["Opus 5", "claude-sonnet-4"])
+		let unlisted = ModelPicker(selected: "gpt-5-codex", models: [
+			ModelInfo(id: "claude-opus-5", provider: "Claude", label: "Opus 5"),
+		])
+		XCTAssertEqual(unlisted.label, "gpt-5-codex", "an unlisted selection still shows its id")
+	}
+
+	/// The controls row is glass, never the stock pickers the fix pass found.
+	func testComposerUsesGlassControlsNotStockPickers() throws {
+		let source = try composerViewSource()
+		XCTAssertFalse(source.contains("pickerStyle("), "no stock picker style, segmented or menu")
+		// Every `Picker(` in the file must be our own `ModelPicker(`: a
+		// re-introduced stock `Picker("Mode", selection:)` with no explicit
+		// style would otherwise slip past the pickerStyle check above.
+		XCTAssertEqual(
+			occurrences(of: "Picker(", in: source),
+			occurrences(of: "ModelPicker(", in: source),
+			"no stock SwiftUI Picker, styled or not")
+		XCTAssertFalse(source.contains("width: 150"), "the mode control is compact")
+		// Revision 3 "Controls on glass": capsule glass with the same rim,
+		// and no outer shadow — so they name the control weight rather than
+		// letting the capsule silhouette float (see Glass.swift).
+		XCTAssertEqual(
+			occurrences(of: "netaControlGlass(.capsule)", in: source), 4,
+			"model pill, mode segments, Stop and the disabled send are glass capsules")
+		XCTAssertFalse(
+			source.contains("netaFloatingGlass"), "no composer control floats over the ground")
+		XCTAssertTrue(source.contains("chevron.down"), "the model pill carries an SF Symbol chevron")
+		XCTAssertTrue(source.contains("Theme.mint"), "the enabled send arrow stays a mint capsule")
+		XCTAssertTrue(source.contains("Theme.Glass.fieldFill"), "the field is inset glass")
+	}
+
+	/// PAPER-SPINE Revision 2: ONE trailing round 30 pt control that becomes
+	/// the mint send arrow when a person types. The send used to be a mint
+	/// lozenge beside a round Stop, so the silhouette changed under the hand
+	/// as well as the colour; and the disabled form was a bare `Image`, so
+	/// VoiceOver announced an image and "nothing to send" was carried by the
+	/// grey tint alone.
+	func testTheTrailingControlIsOneRoundButtonInEveryState() throws {
+		let source = try composerViewSource()
+		XCTAssertEqual(
+			occurrences(
+				of: ".frame(width: Self.actionSize, height: Self.actionSize)",
+				in: source),
+			3,
+			"Stop, send and disabled send share one round footprint")
+		XCTAssertFalse(
+			source.contains(".padding(.horizontal, 12)"),
+			"the send arrow is no longer a lozenge")
+		XCTAssertEqual(ComposerView.actionSize, 30)
+		XCTAssertTrue(
+			source.contains(".disabled(true)"),
+			"the unavailable send is a real disabled Button")
+		XCTAssertTrue(
+			source.contains("accessibilityValue(\"Nothing to send\")"),
+			"and says why, rather than leaving it to the tint")
+	}
+
+	/// The model pill must actually have a menu to open. `ModelPicker` falls
+	/// back to the one model already selected when `model.models` is empty,
+	/// and nothing in `Sources/` called `loadModels()` — so at runtime the
+	/// menu held exactly one item, the current model. The view has to ask.
+	/// `ChatPanelModel.select` replaces `composer` with a brand-new
+	/// `ComposerModel` whose `models` is empty, but `ComposerView` keeps its
+	/// place in `ChatPanel`'s body and so its SwiftUI identity. A bare
+	/// `.task` therefore runs once ever: every selection after the first
+	/// (leader to agent, agent to mission, and back) opened a menu of exactly
+	/// one model. The load is keyed to the session instead.
+	func testComposerLoadsTheModelListOnAppear() throws {
+		let source = try composerViewSource()
+		XCTAssertTrue(
+			source.contains("await model.loadModels()"),
+			"the composer must load the provider's models")
+		XCTAssertTrue(
+			source.contains(".task(id: model.modelLoadKey) { await model.loadModels() }"),
+			"the load is keyed to the session and the provider, so a new selection reloads")
+		XCTAssertFalse(
+			source.contains(".task {"), "an unkeyed task would run only for the first session")
+		// The menu lists what was loaded, not a restated literal.
+		XCTAssertTrue(
+			source.contains("ModelPicker(selected: model.selectedModel, models: model.models)"),
+			"the menu comes from the loaded list")
+	}
+
+	/// The load is keyed on the session AND the provider, not on the session
+	/// alone: the provider arrives with the snapshot, so a session-keyed load
+	/// no-ops at launch and never runs again.
+	func testTheModelListIsKeyedOnTheSessionAndTheProvider() throws {
+		let source = try composerViewSource()
+		XCTAssertTrue(
+			source.contains(".task(id: model.modelLoadKey) { await model.loadModels() }"),
+			"the model list reloads when the session or the provider moves")
+	}
+
 	func testComposerViewBuildsForLiveAndArchived() {
 		let live = leaderModel()
 		live.draft = "Close #305 once the checks pass."
@@ -249,6 +414,19 @@ final class ComposerTests: XCTestCase {
 	}
 
 	// MARK: - Helpers
+
+	private func occurrences(of token: String, in contents: String) -> Int {
+		contents.components(separatedBy: token).count - 1
+	}
+
+	private func composerViewSource() throws -> String {
+		var url = URL(fileURLWithPath: #filePath, isDirectory: false)
+			.deletingLastPathComponent()
+		url.deleteLastPathComponent()
+		url.deleteLastPathComponent()
+		url.appendPathComponent("Sources/NetaDesktop/Chat/ComposerView.swift")
+		return try String(contentsOf: url, encoding: .utf8)
+	}
 
 	private func leaderModel(client: ComposerStub? = nil) -> ComposerModel {
 		ComposerModel(

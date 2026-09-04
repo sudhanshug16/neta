@@ -93,6 +93,109 @@ public enum SpinePlacement {
 	/// edge: half the default minimum column.
 	public static let leaderGap: CGFloat = 60
 
+	/// Gap between the leader card's far edge and the chat panel's leading
+	/// edge (PAPER-SPINE artboard 1 item 8: the leader card sits just left
+	/// of the chat).
+	public static let chatGap: CGFloat = 24
+
+	/// The `scrollX` that puts the live edge — the leader card's far edge —
+	/// at the canvas's usable right edge, `trailingInset` in from
+	/// `viewport.maxX` (the chat's leading edge less `chatGap` while the
+	/// chat is visible, else the window inset).
+	///
+	/// It is negative when the whole sequence is narrower than the usable
+	/// width: the leader still sits at Now and the spine runs off to its
+	/// left. `fit` and `jumpToNow` both land here, so both right-align.
+	public static func liveScrollX(
+		index: SpineIndex, viewport: CGRect, trailingInset: CGFloat
+	) -> CGFloat {
+		index.contentWidth - max(0, viewport.width - trailingInset)
+	}
+
+	/// Half the widest node drawn in the column of item `i`: how far that
+	/// item's node reaches to the left of its own anchor.
+	///
+	/// Every node is centred on its anchor (`cardRect`, `rowRects`), so the
+	/// anchor is not the item's left edge. An open mission's widest node is
+	/// its agent row, a closed one's is its 180 pt collapsed node, and a
+	/// checkpoint's is its 26 pt hit target.
+	public static func halfWidth(
+		of i: Int, in index: SpineIndex, metrics: SpineMetrics = .standard
+	) -> CGFloat {
+		guard i >= 0, i < index.count else { return 0 }
+		guard let mission = index.mission(i) else {
+			return metrics.minHitHeight / 2
+		}
+		if mission.state == .closed { return metrics.closedNodeWidth / 2 }
+		return max(metrics.leadCardWidth, metrics.agentRowWidth) / 2
+	}
+
+	/// The range `scrollX` may take: back to the oldest item's LEFT EDGE at
+	/// the left edge of the band, forward no further than the live edge.
+	/// Nothing exists right of Now, so `liveScrollX` is always the upper
+	/// bound — when it is negative (a sequence narrower than the usable
+	/// width) it is the only value, and the leader cannot be pushed off Now
+	/// by a pan or a zoom.
+	///
+	/// The lower bound is `x(0) - halfWidth(of: 0)`, not 0: item 0's anchor
+	/// is its centre, so flooring at the anchor left half of the oldest
+	/// node permanently off the left edge, unreachable by any pan.
+	public static func clampScrollX(
+		_ scrollX: CGFloat, index: SpineIndex, viewport: CGRect,
+		trailingInset: CGFloat, metrics: SpineMetrics = .standard
+	) -> CGFloat {
+		let live = liveScrollX(
+			index: index, viewport: viewport, trailingInset: trailingInset)
+		let back = index.count > 0
+			? index.x(0) - halfWidth(of: 0, in: index, metrics: metrics) : 0
+		return min(max(scrollX, min(back, live)), live)
+	}
+
+	/// The `scrollX` that brings one mission's column into the canvas's
+	/// usable band, or `nil` when it is already there and nothing should
+	/// move.
+	///
+	/// MANIFESTO.md "The mission inbox": "Clicking a mission in the bar pans
+	/// the spine to that mission and opens its lead's conversation." The
+	/// navigator is the same wire (a jump list). The column is
+	/// `leadCardWidth` wide centred on its anchor, so it counts as in view
+	/// only when both card edges sit inside
+	/// `viewport.minX ... viewport.maxX - trailingInset`; otherwise the
+	/// anchor is centred in that band and the result is clamped to the
+	/// pannable range, so a jump can never push the leader off Now.
+	public static func revealScrollX(
+		mission id: MissionId, index: SpineIndex, scrollX: CGFloat,
+		viewport: CGRect, trailingInset: CGFloat,
+		metrics: SpineMetrics = .standard
+	) -> CGFloat? {
+		guard let position = position(of: id, in: index) else { return nil }
+		let right = viewport.maxX - trailingInset
+		guard right > viewport.minX else { return nil }
+		let contentX = index.x(position)
+		let screenX = contentX - scrollX + viewport.minX
+		let half = metrics.leadCardWidth / 2
+		if screenX - half >= viewport.minX, screenX + half <= right {
+			return nil
+		}
+		let centre = (viewport.minX + right) / 2
+		let target = clampScrollX(
+			contentX - (centre - viewport.minX), index: index,
+			viewport: viewport, trailingInset: trailingInset)
+		return target == scrollX ? nil : target
+	}
+
+	/// Sequence position of a mission, or `nil` when it is not in the index.
+	/// Linear: the index is a value type with no id map of its own, and the
+	/// call sites are one selection change each.
+	private static func position(
+		of id: MissionId, in index: SpineIndex
+	) -> Int? {
+		for i in 0 ..< index.count where index.mission(i)?.id == id {
+			return i
+		}
+		return nil
+	}
+
 	/// The side rule: even numbers below, odd above.
 	public static func side(for number: Int) -> SpineSide {
 		number.isMultiple(of: 2) ? .below : .above
@@ -166,9 +269,9 @@ public enum SpinePlacement {
 		let lastX = index.count > 0 ? index.x(index.count - 1) : 0
 		return CGRect(
 			x: lastX + leaderGap - scrollX + viewport.minX,
-			y: spineY - metrics.leadCardHeight / 2,
-			width: metrics.leadCardWidth,
-			height: metrics.leadCardHeight)
+			y: spineY - metrics.leaderCardHeight / 2,
+			width: metrics.leaderCardWidth,
+			height: metrics.leaderCardHeight)
 	}
 
 	// MARK: - Private
@@ -192,9 +295,7 @@ public enum SpinePlacement {
 				width: metrics.closedNodeWidth,
 				height: metrics.closedNodeHeight)
 		}
-		let height: CGFloat =
-			mission.attention != nil
-			? metrics.leadAttentionHeight : metrics.leadCardHeight
+		let height = metrics.cardHeight(attention: mission.attention != nil)
 		let y =
 			side == .above
 			? spineY - metrics.spineOffset - height
