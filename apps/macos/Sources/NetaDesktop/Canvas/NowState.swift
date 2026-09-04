@@ -3,59 +3,56 @@ import Foundation
 import Observation
 import SwiftUI
 
-/// Now state for the spine canvas (T10.8).
+/// Now state for the spine canvas (T10.9).
 ///
 /// Two states per the manifesto: lit when the view is at the live edge, and
 /// showing how far back the view is when it is not. `leaderOffScreen` drives
 /// `OffScreenLeaderMarker`. The 09 `MissionBarView` renders the Now control
-/// from this state; `jumpToNow` only stages a `jumpRequest` that T10.9
-/// applies via `consumeJump()`. Pure reads of `TimeLens`: no `Store`, no
+/// from this state; `jumpToNow` only stages a `jumpRequest` that T10.10
+/// applies via `consumeJump()`. Pure reads of `SpineIndex`: no `Store`, no
 /// bare `Date()`.
 @Observable @MainActor public final class NowState {
 	public private(set) var isLive = true
 	public private(set) var leaderOffScreen = false
 	public private(set) var label = "Now"
-	public private(set) var jumpRequest: TimeLens?
+	public private(set) var jumpRequest: CGFloat?
 
 	public init() {}
 
-	/// `isLive` when the live edge — wall-clock `now` mapped through the
-	/// lens — sits at or inside the viewport's right edge (half a point of
-	/// grace); otherwise `label` is `Now · <n> back` with `n` the coarsest
-	/// of days, hours, minutes between `lens.t(viewport.maxX)` and `now`.
-	/// On a synced lens (`options.now == now`) this equals comparing
-	/// `lens.x(lens.options.now)`; using wall time keeps the control
-	/// correct after a pan, which stages `options.now` behind wall time.
-	/// `leaderOffScreen` is true exactly when `leader` does not intersect
-	/// `viewport`.
+	/// `isLive` when the newest item's x sits at or inside the viewport's
+	/// right edge (half a point of grace); otherwise `label` is
+	/// `Now · <n> back` with `n` the coarsest of days, hours, minutes from
+	/// the newest item back to `now`. `leaderOffScreen` is true exactly when
+	/// `leader` does not intersect `viewport`.
 	public func update(
-		lens: TimeLens, viewport: CGRect, leader: CGRect, now: Date
+		index: SpineIndex, scrollX: CGFloat, viewport: CGRect,
+		leader: CGRect, now: Date
 	) {
-		let nowMs = now.timeIntervalSince1970 * 1000
-		isLive = lens.x(nowMs) <= viewport.maxX + 0.5
+		guard index.count > 0 else {
+			isLive = true
+			label = "Now"
+			leaderOffScreen = !leader.intersects(viewport)
+			return
+		}
+		let newestX = index.x(index.count - 1) - scrollX + viewport.minX
+		isLive = newestX <= viewport.maxX + 0.5
 		if isLive {
 			label = "Now"
 		} else {
-			label = "Now · \(Self.backText(nowMs - lens.t(Double(viewport.maxX)))) back"
+			let backMs =
+				now.timeIntervalSince1970 * 1000 - index[index.count - 1].at
+			label = "Now · \(Self.backText(max(0, backMs))) back"
 		}
 		leaderOffScreen = !leader.intersects(viewport)
 	}
 
-	/// Stages a lens re-anchored so the live edge sits at `viewport.maxX`,
-	/// keeping the focus duration: the focus window shifts forward by
-	/// `now - lens.t(viewport.maxX)` and `now` becomes the lens's `now`.
-	public func jumpToNow(lens: TimeLens, viewport: CGRect, now: Date) {
-		let nowMs = now.timeIntervalSince1970 * 1000
-		let shift = nowMs - lens.t(Double(viewport.maxX))
-		var options = lens.options
-		options.now = nowMs
-		options.focusStart += shift
-		options.focusEnd += shift
-		jumpRequest = TimeLens(options)
+	/// Stages the `scrollX` putting the live edge at the viewport's right.
+	public func jumpToNow(index: SpineIndex, viewport: CGRect) {
+		jumpRequest = max(0, index.contentWidth - viewport.width)
 	}
 
 	/// Returns the staged jump and clears it.
-	public func consumeJump() -> TimeLens? {
+	public func consumeJump() -> CGFloat? {
 		let request = jumpRequest
 		jumpRequest = nil
 		return request
@@ -75,7 +72,7 @@ import SwiftUI
 	}
 }
 
-/// The small marker inside the canvas for an off-screen leader (T10.8).
+/// The small marker inside the canvas for an off-screen leader (T10.9).
 ///
 /// Rendered only while `state.leaderOffScreen` is true. The parent overlays
 /// this full-canvas; the pill hugs the trailing edge at

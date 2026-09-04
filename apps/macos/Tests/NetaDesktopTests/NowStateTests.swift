@@ -1,7 +1,5 @@
-import AppKit
 import CoreGraphics
 import Foundation
-import SwiftUI
 import XCTest
 
 @testable import NetaDesktop
@@ -10,303 +8,279 @@ private let now = Date(timeIntervalSince1970: 1_787_712_000)
 
 private var nowMs: Double { now.timeIntervalSince1970 * 1000 }
 
-private func lens(focusHours: Double = 24) -> TimeLens {
-	TimeLens(TimeLensOptions(
-		now: nowMs,
-		focusStart: nowMs - focusHours * 3_600_000,
-		focusEnd: nowMs,
-		width: 1600,
-		minPxPerHour: 8))
+private func makeMission(
+	id: String, number: Int, state: MissionState = .running,
+	age: Double
+) -> Mission {
+	Mission(
+		id: id, number: number,
+		workspaceId: "w1", machineId: "m1",
+		name: "mission \(number)", objective: "Objective.", changes: [],
+		lead: .leader, agentIds: [], access: .readOnly, worktree: nil,
+		state: state, attention: nil,
+		createdAt: now.addingTimeInterval(-age),
+		closedAt: nil, disposition: nil, closeReason: nil,
+		integration: nil, continuesMissionId: nil)
 }
 
-/// T10.8 contract: the Now label and live edge, jump staging and clearing,
-/// the off-screen leader flip, pan moving time but never metrics, vertical
-/// pan clamping scroll only, zoom holding the cursor time, and Fit showing
-/// the earliest open mission.
+private func makeIndex(
+	_ missions: [Mission], pxPerHour: Double = 48
+) -> SpineIndex {
+	SpineIndex(
+		missions: missions, pxPerHour: pxPerHour, maxPitch: 320)
+}
+
+/// T10.9 contract: the Now label and live edge, jump staging and clearing,
+/// the off-screen leader flip, pan moving scroll but never spacing, zoom
+/// holding the cursor, and Fit.
 @MainActor
 final class NowStateTests: XCTestCase {
 	private let viewport = CGRect(x: 0, y: 0, width: 1600, height: 1000)
 
-	/// The leader card as T10.9 places it: centred on wall-clock `now`
-	/// mapped through the lens (which trails wall time after a pan).
-	private func leaderRect(_ lens: TimeLens) -> CGRect {
-		let x = CGFloat(lens.x(nowMs))
-		return CGRect(x: x - 105, y: 463, width: 210, height: 74)
+	private func leaderRect(
+		_ index: SpineIndex, scrollX: CGFloat
+	) -> CGRect {
+		SpinePlacement.leaderRect(
+			index: index, scrollX: scrollX, viewport: viewport,
+			spineY: viewport.midY)
 	}
 
 	// MARK: - Live edge
 
 	func testLitAtLiveEdge() {
+		let index = makeIndex([
+			makeMission(id: "a", number: 1, age: 3600),
+			makeMission(id: "b", number: 2, age: 60),
+		])
 		let state = NowState()
-		let lens = lens()
 		state.update(
-			lens: lens, viewport: viewport, leader: leaderRect(lens),
-			now: now)
+			index: index, scrollX: 0, viewport: viewport,
+			leader: leaderRect(index, scrollX: 0), now: now)
 		XCTAssertTrue(state.isLive)
 		XCTAssertEqual(state.label, "Now")
 	}
 
 	func testLitAtHalfPixelOvershoot() {
+		let index = makeIndex([
+			makeMission(id: "a", number: 1, age: 60),
+		])
+		// Newest item half a point past the right edge still counts.
+		let newestX = index.x(index.count - 1)
+		let scrollX = newestX - viewport.width - 0.5
 		let state = NowState()
-		let lens = lens()
-		// Live edge half a point past the viewport edge still counts.
-		let atGrace = CGRect(x: -0.5, y: 0, width: 1600, height: 1000)
 		state.update(
-			lens: lens, viewport: atGrace, leader: leaderRect(lens),
-			now: now)
+			index: index, scrollX: scrollX, viewport: viewport,
+			leader: leaderRect(index, scrollX: scrollX), now: now)
 		XCTAssertTrue(state.isLive)
 		XCTAssertEqual(state.label, "Now")
 		// Past the grace the view is back in time.
-		let pastGrace = CGRect(x: -0.6, y: 0, width: 1600, height: 1000)
-		state.update(
-			lens: lens, viewport: pastGrace, leader: leaderRect(lens),
-			now: now)
-		XCTAssertFalse(state.isLive)
-		XCTAssertTrue(state.label.hasPrefix("Now · "))
-		XCTAssertTrue(state.label.hasSuffix(" back"))
+		let past = NowState()
+		past.update(
+			index: index, scrollX: scrollX - 0.1, viewport: viewport,
+			leader: leaderRect(index, scrollX: scrollX - 0.1), now: now)
+		XCTAssertFalse(past.isLive)
 	}
 
-	func testBackLabelInDaysAndHours() {
+	func testBackLabels() {
+		let threeDays = makeIndex([
+			makeMission(id: "a", number: 1, age: 3 * 86400 + 60),
+			makeMission(id: "b", number: 2, age: 3 * 86400),
+		])
 		let state = NowState()
-		let wide = TimeLens(TimeLensOptions(
-			now: nowMs,
-			focusStart: nowMs - 7 * 24 * 3_600_000,
-			focusEnd: nowMs,
-			width: 1600,
-			minPxPerHour: 8))
-		let threeDays = CGFloat(wide.x(nowMs - 3 * 24 * 3_600_000))
+		// Newest item off the right edge: 120 past a 100-wide viewport.
+		let narrow = CGRect(x: 0, y: 0, width: 100, height: 1000)
 		state.update(
-			lens: wide,
-			viewport: CGRect(
-				x: threeDays - 1600, y: 0, width: 1600, height: 1000),
-			leader: leaderRect(wide), now: now)
+			index: threeDays, scrollX: 0, viewport: narrow,
+			leader: leaderRect(threeDays, scrollX: 0), now: now)
 		XCTAssertFalse(state.isLive)
 		XCTAssertEqual(state.label, "Now · 3d back")
 
-		let fiveHours = CGFloat(wide.x(nowMs - 5 * 3_600_000))
-		state.update(
-			lens: wide,
-			viewport: CGRect(
-				x: fiveHours - 1600, y: 0, width: 1600, height: 1000),
-			leader: leaderRect(wide), now: now)
-		XCTAssertFalse(state.isLive)
-		XCTAssertEqual(state.label, "Now · 5h back")
+		let fiveHours = makeIndex([
+			makeMission(id: "c", number: 3, age: 5 * 3600 + 60),
+			makeMission(id: "d", number: 4, age: 5 * 3600),
+		])
+		let hours = NowState()
+		hours.update(
+			index: fiveHours, scrollX: 0, viewport: narrow,
+			leader: leaderRect(fiveHours, scrollX: 0), now: now)
+		XCTAssertFalse(hours.isLive)
+		XCTAssertEqual(hours.label, "Now · 5h back")
 	}
 
 	// MARK: - Jump
 
-	func testConsumeJumpClearsRequest() {
+	func testConsumeJumpClearsTheRequest() {
+		let index = makeIndex([
+			makeMission(id: "a", number: 1, age: 3600),
+		])
 		let state = NowState()
-		XCTAssertNil(state.consumeJump())
-		state.jumpToNow(lens: lens(), viewport: viewport, now: now)
-		let jumped = state.consumeJump()
-		XCTAssertNotNil(jumped)
+		XCTAssertNil(state.jumpRequest)
+		state.jumpToNow(index: index, viewport: viewport)
+		let request = state.jumpRequest
+		XCTAssertNotNil(request)
+		XCTAssertEqual(
+			request, max(0, index.contentWidth - viewport.width))
+		XCTAssertEqual(state.consumeJump(), request)
 		XCTAssertNil(state.consumeJump())
 	}
 
-	func testJumpToNowReanchorsLiveEdgeKeepingDuration() {
-		let state = NowState()
-		let viewportState = SpineViewportState(lens: lens())
-		// Pan back: the view leaves the live edge...
-		viewportState.pan(
-			by: CGSize(width: 800, height: 0), viewport: viewport,
-			contentHeight: 1000)
-		state.update(
-			lens: viewportState.lens, viewport: viewport,
-			leader: leaderRect(viewportState.lens), now: now)
-		XCTAssertFalse(state.isLive)
-		XCTAssertTrue(state.leaderOffScreen)
-		// ...and jumping returns exactly to the pre-pan lens: the live
-		// edge sits at the viewport edge with the focus duration kept.
-		state.jumpToNow(
-			lens: viewportState.lens, viewport: viewport, now: now)
-		let jumped = state.consumeJump()
-		XCTAssertNotNil(jumped)
-		XCTAssertEqual(jumped, lens())
-		XCTAssertEqual(
-			jumped!.t(Double(viewport.maxX)), nowMs, accuracy: 1.0)
-		XCTAssertEqual(
-			jumped!.x(nowMs), Double(viewport.maxX), accuracy: 1e-9)
-		state.update(
-			lens: jumped!, viewport: viewport,
-			leader: leaderRect(jumped!), now: now)
-		XCTAssertTrue(state.isLive)
-		XCTAssertEqual(state.label, "Now")
-		XCTAssertFalse(state.leaderOffScreen)
-	}
+	// MARK: - Off-screen leader
 
-	// MARK: - Leader marker
-
-	func testLeaderOffScreenFlipsAtViewportEdge() {
+	func testLeaderOffScreenFlipsAtTheViewportEdge() {
+		let index = makeIndex([
+			makeMission(id: "a", number: 1, age: 60),
+		])
 		let state = NowState()
-		let lens = lens()
+		let leader = leaderRect(index, scrollX: 0)
 		state.update(
-			lens: lens, viewport: viewport, leader: leaderRect(lens),
+			index: index, scrollX: 0, viewport: viewport, leader: leader,
 			now: now)
 		XCTAssertFalse(state.leaderOffScreen)
-
-		// Leader fully past the left edge.
-		let gone = CGRect(x: -500, y: 463, width: 210, height: 74)
+		// A viewport ending one point left of the leader's leading edge.
+		let clipped = CGRect(
+			x: 0, y: 0, width: leader.minX - 1, height: 1000)
 		state.update(
-			lens: lens, viewport: viewport, leader: gone, now: now)
+			index: index, scrollX: 0, viewport: clipped, leader: leader,
+			now: now)
 		XCTAssertTrue(state.leaderOffScreen)
-
-		// Touching the edge without overlapping is still off-screen.
-		let touching = CGRect(
-			x: viewport.minX - 210, y: 463, width: 210, height: 74)
-		state.update(
-			lens: lens, viewport: viewport, leader: touching, now: now)
-		XCTAssertTrue(state.leaderOffScreen)
-
-		// One point of overlap is on-screen.
-		let overlap = CGRect(
-			x: viewport.minX - 209, y: 463, width: 210, height: 74)
-		state.update(
-			lens: lens, viewport: viewport, leader: overlap, now: now)
-		XCTAssertFalse(state.leaderOffScreen)
 	}
 
 	// MARK: - Pan
 
-	func testHorizontalPanMovesTimeAndLeavesMetricsUntouched() {
-		let state = SpineViewportState(lens: lens())
-		let before = state.lens.t(Double(viewport.midX))
+	func testHorizontalPanMovesScrollXOnly() {
+		// Seven missions a day apart: six gaps clamped to `maxPitch` keep
+		// the content (6 x 320 + 270) wider than the viewport, so the pan
+		// has room to land.
+		let index = makeIndex((0 ..< 7).map { k in
+			makeMission(
+				id: "m\(k)", number: k + 1, age: Double(6 - k) * 86400)
+		})
+		let state = SpineViewportState(pxPerHour: 48)
+		XCTAssertGreaterThan(index.contentWidth, viewport.width)
 		state.pan(
-			by: CGSize(width: 100, height: 0), viewport: viewport,
-			contentHeight: 1000)
-		let after = state.lens.t(Double(viewport.midX))
-		XCTAssertNotEqual(after, before)
-		XCTAssertEqual(SpineMetrics.standard, SpineMetrics())
+			by: CGSize(width: 100, height: 0), index: index,
+			viewport: viewport, contentHeight: 1000)
+		XCTAssertEqual(state.scrollX, 100)
+		XCTAssertEqual(state.pxPerHour, 48)
+		XCTAssertEqual(state.maxPitch, 320)
+		XCTAssertEqual(
+			SpineMetrics.standard.rowGap, 10,
+			"pan leaves metrics untouched")
 	}
 
-	func testVerticalPanChangesScrollOnlyAndClamps() {
-		let state = SpineViewportState(lens: lens())
-		let lensBefore = state.lens
+	func testVerticalPanChangesScrollYOnlyAndClamps() {
+		let index = makeIndex([makeMission(id: "a", number: 1, age: 60)])
+		let state = SpineViewportState(pxPerHour: 48)
 		state.pan(
-			by: CGSize(width: 0, height: 200), viewport: viewport,
-			contentHeight: 2400)
-		XCTAssertEqual(state.scrollY, 200)
-		XCTAssertEqual(state.lens, lensBefore)
-
-		// Clamps to the bottom.
+			by: CGSize(width: 0, height: 40), index: index,
+			viewport: viewport, contentHeight: 1400)
+		XCTAssertEqual(state.scrollY, 40)
+		XCTAssertEqual(state.scrollX, 0)
 		state.pan(
-			by: CGSize(width: 0, height: 5000), viewport: viewport,
-			contentHeight: 2400)
-		XCTAssertEqual(state.scrollY, 1400)
-		XCTAssertEqual(state.lens, lensBefore)
-
-		// Clamps to the top.
+			by: CGSize(width: 0, height: 10_000), index: index,
+			viewport: viewport, contentHeight: 1400)
+		XCTAssertEqual(state.scrollY, 400)
 		state.pan(
-			by: CGSize(width: 0, height: -5000), viewport: viewport,
-			contentHeight: 2400)
+			by: CGSize(width: 0, height: -10_000), index: index,
+			viewport: viewport, contentHeight: 1400)
 		XCTAssertEqual(state.scrollY, 0)
-		XCTAssertEqual(state.lens, lensBefore)
 	}
 
-	// MARK: - Zoom and fit
+	func testPanClampsScrollXToContent() {
+		let index = makeIndex([makeMission(id: "a", number: 1, age: 60)])
+		XCTAssertLessThan(index.contentWidth, viewport.width)
+		let state = SpineViewportState(pxPerHour: 48)
+		state.pan(
+			by: CGSize(width: 500, height: 0), index: index,
+			viewport: viewport, contentHeight: 1000)
+		XCTAssertEqual(state.scrollX, 0)
+	}
 
-	func testZoomHoldsCursorTime() {
-		let state = SpineViewportState(lens: lens())
-		// At the max clamp further zooms are exact no-ops: the time under
-		// every cursor stays put within a millisecond.
-		state.zoom(factor: 1e9, atCursorX: 800)
-		for cursorX in [0.0, 400, 800, 1200, 1600] {
-			let cursorT = state.lens.t(cursorX)
-			state.zoom(factor: 2, atCursorX: cursorX)
+	// MARK: - Zoom
+
+	func testZoomHoldsContentUnderCursor() {
+		let missions = (0 ..< 20).map { k in
+			makeMission(
+				id: "m\(k)", number: k + 1, age: Double(20 - k) * 3600)
+		}
+		// 200 px/h keeps hour gaps unclamped, so the zoom re-solves
+		// nontrivially.
+		let state = SpineViewportState(pxPerHour: 200)
+		var index = makeIndex(missions, pxPerHour: 200)
+		let cursorX: CGFloat = 800
+		let before = SpineTicks.time(
+			index: index, x: state.scrollX + cursorX, now: .infinity)
+		state.zoom(factor: 1.25, atCursorX: cursorX, index: index)
+		XCTAssertEqual(state.pxPerHour, 250)
+		index = index.respaced(
+			pxPerHour: state.pxPerHour, maxPitch: state.maxPitch)
+		let after = SpineTicks.time(
+			index: index, x: state.scrollX + cursorX, now: .infinity)
+		XCTAssertEqual(after, before, accuracy: 1e-9)
+		// ...so the content under the cursor holds within one point.
+		let afterX = SpineTicks.x(index: index, t: after, now: .infinity)
+		XCTAssertEqual(afterX - state.scrollX, cursorX, accuracy: 1.0)
+	}
+
+	func testZoomNeverChangesTheMinimumPitch() {
+		let state = SpineViewportState(pxPerHour: 48)
+		XCTAssertEqual(SpineViewportState.minPitch, 120)
+		let index = makeIndex([makeMission(id: "a", number: 1, age: 60)])
+		state.zoom(factor: 0.001, atCursorX: 800, index: index)
+		XCTAssertEqual(state.pxPerHour, SpineViewportState.minPxPerHour)
+		XCTAssertEqual(state.maxPitch, SpineViewportState.minPitch)
+	}
+
+	func testFloorGivesAUniformSequence() {
+		let missions = (0 ..< 10).map { k in
+			makeMission(
+				id: "m\(k)", number: k + 1, age: Double(10 - k) * 24 * 3600)
+		}
+		let state = SpineViewportState(pxPerHour: 48)
+		let index = makeIndex(missions)
+		state.zoom(factor: 0.0001, atCursorX: 800, index: index)
+		let floored = index.respaced(
+			pxPerHour: state.pxPerHour, maxPitch: state.maxPitch)
+		for i in 1 ..< floored.count {
 			XCTAssertEqual(
-				state.lens.t(cursorX), cursorT, accuracy: 1.0,
-				"cursor time at x=\(cursorX)")
+				floored.x(i) - floored.x(i - 1), 120, accuracy: 1e-9)
 		}
 	}
 
-	func testKeyboardZoomStepsAboutViewportCentre() {
-		let state = SpineViewportState(lens: lens())
-		let span = state.lens.options.focusEnd - state.lens.options.focusStart
-		state.zoom(.zoomIn, viewport: viewport)
-		XCTAssertEqual(
-			state.lens.options.focusEnd - state.lens.options.focusStart,
-			span / 1.25, accuracy: 1.0)
-		state.zoom(.zoomOut, viewport: viewport)
-		XCTAssertEqual(
-			state.lens.options.focusEnd - state.lens.options.focusStart,
-			span, accuracy: 1.0)
-	}
+	// MARK: - Fit
 
-	func testFitShowsEarliestOpenAndResetsScroll() {
-		let earliest = now.addingTimeInterval(-3 * 24 * 3600)
-		let index = SpineIndex(missions: [
-			makeMission(
-				id: "closed-old", number: 1, state: .closed,
-				createdAt: now.addingTimeInterval(-10 * 24 * 3600)),
-			makeMission(
-				id: "open-early", number: 2, state: .running,
-				createdAt: earliest),
-			makeMission(
-				id: "open-late", number: 3, state: .blocked,
-				createdAt: now.addingTimeInterval(-3600)),
-		])
-		let state = SpineViewportState(lens: lens())
-		state.pan(
-			by: CGSize(width: 0, height: 300), viewport: viewport,
-			contentHeight: 2400)
-		XCTAssertEqual(state.scrollY, 300)
-		state.fit(index: index, viewport: viewport, now: now)
+	func testFitShowsEveryOpenMissionWhenTheyFit() {
+		let missions = [
+			makeMission(id: "a", number: 1, age: 5 * 3600),
+			makeMission(id: "b", number: 2, age: 3600),
+			makeMission(id: "c", number: 3, age: 60),
+		]
+		let state = SpineViewportState(pxPerHour: 48)
+		let index = makeIndex(missions)
+		state.fit(index: index, viewport: viewport)
+		let fitted = index.respaced(
+			pxPerHour: state.pxPerHour, maxPitch: state.maxPitch)
+		let first = fitted.earliestOpen ?? 0
+		XCTAssertGreaterThanOrEqual(state.scrollX, 0)
+		XCTAssertLessThanOrEqual(
+			fitted.x(fitted.count - 1) - state.scrollX, viewport.width)
+		XCTAssertLessThanOrEqual(state.scrollX, fitted.x(first) + 1)
 		XCTAssertEqual(state.scrollY, 0)
-		let earliestMs = earliest.timeIntervalSince1970 * 1000
-		XCTAssertGreaterThanOrEqual(state.lens.x(earliestMs), 0)
-		XCTAssertEqual(
-			state.lens.options.focusStart, earliestMs, accuracy: 1e-9)
-		XCTAssertEqual(state.lens.options.focusEnd, nowMs, accuracy: 1e-9)
 	}
 
-	func testToggleExpanded() {
-		let state = SpineViewportState(lens: lens())
-		XCTAssertTrue(state.expanded.isEmpty)
-		state.toggleExpanded("m1")
-		XCTAssertEqual(state.expanded, ["m1"])
-		state.toggleExpanded("m1")
-		XCTAssertTrue(state.expanded.isEmpty)
-	}
-
-	// MARK: - Trackpad capture
-
-	func testNonPreciseDeltasScaleByEighteen() {
+	func testFitPansToNewestWhenOpenMissionsDoNotFit() {
+		let missions = (0 ..< 200).map { k in
+			makeMission(
+				id: "m\(k)", number: k + 1, age: Double(200 - k) * 3600)
+		}
+		let state = SpineViewportState(pxPerHour: 48)
+		let index = makeIndex(missions)
+		state.fit(index: index, viewport: viewport)
+		XCTAssertEqual(state.pxPerHour, SpineViewportState.minPxPerHour)
+		let floored = index.respaced(
+			pxPerHour: state.pxPerHour, maxPitch: state.maxPitch)
 		XCTAssertEqual(
-			TrackpadPanCaptureView.scaledDelta(2, precise: true), 2)
-		XCTAssertEqual(
-			TrackpadPanCaptureView.scaledDelta(2, precise: false), 36)
-		XCTAssertEqual(TrackpadPanCaptureView.nonPreciseScale, 18)
-	}
-
-	func testCaptureRectCarvesOutInteractionInsets() {
-		let view = TrackpadPanCaptureView(
-			frame: NSRect(x: 0, y: 0, width: 1600, height: 1000))
-		let bounds = NSRect(x: 0, y: 0, width: 1600, height: 1000)
-		let full = view.captureRect(in: bounds)
-		XCTAssertEqual(full, bounds)
-		view.configure(
-			isEnabled: true,
-			interactionInsets: NSEdgeInsets(
-				top: 0, left: 0, bottom: 56, right: 426),
-			onScroll: { _ in })
-		XCTAssertEqual(
-			view.captureRect(in: bounds),
-			NSRect(x: 0, y: 56, width: 1174, height: 944))
-	}
-
-	// MARK: - Helpers
-
-	private func makeMission(
-		id: String, number: Int, state: MissionState, createdAt: Date
-	) -> Mission {
-		Mission(
-			id: id, number: number,
-			workspaceId: "w1", machineId: "m1",
-			name: "mission \(number)", objective: "Objective.", changes: [],
-			lead: .leader, agentIds: [], access: .readOnly, worktree: nil,
-			state: state, attention: nil,
-			createdAt: createdAt,
-			closedAt: nil, disposition: nil, closeReason: nil,
-			integration: nil, continuesMissionId: nil)
+			state.scrollX,
+			max(0, floored.contentWidth - viewport.width), accuracy: 1e-6)
 	}
 }

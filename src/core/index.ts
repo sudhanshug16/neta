@@ -1,5 +1,4 @@
 export * from "./ids.ts";
-export * from "./lens.ts";
 export * from "./names.ts";
 export * from "./numbering.ts";
 export * from "./state.ts";

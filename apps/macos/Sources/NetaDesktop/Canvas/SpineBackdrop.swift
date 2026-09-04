@@ -1,7 +1,7 @@
 import CoreGraphics
 import SwiftUI
 
-/// Backdrop paint tokens (T10.4).
+/// Backdrop paint tokens (T10.5).
 ///
 /// One edge colour for every edge — solid, never dashed or coloured — so
 /// blocked reads through the amber anchor and the card label, never through
@@ -45,8 +45,7 @@ public struct BackdropStyle: Sendable, Equatable {
 public struct RecordingGraphicsContext: Sendable {
 	public enum EdgeKind: Sendable, Equatable {
 		case connector
-		case trunk
-		case stub
+		case link
 		case leader
 	}
 
@@ -95,16 +94,11 @@ public struct RecordingGraphicsContext: Sendable {
 /// `leaderEdges` is always empty: Revision 2 removed the leader edge (and the
 /// amber dashed blocked variant), so no mission — including a `.leader`-led
 /// one — draws an edge to the leader. A leader-led mission is marked by the
-/// 12 pt crown on its card header instead, which the card view (T10.6) owns.
+/// 12 pt crown on its card header instead, which the card view (T10.7) owns.
 struct BackdropPlan: Sendable, Equatable {
 	struct ConnectorMark: Sendable, Equatable {
 		var id: MissionId
 		var points: [CGPoint]
-	}
-
-	struct TrunkMark: Sendable, Equatable {
-		var points: [CGPoint]
-		var stubs: [[CGPoint]]
 	}
 
 	struct AnchorMark: Sendable, Equatable {
@@ -124,8 +118,6 @@ struct BackdropPlan: Sendable, Equatable {
 		var text: String
 	}
 
-	/// 6 pt stubs joining the trunk to each agent row (Paper artboard 1 item 9).
-	static let stubLength: CGFloat = 6
 	/// Mission ticks straddle the axis by this half-height.
 	static let tickHalfHeight: CGFloat = 3
 	/// Violet bed beneath the 1 px axis (Paper artboard 1 item 8).
@@ -134,57 +126,70 @@ struct BackdropPlan: Sendable, Equatable {
 	static let labelDrop: CGFloat = 14
 
 	var connectors: [ConnectorMark] = []
-	var trunks: [TrunkMark] = []
+	/// Revision 4b stack links: one short centred vertical segment joining
+	/// the lead card to the first row, each row to the next, and the last
+	/// row to the `+N completed` chip. No trunk line, no stubs.
+	var links: [[CGPoint]] = []
 	var anchors: [AnchorMark] = []
 	var ticks: [TickMark] = []
 	var labels: [AxisLabel] = []
 	var leaderEdges: [[CGPoint]] = []
 
 	init(
-		window: VisibleWindow, lens: TimeLens,
+		window: VisibleWindow,
 		emphasisFor: (MissionId) -> Double
 	) {
-		let stubHalf = Self.stubLength / 2
 		for column in window.columns {
 			connectors.append(ConnectorMark(id: column.id, points: column.connector))
 			anchors.append(AnchorMark(
 				id: column.id, point: column.anchor, state: column.state,
 				emphasis: min(1, max(0, emphasisFor(column.id)))))
-			if let last = column.rows.last {
-				let midX = column.card.midX
-				let nearY =
-					column.side == .above ? column.card.minY : column.card.maxY
-				let farY =
-					column.side == .above ? last.minY : last.maxY
-				trunks.append(TrunkMark(
-					points: [CGPoint(x: midX, y: nearY), CGPoint(x: midX, y: farY)],
-					stubs: column.rows.map { row in
-						[
-							CGPoint(x: midX - stubHalf, y: row.midY),
-							CGPoint(x: midX + stubHalf, y: row.midY),
-						]
-					}))
-			}
+			links.append(contentsOf: Self.stackLinks(for: column))
 		}
 		for tick in window.ticks {
 			ticks.append(TickMark(x: tick.x, state: tick.state))
 		}
-		for lensTick in lens.ticks() {
+		for label in window.labels {
 			labels.append(AxisLabel(
 				point: CGPoint(
-					x: CGFloat(lens.x(lensTick.t)), y: window.spineY + Self.labelDrop),
-				text: lensTick.label))
+					x: label.x, y: window.spineY + Self.labelDrop),
+				text: label.label))
 		}
+	}
+
+	/// One segment per row rect: from the card's far edge (or the previous
+	/// row's far edge) to the row's near edge, at the card's horizontal
+	/// centre.
+	static func stackLinks(for column: MissionColumn) -> [[CGPoint]] {
+		let midX = column.card.midX
+		var links: [[CGPoint]] = []
+		links.reserveCapacity(column.rows.count)
+		for (i, row) in column.rows.enumerated() {
+			let fromY: CGFloat
+			let toY: CGFloat
+			if column.side == .above {
+				fromY = i == 0 ? column.card.minY : column.rows[i - 1].minY
+				toY = row.maxY
+			} else {
+				fromY = i == 0 ? column.card.maxY : column.rows[i - 1].maxY
+				toY = row.minY
+			}
+			links.append([
+				CGPoint(x: midX, y: fromY),
+				CGPoint(x: midX, y: toY),
+			])
+		}
+		return links
 	}
 }
 
-/// One-`Canvas` backdrop painter (T10.4): no per-mission shape views.
+/// One-`Canvas` backdrop painter (T10.5): no per-mission shape views.
 ///
-/// Paint order: axis underlay, axis, `lens.ticks()` labels in 10 pt mono
-/// `Theme.textSecondary` beneath the axis, mission ticks, connectors, agent
-/// trunk edges with 6 pt stubs, then anchors. Every edge is `edgeColor` at
-/// `edgeWidth`, solid, with round caps. Emphasis fades anchors only; edges
-/// stay one colour.
+/// Paint order: axis underlay, axis, age `labels` in 10 pt mono
+/// `Theme.textSecondary` beneath the axis, mission ticks, connectors, stack
+/// links, then anchors. Every edge is `edgeColor` at `edgeWidth`, solid,
+/// straight, with round caps. Emphasis fades anchors only; edges stay one
+/// colour.
 public enum SpinePainter {
 	public static func connectorPath(_ points: [CGPoint]) -> Path {
 		var path = Path()
@@ -195,7 +200,7 @@ public enum SpinePainter {
 	}
 
 	/// State colour for anchors and mission ticks. Missions have no
-	/// completed/archived case; the remaining mapping is the table T10.5
+	/// completed/archived case; the remaining mapping is the table T10.6
 	/// canonises in `CanvasStyle`.
 	public static func anchorColor(for state: MissionState) -> Color {
 		switch state {
@@ -209,10 +214,10 @@ public enum SpinePainter {
 
 	public static func draw(
 		into ctx: inout GraphicsContext, size: CGSize, window: VisibleWindow,
-		lens: TimeLens, style: BackdropStyle,
+		style: BackdropStyle,
 		emphasisFor: (MissionId) -> Double
 	) {
-		let plan = BackdropPlan(window: window, lens: lens, emphasisFor: emphasisFor)
+		let plan = BackdropPlan(window: window, emphasisFor: emphasisFor)
 		let edgeStyle = StrokeStyle(
 			lineWidth: style.edgeWidth, lineCap: .round, lineJoin: .round)
 		let axis = [
@@ -245,15 +250,10 @@ public enum SpinePainter {
 				connectorPath(connector.points), with: .color(style.edgeColor),
 				style: edgeStyle)
 		}
-		for trunk in plan.trunks {
+		for link in plan.links {
 			ctx.stroke(
-				connectorPath(trunk.points), with: .color(style.edgeColor),
+				connectorPath(link), with: .color(style.edgeColor),
 				style: edgeStyle)
-			for stub in trunk.stubs {
-				ctx.stroke(
-					connectorPath(stub), with: .color(style.edgeColor),
-					style: edgeStyle)
-			}
 		}
 		for edge in plan.leaderEdges {
 			ctx.stroke(
@@ -277,10 +277,10 @@ public enum SpinePainter {
 	/// Test overload: records the same plan the `Canvas` paints.
 	public static func draw(
 		into recorder: inout RecordingGraphicsContext, size: CGSize,
-		window: VisibleWindow, lens: TimeLens, style: BackdropStyle,
+		window: VisibleWindow, style: BackdropStyle,
 		emphasisFor: (MissionId) -> Double
 	) {
-		let plan = BackdropPlan(window: window, lens: lens, emphasisFor: emphasisFor)
+		let plan = BackdropPlan(window: window, emphasisFor: emphasisFor)
 		recorder.recordStyle(style)
 		for label in plan.labels
 		where label.point.x >= 0 && label.point.x <= size.width {
@@ -292,11 +292,8 @@ public enum SpinePainter {
 		for connector in plan.connectors {
 			recorder.recordStroke(kind: .connector, points: connector.points)
 		}
-		for trunk in plan.trunks {
-			recorder.recordStroke(kind: .trunk, points: trunk.points)
-			for stub in trunk.stubs {
-				recorder.recordStroke(kind: .stub, points: stub)
-			}
+		for link in plan.links {
+			recorder.recordStroke(kind: .link, points: link)
 		}
 		for edge in plan.leaderEdges {
 			recorder.recordStroke(kind: .leader, points: edge)
@@ -307,24 +304,22 @@ public enum SpinePainter {
 	}
 }
 
-/// The backdrop view wrapping the painter (T10.4).
+/// The backdrop view wrapping the painter (T10.5).
 ///
 /// The `Canvas` must be sized to the viewport with a matching origin: window
-/// coordinates are lens/viewport points. Column views, the leader card and
-/// the checkpoint layer stack above this in T10.9.
+/// coordinates are viewport points. Column views, the leader card and the
+/// checkpoint layer stack above this in T10.10.
 public struct SpineBackdrop: View {
 	private let window: VisibleWindow
-	private let lens: TimeLens
 	private let style: BackdropStyle
 	private let emphasisFor: (MissionId) -> Double
 
 	public init(
-		window: VisibleWindow, lens: TimeLens,
+		window: VisibleWindow,
 		style: BackdropStyle = .standard,
 		emphasisFor: @escaping (MissionId) -> Double
 	) {
 		self.window = window
-		self.lens = lens
 		self.style = style
 		self.emphasisFor = emphasisFor
 	}
@@ -332,7 +327,7 @@ public struct SpineBackdrop: View {
 	public var body: some View {
 		Canvas { ctx, size in
 			SpinePainter.draw(
-				into: &ctx, size: size, window: window, lens: lens,
+				into: &ctx, size: size, window: window,
 				style: style, emphasisFor: emphasisFor)
 		}
 	}

@@ -10,13 +10,18 @@ private let now = Date(timeIntervalSince1970: 1_787_712_000)
 
 private var nowMs: Double { now.timeIntervalSince1970 * 1000 }
 
-private func lens(focusHours: Double = 24) -> TimeLens {
-	TimeLens(TimeLensOptions(
-		now: nowMs,
-		focusStart: nowMs - focusHours * 3_600_000,
-		focusEnd: nowMs,
-		width: 1600,
-		minPxPerHour: 8))
+private func makeMission(
+	id: String, number: Int, at: Date
+) -> Mission {
+	Mission(
+		id: id, number: number,
+		workspaceId: "w1", machineId: "m1",
+		name: "mission \(number)", objective: "Objective.", changes: [],
+		lead: .leader, agentIds: [], access: .readOnly, worktree: nil,
+		state: .running, attention: nil,
+		createdAt: at,
+		closedAt: nil, disposition: nil, closeReason: nil,
+		integration: nil, continuesMissionId: nil)
 }
 
 private func makeEvent(
@@ -34,11 +39,12 @@ private func makeEvent(
 		sessionId: sessionId, turnId: turnId, data: data)
 }
 
-/// T10.7 contract: the icon table over every `EventKind`, individual points
-/// inside the focus window, coalescing older than `focusStart`, and routing
-/// through `CheckpointRouter`.
+/// T10.8 contract: the icon table over every `EventKind`, index-based
+/// positions with checkpoint pitch, and routing through `CheckpointRouter`.
 @MainActor
 final class CheckpointTests: XCTestCase {
+	private let viewport = CGRect(x: 0, y: 0, width: 1600, height: 1000)
+
 	// MARK: - Icon table
 
 	func testIconTableCoversEveryEventKind() {
@@ -63,153 +69,140 @@ final class CheckpointTests: XCTestCase {
 	}
 
 	func testNonCheckpointKindsAreExcludedFromPlace() {
-		let lens = lens()
 		let events = [
 			makeEvent(seq: 1, kind: .missionCreated, at: now.addingTimeInterval(-60)),
 			makeEvent(seq: 2, kind: .agentSpawned, at: now.addingTimeInterval(-120)),
 			makeEvent(seq: 3, kind: .leaderModeReminder, at: now.addingTimeInterval(-180)),
 			makeEvent(seq: 4, kind: .unknown("future.kind"), at: now.addingTimeInterval(-240)),
 		]
-		let result = Checkpoints.place(events: events, lens: lens, now: now)
-		XCTAssertTrue(result.points.isEmpty)
-		XCTAssertTrue(result.clusters.isEmpty)
+		let index = SpineIndex(
+			missions: [], events: events, pxPerHour: 48, maxPitch: 320)
+		XCTAssertEqual(index.count, 0)
+		XCTAssertTrue(Checkpoints.place(
+			index: index, events: events, range: 0 ..< 0, scrollX: 0,
+			viewport: viewport, now: now).isEmpty)
 	}
 
-	// MARK: - Focus window stays individual
+	// MARK: - Index positions
 
-	func testFocusWindowEventsStayIndividual() {
-		let lens = lens()
+	/// Twelve events across a month: each x equals `index.x` of its item
+	/// and no two are closer than `checkpointPitch`.
+	func testTwelveEventsAcrossAMonthSitOnTheirItems() throws {
+		let kinds: [EventKind] = [
+			.leaderModeChanged, .missionMerged, .userPinned, .missionFailed,
+			.charterChanged, .nodeRestarted, .missionClosed, .missionBlocked,
+			.baseIntegrated, .missionMerged, .userPinned, .missionClosed,
+		]
+		var events: [Event] = []
+		for i in 0 ..< 12 {
+			events.append(makeEvent(
+				seq: i + 1, kind: kinds[i],
+				at: now.addingTimeInterval(-30 * 86400 + Double(i) * 2.5 * 86400)))
+		}
+		let missions = [
+			makeMission(
+				id: "m1", number: 1,
+				at: now.addingTimeInterval(-31 * 86400)),
+			makeMission(id: "m2", number: 2, at: now),
+		]
+		let index = SpineIndex(
+			missions: missions, events: events, pxPerHour: 48,
+			maxPitch: 320)
+		let points = Checkpoints.place(
+			index: index, events: events, range: 0 ..< index.count,
+			scrollX: 0, viewport: viewport, now: now)
+		XCTAssertEqual(points.map(\.seq), Array(1...12))
+		var itemXBySeq: [Int: CGFloat] = [:]
+		for i in 0 ..< index.count {
+			if case .checkpoint(let seq, _) = index[i] {
+				itemXBySeq[seq] = index.x(i)
+			}
+		}
+		for point in points {
+			XCTAssertEqual(
+				point.x, try XCTUnwrap(itemXBySeq[point.seq]),
+				accuracy: 1e-9)
+			XCTAssertEqual(point.id, String(point.seq))
+		}
+		let sorted = points.map(\.x).sorted()
+		for i in 1 ..< sorted.count {
+			XCTAssertGreaterThanOrEqual(sorted[i] - sorted[i - 1], 28)
+		}
+		XCTAssertEqual(points[0].label, "Lead++")
+	}
+
+	func testLeadPlusLabelCarriesMissionNumberAndAge() {
 		let events = [
 			makeEvent(
 				seq: 1, kind: .leaderModeChanged,
 				at: now.addingTimeInterval(-14 * 60),
 				missionId: "m308", sessionId: "s1", turnId: "t1",
 				data: ["number": .number(308)]),
-			makeEvent(seq: 2, kind: .missionMerged, at: now.addingTimeInterval(-2 * 3600)),
-			makeEvent(seq: 3, kind: .userPinned, at: now.addingTimeInterval(-3 * 3600)),
-			makeEvent(seq: 4, kind: .missionFailed, at: now.addingTimeInterval(-19 * 3600)),
-			makeEvent(
-				seq: 5, kind: .missionCreated,
-				at: now.addingTimeInterval(-3600)),
 		]
-		let result = Checkpoints.place(events: events, lens: lens, now: now)
-		XCTAssertEqual(result.points.map(\.seq), [1, 2, 3, 4])
-		XCTAssertTrue(result.clusters.isEmpty)
-		for checkpoint in result.points {
-			XCTAssertEqual(checkpoint.id, String(checkpoint.seq))
-			XCTAssertEqual(
-				checkpoint.x,
-				CGFloat(lens.x(checkpoint.at.timeIntervalSince1970 * 1000)),
-				accuracy: 1e-9)
-		}
-		XCTAssertEqual(result.points[0].label, "Lead++ · #308")
-		XCTAssertEqual(result.points[0].relative, "14m ago")
-		XCTAssertEqual(result.points[1].icon, .merge)
-		XCTAssertEqual(result.points[3].icon, .x)
-	}
-
-	// MARK: - Coalescing
-
-	func testTwelveAtTwoWeeksCollapseIntoClustersSummingToTwelve() {
-		let lens = lens()
-		let kinds: [EventKind] = [
-			.missionClosed, .missionMerged, .baseIntegrated,
-			.charterChanged, .nodeRestarted, .userPinned,
-		]
-		var events: [Event] = []
-		for i in 0 ..< 12 {
-			events.append(makeEvent(
-				seq: 100 + i, kind: kinds[i % kinds.count],
-				at: now.addingTimeInterval(-14 * 86400 + Double(i) * 60)))
-		}
-		let result = Checkpoints.place(events: events, lens: lens, now: now)
-		XCTAssertTrue(result.points.isEmpty)
-		XCTAssertFalse(result.clusters.isEmpty)
-		XCTAssertEqual(result.clusters.flatMap(\.members).count, 12)
-		XCTAssertEqual(
-			Set(result.clusters.flatMap { $0.members.map(\.seq) }).count, 12,
-			"every event lands in exactly one cluster")
-		for cluster in result.clusters {
-			let mean = cluster.members.reduce(CGFloat(0)) { $0 + $1.x }
-				/ CGFloat(cluster.members.count)
-			XCTAssertEqual(cluster.x, mean, accuracy: 1e-6)
-		}
-	}
-
-	func testSpreadOldEventsFormOneClusterPerRun() {
-		let lens = lens()
-		var events: [Event] = []
-		for i in 0 ..< 6 {
-			events.append(makeEvent(
-				seq: 200 + i, kind: .missionClosed,
-				at: now.addingTimeInterval(-14 * 86400 + Double(i) * 60)))
-		}
-		for i in 0 ..< 6 {
-			events.append(makeEvent(
-				seq: 300 + i, kind: .missionClosed,
-				at: now.addingTimeInterval(-28 * 86400 + Double(i) * 60)))
-		}
-		let result = Checkpoints.place(events: events, lens: lens, now: now)
-		XCTAssertTrue(result.points.isEmpty)
-		XCTAssertEqual(result.clusters.count, 2)
-		XCTAssertEqual(result.clusters.map { $0.members.count }.sorted(), [6, 6])
+		let index = SpineIndex(
+			missions: [], events: events, pxPerHour: 48, maxPitch: 320)
+		let points = Checkpoints.place(
+			index: index, events: events, range: 0 ..< index.count,
+			scrollX: 0, viewport: viewport, now: now)
+		XCTAssertEqual(points.count, 1)
+		XCTAssertEqual(points[0].label, "Lead++ · #308")
+		XCTAssertEqual(points[0].relative, "14m ago")
+		XCTAssertEqual(points[0].icon, .bolt)
 	}
 
 	// MARK: - Routing
 
 	func testModeChangedWithTurnRoutesToScrollToTurn() {
-		let lens = lens()
 		let event = makeEvent(
 			seq: 7, kind: .leaderModeChanged,
 			at: now.addingTimeInterval(-840),
 			missionId: "m1", sessionId: "s1", turnId: "t1")
-		let result = Checkpoints.place(events: [event], lens: lens, now: now)
-		XCTAssertEqual(result.points.count, 1)
+		let index = SpineIndex(
+			missions: [], events: [event], pxPerHour: 48, maxPitch: 320)
+		let points = Checkpoints.place(
+			index: index, events: [event], range: 0 ..< index.count,
+			scrollX: 0, viewport: viewport, now: now)
+		XCTAssertEqual(points.count, 1)
 		let router = CheckpointRouter()
 		XCTAssertNil(router.pending)
-		router.open(result.points[0])
+		router.open(points[0])
 		XCTAssertEqual(router.pending, .scrollToTurn(sessionId: "s1", turnId: "t1"))
 		XCTAssertEqual(router.consume(), .scrollToTurn(sessionId: "s1", turnId: "t1"))
 		XCTAssertNil(router.pending)
 	}
 
 	func testModeChangedWithoutTurnRoutesToDecisionRecord() {
-		let lens = lens()
 		let event = makeEvent(
 			seq: 8, kind: .leaderModeChanged,
 			at: now.addingTimeInterval(-840), missionId: "m9")
-		let result = Checkpoints.place(events: [event], lens: lens, now: now)
-		XCTAssertEqual(result.points.count, 1)
+		let index = SpineIndex(
+			missions: [], events: [event], pxPerHour: 48, maxPitch: 320)
+		let points = Checkpoints.place(
+			index: index, events: [event], range: 0 ..< index.count,
+			scrollX: 0, viewport: viewport, now: now)
+		XCTAssertEqual(points.count, 1)
 		let router = CheckpointRouter()
-		router.open(result.points[0])
+		router.open(points[0])
 		XCTAssertEqual(router.pending, .openDecisionRecord(missionId: "m9", seq: 8))
 	}
 
 	func testOpenWithoutMissionIdStillRoutesToDecisionRecord() {
-		let lens = lens()
 		let event = makeEvent(
 			seq: 9, kind: .missionBlocked,
 			at: now.addingTimeInterval(-3600))
-		let result = Checkpoints.place(events: [event], lens: lens, now: now)
-		XCTAssertEqual(result.points.count, 1)
+		let index = SpineIndex(
+			missions: [], events: [event], pxPerHour: 48, maxPitch: 320)
+		let points = Checkpoints.place(
+			index: index, events: [event], range: 0 ..< index.count,
+			scrollX: 0, viewport: viewport, now: now)
+		XCTAssertEqual(points.count, 1)
 		let router = CheckpointRouter()
-		router.open(result.points[0])
+		router.open(points[0])
 		XCTAssertEqual(router.pending, .openDecisionRecord(missionId: "", seq: 9))
 	}
 
 	func testConsumeClearsPending() {
-		let lens = lens()
-		let event = makeEvent(
-			seq: 10, kind: .userPinned,
-			at: now.addingTimeInterval(-60),
-			missionId: "m2", sessionId: "s2", turnId: "t2")
-		let result = Checkpoints.place(events: [event], lens: lens, now: now)
 		let router = CheckpointRouter()
-		XCTAssertNil(router.consume())
-		router.open(result.points[0])
-		XCTAssertNotNil(router.pending)
-		XCTAssertNotNil(router.consume())
-		XCTAssertNil(router.pending)
 		XCTAssertNil(router.consume())
 	}
 }

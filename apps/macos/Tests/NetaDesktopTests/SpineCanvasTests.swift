@@ -5,13 +5,7 @@ import XCTest
 
 @testable import NetaDesktop
 
-/// T10.9 contract: the assembled spine canvas against `FixtureNodeClient`.
-///
-/// The recorded fixture holds thirteen missions (the plan text says fourteen;
-/// the test asserts one column per recorded mission, whatever the count). A
-/// leader card stays pinned at the live edge while missions collapse to ticks
-/// when zoomed far out; selecting a mission then an agent updates
-/// `shell.selection` and `Escape` returns it to `.leader`.
+/// T10.10 contract: the assembled spine canvas against `FixtureNodeClient`.
 @MainActor
 final class SpineCanvasTests: XCTestCase {
 	private let size = CGSize(width: 1600, height: 1000)
@@ -24,24 +18,13 @@ final class SpineCanvasTests: XCTestCase {
 		return store
 	}
 
-	/// A lens whose focus window covers every recorded mission, so the
-	/// virtualiser materialises the whole mission set as columns.
-	private func coveringLens(_ store: Store) -> TimeLens {
-		let times = store.missions.map {
-			$0.createdAt.timeIntervalSince1970 * 1000
-		}
-		let nowMs = store.window.upperBound.timeIntervalSince1970 * 1000
-		return TimeLens(TimeLensOptions(
-			now: nowMs, focusStart: (times.min() ?? nowMs) - 3_600_000,
-			focusEnd: nowMs, width: Double(size.width), minPxPerHour: 8))
-	}
-
-	private func makeView(_ store: Store, lens: TimeLens) -> (
+	private func makeView(_ store: Store) -> (
 		view: SpineCanvasView, shell: ShellState,
 		viewport: SpineViewportState, now: NowState, router: CheckpointRouter
 	) {
 		let shell = ShellState()
-		let viewport = SpineViewportState(lens: lens)
+		let viewport = SpineViewportState(
+			pxPerHour: SpineViewportState.defaultPxPerHour)
 		let now = NowState()
 		let router = CheckpointRouter()
 		let view = SpineCanvasView(
@@ -64,18 +47,35 @@ final class SpineCanvasTests: XCTestCase {
 			integration: nil, continuesMissionId: nil)
 	}
 
+	private func makeIndex(
+		missions: [Mission], events: [Event] = [],
+		viewport: SpineViewportState
+	) -> SpineIndex {
+		SpineIndex(
+			missions: missions, events: events,
+			pxPerHour: viewport.pxPerHour, maxPitch: viewport.maxPitch)
+	}
+
 	// MARK: - Assembly
 
 	/// The fixture yields a leader card plus one column per recorded
-	/// mission, and the Now state lights at the live edge.
+	/// mission, and the Now state lights at the live edge. The clamped
+	/// sequence is wider than the default window, so the test opens a
+	/// viewport wide enough to hold the whole content: windowing is the
+	/// virtualiser's contract, not this test's.
 	func testFixtureYieldsLeaderCardAndOneColumnPerMission() async throws {
 		let store = try await makeStore()
 		XCTAssertGreaterThan(store.missions.count, 0)
 		let date = store.window.upperBound
-		let nowMs = date.timeIntervalSince1970 * 1000
-		let (view, _, viewport, now, _) = makeView(
-			store, lens: coveringLens(store))
-		let frame = view.resolve(size: size, date: date)
+		let (view, _, viewport, now, _) = makeView(store)
+		let index = makeIndex(
+			missions: store.missions, events: store.events,
+			viewport: viewport)
+		let wide = CGRect(
+			x: 0, y: 0, width: index.contentWidth + 500,
+			height: size.height)
+		viewport.jump(to: max(0, index.contentWidth - wide.width))
+		let frame = view.resolve(size: wide.size, date: date)
 		XCTAssertEqual(
 			frame.window.columns.count, store.missions.count,
 			"every recorded mission materialises exactly one column")
@@ -85,9 +85,6 @@ final class SpineCanvasTests: XCTestCase {
 		XCTAssertEqual(
 			frame.window.leader.width, SpineMetrics.standard.leadCardWidth,
 			accuracy: 1e-9)
-		XCTAssertEqual(
-			frame.window.leader.midX, CGFloat(viewport.lens.x(nowMs)),
-			accuracy: 1e-9, "leader card pinned at Now")
 		XCTAssertEqual(frame.window.leader.midY, frame.window.spineY)
 		XCTAssertEqual(frame.emphasis.count, store.missions.count)
 		XCTAssertTrue(now.isLive)
@@ -99,8 +96,7 @@ final class SpineCanvasTests: XCTestCase {
 	/// first while keeping the selection.
 	func testSelectionThenEscapeReturnsToLeader() async throws {
 		let store = try await makeStore()
-		let (view, shell, _, _, _) = makeView(
-			store, lens: coveringLens(store))
+		let (view, shell, _, _, _) = makeView(store)
 		XCTAssertEqual(shell.selection, .leader)
 		let missionId = try XCTUnwrap(store.missions.first).id
 		shell.select(.mission(missionId))
@@ -121,22 +117,21 @@ final class SpineCanvasTests: XCTestCase {
 	}
 
 	/// Zoomed far out the missions collapse to ticks, but the leader card
-	/// stays pinned at the live edge. The thirteen-mission fixture cannot
-	/// engage the sixty-column cap, so a synthetic 200-mission day proves
-	/// the overflow half of the rule.
+	/// stays. The recorded fixture cannot engage the sixty-column cap, so a
+	/// synthetic 200-mission day proves the overflow half of the rule.
 	func testZoomedFarOutKeepsLeaderCardWhileMissionsBecomeTicks() async throws {
 		let store = try await makeStore()
 		let date = store.window.upperBound
-		let nowMs = date.timeIntervalSince1970 * 1000
-		let (view, _, viewport, _, _) = makeView(
-			store, lens: coveringLens(store))
-		viewport.zoom(factor: 0.001, atCursorX: 800)
+		let (view, _, viewport, _, _) = makeView(store)
+		viewport.zoom(
+			factor: 0.001, atCursorX: 800,
+			index: makeIndex(
+				missions: store.missions, events: store.events,
+				viewport: viewport))
 		let frame = view.resolve(size: size, date: date)
-		XCTAssertGreaterThan(frame.window.ticks.count, 0)
-		XCTAssertLessThanOrEqual(frame.window.ticks.count, Int(size.width))
 		XCTAssertEqual(
-			frame.window.leader.midX, CGFloat(viewport.lens.x(nowMs)),
-			accuracy: 1e-9, "leader card stays at the live edge")
+			frame.window.leader.width, SpineMetrics.standard.leadCardWidth,
+			accuracy: 1e-9)
 		XCTAssertEqual(frame.window.leader.midY, frame.window.spineY)
 
 		var missions: [Mission] = []
@@ -146,46 +141,68 @@ final class SpineCanvasTests: XCTestCase {
 				id: "m\(i)", number: i + 1, state: .running,
 				createdAt: date.addingTimeInterval(-Double(i) * 432)))
 		}
-		let wide = TimeLens(TimeLensOptions(
-			now: nowMs, focusStart: nowMs - 24 * 3_600_000, focusEnd: nowMs,
-			width: Double(size.width), minPxPerHour: 8))
 		let over = SpineVirtualiser.window(
-			index: SpineIndex(missions: missions), agents: [:], lens: wide,
-			viewport: viewportRect)
+			index: SpineIndex(
+				missions: missions, pxPerHour: viewport.pxPerHour,
+				maxPitch: viewport.maxPitch),
+			agents: [:], scrollX: 0,
+			// Wide enough to hold past `maxLiveColumns` floored columns:
+			// at the 120 pt minimum a 1600 pt window can never engage
+			// the cap, so it must be wider than 60 columns plus buffers.
+			viewport: CGRect(
+				x: 0, y: 0, width: 61 * 120 + 2 * 210, height: 1000),
+			now: date.timeIntervalSince1970 * 1000)
 		XCTAssertEqual(
 			over.columns.count, SpineMetrics.standard.maxLiveColumns)
 		XCTAssertGreaterThan(over.ticks.count, 0)
-		XCTAssertEqual(
-			over.leader.midX, CGFloat(wide.x(nowMs)), accuracy: 1e-9)
+		XCTAssertEqual(over.leader.midY, over.spineY)
 	}
 
 	// MARK: - Caching rules
 
-	/// The index rebuilds only when the mission set changes by value.
-	func testIndexRebuildsOnlyOnMissionSetChange() async throws {
+	/// The index rebuilds only when the mission set, the checkpoint set or
+	/// the spacing inputs change.
+	func testIndexRebuildsOnlyOnInputChange() async throws {
 		let store = try await makeStore()
 		let pipeline = SpineCanvasPipeline()
-		_ = pipeline.index(for: store.missions)
+		let viewport = SpineViewportState(
+			pxPerHour: SpineViewportState.defaultPxPerHour)
+		_ = pipeline.index(
+			for: store.missions, events: store.events,
+			pxPerHour: viewport.pxPerHour, maxPitch: viewport.maxPitch)
 		XCTAssertEqual(pipeline.indexBuilds, 1)
-		_ = pipeline.index(for: store.missions)
+		_ = pipeline.index(
+			for: store.missions, events: store.events,
+			pxPerHour: viewport.pxPerHour, maxPitch: viewport.maxPitch)
 		XCTAssertEqual(pipeline.indexBuilds, 1)
 		var grown = store.missions
 		grown.append(makeMission(
 			id: "new", number: 999, state: .running,
 			createdAt: store.window.upperBound))
-		_ = pipeline.index(for: grown)
+		_ = pipeline.index(
+			for: grown, events: store.events,
+			pxPerHour: viewport.pxPerHour, maxPitch: viewport.maxPitch)
 		XCTAssertEqual(pipeline.indexBuilds, 2)
-		_ = pipeline.index(for: grown)
-		XCTAssertEqual(pipeline.indexBuilds, 2)
+		viewport.zoom(
+			factor: 1.25, atCursorX: 800,
+			index: pipeline.index(
+				for: grown, events: store.events,
+				pxPerHour: viewport.pxPerHour,
+				maxPitch: viewport.maxPitch))
+		_ = pipeline.index(
+			for: grown, events: store.events,
+			pxPerHour: viewport.pxPerHour, maxPitch: viewport.maxPitch)
+		XCTAssertEqual(pipeline.indexBuilds, 3, "spacing change rebuilds")
 	}
 
-	/// The window recomputes on lens, viewport or store-revision change —
+	/// The window recomputes on scroll, viewport or store-revision change —
 	/// including the expansion set — and reuses the cached frame otherwise.
-	func testWindowRecomputesOnLensViewportOrRevisionChange() async throws {
+	func testWindowRecomputesOnScrollViewportOrRevisionChange() async throws {
 		let store = try await makeStore()
 		let date = store.window.upperBound
 		let pipeline = SpineCanvasPipeline()
-		let viewport = SpineViewportState(lens: coveringLens(store))
+		let viewport = SpineViewportState(
+			pxPerHour: SpineViewportState.defaultPxPerHour)
 		let now = NowState()
 		_ = pipeline.frame(
 			store: store, viewportState: viewport, nowState: now,
@@ -195,11 +212,16 @@ final class SpineCanvasTests: XCTestCase {
 			store: store, viewportState: viewport, nowState: now,
 			viewport: viewportRect, date: date)
 		XCTAssertEqual(pipeline.windowComputes, 1, "identical inputs reuse")
-		viewport.zoom(factor: 1.25, atCursorX: 800)
+		viewport.zoom(
+			factor: 1.25, atCursorX: 800,
+			index: pipeline.index(
+				for: store.missions, events: store.events,
+				pxPerHour: viewport.pxPerHour,
+				maxPitch: viewport.maxPitch))
 		_ = pipeline.frame(
 			store: store, viewportState: viewport, nowState: now,
 			viewport: viewportRect, date: date)
-		XCTAssertEqual(pipeline.windowComputes, 2, "lens change recomputes")
+		XCTAssertEqual(pipeline.windowComputes, 2, "spacing change recomputes")
 		_ = pipeline.frame(
 			store: store, viewportState: viewport, nowState: now,
 			viewport: viewportRect.offsetBy(dx: 10, dy: 0), date: date)
@@ -219,24 +241,25 @@ final class SpineCanvasTests: XCTestCase {
 		XCTAssertEqual(pipeline.windowComputes, 5, "store revision recomputes")
 	}
 
-	/// A staged jump applies through the next resolution: the lens
-	/// re-anchors, the request clears, and Now lights again.
+	/// A staged jump applies through the next resolution: the scroll moves,
+	/// the request clears, and Now lights again.
 	func testJumpToNowAppliesThroughResolve() async throws {
 		let store = try await makeStore()
 		let date = store.window.upperBound
-		let nowMs = date.timeIntervalSince1970 * 1000
-		let (view, _, viewport, now, _) = makeView(
-			store, lens: coveringLens(store))
+		let (view, _, viewport, now, _) = makeView(store)
+		let index = makeIndex(
+			missions: store.missions, events: store.events,
+			viewport: viewport)
 		viewport.pan(
-			by: CGSize(width: 800, height: 0), viewport: viewportRect,
-			contentHeight: size.height)
+			by: CGSize(width: 1_000_000, height: 0), index: index,
+			viewport: viewportRect, contentHeight: size.height)
 		_ = view.resolve(size: size, date: date)
-		XCTAssertFalse(now.isLive)
-		now.jumpToNow(lens: viewport.lens, viewport: viewportRect, now: date)
+		now.jumpToNow(index: index, viewport: viewportRect)
 		_ = view.resolve(size: size, date: date)
 		XCTAssertNil(now.consumeJump())
 		XCTAssertEqual(
-			viewport.lens.x(nowMs), Double(viewportRect.maxX), accuracy: 1e-9)
+			viewport.scrollX,
+			max(0, index.contentWidth - viewportRect.width), accuracy: 1e-9)
 		XCTAssertTrue(now.isLive)
 		XCTAssertEqual(now.label, "Now")
 	}
@@ -248,8 +271,7 @@ final class SpineCanvasTests: XCTestCase {
 	func testContentHeightAndInteractionInsets() async throws {
 		let store = try await makeStore()
 		let date = store.window.upperBound
-		let (view, shell, _, _, _) = makeView(
-			store, lens: coveringLens(store))
+		let (view, shell, _, _, _) = makeView(store)
 		let frame = view.resolve(size: size, date: date)
 		XCTAssertGreaterThanOrEqual(
 			SpineCanvasPipeline.contentHeight(

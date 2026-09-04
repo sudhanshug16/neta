@@ -17,21 +17,18 @@ final class AgentStackTests: XCTestCase {
 		XCTAssertEqual(metrics.leadCardWidth, 210)
 		XCTAssertEqual(metrics.leadCardHeight, 74)
 		XCTAssertEqual(metrics.leadAttentionHeight, 104)
-		XCTAssertEqual(metrics.closedNodeWidth, 132)
+		XCTAssertEqual(metrics.closedNodeWidth, 180)
 		XCTAssertEqual(metrics.closedNodeHeight, 34)
 		XCTAssertEqual(metrics.agentRowWidth, 220)
 		XCTAssertEqual(metrics.agentRowHeight, 40)
 		XCTAssertEqual(metrics.runningRowHeight, 52)
 		XCTAssertEqual(metrics.chipHeight, 26)
-		XCTAssertEqual(metrics.rowGap, 5)
-		XCTAssertEqual(metrics.columnGap, 16)
+		XCTAssertEqual(metrics.rowGap, 10)
 		XCTAssertEqual(metrics.leadGap, 10)
 		XCTAssertEqual(metrics.spineOffset, 90)
 		XCTAssertEqual(metrics.minHitHeight, 26)
-		XCTAssertEqual(metrics.checkpointClusterGap, 24)
 		XCTAssertEqual(metrics.completedShown, 8)
 		XCTAssertEqual(metrics.maxLiveColumns, 60)
-		XCTAssertEqual(metrics.maxChainWalk, 512)
 	}
 
 	// MARK: - Live never collapses

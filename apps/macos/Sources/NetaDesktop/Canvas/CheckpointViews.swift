@@ -1,26 +1,23 @@
 import SwiftUI
 
-/// Checkpoint presentation (T10.7): icons on the axis, one glass tooltip,
-/// `N more` chips for coalesced history.
+/// Checkpoint presentation (T10.8): icons on the axis, one glass tooltip.
 ///
-/// Icons are 14 pt symbols sitting on the axis with no permanent labels;
-/// hovering one shows a single glass tooltip with the label, the relative
-/// time and a 6 pt caret to the icon. Clusters render as `N more` chips at
-/// their mean x. Tapping an icon routes through `CheckpointRouter` and
-/// opens no surface. Nodes never scale: there is no `scaleEffect` here.
+/// Icons are 14 pt stroke symbols sitting on the axis with no permanent
+/// labels; hovering one shows a single glass tooltip with the label, the
+/// relative time and a 6 pt caret to the icon. Tapping an icon routes
+/// through `CheckpointRouter` and opens no surface. Nodes never scale:
+/// there is no `scaleEffect` here.
 public struct CheckpointLayer: View {
 	private let points: [Checkpoint]
-	private let clusters: [CheckpointCluster]
 	private let spineY: CGFloat
 	private let router: CheckpointRouter
 	@State private var hoveredId: String?
 
 	public init(
-		points: [Checkpoint], clusters: [CheckpointCluster],
+		points: [Checkpoint],
 		spineY: CGFloat, router: CheckpointRouter
 	) {
 		self.points = points
-		self.clusters = clusters
 		self.spineY = spineY
 		self.router = router
 	}
@@ -30,10 +27,6 @@ public struct CheckpointLayer: View {
 			ForEach(points) { checkpoint in
 				checkpointButton(checkpoint)
 					.position(x: checkpoint.x, y: spineY)
-			}
-			ForEach(clusters) { cluster in
-				clusterChip(cluster)
-					.position(x: cluster.x, y: spineY)
 			}
 		}
 		.frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -93,19 +86,6 @@ public struct CheckpointLayer: View {
 		.accessibilityHidden(true)
 	}
 
-	// MARK: - Clusters
-
-	private func clusterChip(_ cluster: CheckpointCluster) -> some View {
-		Text("\(cluster.members.count) more")
-			.font(Theme.text(11, .medium))
-			.foregroundStyle(Theme.textSecondary)
-			.padding(.horizontal, 10)
-			.padding(.vertical, 5)
-			.frame(minHeight: 26)
-			.background(Capsule().fill(Theme.subtleSurface))
-			.overlay(Capsule().stroke(Theme.nodeBorder))
-			.accessibilityLabel("\(cluster.members.count) more checkpoints")
-	}
 }
 
 /// View mapping for `CheckpointIcon`: the SF Symbol and the state colour

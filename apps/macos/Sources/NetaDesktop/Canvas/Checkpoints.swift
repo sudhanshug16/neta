@@ -2,7 +2,7 @@ import CoreGraphics
 import Foundation
 import Observation
 
-/// Axis checkpoints (T10.7): one icon per state-changing event kind.
+/// Axis checkpoints (T10.8): one icon per state-changing event kind.
 ///
 /// Icon table (PAPER-SPINE item 10): `leader.modeChanged` bolt;
 /// `mission.merged` and `base.integrated` merge; `user.pinned` diamond;
@@ -21,8 +21,8 @@ public enum CheckpointIcon: String, Sendable, CaseIterable {
 	case question
 }
 
-/// What opening a checkpoint requests. T10.11 consumes this; `open` sets
-/// `pending` only and opens no surface.
+/// What opening a checkpoint requests. The chat workstream consumes this;
+/// `open` sets `pending` only and opens no surface.
 public enum CheckpointAction: Sendable, Equatable {
 	case scrollToTurn(sessionId: SessionId, turnId: TurnId)
 	case openDecisionRecord(missionId: MissionId, seq: Int)
@@ -30,9 +30,10 @@ public enum CheckpointAction: Sendable, Equatable {
 
 /// One checkpoint-eligible event placed on the axis.
 ///
-/// `id` is `String(seq)`; `x` is `lens.x(at)`; `label` is the kind phrase
-/// with a ` · #<number>` suffix when the event carries one in `data`
-/// (for example "Lead++ · #308"); `relative` is the age from `now`
+/// `id` is `String(seq)`; `x` is the checkpoint's screen x, taken from
+/// `index.x` of its sequence item (never from a separate scale); `label` is
+/// the kind phrase with a ` · #<number>` suffix when the event carries one
+/// in `data` (for example "Lead++ · #308"); `relative` is the age from `now`
 /// (for example "14m ago").
 public struct Checkpoint: Sendable, Equatable, Identifiable {
 	public let id: String
@@ -62,20 +63,6 @@ public struct Checkpoint: Sendable, Equatable, Identifiable {
 		self.missionId = missionId
 		self.sessionId = sessionId
 		self.turnId = turnId
-	}
-}
-
-/// Older checkpoints coalesced into one `N more` chip at the members'
-/// mean x. Members are in `seq` order.
-public struct CheckpointCluster: Sendable, Equatable, Identifiable {
-	public let id: String
-	public let x: CGFloat
-	public let members: [Checkpoint]
-
-	public init(id: String, x: CGFloat, members: [Checkpoint]) {
-		self.id = id
-		self.x = x
-		self.members = members
 	}
 }
 
@@ -122,13 +109,13 @@ extension EventKind: CaseIterable {
 	}
 }
 
-/// Checkpoint placement (T10.7).
+/// Checkpoint placement (T10.8).
 ///
-/// Events whose kind has no icon are dropped. Events at or after
-/// `lens.options.focusStart` stay individual `points`; older events
-/// coalesce into `clusters`, grouped by x within
-/// `metrics.checkpointClusterGap`, each at its members' mean x. Points are
-/// in `seq` order; clusters run oldest to newest.
+/// A checkpoint is an item in the sequence, so its x comes from `index.x`,
+/// mapped to screen coordinates; the spacing rule keeps neighbours
+/// `checkpointPitch` apart, so checkpoints never pile up and nothing
+/// coalesces. Events whose kind has no icon are dropped. Points are in
+/// `seq` order.
 public enum Checkpoints {
 	public static func icon(for kind: EventKind) -> CheckpointIcon? {
 		switch kind {
@@ -156,48 +143,44 @@ public enum Checkpoints {
 	}
 
 	public static func place(
+		index: SpineIndex,
 		events: [Event],
-		lens: TimeLens,
-		now: Date,
-		metrics: SpineMetrics = .standard
-	) -> (points: [Checkpoint], clusters: [CheckpointCluster]) {
-		let focusStart = lens.options.focusStart
+		range: Range<Int>,
+		scrollX: CGFloat,
+		viewport: CGRect,
+		now: Date
+	) -> [Checkpoint] {
+		var bySeq: [Int: Event] = [:]
+		bySeq.reserveCapacity(events.count)
+		for event in events { bySeq[event.seq] = event }
+		let lo = max(0, range.lowerBound)
+		let hi = min(index.count, range.upperBound)
 		var points: [Checkpoint] = []
-		var older: [Checkpoint] = []
-		for event in events {
-			guard let checkpoint = checkpoint(for: event, lens: lens, now: now) else {
+		for i in lo ..< hi {
+			guard case .checkpoint(let seq, _) = index[i],
+				let event = bySeq[seq],
+				let icon = icon(for: event.kind)
+			else {
 				continue
 			}
-			if event.at.timeIntervalSince1970 * 1000 >= focusStart {
-				points.append(checkpoint)
-			} else {
-				older.append(checkpoint)
-			}
+			points.append(Checkpoint(
+				id: String(event.seq),
+				seq: event.seq,
+				at: event.at,
+				kind: event.kind,
+				icon: icon,
+				label: label(for: event),
+				relative: relativeString(at: event.at, now: now),
+				x: index.x(i) - scrollX + viewport.minX,
+				missionId: event.missionId,
+				sessionId: event.sessionId,
+				turnId: event.turnId))
 		}
 		points.sort { $0.seq < $1.seq }
-		return (points, cluster(older, gap: metrics.checkpointClusterGap))
+		return points
 	}
 
 	// MARK: - Private
-
-	private static func checkpoint(
-		for event: Event, lens: TimeLens, now: Date
-	) -> Checkpoint? {
-		guard let icon = icon(for: event.kind) else { return nil }
-		let atMs = event.at.timeIntervalSince1970 * 1000
-		return Checkpoint(
-			id: String(event.seq),
-			seq: event.seq,
-			at: event.at,
-			kind: event.kind,
-			icon: icon,
-			label: label(for: event),
-			relative: relativeString(at: event.at, now: now),
-			x: CGFloat(lens.x(atMs)),
-			missionId: event.missionId,
-			sessionId: event.sessionId,
-			turnId: event.turnId)
-	}
 
 	/// Product-language kind phrase, with a ` · #<number>` suffix when the
 	/// event carries one in `data` (under `number` or `missionNumber`).
@@ -256,34 +239,5 @@ public enum Checkpoints {
 		let days = Int(seconds / 86400)
 		if days < 7 { return "\(days)d ago" }
 		return "\(days / 7)w ago"
-	}
-
-	/// Single-linkage grouping over x-sorted checkpoints: a checkpoint
-	/// joins the current group while it sits within `gap` of its
-	/// predecessor, so every group is a run of neighbours at most `gap`
-	/// apart. Each cluster sits at its members' mean x.
-	private static func cluster(
-		_ checkpoints: [Checkpoint], gap: CGFloat
-	) -> [CheckpointCluster] {
-		var groups: [[Checkpoint]] = []
-		for checkpoint in checkpoints.sorted(by: { $0.x < $1.x }) {
-			if let last = groups.last?.last,
-				checkpoint.x - last.x > gap
-			{
-				groups.append([checkpoint])
-			} else if groups.isEmpty {
-				groups.append([checkpoint])
-			} else {
-				groups[groups.count - 1].append(checkpoint)
-			}
-		}
-		return groups.map { group in
-			let members = group.sorted { $0.seq < $1.seq }
-			let meanX = group.reduce(CGFloat(0)) { $0 + $1.x } / CGFloat(group.count)
-			return CheckpointCluster(
-				id: "cluster-\(members.map(\.seq).min() ?? 0)",
-				x: meanX,
-				members: members)
-		}
 	}
 }
