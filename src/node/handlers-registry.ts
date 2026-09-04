@@ -241,8 +241,12 @@ export const registryHandlers: NodeHandlers = {
 		if (leader === undefined) {
 			throw new NodeError("NOT_FOUND", `no leader for workspace: ${parsed.workspaceId}`);
 		}
-		// 07 replaces this body for the Lead++ clock; its `missionId` targets
-		// that mission's lead instead, so 04 accepts and ignores it here.
+		// The stub-store body: a real Node mounts the tools, and `toolMount`
+		// overrides this method with 07's `ModeService.setMode`, which starts
+		// the Lead++ clock and honours `missionId` by moving that mission's
+		// lead instead of the workspace leader. Without the mount there is no
+		// mode service, so the mode is recorded and announced and nothing
+		// counts.
 		const updated = { ...leader, mode, modeSince: nowIso() };
 		await ctx.store.putLeader(updated);
 		await ctx.store.appendEvent({ workspaceId: leader.workspaceId, kind: "leader.modeChanged", data: { mode } });

@@ -26,9 +26,11 @@ export type ToolResult =
 
 export interface ToolDeps {
 	store: NodeStore;
-	// 07's `ModeService.decorate` plugs in here; until then the reminder has
-	// no third line and the preamble carries none either.
-	modeLine?: (actor: Actor) => string | undefined;
+	// 07's `ModeService.decorate`: every leader and lead response passes
+	// through it, so a subject in Lead++ carries the banner and, when one
+	// falls due, the reminder saying why Lead++ is on. Unset (a stubbed
+	// Node) leaves the response as the reminder built it.
+	decorate?: (actor: Actor, response: string) => Promise<string>;
 }
 
 export interface ToolContext {
@@ -106,21 +108,21 @@ function resolveActor(store: NodeStore, actorId: string): Actor | undefined {
 // A success answers compact JSON on the first line; a failure answers
 // `error <code>: <message>`. Leader and lead responses then carry the
 // open-mission reminder; an agent's never does.
-function render(actor: Actor, deps: ToolDeps, head: string, isError: boolean): McpToolResponse {
+async function render(actor: Actor, deps: ToolDeps, head: string, isError: boolean): Promise<McpToolResponse> {
 	let text = head;
 	if (actor.kind !== "agent") {
-		const extra = reminder({
-			missions: deps.store.listMissions(actor.workspaceId),
-			modeLine: deps.modeLine?.(actor),
-		});
+		const extra = reminder({ missions: deps.store.listMissions(actor.workspaceId) });
 		if (extra !== "") {
 			text += `\n${extra}`;
+		}
+		if (deps.decorate !== undefined) {
+			text = await deps.decorate(actor, text);
 		}
 	}
 	return { content: [{ type: "text", text }], isError };
 }
 
-function refused(deps: ToolDeps, actor: Actor | undefined, message: string): McpToolResponse {
+async function refused(deps: ToolDeps, actor: Actor | undefined, message: string): Promise<McpToolResponse> {
 	if (actor !== undefined) {
 		return render(actor, deps, `error notAuthorised: ${message}`, true);
 	}

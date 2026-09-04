@@ -35,18 +35,30 @@ export class AlreadyRunningError extends Error {
 	}
 }
 
-function descriptorPath(): string {
-	return join(netaDir(), "node.json");
+function descriptorPath(dir?: string): string {
+	return join(dir ?? netaDir(), "node.json");
 }
 
 function lockPath(): string {
 	return join(netaDir(), "node.lock");
 }
 
+// The descriptor in a named directory. The socket always sits beside
+// `node.json` in the same NETA_DIR, so a client handed only `NETA_SOCKET`
+// (which is all `netaMcpServer` puts in an ACP session's environment) can
+// still find the node token by looking next to the socket.
+export async function readDescriptorIn(dir: string): Promise<NodeDescriptor | undefined> {
+	return readDescriptorAt(descriptorPath(dir));
+}
+
 export async function readDescriptor(): Promise<NodeDescriptor | undefined> {
+	return readDescriptorAt(descriptorPath());
+}
+
+async function readDescriptorAt(path: string): Promise<NodeDescriptor | undefined> {
 	let raw: string;
 	try {
-		raw = await readFile(descriptorPath(), "utf8");
+		raw = await readFile(path, "utf8");
 	} catch (error) {
 		if ((error as { code?: unknown }).code === "ENOENT") {
 			return undefined;

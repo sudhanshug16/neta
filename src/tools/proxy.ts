@@ -3,8 +3,9 @@
 // locally, every `tools/list` and `tools/call` is forwarded to the Node over
 // the socket with the actor's token. Both sides speak NDJSON JSON-RPC 2.0.
 import { connect, type Socket } from "node:net";
+import { dirname } from "node:path";
 import type { Readable, Writable } from "node:stream";
-import { readDescriptor } from "../node/lockfile.ts";
+import { readDescriptor, readDescriptorIn } from "../node/lockfile.ts";
 import { decodeLines, encodeLine, PROTOCOL_VERSION } from "../node/protocol.ts";
 import { netaVersion } from "../version.ts";
 
@@ -131,6 +132,11 @@ async function forward(
 		path = descriptor.socket;
 		nodeToken = descriptor.token;
 	}
+	if (nodeToken === "") {
+		// The token beside the socket, in case the node came up after the
+		// proxy did (the first read found no `node.json`).
+		nodeToken = (await readDescriptorIn(dirname(path)).catch(() => undefined))?.token ?? "";
+	}
 	const payload =
 		method === "tools.list" ? { actorId, token } : { ...(params as Record<string, unknown>), actorId, token };
 	let last: unknown;
@@ -150,7 +156,10 @@ export async function runProxy(options: ProxyOptions): Promise<number> {
 	const stdout = options.stdout ?? process.stdout;
 	let clientToken = "";
 	if (options.socketPath !== undefined) {
-		clientToken = (await readDescriptor().catch(() => undefined))?.token ?? "";
+		// `NETA_SOCKET` is all `netaMcpServer` puts in a session's
+		// environment, so the node token is read from beside that socket,
+		// not from `netaDir()` — an ACP session's proxy has no `NETA_DIR`.
+		clientToken = (await readDescriptorIn(dirname(options.socketPath)).catch(() => undefined))?.token ?? "";
 	}
 	const pending = new Set<Promise<void>>();
 	let buffer = "";

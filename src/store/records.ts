@@ -90,12 +90,24 @@ export function openLeaderStore(): LeaderStore {
 	return {
 		load: (id, defaults) => loadOrCreate<LeaderDocument>(paths().leader(id), mutex, defaults),
 		save: (l) =>
-			mutex(() => {
+			mutex(async () => {
+				const path = paths().leader(l.workspaceId);
 				const doc: LeaderDocument = { ...(l as LeaderDocument) };
+				if (!("leadModes" in l)) {
+					// Most callers hold a plain `Leader` (01) and know nothing
+					// about 07's lead modes, which live in the same file. 02
+					// round-trips the field for them rather than letting a
+					// session or activeMissionId write erase a mission lead's
+					// mode; only a caller that names `leadModes` replaces it.
+					const existing = await readJson<LeaderDocument>(path);
+					if (existing?.leadModes !== undefined) {
+						doc.leadModes = existing.leadModes;
+					}
+				}
 				if (doc.leadModes !== undefined && Object.keys(doc.leadModes).length === 0) {
 					delete doc.leadModes;
 				}
-				return writeJsonAtomic(paths().leader(l.workspaceId), doc);
+				return writeJsonAtomic(path, doc);
 			}),
 	};
 }

@@ -43,6 +43,11 @@ export interface LifecyclePorts {
 	worktrees: { close(input: CloseMissionInput): Promise<CloseOutcome> };
 	modes: {
 		requestMode(input: { subject: ModeSubject; mode: LeaderMode; record?: DecisionRecord }): Promise<ModeApproval>;
+		// The caller's own mode. A mission lead's lives on its own record
+		// (07), never on the workspace leader's, so `neta_status` asks for
+		// the subject that called it. Unset (a Node with no mode service)
+		// falls back to the leader record.
+		snapshot?(subject: ModeSubject): Promise<{ mode: LeaderMode; modeActiveMs: number }>;
 	};
 }
 
@@ -158,14 +163,28 @@ async function pinTurn(ctx: LifecycleToolContext, params: PinParams): Promise<To
 	return { ok: true, data: { turnId: params.turnId, pinned: true } };
 }
 
+// The subject a leadership tool acts for: the workspace leader, or the
+// mission lead that called it.
+function subjectOf(actor: LifecycleToolContext["actor"]): ModeSubject | undefined {
+	if (actor.kind === "leader") {
+		return { kind: "leader", workspaceId: actor.workspaceId };
+	}
+	if (actor.kind === "lead") {
+		return { kind: "lead", workspaceId: actor.workspaceId, missionId: actor.missionId, agentId: actor.agentId };
+	}
+	return undefined;
+}
+
 async function missionStatus(ctx: LifecycleToolContext, _params: StatusParams): Promise<ToolResult> {
-	if (ctx.actor.kind !== "lead" && ctx.actor.kind !== "leader") {
+	const subject = subjectOf(ctx.actor);
+	if (subject === undefined) {
 		return { ok: false, code: "notAuthorised", message: "only a lead or the leader reads status" };
 	}
 	const open = ctx.deps.store.listMissions(ctx.actor.workspaceId).filter((mission) => mission.state !== "closed");
 	const needsYou = open.filter((mission) => needsPerson(mission)).sort((a, b) => b.number - a.number);
 	const running = open.filter((mission) => !needsPerson(mission)).sort((a, b) => b.number - a.number);
 	const leader = ctx.deps.store.getLeader(ctx.actor.workspaceId);
+	const snapshot = await ctx.deps.modes.snapshot?.(subject);
 	return {
 		ok: true,
 		data: {
@@ -176,25 +195,17 @@ async function missionStatus(ctx: LifecycleToolContext, _params: StatusParams): 
 				...(mission.attention === undefined ? {} : { attention: mission.attention }),
 				agents: ctx.deps.store.listAgents(mission.id).length,
 			})),
-			mode: leader?.mode ?? "lead",
-			modeActiveMs: leader?.modeActiveMs ?? 0,
+			mode: snapshot?.mode ?? leader?.mode ?? "lead",
+			modeActiveMs: snapshot?.modeActiveMs ?? leader?.modeActiveMs ?? 0,
 		},
 	};
 }
 
 async function switchMode(ctx: LifecycleToolContext, params: ModeParams): Promise<ToolResult> {
-	if (ctx.actor.kind !== "lead" && ctx.actor.kind !== "leader") {
+	const subject = subjectOf(ctx.actor);
+	if (subject === undefined) {
 		return { ok: false, code: "notAuthorised", message: "only a lead or the leader switches mode" };
 	}
-	const subject: ModeSubject =
-		ctx.actor.kind === "leader"
-			? { kind: "leader", workspaceId: ctx.actor.workspaceId }
-			: {
-					kind: "lead",
-					workspaceId: ctx.actor.workspaceId,
-					missionId: ctx.actor.missionId,
-					agentId: ctx.actor.agentId,
-				};
 	const approval = await ctx.deps.modes.requestMode({ subject, mode: params.mode, record: params.record });
 	if (!approval.approved && approval.reason === "unavailable") {
 		return { ok: false, code: "unavailable", message: approval.detail };

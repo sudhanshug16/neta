@@ -5,6 +5,7 @@
 // refused hello exit 3, the same mapping every other command uses — and then
 // stdio belongs to the proxy. This module parses no MCP traffic and writes
 // nothing to stdout, which is the proxy's.
+import { dirname } from "node:path";
 import { runProxy } from "../../tools/proxy.ts";
 import { CliError, NodeClient } from "../client.ts";
 
@@ -28,11 +29,17 @@ export async function mcpCommand(flags: Record<string, string | true>): Promise<
 		process.stderr.write("neta: neta mcp needs --token <t>\n");
 		return 1;
 	}
+	// `NETA_SOCKET` is the only variable `netaMcpServer` puts in an ACP
+	// session's environment, so it has to be enough on its own: the node
+	// descriptor is read from beside that socket rather than from
+	// `netaDir()`, which an agent's proxy has no `NETA_DIR` to point at.
+	const env = process.env.NETA_SOCKET;
+	const socketPath = env === undefined || env === "" ? undefined : env;
 	try {
-		const client = await NodeClient.connect();
+		const client = await NodeClient.connect(socketPath === undefined ? {} : { dir: dirname(socketPath) });
 		client.close();
 	} catch (error) {
 		return fail(error);
 	}
-	return runProxy({ actorId: actor, token, socketPath: process.env.NETA_SOCKET });
+	return runProxy({ actorId: actor, token, ...(socketPath === undefined ? {} : { socketPath }) });
 }

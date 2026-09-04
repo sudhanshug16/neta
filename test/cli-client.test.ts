@@ -317,9 +317,14 @@ async function installFakeNeta(script: string): Promise<void> {
 }
 
 describe("start on demand", () => {
+	// The fake sleeps 300 ms before it writes `node.json`, and spawning it is
+	// a whole process start: the 5 s default was not enough on a machine also
+	// running a Swift build, and the connect then timed out after the test
+	// had been torn down. `timeoutMs` overrides the default only here; the
+	// CLI itself still gives up after 5 s.
 	test("start: true starts a reachable Node", async () => {
 		await installFakeNeta(FAKE_NETA);
-		const client = await NodeClient.connect({ start: true });
+		const client = await NodeClient.connect({ start: true, timeoutMs: 60_000 });
 		try {
 			expect(await client.request<Record<string, never>>("snapshot", {})).toEqual({});
 		} finally {
@@ -334,5 +339,5 @@ describe("start on demand", () => {
 				// Already gone; the temp dir goes with it.
 			}
 		}
-	});
+	}, 90_000);
 });

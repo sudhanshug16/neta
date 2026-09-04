@@ -8,7 +8,7 @@
 // version mismatch; 3 refused — `data.code` is UNAUTHORIZED or
 // CONFIRMATION_REQUIRED.
 import { connectNode, type NodeClient as TransportClient } from "../node/client.ts";
-import { netaDir, readDescriptor } from "../node/lockfile.ts";
+import { netaDir, readDescriptor, readDescriptorIn } from "../node/lockfile.ts";
 import { NodeError, PROTOCOL_VERSION } from "../node/protocol.ts";
 
 export class CliError extends Error {
@@ -103,31 +103,38 @@ export class NodeClient {
 	// (via `connectNode` autostart) and retries every 100 ms for up to 5 s;
 	// the lock makes that race harmless. With `start` false (the default)
 	// nothing is started: a missing `node.json` or a dead pid is CliError(2).
-	static async connect(opts?: { start?: boolean }): Promise<NodeClient> {
+	// `dir` is where `node.json` lives when it is not `netaDir()`: `neta mcp`
+	// is launched with `NETA_SOCKET` and no `NETA_DIR`, so it looks beside
+	// the socket. `timeoutMs` raises the 5 s default for a caller (a test on
+	// a loaded machine) that can afford to wait longer for a cold start.
+	static async connect(opts?: { start?: boolean; dir?: string; timeoutMs?: number }): Promise<NodeClient> {
 		const start = opts?.start ?? false;
+		const dir = opts?.dir ?? netaDir();
 		if (!start) {
 			let descriptor: Awaited<ReturnType<typeof readDescriptor>>;
 			try {
-				descriptor = await readDescriptor();
+				descriptor = opts?.dir === undefined ? await readDescriptor() : await readDescriptorIn(opts.dir);
 			} catch (error) {
-				throw new CliError(2, `cannot read the node descriptor in ${netaDir()}: ${messageOf(error)}`);
+				throw new CliError(2, `cannot read the node descriptor in ${dir}: ${messageOf(error)}`);
 			}
 			if (descriptor === undefined) {
-				throw new CliError(
-					2,
-					`no node is running in ${netaDir()} (no node.json); start it with \`neta node start\``,
-				);
+				throw new CliError(2, `no node is running in ${dir} (no node.json); start it with \`neta node start\``);
 			}
 			if (!isAlive(descriptor.pid)) {
 				throw new CliError(
 					2,
-					`no node is running in ${netaDir()} (pid ${descriptor.pid} is not alive); start it with \`neta node start\``,
+					`no node is running in ${dir} (pid ${descriptor.pid} is not alive); start it with \`neta node start\``,
 				);
 			}
 		}
 		let inner: TransportClient;
 		try {
-			inner = await connectNode({ client: "cli", autostart: start, timeoutMs: CONNECT_TIMEOUT_MS });
+			inner = await connectNode({
+				client: "cli",
+				autostart: start,
+				timeoutMs: opts?.timeoutMs ?? CONNECT_TIMEOUT_MS,
+				...(opts?.dir === undefined ? {} : { dir: opts.dir }),
+			});
 		} catch (error) {
 			throw mapConnectError(error);
 		}

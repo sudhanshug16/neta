@@ -90,9 +90,13 @@ async function loadLeaders(): Promise<Map<WorkspaceId, Leader>> {
 		if (!name.endsWith(".json")) {
 			continue;
 		}
-		const record = await readJson<Leader>(join(paths().root, "leaders", name));
+		const record = await readJson<Leader & { leadModes?: unknown }>(join(paths().root, "leaders", name));
 		if (record !== undefined) {
-			leaders.set(record.workspaceId, record);
+			// The mirror holds the `Leader` alone: 07's lead modes share the
+			// file but not the record, and carrying them here would put them
+			// on every `state` broadcast.
+			const { leadModes: _leadModes, ...leader } = record;
+			leaders.set(leader.workspaceId, leader);
 		}
 	}
 	return leaders;
@@ -816,6 +820,9 @@ export async function startNode(o?: { store?: NodeStore; acp?: NodeAcp }): Promi
 			}
 			stopping = (async (): Promise<void> => {
 				try {
+					// 07's mode ticker first: it writes through the store,
+					// which is about to close.
+					mounted?.stop();
 					hub.broadcast("node", { phase: "stopping" });
 					await server.close();
 					await acpPort.closeAll();
@@ -835,7 +842,7 @@ export async function startNode(o?: { store?: NodeStore; acp?: NodeAcp }): Promi
 		// The tools are only mounted on a real Node: the router needs 02's
 		// registry for numbers and records, which the ports do not carry, so a
 		// stubbed store (handler tests) serves the rest and no tools.
-		const tools =
+		const mounted =
 			realStore !== undefined && adapted !== undefined && adaptedAcp !== undefined
 				? toolMount({
 						real: realStore,
@@ -843,8 +850,9 @@ export async function startNode(o?: { store?: NodeStore; acp?: NodeAcp }): Promi
 						acp: adaptedAcp,
 						settings,
 						hub: () => hub,
-					}).handlers
-				: {};
+					})
+				: undefined;
+		const tools = mounted?.handlers ?? {};
 		const server = await createServer({ socketPath, token, handlers: { ...allHandlers, ...tools }, ctx });
 		hub = server.hub;
 		wireTurnStream({ ...ctx, hub: server.hub });

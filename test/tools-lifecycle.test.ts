@@ -123,6 +123,13 @@ function fixture(opts?: {
 				modes.push({ subject: input.subject, mode: input.mode });
 				return approval;
 			},
+			// 07 keys a mission lead's mode by its own agentId, so the
+			// snapshot answers for the subject that asked, not for the
+			// workspace leader.
+			snapshot: async (subject) =>
+				subject.kind === "lead"
+					? { mode: "leadPlus" as const, modeActiveMs: 660_000 }
+					: { mode: LEADER.mode, modeActiveMs: LEADER.modeActiveMs },
 		},
 	};
 	return { store, missions, events, closes, modes, ports };
@@ -268,6 +275,26 @@ describe("neta_pin and neta_status", () => {
 				modeActiveMs: 12000,
 			},
 		});
+	});
+
+	// The lead's own mode, from its own record: reading the workspace
+	// leader's would tell a mission lead in Lead++ that it is in Lead.
+	test("status reports the calling lead's own mode, not the leader's", async () => {
+		const f = fixture({ seed: [mission(1, "running")] });
+		const lead: Actor = {
+			kind: "lead",
+			workspaceId: WORKSPACE,
+			missionId: onlyMission(f).id,
+			agentId: "a1",
+			sessionId: ulid(),
+		};
+		const result = await lifecycleHandlers.neta_status(ctx(f, lead), {});
+		expect(result.ok).toBe(true);
+		if (!result.ok) {
+			throw new Error("expected a status");
+		}
+		expect(result.data.mode).toBe("leadPlus");
+		expect(result.data.modeActiveMs).toBe(660_000);
 	});
 });
 

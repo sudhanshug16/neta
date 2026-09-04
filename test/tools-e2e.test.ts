@@ -109,10 +109,14 @@ interface DrivenProxy {
 	call(method: string, params: unknown, id: number): Promise<{ result?: unknown; error?: { code: number } }>;
 }
 
-// Spawn the proxy the way a provider does and speak MCP NDJSON to it.
+// Spawn the proxy the way a provider does and speak MCP NDJSON to it. 05:
+// "env carries NETA_SOCKET only", so NETA_DIR is dropped here — the socket
+// alone has to be enough to find the node and the token it answers to.
 async function spawnProxy(actorId: string, token: string, socketPath: string): Promise<DrivenProxy> {
+	const env: NodeJS.ProcessEnv = { ...process.env, NETA_SOCKET: socketPath };
+	delete env.NETA_DIR;
 	const child = spawn(RUNNER, ["mcp", "--actor", actorId, "--token", token], {
-		env: { ...process.env, NETA_SOCKET: socketPath },
+		env,
 		stdio: ["pipe", "pipe", "ignore"],
 	});
 	children.push(child);

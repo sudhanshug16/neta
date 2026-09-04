@@ -5,7 +5,7 @@ import { connect, type Socket } from "node:net";
 import { join } from "node:path";
 import { ulid } from "../core/ids.ts";
 import { selfInvocation } from "../core/self.ts";
-import { type NodeDescriptor, netaDir, readDescriptor } from "./lockfile.ts";
+import { type NodeDescriptor, netaDir, readDescriptor, readDescriptorIn } from "./lockfile.ts";
 import {
 	type ClientKind,
 	decodeLines,
@@ -31,6 +31,10 @@ export interface ConnectOptions {
 	client?: ClientKind;
 	autostart?: boolean;
 	timeoutMs?: number;
+	// Where `node.json` lives, when it is not `netaDir()`. An MCP proxy is
+	// launched with `NETA_SOCKET` and no `NETA_DIR`, so it passes the
+	// socket's own directory here rather than guessing at `~/.neta`.
+	dir?: string;
 }
 
 const RETRY_MS = 100;
@@ -75,14 +79,15 @@ export async function connectNode(o?: ConnectOptions): Promise<NodeClient> {
 	const client: ClientKind = o?.client ?? "cli";
 	const autostart = o?.autostart ?? false;
 	const timeoutMs = o?.timeoutMs ?? 5000;
+	const dir = o?.dir ?? netaDir();
 	const deadline = Date.now() + timeoutMs;
 	let spawned = false;
 	for (;;) {
 		let descriptor: NodeDescriptor | undefined;
 		try {
-			descriptor = await readDescriptor();
+			descriptor = o?.dir === undefined ? await readDescriptor() : await readDescriptorIn(o.dir);
 		} catch {
-			throw new NotReadyError(`cannot read the node descriptor in ${netaDir()}`);
+			throw new NotReadyError(`cannot read the node descriptor in ${dir}`);
 		}
 		if (descriptor !== undefined) {
 			try {
@@ -94,18 +99,18 @@ export async function connectNode(o?: ConnectOptions): Promise<NodeClient> {
 			}
 		}
 		if (!autostart) {
-			throw new NotReadyError(`no node is listening on ${join(netaDir(), "node.sock")}`);
+			throw new NotReadyError(`no node is listening on ${join(dir, "node.sock")}`);
 		}
 		if (!spawned) {
 			spawnNode();
 			spawned = true;
 		}
 		if (Date.now() >= deadline) {
-			throw new NotReadyError(`timed out connecting to the node in ${netaDir()}`);
+			throw new NotReadyError(`timed out connecting to the node in ${dir}`);
 		}
 		await sleep(Math.min(RETRY_MS, Math.max(0, deadline - Date.now())));
 		if (Date.now() >= deadline) {
-			throw new NotReadyError(`timed out connecting to the node in ${netaDir()}`);
+			throw new NotReadyError(`timed out connecting to the node in ${dir}`);
 		}
 	}
 }

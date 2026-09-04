@@ -183,9 +183,14 @@ async function installFakeNeta(script: string): Promise<void> {
 }
 
 describe("autostart", () => {
+	// The fake sleeps 300 ms before it writes `node.json`, but the spawn
+	// itself is a whole process start: on a loaded machine (a Swift build in
+	// the same checkout) 5 s was not enough and the connect timed out after
+	// the test had already been torn down. The wait is generous on purpose —
+	// a healthy machine still finishes in well under a second.
 	test("a socket appearing after 300 ms connects", async () => {
 		await installFakeNeta(FAKE_NETA);
-		const client: NodeClient = await connectNode({ autostart: true, timeoutMs: 5000 });
+		const client: NodeClient = await connectNode({ autostart: true, timeoutMs: 60_000 });
 		closers.push(() => client.close());
 		expect(client.hello.machine.name).toBe("fake");
 		const pid = client.hello.pid;
@@ -195,7 +200,7 @@ describe("autostart", () => {
 		} catch {
 			// Already gone; the temp dir goes with it.
 		}
-	});
+	}, 90_000);
 
 	test("a socket that never appears rejects inside timeoutMs", async () => {
 		await installFakeNeta("process.exit(0);\n");

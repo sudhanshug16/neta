@@ -209,10 +209,18 @@ export async function attach(client: NodeClient, path: string): Promise<number> 
 				}
 				return;
 			}
-			// Text streams; every other kind arrives once, whole.
-			const shown = b.kind === "text" && b.role !== "user" ? { ...b, text: deltaOf(b) } : b;
-			if (shown.text === "") {
-				return;
+			// Text streams; every other kind arrives once, whole. Only the
+			// coalesced delta can come out empty (a re-emit that grew by
+			// nothing); every other kind keeps its own emptiness for
+			// `renderBlock` to judge — a tool block carries its title in
+			// `data`, not always in `text`.
+			let shown = b;
+			if (b.kind === "text" && b.role !== "user") {
+				const delta = deltaOf(b);
+				if (delta === "") {
+					return;
+				}
+				shown = { ...b, text: delta };
 			}
 			const rendered = renderBlock(shown, ttyOut);
 			if (rendered === null) {

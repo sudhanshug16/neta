@@ -84,6 +84,20 @@ describe("mode records and the store field", () => {
 		expect("leadModes" in emptied).toBe(false);
 	});
 
+	// Everything but 07 holds a plain `Leader` — the Node writes one on every
+	// session relaunch and every activeMissionId change — and none of those
+	// writes may take a mission lead's mode with them.
+	test("saving a plain Leader keeps the lead modes on file", async () => {
+		useTempDir();
+		const store = openLeaderStore();
+		const id = "w";
+		await store.save({ ...leader(id), leadModes: { a1: leadMode("a1") } });
+		await store.save({ ...leader(id), mode: "leadPlus" });
+		const back = await store.load(id, () => leader("other"));
+		expect(back.leadModes).toEqual({ a1: leadMode("a1") });
+		expect(back.mode).toBe("leadPlus");
+	});
+
 	test("deleting one mode leaves the leader untouched", async () => {
 		useTempDir();
 		const store = openLeaderStore();
