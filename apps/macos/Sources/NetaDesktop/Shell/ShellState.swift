@@ -13,6 +13,20 @@ public enum Selection: Hashable, Sendable {
 	case agent(Ulid)
 }
 
+/// The two surfaces that keep the navigator up under the pointer: the 6 pt
+/// left-edge strip and the overlay panel itself.
+///
+/// They are tracked separately because AppKit does not order hover events
+/// across sibling views: a fast move from the strip into the panel can deliver
+/// the panel's enter before the strip's exit. With one flag the late exit
+/// would schedule an unopposed hide and the panel would vanish under a
+/// resting pointer; with a set, the strip's exit sees the panel still hovered
+/// and schedules nothing.
+public enum NavigatorHoverRegion: Hashable, Sendable {
+	case edge
+	case panel
+}
+
 /// The person's view: selection, overlays, focus and time zoom.
 ///
 /// `Store` holds Node data; this holds the view. Selecting only changes
@@ -41,12 +55,25 @@ public enum Selection: Hashable, Sendable {
 	public var timeZoom: Double = 1.0
 	/// Bumped by every `fit()`; the spine canvas (10) observes it.
 	public private(set) var fitRequested = 0
+	/// How long the navigator stays up after the pointer leaves it. It
+	/// covers the gap between the 6 pt edge strip and the panel, so crossing
+	/// that gap does not close what the crossing just opened. One cancellable
+	/// sleep per exit, never a polling timer.
+	public var navigatorHideDelay: Duration = .milliseconds(320)
+	@ObservationIgnored private var navigatorHide: Task<Void, Never>?
+	/// Which of the navigator's hover surfaces the pointer is currently on.
+	/// The hide only ever runs while this is empty.
+	@ObservationIgnored private var navigatorHovered: Set<NavigatorHoverRegion> = []
 
 	public init() {}
 
 	/// Selects a destination. Never touches `chatVisible`: selecting opens
 	/// that session's chat by content (via `sessionId(in:)`), and only the
 	/// person's toggle hides the surface.
+	///
+	/// It does not touch the navigator either: the overlay closes itself
+	/// when one of its own rows is used (`NavigatorOverlay.select`), and
+	/// Escape still unstacks the overlay before the selection.
 	public func select(_ selection: Selection) {
 		self.selection = selection
 	}
@@ -84,8 +111,77 @@ public enum Selection: Hashable, Sendable {
 		}
 	}
 
+	/// `⌘L`.
 	public func toggleNavigator() {
-		navigatorVisible.toggle()
+		if navigatorVisible {
+			hideNavigator()
+		} else {
+			showNavigator()
+		}
+	}
+
+	/// Shows the overlay now and cancels any pending auto-hide. Both the
+	/// left-edge hover strip and `⌘L` land here.
+	public func showNavigator() {
+		cancelNavigatorHide()
+		navigatorVisible = true
+	}
+
+	/// Hides it now: Escape, a canvas click, or a row that was used.
+	///
+	/// It also forgets which surfaces the pointer was on. The panel leaves the
+	/// view hierarchy under the pointer here, so its hover exit may never
+	/// fire; a `.panel` left behind would keep the next hover-out from ever
+	/// scheduling a hide.
+	public func hideNavigator() {
+		cancelNavigatorHide()
+		navigatorHovered.removeAll()
+		navigatorVisible = false
+	}
+
+	/// The pointer is over one of the navigator's hover surfaces: keep the
+	/// overlay up and cancel any pending hide.
+	public func navigatorPointerEntered(_ region: NavigatorHoverRegion) {
+		navigatorHovered.insert(region)
+		cancelNavigatorHide()
+	}
+
+	/// The pointer left one hover surface: hide the overlay after
+	/// `navigatorHideDelay`, but only once it is on neither surface. Driven by
+	/// hover exit, so nothing runs while the pointer sits still.
+	///
+	/// The task re-checks `navigatorHovered` before it clears the flag, so an
+	/// enter that arrives out of order (see `NavigatorHoverRegion`) still wins
+	/// even if it lands after this exit scheduled the hide.
+	public func navigatorPointerExited(_ region: NavigatorHoverRegion) {
+		navigatorHovered.remove(region)
+		guard navigatorVisible, navigatorHovered.isEmpty else { return }
+		navigatorHide?.cancel()
+		navigatorHide = Task { [delay = navigatorHideDelay] in
+			try? await Task.sleep(for: delay)
+			guard !Task.isCancelled, navigatorHovered.isEmpty else { return }
+			navigatorVisible = false
+			navigatorHide = nil
+		}
+	}
+
+	/// A click on the canvas, outside every floating surface: it dismisses
+	/// the navigator. Returns true when it consumed the click, so the canvas
+	/// can leave the selection alone. The root view already knows which
+	/// rects the surfaces cover (`ShellLayout.covered`); this is the shell
+	/// side of that click path.
+	///
+	/// It only dismisses when the canvas actually calls it. The canvas owns
+	/// that call site: `SpineCanvasView`'s background layer needs
+	/// `.onTapGesture { shell.canvasClicked() }` below the nodes, so a click
+	/// on empty canvas hides the overlay without swallowing node clicks.
+	/// MANIFESTO.md "Desktop information architecture" — the navigator
+	/// "closes when dismissed".
+	@discardableResult
+	public func canvasClicked() -> Bool {
+		guard navigatorVisible else { return false }
+		hideNavigator()
+		return true
 	}
 
 	/// Escape: closes the navigator, else releases composer focus. Returns
@@ -93,7 +189,7 @@ public enum Selection: Hashable, Sendable {
 	@discardableResult
 	public func dismissOverlay() -> Bool {
 		if navigatorVisible {
-			navigatorVisible = false
+			hideNavigator()
 			return true
 		}
 		if composerFocused {
@@ -122,7 +218,20 @@ public enum Selection: Hashable, Sendable {
 		Int((timeZoom * 100).rounded())
 	}
 
+	// MARK: - Internal
+
+	/// Awaits a scheduled auto-hide, so the tests do not sleep on a wall
+	/// clock. Returns at once when none is pending.
+	func pendingNavigatorHide() async {
+		await navigatorHide?.value
+	}
+
 	// MARK: - Private
+
+	private func cancelNavigatorHide() {
+		navigatorHide?.cancel()
+		navigatorHide = nil
+	}
 
 	private static func clampZoom(_ value: Double) -> Double {
 		min(max(value, minZoom), maxZoom)

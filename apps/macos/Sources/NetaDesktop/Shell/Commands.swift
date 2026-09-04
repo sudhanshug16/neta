@@ -1,8 +1,18 @@
+import AppKit
+import OSLog
 import SwiftUI
 
-/// The six shell shortcuts (09-desktop-shell T9.6): `⌘L` navigator, `⌘K`
-/// focus composer, `⌘.` cancel turn, `⌘0` Fit, `⌘=`/`⌘-` time zoom. Nothing
-/// else is bound here.
+/// The shell's menu commands (09-desktop-shell T9.6): `⌘L` navigator, `⌘K`
+/// focus composer, `⌘.` cancel turn, `⌘0` Fit, `⌘=`/`⌘-` time zoom, and
+/// File > Open Workspace… (`⌘O`). Nothing else is bound here.
+///
+/// The canvas commands go into the system **View** menu through
+/// `CommandGroup(after: .sidebar)`; a second menu named "View" is a bug, not
+/// a menu. The group carries no trailing `Divider()`: the system's own View
+/// items follow it, and a separator immediately before them reads as a stray
+/// line. Open Workspace goes into **File**, not the toolbar: the toolbar is
+/// workspace, machine, Fit and zoom only (MANIFESTO.md "Desktop information
+/// architecture").
 ///
 /// The shell, store and client arrive from the environment, so T9.7's app
 /// wiring only has to inject them on the scene (`.environment(shell)` and
@@ -20,9 +30,15 @@ public struct NetaCommands: Commands {
 	public init() {}
 
 	public var body: some Commands {
-		CommandMenu("View") {
-			Button("Toggle Navigator") { shell?.toggleNavigator() }
-				.keyboardShortcut("l", modifiers: .command)
+		CommandGroup(after: .newItem) {
+			Button("Open Workspace…") { chooseWorkspace() }
+				.keyboardShortcut("o", modifiers: .command)
+		}
+		CommandGroup(after: .sidebar) {
+			Button(Self.navigatorTitle(visible: shell?.navigatorVisible ?? false)) {
+				shell?.toggleNavigator()
+			}
+			.keyboardShortcut("l", modifiers: .command)
 			Divider()
 			Button("Fit Canvas") { shell?.fit() }
 				.keyboardShortcut("0", modifiers: .command)
@@ -39,7 +55,68 @@ public struct NetaCommands: Commands {
 		}
 	}
 
+	/// The `⌘L` menu item's title, which says what the item will do:
+	/// "Hide Navigator" while the overlay is up, "Show Navigator" while it is
+	/// not (the macOS convention). The action is one toggle either way.
+	static func navigatorTitle(visible: Bool) -> String {
+		visible ? "Hide Navigator" : "Show Navigator"
+	}
+
+	/// Opens `path` as a workspace and refreshes the picture: the Node's
+	/// `workspace.open` answers with the workspace, then one snapshot
+	/// replaces the cache whole (never patched) and the shell shows the
+	/// workspace that was just opened. Returns false when nothing changed.
+	///
+	/// A Node that refuses leaves the store untouched, and the reason is
+	/// logged rather than dropped: a folder the Node rejects (not a
+	/// directory, no permission, an unsupported root) and a Node that is up
+	/// but answers with an error both used to end here silently. The shell
+	/// has no error surface of its own — adding one is outside T9.6, and
+	/// MANIFESTO.md "Desktop information architecture" reserves the window's
+	/// surfaces — so the log is where the reason lands until the shell grows
+	/// one.
+	///
+	/// The reason is public and the path is not: the unified log is readable
+	/// by anything on the machine, and a person's absolute checkout path is
+	/// theirs. `os.Logger` redacts a non-public interpolation, so Console
+	/// shows the error with `<private>` where the path was, which still says
+	/// why the open failed.
+	@MainActor
+	@discardableResult
+	static func openWorkspace(path: String, client: any NodeClient, store: Store) async -> Bool {
+		do {
+			let workspace = try await client.openWorkspace(path: path)
+			let snapshot = try await client.snapshot()
+			store.replace(snapshot: snapshot)
+			store.setCurrentWorkspace(workspace.id)
+			return true
+		} catch {
+			log.error(
+				"workspace.open failed: \(String(describing: error), privacy: .public) (path \(path, privacy: .private))"
+			)
+			return false
+		}
+	}
+
+	/// The shell's log. `os.Logger` is the platform's own sink, so a refusal
+	/// is readable in Console without the window growing a surface for it.
+	static let log = Logger(subsystem: "io.neta.desktop", category: "shell")
+
 	// MARK: - Private
+
+	/// File > Open Workspace…: a directory chooser, because a workspace is a
+	/// checkout, not a file.
+	private func chooseWorkspace() {
+		guard let store, let client else { return }
+		let panel = NSOpenPanel()
+		panel.canChooseDirectories = true
+		panel.canChooseFiles = false
+		panel.allowsMultipleSelection = false
+		panel.message = "Choose the folder to open as a workspace."
+		panel.prompt = "Open"
+		guard panel.runModal() == .OK, let url = panel.url else { return }
+		Task { await NetaCommands.openWorkspace(path: url.path, client: client, store: store) }
+	}
 
 	/// Cancels the selected session's open turn through the Node client. A
 	/// missing shell, store, client or session no-ops; a failed cancel is
@@ -57,8 +134,9 @@ private struct NetaNodeClientKey: EnvironmentKey {
 }
 
 extension EnvironmentValues {
-	/// The Node client for command actions (`⌘.` cancel). Injected on the
-	/// scene by the app entry point (T9.7); nil outside the running app.
+	/// The Node client for command actions (`⌘.` cancel, `⌘O` open
+	/// workspace). Injected on the scene by the app entry point (T9.7); nil
+	/// outside the running app.
 	public var netaNodeClient: (any NodeClient)? {
 		get { self[NetaNodeClientKey.self] }
 		set { self[NetaNodeClientKey.self] = newValue }

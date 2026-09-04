@@ -10,6 +10,17 @@ import XCTest
 /// `fitRequested`.
 @MainActor
 final class ShellStateTests: XCTestCase {
+	/// The shell starts where the design says it starts: the workspace leader
+	/// selected, the chat shown, the navigator hidden. (Folded in from
+	/// `SmokeTests`, which was left with nothing else after `ContentView` and
+	/// its `RootViewModel` stub were deleted.)
+	func testShellStartsOnTheLeaderWithTheNavigatorHidden() {
+		let shell = ShellState()
+		XCTAssertEqual(shell.selection, .leader)
+		XCTAssertTrue(shell.chatVisible)
+		XCTAssertFalse(shell.navigatorVisible)
+	}
+
 	func testLeaderSelectionResolvesToLeaderSession() async throws {
 		let store = try await fixtureStore()
 		let shell = ShellState()
@@ -70,6 +81,200 @@ final class ShellStateTests: XCTestCase {
 			shell.select(.agent(agent.id))
 			XCTAssertEqual(shell.chatVisible, visible)
 		}
+	}
+
+	// MARK: - The auto-hide navigator overlay
+
+	func testHoveringTheEdgeShowsTheOverlay() {
+		let shell = ShellState()
+		XCTAssertFalse(shell.navigatorVisible)
+		shell.showNavigator()
+		XCTAssertTrue(shell.navigatorVisible)
+		// ⌘L is the same door, and it closes what it opened.
+		shell.toggleNavigator()
+		XCTAssertFalse(shell.navigatorVisible)
+		shell.toggleNavigator()
+		XCTAssertTrue(shell.navigatorVisible)
+	}
+
+	func testPointerExitHidesTheOverlayAfterTheDelay() async {
+		let shell = ShellState()
+		shell.navigatorHideDelay = .zero
+		shell.showNavigator()
+		shell.navigatorPointerExited(.panel)
+		XCTAssertTrue(shell.navigatorVisible, "the hide is scheduled, not immediate")
+		await shell.pendingNavigatorHide()
+		XCTAssertFalse(shell.navigatorVisible)
+	}
+
+	func testPointerReturningCancelsThePendingHide() async {
+		let shell = ShellState()
+		shell.navigatorHideDelay = .zero
+		shell.navigatorPointerEntered(.edge)
+		shell.showNavigator()
+		shell.navigatorPointerExited(.edge)
+		// Crossing the gap between the 6 pt edge strip and the panel must
+		// not close what the crossing opened.
+		shell.navigatorPointerEntered(.panel)
+		await shell.pendingNavigatorHide()
+		XCTAssertTrue(shell.navigatorVisible)
+	}
+
+	/// AppKit does not order hover events across sibling views: a fast move
+	/// can deliver the panel's enter before the strip's exit. The late exit
+	/// must not schedule a hide under a pointer that is resting on the panel
+	/// — nothing would re-show it, because `.onHover` only fires on
+	/// transitions.
+	func testStripExitArrivingAfterPanelEnterDoesNotHide() async {
+		let shell = ShellState()
+		shell.navigatorHideDelay = .zero
+		shell.navigatorPointerEntered(.edge)
+		shell.showNavigator()
+		shell.navigatorPointerEntered(.panel)
+		shell.navigatorPointerExited(.edge)
+		await shell.pendingNavigatorHide()
+		XCTAssertTrue(shell.navigatorVisible)
+		// Leaving the panel itself still hides it.
+		shell.navigatorPointerExited(.panel)
+		await shell.pendingNavigatorHide()
+		XCTAssertFalse(shell.navigatorVisible)
+	}
+
+	/// Using a row hides the panel out from under the pointer, so its hover
+	/// exit may never arrive. The next hover-out of the edge strip must still
+	/// be able to schedule a hide.
+	func testHidingUnderThePointerDoesNotStrandTheAutoHide() async {
+		let shell = ShellState()
+		shell.navigatorHideDelay = .zero
+		shell.navigatorPointerEntered(.edge)
+		shell.showNavigator()
+		shell.navigatorPointerEntered(.panel)
+		// A row was used: the panel goes, and no `.panel` exit ever fires.
+		shell.hideNavigator()
+		shell.navigatorPointerEntered(.edge)
+		shell.showNavigator()
+		shell.navigatorPointerExited(.edge)
+		await shell.pendingNavigatorHide()
+		XCTAssertFalse(shell.navigatorVisible)
+	}
+
+	func testPointerExitDoesNothingWhenTheOverlayIsClosed() async {
+		let shell = ShellState()
+		shell.navigatorHideDelay = .zero
+		shell.navigatorPointerExited(.panel)
+		await shell.pendingNavigatorHide()
+		XCTAssertFalse(shell.navigatorVisible)
+	}
+
+	func testEscapeHidesTheOverlayAtOnce() {
+		let shell = ShellState()
+		shell.showNavigator()
+		XCTAssertTrue(shell.dismissOverlay())
+		XCTAssertFalse(shell.navigatorVisible)
+	}
+
+	func testCanvasClickDismissesTheOverlay() {
+		let shell = ShellState()
+		// A canvas click with nothing open is the canvas's own click.
+		XCTAssertFalse(shell.canvasClicked())
+		shell.showNavigator()
+		XCTAssertTrue(shell.canvasClicked())
+		XCTAssertFalse(shell.navigatorVisible)
+	}
+
+	/// End to end, on the canvas's own call site: `SpineCanvasView`'s backdrop
+	/// tap runs `handleBackgroundTap`, which is the only thing that reaches
+	/// `canvasClicked` in the app. MANIFESTO.md "Desktop information
+	/// architecture": the navigator "closes when dismissed".
+	///
+	/// Known limit: this reaches the handler, not the gesture. That the
+	/// backdrop's `.onTapGesture` is attached below the nodes is not
+	/// assertable without view introspection; only a running window or a
+	/// snapshot check covers the wire itself.
+	func testCanvasBackgroundTapHidesTheOverlay() async throws {
+		let store = try await fixtureStore()
+		let shell = ShellState()
+		let canvas = SpineCanvasView(store: store, shell: shell)
+		let mission = try XCTUnwrap(store.missions.first)
+		shell.select(.mission(mission.id))
+		shell.showNavigator()
+		canvas.handleBackgroundTap()
+		XCTAssertFalse(shell.navigatorVisible)
+		// The click that dismissed the overlay is not also a selection change.
+		XCTAssertEqual(shell.selection, .mission(mission.id))
+		// With nothing open the same tap is the canvas's own click.
+		canvas.handleBackgroundTap()
+		XCTAssertFalse(shell.navigatorVisible)
+		XCTAssertEqual(shell.selection, .mission(mission.id))
+	}
+
+	func testCanvasClickBeatsAPendingHide() async {
+		let shell = ShellState()
+		shell.navigatorHideDelay = .seconds(60)
+		shell.showNavigator()
+		shell.navigatorPointerExited(.panel)
+		shell.canvasClicked()
+		XCTAssertFalse(shell.navigatorVisible)
+		// The cancelled hide never fires, so a later show stays shown.
+		await shell.pendingNavigatorHide()
+		shell.showNavigator()
+		XCTAssertTrue(shell.navigatorVisible)
+	}
+
+	func testSelectingARowSelectsTheMissionAndHidesTheOverlay() async throws {
+		let store = try await fixtureStore()
+		let shell = ShellState()
+		shell.showNavigator()
+		let overlay = NavigatorOverlay(
+			model: NavigatorModel.make(store: store, query: ""),
+			shell: shell,
+			onSelect: { shell.select($0) })
+		let row = try XCTUnwrap(NavigatorModel.make(store: store, query: "").open.first)
+		overlay.select(row)
+		XCTAssertEqual(shell.selection, .mission(row.id))
+		XCTAssertFalse(shell.navigatorVisible)
+	}
+
+	// MARK: - The View menu
+
+	/// The `⌘L` item says what it will do. With the panel up, an item reading
+	/// "Show Navigator" that hides it is a lying label.
+	func testNavigatorMenuTitleFlipsWithTheOverlay() {
+		let shell = ShellState()
+		XCTAssertFalse(shell.navigatorVisible)
+		XCTAssertEqual(NetaCommands.navigatorTitle(visible: shell.navigatorVisible), "Show Navigator")
+		shell.toggleNavigator()
+		XCTAssertTrue(shell.navigatorVisible)
+		XCTAssertEqual(NetaCommands.navigatorTitle(visible: shell.navigatorVisible), "Hide Navigator")
+		shell.toggleNavigator()
+		XCTAssertEqual(NetaCommands.navigatorTitle(visible: shell.navigatorVisible), "Show Navigator")
+	}
+
+	// MARK: - File > Open Workspace…
+
+	func testOpenWorkspaceOpensAndRefreshesTheSnapshot() async throws {
+		let client = FixtureNodeClient()
+		let store = Store()
+		store.replace(snapshot: try await client.snapshot())
+		let before = store.workspaces.count
+		let opened = await NetaCommands.openWorkspace(
+			path: "/tmp/neta-open-panel", client: client, store: store)
+		XCTAssertTrue(opened)
+		XCTAssertEqual(store.workspaces.count, before + 1)
+		XCTAssertEqual(store.currentWorkspaceId, "folder:/tmp/neta-open-panel")
+		XCTAssertTrue(store.workspaces.contains { $0.id == "folder:/tmp/neta-open-panel" })
+	}
+
+	func testOpenWorkspaceLeavesTheStoreAloneWhenTheNodeRefuses() async throws {
+		let client = RefusingNodeClient()
+		let store = Store()
+		store.replace(snapshot: try await FixtureNodeClient().snapshot())
+		let before = store.workspaces
+		// The refusal is reported, not swallowed: the caller learns nothing
+		// changed and the reason goes to the shell log.
+		let opened = await NetaCommands.openWorkspace(path: "/tmp/nope", client: client, store: store)
+		XCTAssertFalse(opened)
+		XCTAssertEqual(store.workspaces, before)
 	}
 
 	func testDismissOverlayClosesNavigator() {
@@ -140,6 +345,35 @@ final class ShellStateTests: XCTestCase {
 			closeReason: mission.closeReason, integration: mission.integration,
 			continuesMissionId: mission.continuesMissionId)
 	}
+}
+
+/// A Node that answers nothing: it takes the protocol's default
+/// `openWorkspace`, which reports the method as unavailable. Used to prove
+/// the menu leaves the store untouched when the Node refuses.
+private struct RefusingNodeClient: NodeClient {
+	private let refusal = NodeClientError.rpc(code: -32601, message: "unavailable")
+
+	func connect() async throws { throw refusal }
+	func snapshot() async throws -> Snapshot { throw refusal }
+	func missionsList(workspaceId: String, before: Date?, limit: Int) async throws -> [Mission] {
+		throw refusal
+	}
+	func eventsList(workspaceId: String, before: Date?, limit: Int) async throws -> [Event] {
+		throw refusal
+	}
+	func conversationTail(
+		sessionId: Ulid, cursor: String?, limit: Int, direction: String?, turnId: TurnId?
+	) async throws -> ConversationPage {
+		throw refusal
+	}
+	func prompt(sessionId: Ulid, text: String) async throws -> Ulid { throw refusal }
+	func cancel(sessionId: Ulid) async throws { throw refusal }
+	func setModel(sessionId: Ulid, model: String) async throws { throw refusal }
+	func listModels(provider: String) async throws -> [ModelInfo] { throw refusal }
+	func setMode(workspaceId: String, mode: LeaderMode) async throws { throw refusal }
+	func pin(missionId: Ulid, pinned: Bool) async throws { throw refusal }
+	func archiveAgent(agentId: Ulid, confirmRunning: Bool) async throws { throw refusal }
+	var notifications: AsyncStream<NodeNotification> { AsyncStream { $0.finish() } }
 }
 
 private extension ShellState {
