@@ -226,6 +226,28 @@ describe("neta_mission", () => {
 		expect(f.saved[0]?.lead).toEqual({ kind: "leader" });
 	});
 
+	test("Pi lead self launches one distinct mission lead session", async () => {
+		const f = fixture("folder");
+		const leader = f.store.getLeader("folder-w");
+		if (leader === undefined) throw new Error("missing leader fixture");
+		await f.store.putLeader({ ...leader, provider: "pi" });
+		f.ports.sessions.pi = true;
+		const result = await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+			name: "pi solo",
+			objective: "run the mission objective",
+			access: "readOnly",
+			lead: "self",
+		});
+		expect(result.ok).toBe(true);
+		expect(f.launches).toHaveLength(1);
+		expect(f.launches[0]).toMatchObject({ provider: "pi", canSpawn: true, task: "run the mission objective" });
+		expect(f.launches[0]?.sessionId).not.toBe(leader.sessionId);
+		const mission = f.saved.at(-1);
+		const leadId = mission?.agentIds[0];
+		if (leadId === undefined) throw new Error("missing Pi mission lead");
+		expect(mission?.lead).toEqual({ kind: "agent", agentId: leadId });
+	});
+
 	test("a readWrite agent in a readOnly mission is refused", async () => {
 		const f = fixture("folder");
 		const result = await missionHandlers.neta_mission(ctx(f, f.leaderActor), {

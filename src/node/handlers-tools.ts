@@ -57,6 +57,10 @@ export interface ToolMountOptions {
 	acp: AdaptedAcp;
 	settings: Settings;
 	hub(): Hub;
+	pi?: {
+		start(input: { sessionId: string; actorId: string; cwd: string; prompt: string }): Promise<void>;
+		close(sessionId: string): void;
+	};
 }
 
 // The workspace copy on this machine: the root recorded for our machine, else
@@ -597,7 +601,8 @@ export function toolMount(o: ToolMountOptions): {
 	}
 
 	async function releaseAndPromote(agent: Agent): Promise<void> {
-		await o.acp.close(agent.sessionId).catch(() => undefined);
+		if (agent.provider === "pi" && o.pi !== undefined) o.pi.close(agent.sessionId);
+		else await o.acp.close(agent.sessionId).catch(() => undefined);
 		await releaseHolder(agent.workspaceId, agent.id);
 	}
 
@@ -737,6 +742,7 @@ export function toolMount(o: ToolMountOptions): {
 			},
 		},
 		sessions: {
+			pi: o.pi !== undefined,
 			startQueued: async (agent, text) => {
 				const mission = o.store.getMission(agent.missionId);
 				const workspace = o.store.getWorkspace(agent.workspaceId);
@@ -831,6 +837,16 @@ export function toolMount(o: ToolMountOptions): {
 					skills: input.skills,
 					root: rootFor(input.workspaceId),
 				});
+				if (input.provider === "pi" && o.pi !== undefined) {
+					briefs.set(input.agentId, context);
+					await o.pi.start({
+						sessionId: input.sessionId,
+						actorId: input.agentId,
+						cwd: input.worktreePath ?? rootFor(input.workspaceId),
+						prompt: context,
+					});
+					return { sessionId: input.sessionId };
+				}
 				const created = await o.acp.createSession({
 					sessionId: input.sessionId,
 					workspaceId: input.workspaceId,
@@ -848,6 +864,15 @@ export function toolMount(o: ToolMountOptions): {
 			brief: async (input) => {
 				const context = briefs.get(input.agentId);
 				briefs.delete(input.agentId);
+				if (input.provider === "pi" && o.pi !== undefined) {
+					const agent = o.store.getAgent(input.agentId);
+					if (agent !== undefined) {
+						const running = { ...agent, state: "running" as const };
+						await o.store.putAgent(running);
+						o.hub().broadcast("state", { kind: "agent", record: running });
+					}
+					return;
+				}
 				await o.acp.prompt(
 					input.sessionId,
 					context ??
@@ -1003,6 +1028,9 @@ export function toolMount(o: ToolMountOptions): {
 						}
 					: { kind: "leader", workspaceId: parsed.workspaceId };
 			const agent = subject.kind === "lead" ? o.store.getAgent(subject.agentId) : undefined;
+			if (agent?.provider === "pi") {
+				throw new NodeError("INVALID_PARAMS", "Pi mission mode changes are unavailable in this prototype");
+			}
 			const sessionId = agent?.sessionId ?? leader.sessionId;
 			const pending = parsed.mode === "lead" ? pendingModes.get(sessionId) : undefined;
 			if (parsed.mode === "lead") pendingModes.delete(sessionId);
@@ -1059,7 +1087,8 @@ export function toolMount(o: ToolMountOptions): {
 			if ((agent.state === "starting" || agent.state === "running") && parsed.confirm !== true) {
 				throw new NodeError("CONFIRMATION_REQUIRED", "archiving a live agent needs confirm: true");
 			}
-			await o.acp.close(agent.sessionId);
+			if (agent.provider === "pi" && o.pi !== undefined) o.pi.close(agent.sessionId);
+			else await o.acp.close(agent.sessionId);
 			const archived = { ...agent, state: "archived" as const };
 			await o.store.putAgent(archived);
 			await deps.sessions.release(archived);

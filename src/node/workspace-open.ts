@@ -115,7 +115,7 @@ function storedName(leader: Leader): string {
 
 async function createLeader(ctx: NodeContext, workspaceId: string, machineId: string, cwd: string): Promise<Leader> {
 	const { settings } = loadSettings({ netaDir: netaDir(), workspaceRoot: cwd });
-	const providerName = settings.leader.provider;
+	const providerName = ctx.pi === undefined ? settings.leader.provider : "pi";
 	const model = settings.leader.model ?? settings.providers[providerName]?.defaultModel ?? "";
 	const name = leaderName(ctx, workspaceId, cwd);
 	// The leader is an actor: 03 mints its token under the session id it is
@@ -135,6 +135,13 @@ async function createLeader(ctx: NodeContext, workspaceId: string, machineId: st
 		state: "failed",
 	};
 	let leader = candidate;
+	if (ctx.pi !== undefined) {
+		ctx.acp.prepareExternalActor?.(sessionId);
+		leader = { ...candidate, state: "idle" };
+		await ctx.store.putLeader(leader);
+		ctx.hub.broadcast("state", { kind: "leader", record: leader });
+		return leader;
+	}
 	try {
 		providerFor(settings, providerName);
 		const created = await ctx.acp.createSession({
@@ -173,6 +180,14 @@ async function createLeader(ctx: NodeContext, workspaceId: string, machineId: st
 // announced so open clients follow the new conversation.
 async function reviveLeader(ctx: NodeContext, leader: Leader, workspace: Workspace, cwd: string): Promise<Leader> {
 	let effective = leader;
+	if (leader.provider === "pi" && ctx.pi !== undefined) {
+		ctx.acp.prepareExternalActor?.(leader.sessionId);
+		if (leader.state === "idle") return leader;
+		const revived = { ...leader, state: "idle" as const };
+		await ctx.store.putLeader(revived);
+		ctx.hub.broadcast("state", { kind: "leader", record: revived });
+		return revived;
+	}
 	let sessionCwd = cwd;
 	if (leader.mode === "leadPlus") {
 		const mission = leader.activeMissionId === undefined ? undefined : ctx.store.getMission(leader.activeMissionId);

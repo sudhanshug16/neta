@@ -39,6 +39,7 @@ export interface MissionPorts {
 	numbers: { allocateNumber(workspaceId: WorkspaceId): Promise<number> };
 	missions: { save(mission: Mission): Promise<void> };
 	sessions: {
+		pi?: boolean;
 		// Two steps, in this order: the session exists, then the Agent record
 		// is on file, then the context prompt goes out. A fast agent's first
 		// `tools/call` has to find its own record, and the first prompt is
@@ -245,7 +246,28 @@ async function createMission(ctx: MissionToolContext, params: MissionParams): Pr
 	// and on the spine would name one person twice.
 	const taken = new Set<string>([leader.name]);
 	const launched: Agent[] = [];
-	if (params.lead === "self") {
+	if (params.lead === "self" && leader.provider === "pi" && ctx.deps.sessions.pi === true) {
+		const lead = await launchAgent(
+			ctx,
+			mission,
+			workspace,
+			{
+				task: params.objective,
+				access: "readOnly",
+				provider: "pi",
+				model: leader.model,
+				skills: [],
+				canSpawn: true,
+				taken,
+			},
+			async (reserved) => {
+				mission.lead = { kind: "agent", agentId: reserved.id };
+				mission.agentIds.push(reserved.id);
+				await ctx.deps.missions.save(mission);
+			},
+		);
+		launched.push(lead);
+	} else if (params.lead === "self") {
 		mission.lead = { kind: "leader" };
 		await ctx.deps.store.putLeader({ ...leader, activeMissionId: mission.id });
 	} else {

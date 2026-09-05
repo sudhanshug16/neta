@@ -38,6 +38,19 @@ public struct BundledNodeLauncher: NodeLauncher {
 		process.standardInput = FileHandle.nullDevice
 		process.standardOutput = FileHandle.nullDevice
 		process.standardError = FileHandle.nullDevice
+		var environment = ProcessInfo.processInfo.environment
+		environment["NETA_DIR"] = SocketNodeClient.configuredDirectory().path
+		if Bundle.main.object(forInfoDictionaryKey: "NetaRuntime") as? String == "pi" {
+			let runtime = resources.appendingPathComponent("pi-runtime", isDirectory: true)
+			environment["NETA_RUNTIME"] = "pi"
+			environment["NETA_PI_RUNTIME"] = "1"
+			environment["NETA_PI_NODE"] = runtime.appendingPathComponent("bin/node").path
+			environment["NETA_PI_CLI"] = runtime.appendingPathComponent("node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js").path
+			environment["NETA_PI_HOST"] = resources.appendingPathComponent("pi-runtime/neta/pty-host.mjs").path
+			environment["NETA_PI_EXTENSION"] = resources.appendingPathComponent("pi-runtime/neta/neta-extension.ts").path
+			environment["NETA_PI_CLAUDE_BRIDGE"] = runtime.appendingPathComponent("node_modules/pi-claude-bridge/src/index.ts").path
+		}
+		process.environment = environment
 		try await withCheckedThrowingContinuation { continuation in
 			process.terminationHandler = { _ in continuation.resume() }
 			do { try process.run() } catch { continuation.resume(throwing: error) }
@@ -148,13 +161,17 @@ public actor SocketNodeClient: NodeClient {
 	public static let protocolVersion = 3
 
 	/// `~/.neta`, or `$NETA_DIR` when set (04: it overrides the default).
-	public static let defaultDirectory: URL = {
-		if let override = ProcessInfo.processInfo.environment["NETA_DIR"], !override.isEmpty {
+	public static func configuredDirectory(
+		bundle: Bundle = .main,
+		environment: [String: String] = ProcessInfo.processInfo.environment
+	) -> URL {
+		if let override = environment["NETA_DIR"], !override.isEmpty {
 			return URL(fileURLWithPath: override, isDirectory: true)
 		}
-		return FileManager.default.homeDirectoryForCurrentUser
-			.appendingPathComponent(".neta", isDirectory: true)
-	}()
+		let name = bundle.object(forInfoDictionaryKey: "NetaDataDirectoryName") as? String ?? ".neta"
+		return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(name, isDirectory: true)
+	}
+	public static let defaultDirectory: URL = configuredDirectory()
 
 	private static let defaultRetryWindow: Duration = .seconds(5)
 	private static let defaultRetryInterval: Duration = .milliseconds(250)
@@ -528,6 +545,26 @@ public actor SocketNodeClient: NodeClient {
 		return try await sendRequest(method: "conversation.reset", params: ["sessionId": sessionId])
 	}
 
+	public func terminalAttach(sessionId: Ulid, cols: Int, rows: Int) async throws -> TerminalAttachment {
+		guard connected else { throw NodeClientError.disconnected }
+		return try await sendRequest(method: "terminal.attach", params: ["sessionId": sessionId, "cols": cols, "rows": rows])
+	}
+
+	public func terminalInput(sessionId: Ulid, attachmentId: String, data: Data) async throws {
+		guard connected else { throw NodeClientError.disconnected }
+		let _: IgnoredResult = try await sendRequest(method: "terminal.input", params: ["sessionId": sessionId, "attachmentId": attachmentId, "dataBase64": data.base64EncodedString()])
+	}
+
+	public func terminalResize(sessionId: Ulid, attachmentId: String, cols: Int, rows: Int) async throws {
+		guard connected else { throw NodeClientError.disconnected }
+		let _: IgnoredResult = try await sendRequest(method: "terminal.resize", params: ["sessionId": sessionId, "attachmentId": attachmentId, "cols": cols, "rows": rows])
+	}
+
+	public func terminalDetach(sessionId: Ulid, attachmentId: String) async throws {
+		guard connected else { throw NodeClientError.disconnected }
+		let _: IgnoredResult = try await sendRequest(method: "terminal.detach", params: ["sessionId": sessionId, "attachmentId": attachmentId])
+	}
+
 	public func setMode(workspaceId: String, mode: LeaderMode) async throws {
 		guard connected else { throw NodeClientError.disconnected }
 		let _: IgnoredResult = try await sendRequest(
@@ -747,6 +784,12 @@ public actor SocketNodeClient: NodeClient {
 		case "glance.changed":
 			guard let change = try? NetaJSON.decoder.decode(GlanceChange.self, from: paramsData) else { return nil }
 			return .glance(change)
+		case "terminal.output":
+			guard let payload = try? NetaJSON.decoder.decode(TerminalOutputEnvelope.self, from: paramsData) else { return nil }
+			return .terminalOutput(sessionId: payload.sessionId, output: .init(generation: payload.generation, seq: payload.seq, dataBase64: payload.dataBase64))
+		case "terminal.state":
+			guard let state = try? NetaJSON.decoder.decode(TerminalState.self, from: paramsData) else { return nil }
+			return .terminalState(state)
 		default:
 			return nil
 		}
@@ -853,6 +896,12 @@ private struct PromptResult: Decodable {
 private struct InboxResult: Decodable { let messages: [InboxMessage] }
 private struct GlanceCardEnvelope: Decodable { let card: GlanceCard }
 private struct GlanceReviewEnvelope: Decodable { let reviewedThroughGlanceSeq: Int }
+private struct TerminalOutputEnvelope: Decodable {
+	let sessionId: SessionId
+	let generation: String
+	let seq: Int
+	let dataBase64: String
+}
 
 private struct WireModel: Decodable {
 	let id: String

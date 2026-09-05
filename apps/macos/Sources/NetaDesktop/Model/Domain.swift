@@ -523,6 +523,8 @@ public enum NodeNotification: Sendable {
 	case turn(TurnChange)
 	case node(NodeLifecycle)
 	case glance(GlanceChange)
+	case terminalOutput(sessionId: SessionId, output: TerminalOutput)
+	case terminalState(TerminalState)
 }
 
 // MARK: - JSON

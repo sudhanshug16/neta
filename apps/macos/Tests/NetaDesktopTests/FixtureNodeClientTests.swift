@@ -168,6 +168,7 @@ final class FixtureNodeClientTests: XCTestCase {
 			case .state(let change): states.append(change)
 			case .node: XCTFail("no node notification was emitted")
 			case .glance: XCTFail("no glance notification was emitted")
+			case .terminalOutput, .terminalState: XCTFail("no terminal notification was emitted")
 			}
 		}
 		XCTAssertEqual(turns.count, 2)
@@ -217,6 +218,7 @@ final class FixtureNodeClientTests: XCTestCase {
 					case .state(let change): seen.append("state:\(change.kind.rawValue)")
 					case .node(let lifecycle): seen.append("node:\(lifecycle.phase.rawValue)")
 					case .glance: break
+					case .terminalOutput, .terminalState: break
 					}
 					if seen.count == 3 { return seen }
 				}

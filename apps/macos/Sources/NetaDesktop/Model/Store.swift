@@ -191,6 +191,8 @@ import Observation
 			nodeState = lifecycle
 		case .glance:
 			break
+		case .terminalOutput, .terminalState:
+			break
 		}
 	}
 

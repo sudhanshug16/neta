@@ -23,7 +23,7 @@
 //   the port to assemble backward and turn-anchored windows.
 
 import { createHash } from "node:crypto";
-import { accessSync, constants } from "node:fs";
+import { accessSync, constants, statSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { closeAll, SessionTable } from "../acp/lifecycle.ts";
@@ -49,6 +49,7 @@ import type {
 	TurnId,
 	WorkspaceId,
 } from "../core/types.ts";
+import { createPiTerminalManager } from "../pi/manager.ts";
 import type { ConversationStore } from "../store/conversations.ts";
 import { createMutex, readJson, writeJsonAtomic } from "../store/files.ts";
 import { openStore, type Store } from "../store/index.ts";
@@ -59,6 +60,7 @@ import { createFileLeaseStore, LeaseManager } from "../worktrees/leases.ts";
 import { conversationHandlers, prepareHandoffForSession, wireTurnStream } from "./handlers-conversation.ts";
 import { glanceHandlers } from "./handlers-glance.ts";
 import { registryHandlers } from "./handlers-registry.ts";
+import { terminalHandlers } from "./handlers-terminal.ts";
 import { toolMount } from "./handlers-tools.ts";
 import {
 	acquireLock,
@@ -888,6 +890,11 @@ export function adaptAcp(
 	}
 
 	adapted = {
+		prepareExternalActor: (sessionId, actorId = sessionId) => {
+			const token = minted.get(actorId) ?? tokens.mint(actorId);
+			actors.set(sessionId, actorId);
+			return token;
+		},
 		send: async (id, text, attachments, _provenance) => {
 			if (inboxStore === undefined) {
 				const turnId = await (async () => {
@@ -1345,6 +1352,7 @@ export const allHandlers: NodeHandlers = {
 	...conversationHandlers,
 	...glanceHandlers,
 	...workspaceHandlers,
+	...terminalHandlers,
 };
 
 export interface Node {
@@ -1460,6 +1468,54 @@ export async function startNode(o?: { store?: NodeStore; acp?: NodeAcp }): Promi
 		const stopped = new Promise<void>((done) => {
 			stoppedResolve = done;
 		});
+		const piActors = new Map<string, { actorId: string; prompt?: string }>();
+		const claudeExecutable = (() => {
+			const configured = process.env.NETA_CLAUDE_BIN;
+			const candidates = [
+				configured,
+				...(process.env.PATH ?? "").split(":").map((dir) => join(dir, "claude")),
+				join(process.env.HOME ?? "", ".local/bin/claude"),
+				"/opt/homebrew/bin/claude",
+				"/usr/local/bin/claude",
+			];
+			return candidates.find((candidate): candidate is string => {
+				if (!candidate) return false;
+				try {
+					accessSync(candidate, constants.X_OK);
+					return statSync(candidate).isFile();
+				} catch {
+					return false;
+				}
+			});
+		})();
+		const pi =
+			process.env.NETA_PI_RUNTIME === "1" || process.env.NETA_RUNTIME === "pi"
+				? createPiTerminalManager({
+						dataDir: netaDir(),
+						nodeCommand: process.env.NETA_PI_NODE,
+						piCommand: process.env.NETA_PI_NODE,
+						hostPath: process.env.NETA_PI_HOST,
+						extensionPath: process.env.NETA_PI_EXTENSION,
+						extraExtensionPath: process.env.NETA_PI_FIXTURE_EXTENSION,
+						bridgePath: process.env.NETA_PI_CLAUDE_BRIDGE,
+						piCliPath: process.env.NETA_PI_CLI,
+						provider: process.env.NETA_PI_PROVIDER,
+						model: process.env.NETA_PI_MODEL,
+						claudeExecutable,
+						envForSession: (sessionId) => {
+							const persisted = storePort
+								.listAgents()
+								.find((agent) => agent.sessionId === sessionId && agent.provider === "pi");
+							const actor = piActors.get(sessionId) ?? { actorId: persisted?.id ?? sessionId };
+							return {
+								NETA_DESCRIPTOR: join(netaDir(), "node.json"),
+								NETA_ACTOR_ID: actor.actorId,
+								NETA_ACTOR_TOKEN: acpPort.prepareExternalActor?.(sessionId, actor.actorId) ?? "",
+								...(actor.prompt === undefined ? {} : { NETA_INITIAL_PROMPT: actor.prompt }),
+							};
+						},
+					})
+				: undefined;
 		let stopping: Promise<void> | undefined;
 		const stop = async (): Promise<void> => {
 			if (stopping !== undefined) {
@@ -1472,6 +1528,7 @@ export async function startNode(o?: { store?: NodeStore; acp?: NodeAcp }): Promi
 					mounted?.stop();
 					hub.broadcast("node", { phase: "stopping" });
 					await server.close();
+					pi?.closeAll();
 					await acpPort.closeAll();
 					await storePort.compact();
 					if (realStore !== undefined) {
@@ -1485,7 +1542,13 @@ export async function startNode(o?: { store?: NodeStore; acp?: NodeAcp }): Promi
 			})();
 			return stopping;
 		};
-		const ctx: Omit<NodeContext, "hub"> = { store: storePort, acp: acpPort, nodeVersion: netaVersion(), stop };
+		const ctx: Omit<NodeContext, "hub"> = {
+			store: storePort,
+			acp: acpPort,
+			nodeVersion: netaVersion(),
+			stop,
+			...(pi === undefined ? {} : { pi }),
+		};
 		// The tools are only mounted on a real Node: the router needs 02's
 		// registry for numbers and records, which the ports do not carry, so a
 		// stubbed store (handler tests) serves the rest and no tools.
@@ -1497,6 +1560,22 @@ export async function startNode(o?: { store?: NodeStore; acp?: NodeAcp }): Promi
 						acp: adaptedAcp,
 						settings,
 						hub: () => hub,
+						...(pi === undefined
+							? {}
+							: {
+									pi: {
+										start: async (input: {
+											sessionId: string;
+											actorId: string;
+											cwd: string;
+											prompt: string;
+										}) => {
+											piActors.set(input.sessionId, { actorId: input.actorId, prompt: input.prompt });
+											await pi.startSession(input.sessionId, input.cwd);
+										},
+										close: (sessionId: string) => pi.closeSession(sessionId),
+									},
+								}),
 					})
 				: undefined;
 		const tools = mounted?.handlers ?? {};

@@ -9,11 +9,12 @@ let package = Package(
 	],
 	dependencies: [
 		.package(path: "../../packages/AgentChatKit"),
+		.package(url: "https://github.com/migueldeicaza/SwiftTerm.git", exact: "1.15.0"),
 	],
 	targets: [
 		.executableTarget(
 			name: "NetaDesktop",
-			dependencies: ["AgentChatKit"],
+			dependencies: ["AgentChatKit", .product(name: "SwiftTerm", package: "SwiftTerm")],
 			path: "Sources/NetaDesktop"
 		),
 		.testTarget(

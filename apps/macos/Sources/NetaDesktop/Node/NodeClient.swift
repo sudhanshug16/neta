@@ -28,6 +28,10 @@ public protocol NodeClient: Sendable {
 	func prepareHandoff(sessionId: Ulid) async throws -> String
 	func setProvider(sessionId: Ulid, provider: String, model: String?, handoff: String?) async throws -> ProviderSwitchResult
 	func resetChat(sessionId: Ulid) async throws -> ProviderSwitchResult
+	func terminalAttach(sessionId: Ulid, cols: Int, rows: Int) async throws -> TerminalAttachment
+	func terminalInput(sessionId: Ulid, attachmentId: String, data: Data) async throws
+	func terminalResize(sessionId: Ulid, attachmentId: String, cols: Int, rows: Int) async throws
+	func terminalDetach(sessionId: Ulid, attachmentId: String) async throws
 	func setMode(workspaceId: String, mode: LeaderMode) async throws
 	func pin(missionId: Ulid, pinned: Bool) async throws
 	func archiveAgent(agentId: Ulid, confirmRunning: Bool) async throws
@@ -94,6 +98,42 @@ public extension NodeClient {
 	func resetChat(sessionId: Ulid) async throws -> ProviderSwitchResult {
 		throw NodeClientError.rpc(code: -32601, message: "chat reset is unavailable")
 	}
+	func terminalAttach(sessionId: Ulid, cols: Int, rows: Int) async throws -> TerminalAttachment {
+		throw NodeClientError.rpc(code: -32601, message: "terminal unavailable")
+	}
+	func terminalInput(sessionId: Ulid, attachmentId: String, data: Data) async throws {}
+	func terminalResize(sessionId: Ulid, attachmentId: String, cols: Int, rows: Int) async throws {}
+	func terminalDetach(sessionId: Ulid, attachmentId: String) async throws {}
+}
+
+public struct TerminalOutput: Codable, Sendable, Equatable {
+	public let generation: String
+	public let seq: Int
+	public let dataBase64: String
+	public init(generation: String, seq: Int, dataBase64: String) { self.generation = generation; self.seq = seq; self.dataBase64 = dataBase64 }
+	public var data: Data? { Data(base64Encoded: dataBase64) }
+}
+
+public struct TerminalAttachment: Codable, Sendable, Equatable {
+	public let sessionId: SessionId
+	public let attachmentId: String
+	public let pid: Int
+	public let generation: String
+	public let replay: [TerminalOutput]
+	public let replayTruncated: Bool
+	public init(sessionId: SessionId, attachmentId: String, pid: Int, generation: String, replay: [TerminalOutput], replayTruncated: Bool = false) {
+		self.sessionId = sessionId; self.attachmentId = attachmentId; self.pid = pid; self.generation = generation; self.replay = replay; self.replayTruncated = replayTruncated
+	}
+}
+
+public struct TerminalState: Codable, Sendable, Equatable {
+	public enum Phase: String, Codable, Sendable { case running, exited, restarting }
+	public let sessionId: SessionId
+	public let generation: String
+	public let phase: Phase
+	public let pid: Int?
+	public let exitCode: Int?
+	public let signal: String?
 }
 
 public enum GlanceResult: Codable, Sendable, Hashable {

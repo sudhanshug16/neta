@@ -16,5 +16,7 @@
 	<string>26.0</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>NetaRuntime</key>
+	<string>pi</string>
 </dict>
 </plist>

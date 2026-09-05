@@ -296,7 +296,7 @@ describe("startNode and stop", () => {
 });
 
 describe("allHandlers", () => {
-	test("it merges the four maps with no collisions", () => {
+	test("it merges the handler maps with no collisions", () => {
 		expect(Object.keys(allHandlers).sort()).toEqual(
 			[
 				"agent.archive",
@@ -323,6 +323,10 @@ describe("allHandlers", () => {
 				"providers.list",
 				"node.stop",
 				"snapshot",
+				"terminal.attach",
+				"terminal.detach",
+				"terminal.input",
+				"terminal.resize",
 				"workspace.list",
 				"workspace.open",
 			].sort(),
@@ -728,6 +732,10 @@ describe("adaptAcp against the fake provider", () => {
 			expect(typeof created.sessionId).toBe("string");
 			const token = acp.actorToken(created.sessionId);
 			expect(token).toMatch(/^[0-9a-f]{64}$/);
+			if (token === undefined || acp.prepareExternalActor === undefined)
+				throw new Error("missing external actor token");
+			expect(acp.prepareExternalActor(created.sessionId)).toBe(token);
+			expect(acp.actorToken(created.sessionId)).toBe(token);
 			const seen: unknown[] = [];
 			acp.onTurn((notification) => {
 				seen.push(notification);

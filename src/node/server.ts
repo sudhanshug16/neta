@@ -20,6 +20,7 @@ import type {
 	Workspace,
 	WorkspaceId,
 } from "../core/types.ts";
+import type { PiTerminalManager } from "../pi/manager.ts";
 import type { GlanceResult } from "../store/glance.ts";
 import {
 	type ClientKind,
@@ -82,6 +83,7 @@ export interface SessionRequest {
 }
 
 export interface NodeAcp {
+	prepareExternalActor?(sessionId: SessionId, actorId?: string): string;
 	createSession(o: SessionRequest): Promise<{ sessionId: SessionId; provider: string; model: string }>;
 	// A live session for one already on record: the same one when it is still
 	// live, else the provider's resume path, else a fresh session under a new
@@ -144,6 +146,7 @@ export interface Connection {
 	send(method: string, params: unknown): void;
 	tailed: Set<SessionId>;
 	close(): void;
+	onClose?(fn: () => void): void;
 }
 
 export interface NodeContext {
@@ -152,6 +155,7 @@ export interface NodeContext {
 	hub: Hub;
 	nodeVersion: string;
 	stop(): Promise<void>;
+	pi?: PiTerminalManager;
 }
 
 export type NodeHandler = (ctx: NodeContext, params: unknown, conn: Connection) => Promise<unknown>;
@@ -317,6 +321,7 @@ export async function createServer(o: {
 				close: () => {
 					socket.destroy();
 				},
+				onClose: (fn) => socket.once("close", fn),
 			};
 			peer.conn = conn;
 			const result: HelloResult = {

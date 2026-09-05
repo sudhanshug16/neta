@@ -36,6 +36,7 @@ public struct RootView: View {
 	/// window; the panel re-selects from the shell and the store instead of
 	/// being rebuilt (`ChatPanelModel.sync`).
 	@State private var chatModel: ChatPanelModel
+	@State private var terminalRegistry: PiTerminalRegistry
 
 	/// - Parameters:
 	///   - store: The app's picture of the Node; views own nothing.
@@ -50,6 +51,7 @@ public struct RootView: View {
 		self.workspaceResume = workspaceResume
 		_chatModel = State(initialValue: ChatPanelModel(
 			client: client, store: store, shell: shell))
+		_terminalRegistry = State(initialValue: PiTerminalRegistry(client: client))
 	}
 
 	/// Escape, wherever focus sits: close the top overlay, else return the
@@ -160,7 +162,14 @@ public struct RootView: View {
 						.zIndex(101)
 				}
 				if let chat = layout.chat {
-					ChatPanel(model: chatModel, router: router, windowWidth: proxy.size.width)
+					Group {
+						if let sessionId = PiTerminalRoute.sessionId(selection: shell.selection, store: store) {
+							PiTerminalPanel(controller: terminalRegistry.controller(sessionId: sessionId))
+								.id(sessionId)
+						} else {
+							ChatPanel(model: chatModel, router: router, windowWidth: proxy.size.width)
+						}
+					}
 						.netaGlass(.panel, tint: Theme.Glass.chatFill)
 						.frame(width: chat.width, height: chat.height)
 						.position(x: chat.midX, y: chat.midY)

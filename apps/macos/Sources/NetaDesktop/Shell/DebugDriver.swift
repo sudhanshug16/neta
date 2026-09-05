@@ -30,6 +30,9 @@ public enum DebugCommand: Hashable, Sendable {
 	/// way in, because the composer's model is owned by the chat panel and
 	/// the driver holds only the store and the shell.
 	case draft(text: String)
+	/// Puts text on the macOS pasteboard and invokes the focused terminal's
+	/// real paste responder. `key enter` submits it separately.
+	case terminalPaste(text: String)
 	/// Reports the real window chrome: appearance, style mask and whether
 	/// the content runs under the title bar. The only way to see, on a
 	/// machine whose window server composites nothing, that `WindowChrome`
@@ -126,6 +129,9 @@ public enum DebugCommand: Hashable, Sendable {
 		case "draft":
 			// The remainder of the line, spaces and all: a draft is prose.
 			return .draft(text: rest)
+		case "terminal-paste":
+			guard !rest.isEmpty else { throw DebugCommandError("terminal-paste wants text") }
+			return .terminalPaste(text: rest)
 		case "window":
 			try requireNoArgument(rest, verb: verb)
 			return .window
@@ -195,7 +201,8 @@ public enum DebugCommand: Hashable, Sendable {
 	}
 
 	private static func validStatePredicate(_ value: String) -> Bool {
-		if value == "open" || value == "idle" { return true }
+		if value == "open" || value == "idle" || value == "terminal-ready" { return true }
+		if value.hasPrefix("terminal-text ") { return value.count > "terminal-text ".count }
 		if value.hasPrefix("session-not ") { return value.count > "session-not ".count }
 		let parts = value.split(separator: " ")
 		let statuses = Set(["queued", "delivering", "delivered", "uncertain", "discarded"])
@@ -509,6 +516,16 @@ public struct DebugCommandError: Error, CustomStringConvertible, Hashable, Senda
 			return DebugDriver.menuDump()
 		case .draft(let text):
 			return try setDraft(text)
+		case .terminalPaste(let text):
+			guard let terminal = terminalView else { throw DebugCommandError("no Pi terminal in the window") }
+			let board = NSPasteboard.general
+			board.clearContents()
+			board.setString(text, forType: .string)
+			guard targetWindow?.makeFirstResponder(terminal) == true else {
+				throw DebugCommandError("terminal refused first responder")
+			}
+			terminal.paste(self)
+			return "\(text.utf8.count) bytes via PiTerminalView.paste"
 		case .window:
 			guard let window = targetWindow else {
 				throw DebugCommandError("no window")
@@ -525,6 +542,9 @@ public struct DebugCommandError: Error, CustomStringConvertible, Hashable, Senda
 			}
 			let composer = targetWindow?.contentView.flatMap { DebugDriver.firstComposerTextView(in: $0) }
 			let responder = targetWindow?.firstResponder
+			let terminalState = terminalView.flatMap { view in
+				(view.terminalDelegate as? PiTerminalController)?.debugSummary(focused: responder === view)
+			}
 			return "selection=\(selection)"
 				+ " navigator=\(shell.navigatorVisible)"
 				+ " chat=\(shell.chatVisible)"
@@ -543,6 +563,7 @@ public struct DebugCommandError: Error, CustomStringConvertible, Hashable, Senda
 				+ " keyDown=\(composer?.keyDownCount ?? -1) returns=\(composer?.returnCount ?? -1)"
 				+ " pastes=\(composer?.pasteCount ?? -1) pasteHandled=\(composer?.lastPasteHandled ?? false)"
 				+ " model={\(composer?.debugState?() ?? "nil")} \(inboxCounts(composer))"
+				+ (terminalState.map { " \($0)" } ?? " terminalSession=-")
 		case .axDump:
 			return DebugDriver.accessibilityDump()
 		case .axPress(let label):
@@ -584,6 +605,17 @@ public struct DebugCommandError: Error, CustomStringConvertible, Hashable, Senda
 		let state = composer?.debugState?() ?? ""
 		if predicate == "open" { return state.contains("open=true") }
 		if predicate == "idle" { return state.contains("open=false") && state.contains("submitting=false") && state.contains("stopping=false") }
+		if predicate == "terminal-ready" {
+			guard let terminal = terminalView,
+				let controller = terminal.terminalDelegate as? PiTerminalController else { return false }
+			return controller.phase == .running && controller.pid != nil
+		}
+		if predicate.hasPrefix("terminal-text ") {
+			let expected = String(predicate.dropFirst("terminal-text ".count))
+			guard let terminal = terminalView,
+				let controller = terminal.terminalDelegate as? PiTerminalController else { return false }
+			return controller.debugSummary(focused: targetWindow?.firstResponder === terminal).contains(expected)
+		}
 		if predicate.hasPrefix("session-not ") {
 			let old = String(predicate.dropFirst("session-not ".count))
 			return !old.isEmpty && shell.sessionId(in: store).map { $0 != old } == true
@@ -788,6 +820,12 @@ public struct DebugCommandError: Error, CustomStringConvertible, Hashable, Senda
 			composer.paste(nil)
 			return "via ComposerNSTextView.paste"
 		}
+		if modifiers == .command, characters == "v",
+			let terminal = window.firstResponder as? PiTerminalView
+		{
+			terminal.paste(self)
+			return "via PiTerminalView.paste"
+		}
 		if NSApplication.shared.mainMenu?.performKeyEquivalent(with: event) == true {
 			return "via menu"
 		}
@@ -829,6 +867,19 @@ public struct DebugCommandError: Error, CustomStringConvertible, Hashable, Senda
 		if let text = view as? NSTextView { return text }
 		for child in view.subviews {
 			if let found = firstTextView(in: child) { return found }
+		}
+		return nil
+	}
+
+	private var terminalView: PiTerminalView? {
+		guard let content = targetWindow?.contentView else { return nil }
+		return Self.firstTerminalView(in: content)
+	}
+
+	static func firstTerminalView(in view: NSView) -> PiTerminalView? {
+		if let terminal = view as? PiTerminalView { return terminal }
+		for child in view.subviews {
+			if let terminal = firstTerminalView(in: child) { return terminal }
 		}
 		return nil
 	}
