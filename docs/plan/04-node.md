@@ -132,9 +132,22 @@ export interface NodeStore {
   tailConversation(id: SessionId, q: {limit: number; cursor?: string}):
     Promise<Omit<ConversationTailResult, "sessionId">>;
 }
+// `netaTools: true` asks for the Neta MCP entry; only the adapter can build
+// it, because only the adapter knows the token it mints at launch. `actorId`
+// names that actor when it is not the session itself: an agent's session is
+// minted under its `agentId`, per 05.
+export interface SessionRequest {
+  workspaceId: WorkspaceId; cwd: string; provider: string; model: string;
+  access: Access; netaTools: boolean; actorId?: string;
+}
 export interface NodeAcp {
-  createSession(o: {workspaceId: WorkspaceId; cwd: string; provider: string;
-    model: string; access: Access; mcpServers: McpServerSpec[]}):
+  createSession(o: SessionRequest):
+    Promise<{sessionId: SessionId; provider: string; model: string}>;
+  // A live session for one already on record: the same one when it is still
+  // live (relaunched in place when its access no longer matches the recorded
+  // mode, per 07), else the provider's resume path, else a fresh session
+  // under a new id the caller records.
+  ensureSession(o: SessionRequest & {sessionId: SessionId}):
     Promise<{sessionId: SessionId; provider: string; model: string}>;
   prompt(id: SessionId, text: string): Promise<TurnId>;
   setModel(id: SessionId, model: string): Promise<void>;
@@ -145,8 +158,10 @@ export interface NodeAcp {
 }
 ```
 
-04 writes no `Mission` — 05, 06 and 07 do. `McpServerSpec` is 03's stdio
-server descriptor; the Neta tools server (05) is the only entry 04 adds.
+04 writes no `Mission` — 05, 06 and 07 do. The Neta tools server (05) is the
+only MCP entry 04 adds, and 03's `McpServerSpec` never crosses this port: the
+adapter builds that entry from `netaTools`, since the actor token exists only
+inside it. `close(id)` revokes the token minted for that session's actor.
 
 ## Lifecycle
 

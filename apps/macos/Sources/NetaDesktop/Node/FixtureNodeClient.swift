@@ -282,6 +282,43 @@ public actor FixtureNodeClient: NodeClient {
 		}
 		return infos.sorted { $0.id < $1.id }
 	}
+	public func listModels(sessionId: Ulid) async throws -> [ModelInfo] {
+		let provider = leaders.first(where: { $0.sessionId == sessionId })?.provider
+			?? agents.first(where: { $0.sessionId == sessionId })?.provider ?? ""
+		return try await listModels(provider: provider)
+	}
+
+	public func resetChat(sessionId: Ulid) async throws -> ProviderSwitchResult {
+		record("resetChat", ["sessionId": sessionId])
+		let next = Self.newUlid()
+		if let index = leaders.firstIndex(where: { $0.sessionId == sessionId }) {
+			let old = leaders[index]
+			let updated = Leader(
+				workspaceId: old.workspaceId, machineId: old.machineId, name: old.name,
+				sessionId: next, provider: old.provider, model: old.model, mode: old.mode,
+				modeSince: old.modeSince, modeActiveMs: old.modeActiveMs,
+				activeMissionId: old.activeMissionId, state: old.state)
+			leaders[index] = updated
+			hub.broadcast(.state(StateChange(kind: .leader, record: .leader(updated))))
+			return ProviderSwitchResult(
+				sessionId: next, provider: old.provider, model: old.model, contextReset: true)
+		}
+		if let index = agents.firstIndex(where: { $0.sessionId == sessionId }) {
+			let old = agents[index]
+			let updated = Agent(
+				id: old.id, missionId: old.missionId, workspaceId: old.workspaceId,
+				name: old.name, task: old.task, access: old.access, provider: old.provider,
+				model: old.model, skills: old.skills, sessionId: next, canSpawn: old.canSpawn,
+				state: old.state, stateBefore: old.stateBefore, activity: old.activity,
+				pendingQuestion: old.pendingQuestion, startedAt: old.startedAt,
+				endedAt: old.endedAt, outcome: old.outcome)
+			agents[index] = updated
+			hub.broadcast(.state(StateChange(kind: .agent, record: .agent(updated))))
+			return ProviderSwitchResult(
+				sessionId: next, provider: old.provider, model: old.model, contextReset: true)
+		}
+		throw NodeClientError.rpc(code: -32602, message: "chat has no owner")
+	}
 
 	public func setMode(workspaceId: String, mode: LeaderMode) async throws {
 		record("setMode", ["workspaceId": workspaceId, "mode": mode.rawValue])

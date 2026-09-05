@@ -311,7 +311,7 @@ final class NowStateTests: XCTestCase {
 			"pan leaves metrics untouched")
 	}
 
-	func testVerticalPanChangesScrollYOnlyAndClamps() {
+	func testVerticalPanChangesScrollYOnlyWithoutContentClamp() {
 		// A sequence wider than the viewport, so `scrollX` 0 is inside the
 		// scroll range and a vertical pan has nothing to re-clamp.
 		let index = makeIndex((0 ..< 7).map { k in
@@ -327,37 +327,26 @@ final class NowStateTests: XCTestCase {
 		state.pan(
 			by: CGSize(width: 0, height: 10_000), index: index,
 			viewport: viewport, contentHeight: 1400)
-		XCTAssertEqual(state.scrollY, 400)
+		XCTAssertEqual(state.scrollY, 10_040)
 		state.pan(
 			by: CGSize(width: 0, height: -10_000), index: index,
 			viewport: viewport, contentHeight: 1400)
-		XCTAssertEqual(state.scrollY, 0)
+		XCTAssertEqual(state.scrollY, 40)
 	}
 
 	/// Nothing exists right of Now, so the live edge is the forward limit
 	/// even when it is negative. A sequence narrower than the usable width
 	/// cannot be panned off Now: the leader's far edge stays on the usable
 	/// right edge instead of sliding back behind the navigator band.
-	func testPanClampsScrollXToTheLiveEdge() {
+	func testPanIsFreeInBothAxesWithFiniteSafety() {
 		let index = makeIndex([makeMission(id: "a", number: 1, age: 60)])
-		XCTAssertLessThan(index.contentWidth, viewport.width)
-		let inset: CGFloat = 450
-		let live = SpinePlacement.liveScrollX(
-			index: index, viewport: viewport, trailingInset: inset)
-		XCTAssertLessThan(live, 0)
 		let state = SpineViewportState(pxPerHour: 48)
-		state.pan(
-			by: CGSize(width: 500, height: 0), index: index,
-			viewport: viewport, contentHeight: 1000, trailingInset: inset)
-		XCTAssertEqual(state.scrollX, live, accuracy: 1e-9)
-		XCTAssertEqual(
-			leaderRect(index, scrollX: state.scrollX).maxX,
-			viewport.maxX - inset, accuracy: 1e-6)
-		// And back the other way it stops at the oldest item, not past it.
-		state.pan(
-			by: CGSize(width: -10_000, height: 0), index: index,
-			viewport: viewport, contentHeight: 1000, trailingInset: inset)
-		XCTAssertEqual(state.scrollX, live, accuracy: 1e-9)
+		state.pan(by: CGSize(width: 500, height: -200), index: index, viewport: viewport, contentHeight: 0)
+		XCTAssertEqual(state.scrollX, 500)
+		XCTAssertEqual(state.scrollY, -200)
+		state.pan(by: CGSize(width: 2_000_000, height: -2_000_000), index: index, viewport: viewport, contentHeight: 0)
+		XCTAssertEqual(state.scrollX, SpineViewportState.maxPan)
+		XCTAssertEqual(state.scrollY, -SpineViewportState.maxPan)
 	}
 
 	// MARK: - Zoom

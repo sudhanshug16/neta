@@ -25,17 +25,25 @@ async function start(
 	extraArgs: string[] = [],
 	opts?: {
 		access?: Access;
+		unsandboxed?: boolean;
+		unsandboxedMode?: string;
 		model?: string;
 		mcpServers?: { name: string; command: string; args: string[]; env: { name: string; value: string }[] }[];
+		steeringSafe?: boolean;
 	},
 ) {
 	return startSession({
-		settings: settingsFor(extraArgs),
+		settings: {
+			...settingsFor(extraArgs),
+			providers: { fake: { ...provider(extraArgs), unsandboxedMode: opts?.unsandboxedMode } },
+		},
 		provider: "fake",
 		access: opts?.access ?? "readWrite",
+		unsandboxed: opts?.unsandboxed,
 		cwd: mkdtempSync(join(tmpdir(), "neta-acp-")),
 		model: opts?.model,
 		mcpServers: opts?.mcpServers,
+		steeringSafe: opts?.steeringSafe,
 	});
 }
 
@@ -75,6 +83,56 @@ async function promptAndDrain(session: Awaited<ReturnType<typeof start>>, text: 
 }
 
 describe("acp session", () => {
+	test("leaders select the adapter-advertised unrestricted mode and keep it across relaunch", async () => {
+		for (const mode of ["agent-full-access", "bypassPermissions"]) {
+			const storeFile = join(mkdtempSync(join(tmpdir(), "neta-acp-policy-")), "sessions.json");
+			writeFileSync(storeFile, JSON.stringify({ counter: 0, sessions: {} }));
+			const session = await start(["--config-options", "--unrestricted-mode", mode, "--session-store", storeFile], {
+				access: "readOnly",
+				unsandboxed: true,
+				unsandboxedMode: mode,
+			});
+			try {
+				const permission = await promptAndDrain(session, "EDIT");
+				expect(
+					permission
+						.filter((event) => event.type === "block" && event.block.kind === "text")
+						.map((event) => (event as { block: { text: string } }).block.text)
+						.join(""),
+				).toContain("permission=allow");
+				for (const access of ["readOnly", "readWrite"] as const) {
+					if (session.access !== access) await session.relaunch(access);
+					const events = await promptAndDrain(session, "REPORT_SANDBOX_POLICY");
+					const text = events
+						.filter((event) => event.type === "block" && event.block.kind === "text")
+						.map((event) => (event as { block: { text: string } }).block.text)
+						.join("");
+					expect(text).toContain(`mode:${mode}`);
+				}
+			} finally {
+				await session.close();
+			}
+		}
+	});
+
+	test("ordinary agents do not select the provider unrestricted mode", async () => {
+		const session = await start(["--config-options", "--unrestricted-mode", "agent-full-access"], {
+			access: "readWrite",
+			unsandboxed: false,
+			unsandboxedMode: "agent-full-access",
+		});
+		try {
+			const events = await promptAndDrain(session, "REPORT_SANDBOX_POLICY");
+			const text = events
+				.filter((event) => event.type === "block" && event.block.kind === "text")
+				.map((event) => (event as { block: { text: string } }).block.text)
+				.join("");
+			expect(text).toContain("mode:ask");
+		} finally {
+			await session.close();
+		}
+	});
+
 	test("THINK, DIFF and USAGE yield thought, tool plus diff, and status blocks", async () => {
 		const session = await start();
 		try {
@@ -93,10 +151,12 @@ describe("acp session", () => {
 				expect((d as { block: { text: string } }).block.text).toBe("/repo/config.json (+1 −1)");
 			}
 			const usage = await promptAndDrain(session, "USAGE");
-			const statuses = usage.filter((e) => e.type === "block" && e.block.kind === "status");
-			expect(statuses.map((e) => (e as { block: { text: string } }).block.text)).toContain(
-				"1200/200000 tokens · $0.42",
-			);
+			const statuses = usage.filter((e) => e.type === "block" && e.block.kind === "usage");
+			expect(statuses.map((e) => (e as { block: { text: string } }).block.text)).toEqual(["1500 tokens"]);
+			expect(statuses[0]).toMatchObject({
+				type: "block",
+				block: { data: { usedTokens: 1200, contextSize: 200000, inputTokens: 1000, outputTokens: 500 } },
+			});
 			const end = usage.find((e) => e.type === "turnEnd");
 			expect(end).toMatchObject({ stopReason: "end_turn", cancelled: false });
 		} finally {
@@ -116,6 +176,27 @@ describe("acp session", () => {
 			]);
 			const seqs = texts.map((e) => (e as { block: { seq: number } }).block.seq);
 			expect(new Set(seqs).size).toBe(1);
+		} finally {
+			await session.close();
+		}
+	});
+
+	test("plan, tool lifecycle and usage coalesce before the final turn boundary", async () => {
+		const session = await start();
+		try {
+			const events = await promptAndDrain(session, "FULL_SEQUENCE");
+			const blocks = events.filter((event) => event.type === "block").map((event) => event.block);
+			expect(blocks.some((block) => block.kind === "plan" && block.text.includes("Inspect the workspace"))).toBe(
+				true,
+			);
+			const tools = blocks.filter((block) => block.kind === "tool");
+			expect(tools.map((block) => block.data?.status)).toEqual(["pending", "in_progress", "completed", "completed"]);
+			expect(new Set(tools.map((block) => block.seq)).size).toBe(1);
+			const usage = blocks.filter((block) => block.kind === "usage");
+			expect(usage).toHaveLength(1);
+			expect(new Set(usage.map((block) => block.seq)).size).toBe(1);
+			expect(events.at(-1)).toMatchObject({ type: "turnEnd", stopReason: "end_turn" });
+			expect(session.openTurnId).toBeUndefined();
 		} finally {
 			await session.close();
 		}
@@ -167,6 +248,7 @@ describe("acp session", () => {
 			expect(config.filter((e) => e.type === "block" && e.block.kind === "status").length).toBeGreaterThan(0);
 			expect(config.find((e) => e.type === "model")).toEqual({ type: "model", model: "fixture-fast" });
 			expect(session.model).toBe("fixture-fast");
+			expect(session.listModels().map((model) => model.id)).toContain("fixture-fast");
 			const mode = await promptAndDrain(session, "MODE_UPDATE");
 			expect(mode.find((e) => e.type === "mode")).toEqual({ type: "mode", modeId: "plan" });
 		} finally {
@@ -230,12 +312,53 @@ describe("acp session", () => {
 				seen.push(event);
 			}
 		})();
-		const turnId = session.prompt("HOLD_FOREVER");
+		const turnId = session.prompt("HOLD_FOR_STEER");
 		await session.close();
 		await draining;
 		const interrupted = seen.find((e) => e.type === "interrupted");
 		expect(interrupted).toMatchObject({ turnId });
 		expect(seen.filter((e) => e.type === "turnEnd")).toEqual([]);
+	});
+
+	test("trusted native steering injects without cancelling and records the user message", async () => {
+		const session = await start([], { steeringSafe: true });
+		const seen: SessionEvent[] = [];
+		void (async () => {
+			for await (const event of session.events()) seen.push(event);
+		})();
+		const turnId = session.prompt("HOLD_FOREVER");
+		while (session.openTurnId !== turnId) await new Promise((done) => setTimeout(done, 5));
+		expect(session.steeringSupported).toBe(true);
+		expect(await session.steer("message-1", "change direction", [])).toBe("injected");
+		expect(session.openTurnId).toBe(turnId);
+		for (
+			let attempts = 0;
+			attempts < 20 && !seen.some((event) => event.type === "block" && event.block.data?.messageId === "message-1");
+			attempts += 1
+		)
+			await new Promise((done) => setTimeout(done, 5));
+		expect(
+			seen.some(
+				(event) =>
+					event.type === "block" &&
+					event.block.role === "user" &&
+					event.block.text === "change direction" &&
+					event.block.data?.messageId === "message-1",
+			),
+		).toBe(true);
+		for (
+			let attempts = 0;
+			attempts < 100 && !seen.some((event) => event.type === "turnEnd" && event.turnId === turnId);
+			attempts += 1
+		)
+			await new Promise((done) => setTimeout(done, 5));
+		const agentText = seen
+			.filter((event) => event.type === "block" && event.block.role === "agent")
+			.map((event) => (event.type === "block" ? event.block.text : ""))
+			.join("\n");
+		expect(agentText).toContain("steered:change direction");
+		expect(seen.some((event) => event.type === "turnEnd" && event.turnId === turnId)).toBe(true);
+		await session.close();
 	});
 
 	test("relaunch keeps sessionId, vendorSessionId and the history", async () => {

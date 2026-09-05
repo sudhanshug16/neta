@@ -240,8 +240,18 @@ public enum SpinePlacement {
 				rows = []
 				collapsed = true
 			} else {
+				// The lead has its own card in the column. A mission record also
+				// names that lead among its agents, so remove only that one from
+				// the subordinate stack before placing rows.
+				let stackAgents: [Agent]
+				switch mission.lead {
+				case .leader:
+					stackAgents = agents[mission.id] ?? []
+				case .agent(let leadId):
+					stackAgents = (agents[mission.id] ?? []).filter { $0.id != leadId }
+				}
 				stack = AgentStack.build(
-					agents: agents[mission.id] ?? [],
+					agents: stackAgents,
 					expanded: expanded.contains(mission.id),
 					metrics: metrics)
 				rows = rowRects(

@@ -1,9 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { realpathSync } from "node:fs";
-import { runWt, runWtJson, WtError, wtAvailable } from "../src/worktrees/wt.ts";
+import { WorktrunkDriver } from "../src/worktrees/driver.ts";
+import { runWt, runWtJson, WtError, wtAvailable, wtSearchPath } from "../src/worktrees/wt.ts";
 import { fakeWtEnv, makeRepo } from "./helpers/git-repo.ts";
 
 let savedWtBin: string | undefined;
+let savedPath: string | undefined;
+let pathChanged = false;
 const cleanups: Array<() => Promise<void>> = [];
 
 function useShim(): void {
@@ -21,9 +24,21 @@ afterEach(async () => {
 		process.env.NETA_WT_BIN = savedWtBin;
 		savedWtBin = undefined;
 	}
+	if (pathChanged) {
+		if (savedPath === undefined) delete process.env.PATH;
+		else process.env.PATH = savedPath;
+		savedPath = undefined;
+		pathChanged = false;
+	}
 });
 
 describe("wt process runner", () => {
+	test("Finder PATH is augmented with Homebrew and per-user install locations", () => {
+		expect(wtSearchPath("/usr/bin:/bin", "/Users/example").split(":")).toEqual(
+			expect.arrayContaining(["/opt/homebrew/bin", "/usr/local/bin", "/Users/example/.local/bin"]),
+		);
+	});
+
 	test("JSON parses off stdout while stderr prose is ignored", async () => {
 		useShim();
 		const { root, cleanup } = await makeRepo();
@@ -57,7 +72,11 @@ describe("wt process runner", () => {
 	test("a missing binary gives ok:false instead of a throw", async () => {
 		savedWtBin = process.env.NETA_WT_BIN;
 		process.env.NETA_WT_BIN = "/nonexistent/wt-binary";
-		await expect(wtAvailable()).resolves.toEqual({ ok: false, reason: expect.any(String) });
+		await expect(wtAvailable()).resolves.toEqual({
+			ok: false,
+			reason:
+				"Worktrunk executable not found in the app service search path; install Worktrunk, then retry mission creation",
+		});
 	});
 
 	test("wtAvailable reports the real binary", async () => {
@@ -66,5 +85,23 @@ describe("wt process runner", () => {
 		const found = await wtAvailable();
 		expect(found.ok).toBe(true);
 		expect(found.version).toContain("v0.72.0");
+	});
+
+	test("Finder's minimal PATH still creates, verifies, and removes a real Worktrunk worktree", async () => {
+		savedWtBin = process.env.NETA_WT_BIN;
+		delete process.env.NETA_WT_BIN;
+		savedPath = process.env.PATH;
+		pathChanged = true;
+		process.env.PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
+		const { root, cleanup } = await makeRepo();
+		cleanups.push(cleanup);
+		const driver = new WorktrunkDriver();
+		const worktree = await driver.create({ repoRoot: root, number: 92, slug: "finder-path" });
+		try {
+			expect(await driver.verify(worktree)).toEqual({ ok: true });
+		} finally {
+			const removed = await driver.remove({ repoRoot: root, ...worktree, abandon: true });
+			expect(removed.ok).toBe(true);
+		}
 	});
 });

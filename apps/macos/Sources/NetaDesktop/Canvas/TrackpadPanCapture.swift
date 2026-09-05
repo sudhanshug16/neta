@@ -21,21 +21,25 @@ public struct TrackpadPanCapture: NSViewRepresentable {
 	private var isEnabled: Bool
 	private var excludedRects: [CGRect]
 	private var onScroll: (CGSize) -> Void
+	private var dragExclusions: [CGRect]
+	private var onDrag: (CGSize) -> Void
 
 	public init(
-		isEnabled: Bool, excludedRects: [CGRect],
-		onScroll: @escaping (CGSize) -> Void
+		isEnabled: Bool, excludedRects: [CGRect], dragExclusions: [CGRect] = [],
+		onScroll: @escaping (CGSize) -> Void, onDrag: @escaping (CGSize) -> Void = { _ in }
 	) {
 		self.isEnabled = isEnabled
 		self.excludedRects = excludedRects
+		self.dragExclusions = dragExclusions
 		self.onScroll = onScroll
+		self.onDrag = onDrag
 	}
 
 	public func makeNSView(context: Context) -> TrackpadPanCaptureView {
 		let view = TrackpadPanCaptureView()
 		view.configure(
-			isEnabled: isEnabled, excludedRects: excludedRects,
-			onScroll: onScroll)
+			isEnabled: isEnabled, excludedRects: excludedRects, dragExclusions: dragExclusions,
+			onScroll: onScroll, onDrag: onDrag)
 		return view
 	}
 
@@ -43,8 +47,8 @@ public struct TrackpadPanCapture: NSViewRepresentable {
 		_ nsView: TrackpadPanCaptureView, context: Context
 	) {
 		nsView.configure(
-			isEnabled: isEnabled, excludedRects: excludedRects,
-			onScroll: onScroll)
+			isEnabled: isEnabled, excludedRects: excludedRects, dragExclusions: dragExclusions,
+			onScroll: onScroll, onDrag: onDrag)
 	}
 
 	public static func dismantleNSView(
@@ -71,6 +75,9 @@ public final class TrackpadPanCaptureView: NSView {
 	private var isEnabled = true
 	private var excludedRects: [CGRect] = []
 	private var onScroll: ((CGSize) -> Void)?
+	private var dragExclusions: [CGRect] = []
+	private var onDrag: ((CGSize) -> Void)?
+	private var dragOrigin: NSPoint?
 	/// Installed monitor token. Main-thread confined like the view;
 	/// `nonisolated(unsafe)` so `deinit` can remove it.
 	private nonisolated(unsafe) var monitor: Any?
@@ -86,12 +93,14 @@ public final class TrackpadPanCaptureView: NSView {
 	}
 
 	func configure(
-		isEnabled: Bool, excludedRects: [CGRect],
-		onScroll: @escaping (CGSize) -> Void
+		isEnabled: Bool, excludedRects: [CGRect], dragExclusions: [CGRect] = [],
+		onScroll: @escaping (CGSize) -> Void, onDrag: @escaping (CGSize) -> Void = { _ in }
 	) {
 		self.isEnabled = isEnabled
 		self.excludedRects = excludedRects
+		self.dragExclusions = dragExclusions
 		self.onScroll = onScroll
+		self.onDrag = onDrag
 		ensureMonitor()
 	}
 
@@ -124,7 +133,7 @@ public final class TrackpadPanCaptureView: NSView {
 
 	private func ensureMonitor() {
 		guard monitor == nil else { return }
-		monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) {
+		monitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel, .leftMouseDown, .leftMouseDragged, .leftMouseUp]) {
 			[weak self] event in
 			guard let self else { return event }
 			return self.handle(event) ? nil : event
@@ -137,7 +146,19 @@ public final class TrackpadPanCaptureView: NSView {
 			return false
 		}
 		let point = convert(event.locationInWindow, from: nil)
-		guard capturesPoint(point, in: bounds) else { return false }
+		if event.type == .leftMouseDown {
+			let topLeft = CGPoint(x: point.x - bounds.minX, y: bounds.maxY - point.y)
+			dragOrigin = capturesPoint(point, in: bounds) && !dragExclusions.contains(where: { $0.contains(topLeft) }) ? point : nil
+			return false
+		}
+		if event.type == .leftMouseUp { dragOrigin = nil; return false }
+		if event.type == .leftMouseDragged, let origin = dragOrigin {
+			let delta = CGSize(width: origin.x - point.x, height: point.y - origin.y)
+			dragOrigin = point
+			if delta != .zero { onDrag?(delta) }
+			return false
+		}
+		guard event.type == .scrollWheel, capturesPoint(point, in: bounds) else { return false }
 		let delta = CGSize(
 			width: Self.scaledDelta(
 				event.scrollingDeltaX,

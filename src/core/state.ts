@@ -45,6 +45,7 @@ function allDone(mission: Mission, agents: Agent[]): boolean {
 }
 
 const AGENT_TRANSITIONS: Record<AgentState, readonly AgentState[]> = {
+	queued: ["starting", "archived"],
 	starting: ["running", "failed", "interrupted"],
 	running: ["blocked", "failed", "completed", "interrupted"],
 	blocked: ["running", "failed", "interrupted", "archived"],

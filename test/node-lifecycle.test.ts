@@ -7,9 +7,18 @@ import { loadSettings } from "../src/acp/settings.ts";
 import { ulid } from "../src/core/ids.ts";
 import type { Agent, AgentState, Event, Mission, MissionState, Workspace } from "../src/core/types.ts";
 import { connectNode, type NodeClient, startNode } from "../src/node/index.ts";
-import { adaptAcp, adaptStore, allHandlers, markInterrupted, type Node as NetaNode } from "../src/node/lifecycle.ts";
+import {
+	adaptAcp,
+	adaptStore,
+	allHandlers,
+	glanceActorForSession,
+	markInterrupted,
+	type Node as NetaNode,
+} from "../src/node/lifecycle.ts";
 import { readDescriptor } from "../src/node/lockfile.ts";
+import { PROTOCOL_VERSION } from "../src/node/protocol.ts";
 import type { NodeAcp, NodeStore } from "../src/node/server.ts";
+import type { ConversationStore } from "../src/store/conversations.ts";
 import { openStore } from "../src/store/index.ts";
 
 const FIXTURE = new URL("./fixtures/fake-acp-agent.mjs", import.meta.url).pathname;
@@ -148,6 +157,22 @@ function runningWorld(): StubWorld {
 }
 
 describe("markInterrupted", () => {
+	test("Glance freezes agent identity while the session record still exists", () => {
+		const world = runningWorld();
+		const store = stubStore(world);
+		const saved = world.agents.get("a1");
+		if (saved === undefined) throw new Error("missing fixture agent");
+		saved.sessionId = "reader-session";
+		expect(glanceActorForSession(store, "reader-session")).toEqual({
+			workspaceId: "w1",
+			actorKind: "agent",
+			agentId: "a1",
+			missionId: saved.missionId,
+			agentLabel: saved.name,
+		});
+		world.agents.delete("a1");
+		expect(glanceActorForSession(store, "reader-session")).toBeUndefined();
+	});
 	test("live agents come back interrupted with stateBefore, nothing else moves, no events", async () => {
 		const world = runningWorld();
 		const store = stubStore(world);
@@ -175,7 +200,7 @@ describe("startNode and stop", () => {
 			]);
 			expect(await readDescriptor()).toEqual(node.descriptor);
 			expect(node.descriptor.pid).toBe(process.pid);
-			expect(node.descriptor.protocolVersion).toBe(1);
+			expect(node.descriptor.protocolVersion).toBe(PROTOCOL_VERSION);
 			let second: unknown;
 			try {
 				await startNode({ store: stubStore(world), acp: stubAcp(world) });
@@ -276,16 +301,26 @@ describe("allHandlers", () => {
 			[
 				"agent.archive",
 				"conversation.cancel",
+				"conversation.capabilities",
+				"conversation.inbox",
 				"conversation.prompt",
+				"conversation.reset",
+				"conversation.prepareHandoff",
+				"conversation.setProvider",
 				"conversation.setModel",
 				"conversation.tail",
 				"conversation.untail",
 				"events.list",
+				"glance.complete",
+				"glance.list",
+				"glance.markReviewed",
+				"glance.source",
 				"leader.setMode",
 				"mission.pin",
 				"missions.get",
 				"missions.list",
 				"models.list",
+				"providers.list",
 				"node.stop",
 				"snapshot",
 				"workspace.list",
@@ -435,6 +470,230 @@ describe("startNode on an unusable NETA_DIR", () => {
 });
 
 describe("adaptAcp against the fake provider", () => {
+	test("durable prompts drain FIFO after an instant turn and a missing session does not spin", async () => {
+		await writeFile(
+			join(dir, "settings.json"),
+			JSON.stringify({
+				providers: {
+					fake: { command: process.execPath, args: [FIXTURE], resume: true, defaultModel: "test-model" },
+				},
+				leader: { provider: "fake" },
+			}),
+		);
+		const real = await openStore();
+		const acp = adaptAcp(
+			loadSettings({ netaDir: dir }).settings,
+			real.conversations,
+			undefined,
+			undefined,
+			undefined,
+			real.inbox,
+		);
+		try {
+			const created = await acp.createSession({
+				workspaceId: "w1",
+				cwd: dir,
+				provider: "fake",
+				model: "test-model",
+				access: "readOnly",
+				netaTools: false,
+			});
+			await acp.send(created.sessionId, "HOLD_FOREVER", [], { readerDirected: true });
+			const first = await acp.send(created.sessionId, "first queued", [], { readerDirected: true });
+			const second = await acp.send(created.sessionId, "second queued", [], { readerDirected: true });
+			expect([first.status, second.status]).toEqual(["queued", "queued"]);
+			await acp.cancel(created.sessionId);
+			for (let attempts = 0; attempts < 200; attempts += 1) {
+				if (
+					(await real.inbox.list(created.sessionId))
+						.filter((item) => item.id === first.id || item.id === second.id)
+						.every((item) => item.status === "delivered")
+				)
+					break;
+				await Bun.sleep(10);
+			}
+			const drained = await real.inbox.list(created.sessionId);
+			expect(
+				drained.filter((item) => item.id === first.id || item.id === second.id).map((item) => item.status),
+			).toEqual(["delivered", "delivered"]);
+			const blocks = (await real.conversations.tail({ sessionId: created.sessionId, limit: 100 })).blocks
+				.filter((block) => block.role === "user")
+				.map((block) => block.text);
+			expect(blocks.slice(-2)).toEqual(["first queued", "second queued"]);
+
+			const missing = await acp.send(ulid(), "orphan", [], { readerDirected: true });
+			expect(missing.status).toBe("queued");
+			await Bun.sleep(0);
+			expect((await real.inbox.list(missing.sessionId))[0]?.status).toBe("queued");
+		} finally {
+			await acp.closeAll();
+		}
+	});
+
+	test("a failed reset retains its paused queue and resumes it on the old session", async () => {
+		const good = loadSettings({ netaDir: dir }).settings;
+		good.providers.fake = { command: process.execPath, args: [FIXTURE], resume: true, defaultModel: "test-model" };
+		good.leader.provider = "fake";
+		let current = good;
+		const real = await openStore();
+		const acp = adaptAcp(good, real.conversations, () => current, undefined, undefined, real.inbox);
+		try {
+			const created = await acp.createSession({
+				workspaceId: "w1",
+				cwd: dir,
+				provider: "fake",
+				model: "test-model",
+				access: "readOnly",
+				netaTools: false,
+			});
+			await acp.send(created.sessionId, "HOLD_FOREVER", [], { readerDirected: true });
+			const queued = await acp.send(created.sessionId, "survives failed reset", [], { readerDirected: true });
+			const fake = good.providers.fake;
+			if (fake === undefined) throw new Error("fake provider missing");
+			current = {
+				...good,
+				providers: { ...good.providers, fake: { ...fake, command: join(dir, "missing") } },
+			};
+			await expect(acp.resetSession(created.sessionId, "brief", () => Promise.resolve())).rejects.toThrow(
+				"could not reset provider session",
+			);
+			expect((await real.inbox.list(created.sessionId)).find((item) => item.id === queued.id)?.status).toBe(
+				"queued",
+			);
+			await acp.cancel(created.sessionId);
+			for (
+				let attempts = 0;
+				attempts < 200 &&
+				(await real.inbox.list(created.sessionId)).find((item) => item.id === queued.id)?.status !== "delivered";
+				attempts += 1
+			)
+				await Bun.sleep(10);
+			expect((await real.inbox.list(created.sessionId)).find((item) => item.id === queued.id)?.status).toBe(
+				"delivered",
+			);
+		} finally {
+			await acp.closeAll();
+		}
+	});
+
+	test("reject-resume recovery keeps the Neta identity that owns queued messages", async () => {
+		const providerSessions = join(dir, "inbox-resume.json");
+		const configured = loadSettings({ netaDir: dir }).settings;
+		configured.providers.fake = {
+			command: process.execPath,
+			args: [FIXTURE, "--session-store", providerSessions, "--reject-resume"],
+			resume: true,
+			defaultModel: "test-model",
+		};
+		configured.leader.provider = "fake";
+		const real = await openStore();
+		const first = adaptAcp(configured, real.conversations, undefined, undefined, undefined, real.inbox);
+		const created = await first.createSession({
+			workspaceId: "w1",
+			cwd: dir,
+			provider: "fake",
+			model: "test-model",
+			access: "readOnly",
+			netaTools: false,
+		});
+		await first.send(created.sessionId, "HOLD_FOREVER", [], { readerDirected: true });
+		const queued = await first.send(created.sessionId, "after rejected resume", [], { readerDirected: true });
+		await first.closeAll();
+		const second = adaptAcp(configured, real.conversations, undefined, undefined, undefined, real.inbox);
+		try {
+			const recovered = await second.ensureSession({
+				sessionId: created.sessionId,
+				workspaceId: "w1",
+				cwd: dir,
+				provider: "fake",
+				model: "test-model",
+				access: "readOnly",
+				netaTools: false,
+			});
+			expect(recovered.sessionId).toBe(created.sessionId);
+			for (
+				let attempts = 0;
+				attempts < 200 &&
+				(await real.inbox.list(created.sessionId)).find((item) => item.id === queued.id)?.status !== "delivered";
+				attempts += 1
+			)
+				await Bun.sleep(10);
+			expect((await real.inbox.list(created.sessionId)).find((item) => item.id === queued.id)?.status).toBe(
+				"delivered",
+			);
+		} finally {
+			await second.closeAll();
+		}
+	});
+
+	test("a provider switch cannot cross the owned prompt's final drain await", async () => {
+		const configured = loadSettings({ netaDir: dir }).settings;
+		configured.providers.fake = {
+			command: process.execPath,
+			args: [FIXTURE],
+			resume: true,
+			defaultModel: "test-model",
+		};
+		configured.providers.alternate = {
+			command: process.execPath,
+			args: [FIXTURE],
+			resume: true,
+			defaultModel: "test-model",
+		};
+		configured.leader.provider = "fake";
+		const real = await openStore();
+		let releaseMeta: (() => void) | undefined;
+		let enteredMeta: (() => void) | undefined;
+		const entered = new Promise<void>((resolve) => {
+			enteredMeta = resolve;
+		});
+		const blocked = new Promise<void>((resolve) => {
+			releaseMeta = resolve;
+		});
+		let metaCalls = 0;
+		const conversations: ConversationStore = {
+			...real.conversations,
+			meta: async (id) => {
+				metaCalls += 1;
+				if (metaCalls === 1) {
+					enteredMeta?.();
+					await blocked;
+				}
+				return real.conversations.meta(id);
+			},
+		};
+		const acp = adaptAcp(configured, conversations, undefined, undefined, undefined, real.inbox);
+		try {
+			const created = await acp.createSession({
+				workspaceId: "w1",
+				cwd: dir,
+				provider: "fake",
+				model: "test-model",
+				access: "readOnly",
+				netaTools: false,
+			});
+			const sending = acp.send(created.sessionId, "crossing switch", [], { readerDirected: true });
+			await entered;
+			await expect(acp.switchProvider(created.sessionId, "alternate", undefined, undefined)).rejects.toThrow(
+				"provider switch requires an idle session",
+			);
+			releaseMeta?.();
+			const sent = await sending;
+			for (
+				let attempts = 0;
+				attempts < 200 &&
+				(await real.inbox.list(created.sessionId)).find((item) => item.id === sent.id)?.status !== "delivered";
+				attempts += 1
+			)
+				await Bun.sleep(10);
+			expect((await real.inbox.list(created.sessionId)).find((item) => item.id === sent.id)?.status).toBe(
+				"delivered",
+			);
+			expect((await conversations.meta(created.sessionId))?.provider).toBe("fake");
+		} finally {
+			await acp.closeAll();
+		}
+	});
 	test("sessions live, prompt, carry a rewritten tools entry, and close", async () => {
 		await writeFile(
 			join(dir, "settings.json"),
@@ -445,7 +704,18 @@ describe("adaptAcp against the fake provider", () => {
 				leader: { provider: "fake" },
 			}),
 		);
-		const acp = adaptAcp(loadSettings({ netaDir: dir }).settings);
+		const readerTurns: Array<{
+			turn: { readerDirected?: boolean; cancelled?: boolean };
+			blocks: Array<{ role: string; kind: string; text: string }>;
+		}> = [];
+		const acp = adaptAcp(
+			loadSettings({ netaDir: dir }).settings,
+			undefined,
+			undefined,
+			async (_sessionId, turn, blocks) => {
+				readerTurns.push({ turn, blocks });
+			},
+		);
 		const created = await acp.createSession({
 			workspaceId: "w1",
 			cwd: dir,
@@ -462,7 +732,7 @@ describe("adaptAcp against the fake provider", () => {
 			acp.onTurn((notification) => {
 				seen.push(notification);
 			});
-			const turnId = await acp.prompt(created.sessionId, "MCP please");
+			const turnId = await acp.prompt(created.sessionId, "MCP please", [], { readerDirected: true });
 			expect(typeof turnId).toBe("string");
 			const deadline = Date.now() + 5000;
 			let echoed: Array<{ name: string; args: string[] }> = [];
@@ -485,6 +755,10 @@ describe("adaptAcp against the fake provider", () => {
 			}
 			const actorIndex = entry.args.indexOf("--actor");
 			expect(entry.args[actorIndex + 1]).toBe(created.sessionId);
+			while (Date.now() < deadline && readerTurns.length === 0) await new Promise((done) => setTimeout(done, 10));
+			expect(readerTurns).toHaveLength(1);
+			expect(readerTurns[0]?.turn.readerDirected).toBe(true);
+			expect(readerTurns[0]?.blocks.every((block) => block.role === "agent" && block.kind === "text")).toBe(true);
 			const models = await acp.listModels({ sessionId: created.sessionId });
 			expect(Array.isArray(models)).toBe(true);
 			let missing: unknown;
@@ -530,6 +804,93 @@ describe("adaptAcp against the fake provider", () => {
 			await acp.close(created.sessionId);
 			expect(acp.tokens.verify(agentId, token ?? "")).toBe(false);
 			expect(acp.actorToken(created.sessionId)).toBeUndefined();
+		} finally {
+			await acp.closeAll();
+		}
+	});
+
+	test("a prompt after the provider exits relaunches the same Neta session", async () => {
+		const providerSessions = join(dir, "recovery-provider-sessions.json");
+		await writeFile(
+			join(dir, "settings.json"),
+			JSON.stringify({
+				providers: {
+					fake: {
+						command: process.execPath,
+						args: [FIXTURE, "--session-store", providerSessions, "--reject-resume"],
+						resume: true,
+						defaultModel: "test-model",
+					},
+				},
+				leader: { provider: "fake" },
+			}),
+		);
+		const captured: Array<{ id: string; cancelled?: boolean }> = [];
+		let recoveryCalls = 0;
+		const conversationStore = (await openStore()).conversations;
+		const acp = adaptAcp(
+			loadSettings({ netaDir: dir }).settings,
+			conversationStore,
+			undefined,
+			async (_session, turn) => {
+				captured.push({ id: turn.id, cancelled: turn.cancelled });
+			},
+			async () => {
+				recoveryCalls += 1;
+				return "# Recovery recap\n\nEarlier user and assistant text.";
+			},
+		);
+		const seen: Array<{ turn?: { id: string; endedAt?: string }; block?: { text?: string } }> = [];
+		acp.onTurn((notification) => seen.push(notification));
+		try {
+			const created = await acp.createSession({
+				workspaceId: "w1",
+				cwd: dir,
+				provider: "fake",
+				model: "test-model",
+				access: "readOnly",
+				netaTools: false,
+			});
+			const interrupted = await acp.prompt(created.sessionId, "EXIT_MID_TURN", [], { readerDirected: true });
+			expect((await conversationStore.meta(created.sessionId))?.vendorSessionId).toBeTruthy();
+			const deadline = Date.now() + 5000;
+			while (Date.now() < deadline && !seen.some((item) => item.turn?.id === interrupted && item.turn.endedAt)) {
+				await new Promise((done) => setTimeout(done, 20));
+			}
+			expect(seen.some((item) => item.turn?.id === interrupted && item.turn.endedAt)).toBe(true);
+			while (Date.now() < deadline && !captured.some((item) => item.id === interrupted))
+				await new Promise((done) => setTimeout(done, 10));
+			expect(captured.find((item) => item.id === interrupted)?.cancelled).toBe(true);
+			await new Promise((done) => setTimeout(done, 100));
+
+			const recovered = await acp.prompt(created.sessionId, "after provider exit");
+			const recoveryDeadline = Date.now() + 5000;
+			while (
+				Date.now() < recoveryDeadline &&
+				!seen.some((item) => item.turn?.id === recovered && item.turn.endedAt)
+			) {
+				await new Promise((done) => setTimeout(done, 20));
+			}
+			expect(seen.some((item) => item.turn?.id === recovered && item.turn.endedAt)).toBe(true);
+			await new Promise((done) => setTimeout(done, 50));
+			expect(recoveryCalls).toBe(1);
+			const recoveredBlocks = (await conversationStore.tail({ sessionId: created.sessionId, limit: 100 })).blocks;
+			expect(recoveredBlocks.some((item) => item.text.includes("clipped recap"))).toBe(true);
+			const providerState = JSON.parse(await Bun.file(providerSessions).text()) as {
+				sessions: Record<string, { history: string[]; mcpServers: unknown[] }>;
+			};
+			const fresh = Object.values(providerState.sessions).find((item) =>
+				item.history.some((text) => text.includes("## Current user message\n\nafter provider exit")),
+			);
+			expect(fresh).toBeDefined();
+			expect(fresh?.history.at(-1)).toContain("# Recovery recap");
+			expect(fresh?.mcpServers).toEqual([]);
+			const toolsTurn = await acp.prompt(created.sessionId, "MCP please");
+			const toolsDeadline = Date.now() + 5000;
+			while (Date.now() < toolsDeadline && !seen.some((item) => item.turn?.id === toolsTurn && item.turn.endedAt))
+				await new Promise((done) => setTimeout(done, 20));
+			const toolsBlock = seen.find((item) => item.block?.text?.startsWith("mcp:"))?.block?.text ?? "";
+			expect(JSON.parse(toolsBlock.slice(4))).toEqual([]);
 		} finally {
 			await acp.closeAll();
 		}

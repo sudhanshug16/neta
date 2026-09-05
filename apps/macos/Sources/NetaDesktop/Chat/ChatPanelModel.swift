@@ -28,6 +28,7 @@ import Observation
 	public private(set) var sessionId: SessionId
 	public private(set) var transcript: ChatViewModel
 	public private(set) var composer: ComposerModel
+	public private(set) var glance: GlanceViewModel
 	/// Whether the Details inspector is open. Toggled by the header's
 	/// Details button; the panel keeps it across live updates and leaves
 	/// it alone on `select`, since the inspector reads the new selection.
@@ -50,6 +51,7 @@ import Observation
 		self.transcript = ChatViewModel(client: client, sessionId: sid)
 		self.composer = ComposerModel(
 			client: client, store: store, sessionId: sid, selection: resolved)
+		self.glance = GlanceViewModel(client: client, workspaceId: store.currentWorkspaceId ?? "")
 		followOpenTurn()
 		syncComposer()
 	}
@@ -60,6 +62,13 @@ import Observation
 	/// switches workspace.
 	public var currentSessionId: SessionId {
 		Self.sessionId(for: shell.selection, in: store)
+	}
+
+	/// Whether the current selection is waiting for writer access. The panel
+	/// observes this independently of the session id: queued to starting keeps
+	/// the same session, but is the moment a transcript may be tailed.
+	public var isQueuedSelection: Bool {
+		Self.queued(for: shell.selection, in: store)
 	}
 
 	/// Moves to `selection` and rebuilds for its session: a fresh composer,
@@ -80,6 +89,7 @@ import Observation
 	/// changes; `select` is the same thing with the shell moved first.
 	public func sync() {
 		rebuild(selection: shell.selection, sessionId: currentSessionId)
+		syncComposer()
 	}
 
 	/// Routes a checkpoint the canvas opened (10-desktop-spine T10.8: the
@@ -125,7 +135,15 @@ import Observation
 	/// because its placeholder, its mode control, its provider and its model
 	/// all read the selection, not only the session.
 	private func rebuild(selection: Selection, sessionId sid: SessionId) {
-		guard selection != self.selection || sid != sessionId else { return }
+		let workspaceId = store.currentWorkspaceId ?? ""
+		let workspaceChanged = workspaceId != glance.workspaceId
+		guard selection != self.selection || sid != sessionId || workspaceChanged else { return }
+		if workspaceChanged {
+			glance.stop()
+			let nextGlance = GlanceViewModel(client: client, workspaceId: workspaceId)
+			glance = nextGlance
+			Task { await nextGlance.start() }
+		}
 		self.selection = selection
 		if sid != sessionId {
 			sessionId = sid
@@ -157,7 +175,17 @@ import Observation
 	/// Tails the newest page, then streams this session's live turns.
 	public func start() async {
 		await transcript.start()
+		await glance.start()
 		syncComposer()
+	}
+
+	/// Retries the already-selected transcript when its queued agent acquires
+	/// writer access. This transition keeps the same session id, so it cannot
+	/// rely on the ordinary session-change restart path.
+	public func queueReleased(wasQueued: Bool) async {
+		sync()
+		guard wasQueued, !composer.isQueued else { return }
+		await start()
 	}
 
 	/// Re-derives the composer flags: Stop while the transcript has an
@@ -165,6 +193,7 @@ import Observation
 	public func syncComposer() {
 		composer.hasOpenTurn = transcript.openTurnId != nil
 		composer.isArchived = Self.archived(for: selection, in: store)
+		composer.isQueued = Self.queued(for: selection, in: store)
 	}
 
 	/// Makes the composer follow the transcript's open turn as it changes,
@@ -172,13 +201,28 @@ import Observation
 	/// notification, and Stop has to become Send at that moment.
 	private func followOpenTurn() {
 		transcript.onOpenTurnChange = { [weak self] in
-			self?.syncComposer()
+			guard let self else { return }
+			self.syncComposer()
+			if self.transcript.openTurnId == nil {
+				Task { @MainActor in
+					await self.composer.loadModels()
+					await self.composer.loadProviders()
+				}
+			}
 		}
+		transcript.onInboxChange = { [weak self] message in self?.composer.applyInbox(message) }
 		composer.onSend = { [weak self] text in
 			self?.transcript.echoUserMessage(text)
 		}
 		composer.onSendFailed = { [weak self] text in
 			self?.transcript.retireEcho(text)
+		}
+		composer.onSendRich = { [weak self] text, attachments in
+			self?.transcript.echoUserMessage(text, attachments: attachments)
+		}
+		composer.onSendFailedId = { [weak self] id in self?.transcript.retireEcho(id: id) }
+		composer.onPromptAccepted = { [weak self] turnId in
+			self?.transcript.acknowledgePrompt(turnId: turnId)
 		}
 	}
 
@@ -233,6 +277,18 @@ import Observation
 			return store.missionsById[id]?.state == .closed
 		case .agent(let id):
 			return store.agentsById[id]?.state == .archived
+		}
+	}
+
+	private static func queued(for s: Selection, in store: Store) -> Bool {
+		switch s {
+		case .agent(let id):
+			return store.agentsById[id]?.state == .queued
+		case .mission(let id):
+			guard let mission = store.missionsById[id], case .agent(let agentId) = mission.lead else { return false }
+			return store.agentsById[agentId]?.state == .queued
+		case .leader:
+			return false
 		}
 	}
 }

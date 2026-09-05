@@ -38,6 +38,10 @@ public struct BlockStyle: Equatable, Sendable {
 			return BlockStyle(size: 11.5, weight: .regular, mono: true, secondary: false, alignment: .leading)
 		case .status:
 			return BlockStyle(size: 10, weight: .medium, mono: false, secondary: true, alignment: .center)
+		case .plan:
+			return BlockStyle(size: 12.5, weight: .regular, mono: false, secondary: false, alignment: .leading)
+		case .usage:
+			return BlockStyle(size: 10, weight: .regular, mono: false, secondary: true, alignment: .center)
 		}
 	}
 }
@@ -170,6 +174,10 @@ public struct BlockView: View {
 		case .diff:
 			diffBody
 		case .status:
+			statusBody
+		case .plan:
+			textBody
+		case .usage:
 			statusBody
 		}
 	}

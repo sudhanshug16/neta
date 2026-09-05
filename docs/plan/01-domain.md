@@ -40,6 +40,7 @@ export type LeaderMode = "lead" | "leadPlus";
 export interface Leader {
   workspaceId: WorkspaceId;
   machineId: MachineId;
+  name: string;                            // from the name pool, fixed at creation
   sessionId: SessionId;                    // the one continuous conversation
   provider: string;                        // provider name from settings
   model: string;                           // concrete model id
@@ -196,12 +197,6 @@ to `github.com/org/repo`; `workspaceIdFor({kind, remote?, path})` returns
 `src/core/numbering.ts`: `nextNumber(current: number)` is trivially
 `current + 1`; it exists so the store owns the only call site.
 
-`src/core/lens.ts`: the time lens used by both the Node (for windowed
-queries) and the desktop (for layout), written once in TypeScript here and
-ported to Swift in 10 with the same tests: `lens({now, focusStart, focusEnd,
-width, minPxPerHour})` returns `x(t)` and `t(x)`, linear inside the focus
-window and logarithmically compressed outside it on both sides.
-
 ## Tasks
 
 Done when, for every task: `bun run check` and `bun test` pass, the test file
@@ -261,15 +256,4 @@ Tests: pool size 200, all unique, no three-letter prefix collision, `pickName`
 skips taken names and is deterministic for a seed.
 Commit: `feat(core): agent name pool`
 
-### T1.6 time lens
-Goal: the lens function with a table-driven test that 10 will port.
-Reads: this file, `MANIFESTO.md` Canvas section. Writes: `src/core/lens.ts`,
-`test/core-lens.test.ts`, `test/fixtures/lens-cases.json`.
-Contract: `lens(opts)` → `{ x(t: number): number; t(x: number): number;
-ticks(): {t: number; label: string}[] }`; the JSON fixture lists
-`{opts, samples: [{t, x}]}` cases; the Swift port must pass the same fixture.
-Steps: write the lens, then generate the fixture from it.
-Tests: identity inside the focus window, monotonic everywhere, `t(x(t))`
-round-trips within 1 ms, ticks are the manifesto labels (`now, 1h, 3h, 12h,
-1d, 3d, 1w, 2w, ...`) and lie inside the width.
-Commit: `feat(core): time lens`
+T1.6 was removed on 2026-09-04: layout math lives in the desktop, see 10.

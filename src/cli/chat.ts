@@ -238,6 +238,11 @@ export async function attach(client: NodeClient, path: string): Promise<number> 
 			}
 			return;
 		}
+		// Inbox state changes carry neither a block nor a turn. They are not a
+		// provider boundary and must not make SIGINT forget the active turn.
+		if (n.inbox !== undefined) {
+			return;
+		}
 		// A bare ping: the turn ended (model, mode and interruption pings only
 		// coincide with a prompt this chat triggered).
 		if (streaming) {

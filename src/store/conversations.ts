@@ -19,6 +19,8 @@ export interface ConversationMeta {
 	provider: string;
 	model: string;
 	vendorSessionId?: string;
+	pendingHandoff?: string;
+	pendingBrief?: string;
 	createdAt: IsoTime;
 }
 
@@ -42,7 +44,9 @@ export interface ConversationStore {
 	meta(sessionId: SessionId): Promise<ConversationMeta | undefined>;
 	setMeta(
 		sessionId: SessionId,
-		patch: Partial<Pick<ConversationMeta, "model" | "vendorSessionId">>,
+		patch: Partial<
+			Pick<ConversationMeta, "provider" | "model" | "vendorSessionId" | "pendingHandoff" | "pendingBrief">
+		>,
 	): Promise<ConversationMeta>;
 	appendTurn(turn: Turn): Promise<Turn>;
 	appendBlock(sessionId: SessionId, block: Block): Promise<Block>;

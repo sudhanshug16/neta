@@ -1,14 +1,17 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	DEFAULT_SETTINGS,
 	isForbiddenModel,
 	launchArgs,
+	launchEnvironment,
 	loadSettings,
 	mergeSettings,
+	providerCommandAvailable,
 	providerFor,
+	providerPath,
 	UnknownProviderError,
 } from "../src/acp/settings.ts";
 
@@ -21,6 +24,9 @@ describe("provider settings", () => {
 		expect(settings.forbiddenModels).toEqual([]);
 		expect(Object.keys(settings.providers).sort()).toEqual(["claude", "codex", "opencode"]);
 		expect(settings.providers.claude?.defaultModel).toBe("sonnet");
+		expect(settings.providers.claude?.unsandboxedMode).toBe("bypassPermissions");
+		expect(settings.providers.codex?.unsandboxedMode).toBe("agent-full-access");
+		expect(settings.providers.opencode?.unsandboxedMode).toBe("build");
 	});
 
 	test("workspace beats user beats defaults, arrays replace", () => {
@@ -46,6 +52,31 @@ describe("provider settings", () => {
 		expect(settings.providers.claude?.args).toEqual(["user-args"]);
 		expect(settings.providers.claude?.defaultModel).toBe("ws-model");
 		expect(settings.providers.claude?.command).toBe("npx");
+	});
+
+	test("exact retired shipped adapters advance without changing custom pins", () => {
+		const dir = mkdtempSync(join(tmpdir(), "neta-settings-"));
+		writeFileSync(
+			join(dir, "settings.json"),
+			JSON.stringify({
+				providers: {
+					claude: { command: "npx", args: ["-y", "@agentclientprotocol/claude-agent-acp@0.68.0"] },
+					codex: {
+						command: "custom-npx",
+						args: ["-y", "@agentclientprotocol/codex-acp@1.3.0"],
+						env: { OPENAI_BASE_URL: "https://example.invalid" },
+					},
+					opencode: { args: ["acp", "--pinned"] },
+				},
+			}),
+		);
+		const { settings, warnings } = loadSettings({ netaDir: dir });
+		expect(settings.providers.claude?.args).toEqual(DEFAULT_SETTINGS.providers.claude?.args);
+		expect(warnings.some((warning) => warning.includes("retired shipped adapter"))).toBe(true);
+		expect(settings.providers.codex?.command).toBe("custom-npx");
+		expect(settings.providers.codex?.args).toEqual(["-y", "@agentclientprotocol/codex-acp@1.3.0"]);
+		expect(settings.providers.codex?.env).toEqual({ OPENAI_BASE_URL: "https://example.invalid" });
+		expect(settings.providers.opencode?.args).toEqual(["acp", "--pinned"]);
 	});
 
 	test("leader name overrides across layers and a wrong-typed one is dropped", () => {
@@ -95,8 +126,8 @@ describe("provider settings", () => {
 		const disabled = mergeSettings(settings, { providers: { claude: { disabled: true } } });
 		expect(() => providerFor(disabled, "claude")).toThrow(UnknownProviderError);
 		const codex = providerFor(settings, "codex");
-		expect(launchArgs(codex, "readOnly")).toContain('sandbox_mode="read-only"');
-		expect(launchArgs(codex, "readWrite")).toContain('sandbox_mode="workspace-write"');
+		expect(launchEnvironment(codex, "readOnly").INITIAL_AGENT_MODE).toBe("read-only");
+		expect(launchEnvironment(codex, "readWrite").INITIAL_AGENT_MODE).toBe("agent");
 		expect(launchArgs(providerFor(settings, "claude"), "readOnly")).toEqual(settings.providers.claude?.args);
 	});
 
@@ -107,5 +138,17 @@ describe("provider settings", () => {
 		expect(isForbiddenModel(withBan, "claude-fable-5")).toBe(true);
 		expect(isForbiddenModel(withBan, "claude-fable")).toBe(false);
 		expect(isForbiddenModel(withBan, "claude-fable-50")).toBe(false);
+	});
+
+	test("provider commands resolve from the augmented path and reject directories", () => {
+		const dir = mkdtempSync(join(tmpdir(), "neta-provider-bin-"));
+		const command = join(dir, "adapter");
+		writeFileSync(command, "#!/bin/sh\n");
+		chmodSync(command, 0o755);
+		const base = { command: "adapter", args: ["acp"], resume: true, defaultModel: "" };
+		expect(providerCommandAvailable({ ...base, env: { PATH: dir } })).toBe(true);
+		expect(providerCommandAvailable({ ...base, command: ".", env: { PATH: dir } }, dir)).toBe(false);
+		expect(providerCommandAvailable({ ...base, command: "./adapter" }, dir)).toBe(true);
+		expect(providerPath(base)).toContain(join(process.env.HOME ?? "", ".local", "bin"));
 	});
 });

@@ -5,8 +5,8 @@ navigator. The spine canvas is `10-desktop-spine.md` and the chat body `11-deskt
 gets a placeholder view here.
 
 Read first: `docs/plan/README.md`, `docs/plan/01-domain.md`, `design/canvas-directions/BRIEF.md`,
-`design/canvas-directions/PAPER-SPINE.md` (all three revisions; Revision 3 supersedes earlier
-surfaces), and `MANIFESTO.md` sections "Clients, cache, and offline state", "Desktop information
+`design/canvas-directions/PAPER-SPINE.md` (all revisions; Revision 3 supersedes earlier
+surfaces and Revision 4 the spine layout), and `MANIFESTO.md` sections "Clients, cache, and offline state", "Desktop information
 architecture", "The mission inbox", "Visual direction", "Rejected desktop patterns".
 
 Depends on 04. `test/fixtures/node-snapshot.json` and `node-events.ndjson` are recorded by 04 and
@@ -54,13 +54,28 @@ enum Theme {
     // surfaceTop 48, missionBarHeight 52, barGap 12, hoverEdge 6
     static func concentric(outer: CGFloat, padding: CGFloat) -> CGFloat }
 }
-enum GlassShape: Sendable { case panel, capsule, rounded(CGFloat) }
-extension View { func netaGlass(_ s: GlassShape = .panel, tint: Color? = nil) -> some View }
+enum GlassShape: Sendable {
+  case panel, capsule, rounded(CGFloat)
+  var floats: Bool }                              // .panel/.capsule float, .rounded never does
+extension View {
+  func netaGlass(_ s: GlassShape = .panel, tint: Color? = nil) -> some View
+  func netaControlGlass(_ s: GlassShape = .capsule, tint: Color? = nil) -> some View
+  func netaFloatingGlass(_ s: GlassShape = .panel, tint: Color? = nil) -> some View
+  func netaSpecular(_ s: GlassShape) -> some View }
 ```
 Steps: 1. Colors are literals from BRIEF; no color is defined elsewhere in the app. 2. `digits` and
-`mono` apply `.monospacedDigit()`, used on every ordinal, age and percentage. 3. `netaGlass` is the
-only call site of `.glassEffect` outside `Theme/`; the leader rim takes the violet tint. 4.
-`concentric` is `max(outer - padding, 6)`.
+`mono` apply `.monospacedDigit()`, used on every ordinal, age and percentage. 3. The three `neta*Glass`
+modifiers are the only call sites of `.glassEffect` outside `Theme/`; the leader card is content and
+borrows the rim and sheen alone through `netaSpecular`, with the violet tint and the violet 60% border
+over it. 4. `concentric` is `max(outer - padding, 6)`.
+Elevation rule (Rev 3's `0 18px 40px rgba(0,0,0,0.38)`): elevation follows the silhouette.
+`netaGlass` shadows `.panel` and `.capsule` — the silhouettes Rev 3 gives its floating surfaces — and
+never `.rounded(_)`, the concentric radius it reserves for nested controls. Two named escape hatches
+cover the cases where silhouette and role disagree: `netaControlGlass` for a capsule that is a control
+on another surface (model pill, `Lead | Lead++`, Details, Stop/send, `+N completed`), and
+`netaFloatingGlass` for a floating surface on a nested radius — the Lead++ tooltip (Rev 3 item 5) is
+the only one. There are exactly five shadowed calls in the app: toolbar capsule, chat panel, mission
+bar capsule, navigator panel, tooltip.
 Tests: `ThemeTests.swift` — each BRIEF hex round-trips within 1/255; `agentHues.count == 6`;
 `concentric(outer: 22, padding: 8) == 14`, never below 6; `digits` yields a monospaced-digit font.
 Done when: `swift build` and `swift test` pass in `apps/macos`, the test passes, the commit is made.
@@ -226,9 +241,11 @@ enum Selection: Hashable, Sendable { case leader, mission(Ulid), agent(Ulid) }
   var chatVisible = true; var navigatorVisible = false; var composerFocused = false
   var timeZoom: Double = 1.0        // 0.25 ... 4.0
   private(set) var fitRequested = 0
+  private(set) var nowRequested = 0
   func select(_ selection: Selection); func sessionId(in store: Store) -> Ulid?
   func toggleNavigator(); func dismissOverlay() -> Bool   // Escape; false if none
-  func fit(); func zoomIn(); func zoomOut(); var zoomPercent: Int { get } }
+  func fit(); func zoomIn(); func zoomOut(); var zoomPercent: Int { get }
+  func jumpToNow() }
 struct NetaCommands: Commands {}    // ⌘L ⌘K ⌘. ⌘0 ⌘= ⌘-
 ```
 Steps: 1. `sessionId` resolves `.leader` to the leader's session, `.mission(id)` to that mission's
@@ -236,7 +253,11 @@ lead session (the leader's when the lead is the leader), `.agent(id)` to that ag
 unknown id returns nil and selection falls back to `.leader`. 2. Selecting opens that session's
 chat; only the person's toggle sets `chatVisible = false`. 3. Zoom clamps to 0.25...4 in ×1.25
 steps; `fit` resets to 1.0 and bumps `fitRequested`, which 10 observes. 4. `NetaCommands` binds the
-six menu shortcuts; Escape calls `dismissOverlay` via `.onExitCommand` in the root view.
+six menu shortcuts; Escape calls `dismissOverlay` via `.onExitCommand` in the root view. 5.
+`jumpToNow` bumps `nowRequested`, which 10 observes and answers by jumping the view to the live edge.
+The ask lives on the shell because everything that asks is outside the canvas — the mission bar's Now
+pill and the debug driver — while the canvas is the only thing that knows where the live edge is;
+`NowState` still owns the two states the control renders.
 Tests: `ShellStateTests.swift` — each selection case resolves to the right session id against a
 fixture-backed store; an unknown id falls back to `.leader`; selecting never changes `chatVisible`;
 `dismissOverlay` closes the navigator and returns false when nothing is open; zoom clamps at both
@@ -261,6 +282,8 @@ struct ShellLayout: Equatable, Sendable {
 struct RootView: View { init(store: Store, shell: ShellState, client: any NodeClient) }
 struct CanvasPlaceholder: View {}   // replaced by 10
 struct ChatPlaceholder: View {}     // replaced by 11
+enum WindowChrome { static func apply(to window: NSWindow) }
+struct WindowChromeConfigurator: NSViewRepresentable {}   // draws nothing
 ```
 Steps: 1. `compute`: mission bar `x = 16`, `width = size.width - 32`, `height = 52`, `maxY =
 size.height - 16`; chat `width = min(410, size.width - 360)`, `x = size.width - 16 - width`, `y =
@@ -271,8 +294,22 @@ the canvas is told which rects are covered so no floating surface steals trackpa
 `NetaDesktopApp` builds one `Store`, `ShellState` and `SocketNodeClient`, calls `connect()` then
 `snapshot()` into `replace(snapshot:)`, feeds `notifications` into `apply(notification:)`, and
 reconnects with a full snapshot; the window stays `.hiddenTitleBar`, 1600×1000 default, 1100×700
-minimum.
-Tests: `ShellLayoutTests.swift` — at 1100×700 and 1600×1000 the chat never overlaps the mission bar
+minimum. 4. `RootView` owns the chat panel's state: one `ChatPanelModel` in `@State`, built once in
+`init` and handed to `ChatPanel` with the canvas's `CheckpointRouter`. The body reads `store` on
+every notification, so a model built inside it is replaced on the first live update — transcript,
+typed draft and open inspector with it — and there is deliberately no `ChatPanel` initializer that
+can build one. 5. `WindowChrome.apply` pins the real `NSWindow`: `darkAqua` (the design is dark
+only, and the glass material resolves against the window's appearance — it rendered pale grey under
+Aqua), `.fullSizeContentView` with a transparent title bar, so the canvas runs to the top edge with
+the system traffic lights over it. `WindowChromeConfigurator` is how the SwiftUI scene reaches the
+window; it is idempotent and runs on every layout pass. 6. The mission bar and the spine draw
+`Store.currentMissions`, never `store.missions`: the Node lists every open workspace in one
+snapshot, and two of them interleaved put two `#1`s in the bar.
+Tests: `WindowChromeTests.swift` — the chrome is dark, full-size content, transparent title bar and
+a content view the full height of the window, and applying twice changes nothing.
+`ShellAssemblyTests.swift` — `RootView` holds the panel model in `@State` and `ChatPanel` builds
+none; the bar shows one workspace's missions and never two `#1`s.
+`ShellLayoutTests.swift` — at 1100×700 and 1600×1000 the chat never overlaps the mission bar
 (`chat!.maxY <= missionBar.minY`, gap 12); every rect lies inside the window; the chat is at least
 320 wide and leaves 360 points of canvas uncovered on the left; hiding the chat changes neither the
 bar nor the canvas.
@@ -312,25 +349,32 @@ Contract:
 ```swift
 enum MissionBarItem: Equatable, Identifiable, Sendable {
   case leader(name: String, mode: LeaderMode)
-  case now(lit: Bool)       // lit state supplied by 10
+  case now(label: String, lit: Bool)   // both supplied by 10's NowState
   case divider
   case waiting(Mission)     // number, name, state label, attention mark
   case running(Mission)     // number and a mint dot only
   var id: String { get } }
 enum MissionBarModel {
-  static func items(missions: [Mission], leader: Leader?, nowLit: Bool) -> [MissionBarItem] }
+  static func items(missions: [Mission], leader: Leader?, nowLabel: String = "Now",
+    nowLit: Bool) -> [MissionBarItem]
+  static func leaderDisplayName(_ leader: Leader?) -> String }
 struct MissionBarView: View {
-  init(items: [MissionBarItem], selection: Selection, onSelect: @escaping (Selection) -> Void) }
+  init(items: [MissionBarItem], selection: Selection, onSelect: @escaping (Selection) -> Void,
+    onNow: @escaping () -> Void = {}) }
 ```
 Steps: 1. Order: leader, Now, divider, waiting missions grouped blocked, failed, readyToClose,
 mergedNotClosed and by number ascending within each group, then running missions by number
 ascending; closed missions never appear. 2. Every item carries a text state label and a mark; state
 is never carried by color alone. 3. Selecting calls `onSelect(.mission(id))`; the shell opens that
-lead's conversation and 10 pans the spine to it. 4. One glass capsule of glass chips, scrolling
+lead's conversation and 10 pans the spine to it (`SpineCanvasView` observes
+`shell.selection` and drives `SpinePlacement.revealScrollX`, leaving `.leader` at
+Now). The Now pill calls `onNow`, which jumps the spine to the live edge; the
+divider is emitted only when at least one chip follows it, so an empty workspace
+is the leader and Now alone. 4. One glass capsule of glass chips, scrolling
 horizontally on overflow: no counts, no cards, no status tiles, never the Lead/Lead++ control.
 Tests: `MissionBarTests.swift` — a fixture with all four waiting states plus running missions
 produces exactly that order; closed missions are absent; every `waiting` item has a non-empty state
-label; `now(lit:)` follows the flag.
+label; `now(label:lit:)` carries both halves of 10's Now state.
 Done when: `swift build` and `swift test` pass in `apps/macos`, the test passes, the commit is made.
 Commit: `feat(desktop): mission bar`
 

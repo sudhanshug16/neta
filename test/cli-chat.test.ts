@@ -280,12 +280,29 @@ describe("attached chat", () => {
 
 	test("SIGINT mid-turn cancels and stays alive, a second SIGINT exits 0", async () => {
 		await withChat(async (harness, work) => {
+			const saved = process.env.NETA_DIR;
+			process.env.NETA_DIR = harness.dir;
+			const observer = await NodeClient.connect();
+			const opened = await observer.request<{ leader: { sessionId: string } }>("workspace.open", { path: work });
+			const seen: Array<{ turn?: { id: string; endedAt?: string }; block?: { role?: string; text?: string } }> = [];
+			observer.on("turn", (value) =>
+				seen.push(value as { turn?: { id: string; endedAt?: string }; block?: { role?: string; text?: string } }),
+			);
+			await observer.request("conversation.tail", { sessionId: opened.leader.sessionId, limit: 20 });
 			const child = harness.spawn([], { cwd: work });
 			const cap = capture(child);
 			try {
 				// HOLD_FOREVER keeps the turn streaming until the cancel lands.
 				child.stdin?.write("HOLD_FOREVER\n");
-				await new Promise((done) => setTimeout(done, 2000));
+				await waitFor(
+					() =>
+						seen.some(
+							(notification) =>
+								notification.block?.role === "user" && notification.block.text === "HOLD_FOREVER",
+						),
+					20000,
+					"active held prompt",
+				);
 				expect(child.exitCode).toBeNull();
 				child.kill("SIGINT");
 				await waitFor(() => cap.stdout.includes("^C cancelled"), 15000, "^C cancelled");
@@ -294,6 +311,9 @@ describe("attached chat", () => {
 				child.kill("SIGINT");
 				expect(await waitExit(child, 15000)).toBe(0);
 			} finally {
+				observer.close();
+				if (saved === undefined) delete process.env.NETA_DIR;
+				else process.env.NETA_DIR = saved;
 				if (child.exitCode === null) {
 					child.kill("SIGKILL");
 				}

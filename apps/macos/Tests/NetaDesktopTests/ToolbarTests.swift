@@ -72,9 +72,9 @@ final class ToolbarTests: XCTestCase {
 		_ = ToolbarCapsule(model: ToolbarModel.make(store: store, shell: shell), shell: shell)
 	}
 
-	/// The zoom readout is mono tabular, the labels are 12/600, and the
-	/// menus carry an SF Symbol chevron instead of a literal glyph.
-	func testZoomTextIsMonoTabularAndMenusUseASymbolChevron() async throws {
+	/// The zoom readout is mono tabular and workspace selection is exposed as
+	/// a native menu with one stable accessibility target.
+	func testZoomTextAndWorkspaceMenuAccessibilityContract() async throws {
 		let store = try await fixtureStore()
 		let shell = ShellState()
 		XCTAssertEqual(ToolbarModel.make(store: store, shell: shell).zoomText, "100%")
@@ -83,35 +83,18 @@ final class ToolbarTests: XCTestCase {
 		let source = try toolbarSource()
 		XCTAssertTrue(
 			source.contains("Theme.mono(10, .semibold)"), "zoom readout is 10/600 mono")
-		XCTAssertFalse(source.contains("▾"), "menus use an SF Symbol chevron")
-		XCTAssertTrue(source.contains("chevron.down"))
+		XCTAssertTrue(source.contains("menuIndicator(.visible)"))
+		XCTAssertTrue(source.contains("accessibilityIdentifier(\"workspace-selector\")"))
 		XCTAssertTrue(source.contains("Theme.text(12, .semibold)"), "labels are 12/600")
 		XCTAssertFalse(source.contains("Divider()"), "rules are Theme.divider hairlines")
-		XCTAssertTrue(source.contains("netaGlass(.rounded(controlRadius)"), "concentric glass")
+		XCTAssertTrue(source.contains("buttonStyle(.glass)"), "the actionable menu uses native glass")
 	}
 
-	/// The chevron has to trail the name (BRIEF: `NoScrubs ▾`). With
-	/// `.menuStyle(.borderlessButton)` AppKit drew its own indicator at the
-	/// LEADING edge and clipped our label's chevron, so the toolbar read
-	/// `⌄ repo` in the render; `.menuStyle(.button)` with a plain button
-	/// style draws the label as written.
-	func testMenuLabelsDrawTheirOwnTrailingChevron() throws {
-		for source in [try toolbarSource(), try composerViewSource()] {
-			XCTAssertFalse(
-				source.contains("menuStyle(.borderlessButton)"),
-				"that style draws a leading indicator over our label")
-			XCTAssertTrue(source.contains("menuStyle(.button)"))
-			XCTAssertTrue(source.contains("menuIndicator(.hidden)"))
-		}
-		let toolbar = try toolbarSource()
-		let label = try XCTUnwrap(
-			toolbar.range(of: "private func menuLabel"))
-		let body = String(toolbar[label.lowerBound...].prefix(400))
-		let text = try XCTUnwrap(body.range(of: "Text(text)"))
-		let chevron = try XCTUnwrap(body.range(of: "chevron.down"))
-		XCTAssertLessThan(
-			text.lowerBound, chevron.lowerBound,
-			"the name comes first, the chevron trails it")
+	func testWorkspaceMenuUsesTheNativeIndicator() throws {
+		let source = try toolbarSource()
+		XCTAssertTrue(source.contains("menuStyle(.button)"))
+		XCTAssertTrue(source.contains("menuIndicator(.visible)"))
+		XCTAssertFalse(source.contains("chevron.down"), "avoid a duplicate hand-drawn menu indicator")
 	}
 
 	/// A menu that lists rows which do nothing when clicked is a control
@@ -130,10 +113,6 @@ final class ToolbarTests: XCTestCase {
 		XCTAssertEqual(
 			source.components(separatedBy: "Menu {").count - 1, 1,
 			"one menu in the toolbar: the workspace")
-		let root = try rootViewSource()
-		XCTAssertTrue(
-			root.contains("NavigatorOverlay.selectWorkspace($0, store: store, shell: shell)"),
-			"and it is the navigator's own selectWorkspace body, not a second one")
 	}
 
 	/// The capsule floats over the canvas ground and takes Revision 3's outer
@@ -149,8 +128,8 @@ final class ToolbarTests: XCTestCase {
 			occurrences(of: "netaGlass(.capsule)", in: source), 1,
 			"exactly one floating surface: the capsule")
 		XCTAssertEqual(
-			occurrences(of: "netaGlass(.rounded(controlRadius))", in: source), 4,
-			"the nested controls stay on the concentric radius, and so stay flat")
+			occurrences(of: "netaGlass(.rounded(controlRadius))", in: source), 3,
+			"non-menu nested controls stay on the concentric radius; the menu uses native glass")
 		XCTAssertEqual(
 			occurrences(of: "netaFloatingGlass(", in: source), 0,
 			"the capsule silhouette already floats; no escape hatch needed")

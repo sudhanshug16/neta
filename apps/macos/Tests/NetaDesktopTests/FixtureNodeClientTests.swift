@@ -167,6 +167,7 @@ final class FixtureNodeClientTests: XCTestCase {
 			case .event(let event): events.append(event)
 			case .state(let change): states.append(change)
 			case .node: XCTFail("no node notification was emitted")
+			case .glance: XCTFail("no glance notification was emitted")
 			}
 		}
 		XCTAssertEqual(turns.count, 2)
@@ -215,6 +216,7 @@ final class FixtureNodeClientTests: XCTestCase {
 					case .event(let event): seen.append("event:\(event.seq)")
 					case .state(let change): seen.append("state:\(change.kind.rawValue)")
 					case .node(let lifecycle): seen.append("node:\(lifecycle.phase.rawValue)")
+					case .glance: break
 					}
 					if seen.count == 3 { return seen }
 				}
@@ -258,6 +260,23 @@ final class FixtureNodeClientTests: XCTestCase {
 		XCTAssertEqual(
 			calls.last(where: { $0.method == "openWorkspace" })?.json,
 			"{\"path\":\"\\/tmp\\/neta-fixture-repo\"}")
+	}
+
+	func testResetChatRebindsTheOwnerAndLeavesTheOldThreadStored() async throws {
+		let client = FixtureNodeClient()
+		let before = try await client.snapshot()
+		let old = try XCTUnwrap(before.leaders.first?.sessionId)
+		_ = try await client.prompt(sessionId: old, text: "old direction")
+		let reset = try await client.resetChat(sessionId: old)
+		XCTAssertNotEqual(reset.sessionId, old)
+		let after = try await client.snapshot()
+		let oldPage = try await client.conversationTail(sessionId: old, cursor: nil, limit: 20)
+		let newPage = try await client.conversationTail(sessionId: reset.sessionId, cursor: nil, limit: 20)
+		XCTAssertEqual(after.leaders.first?.sessionId, reset.sessionId)
+		XCTAssertFalse(oldPage.turns.isEmpty)
+		XCTAssertTrue(newPage.turns.isEmpty)
+		let calls = await client.calls
+		XCTAssertTrue(calls.last(where: { $0.method == "resetChat" })?.json.contains(old) == true)
 	}
 
 	func testWritesNeverTouchDisk() async throws {

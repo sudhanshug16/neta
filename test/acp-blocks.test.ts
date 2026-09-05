@@ -34,6 +34,7 @@ describe("blocksFromUpdate", () => {
 				kind: "tool",
 				text: "Edit config.json",
 				data: { toolCallId: "call_1", toolKind: "edit", status: "in_progress" },
+				key: "tool:call_1",
 			},
 			{
 				role: "agent",
@@ -56,7 +57,16 @@ describe("blocksFromUpdate", () => {
 		expect(blocks[0].data?.status).toBe("completed");
 	});
 
-	test("usage_update becomes a priced status block", () => {
+	test("content-only tool updates do not erase the prior lifecycle fields", () => {
+		const update: SessionUpdate = {
+			sessionUpdate: "tool_call_update",
+			toolCallId: "call_1",
+			content: [{ type: "content", content: { type: "text", text: "done" } }],
+		};
+		expect(blocksFromUpdate(update)[0]?.data).toEqual({ toolCallId: "call_1" });
+	});
+
+	test("usage_update becomes a structured usage block", () => {
 		const update: SessionUpdate = {
 			sessionUpdate: "usage_update",
 			used: 1200,
@@ -66,9 +76,10 @@ describe("blocksFromUpdate", () => {
 		expect(blocksFromUpdate(update)).toEqual([
 			{
 				role: "agent",
-				kind: "status",
+				kind: "usage",
 				text: "1200/200000 tokens · $0.42",
-				data: { used: 1200, size: 200000, costAmount: 0.42, costCurrency: "USD" },
+				data: { usedTokens: 1200, contextSize: 200000, costAmount: 0.42, costCurrency: "USD" },
+				key: "usage",
 			},
 		]);
 	});

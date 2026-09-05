@@ -6,7 +6,15 @@ import { needsPerson } from "../../core/state.ts";
 import { nowIso } from "../../core/time.ts";
 import type { DecisionRecord, Disposition, LeaderMode, Mission, MissionId, WorkspaceId } from "../../core/types.ts";
 import type { ToolContext, ToolDeps, ToolHandlers, ToolResult } from "../router.ts";
-import type { CloseParams, ModeParams, PinParams, ReadyParams, ScopeParams, StatusParams } from "../schemas.ts";
+import type {
+	CloseParams,
+	HistoryParams,
+	ModeParams,
+	PinParams,
+	ReadyParams,
+	ScopeParams,
+	StatusParams,
+} from "../schemas.ts";
 
 export interface CloseMissionInput {
 	mission: Mission;
@@ -213,14 +221,23 @@ async function switchMode(ctx: LifecycleToolContext, params: ModeParams): Promis
 	return { ok: true, data: { ...approval } };
 }
 
+async function conversationHistory(ctx: LifecycleToolContext, params: HistoryParams): Promise<ToolResult> {
+	if (ctx.deps.history === undefined) return { ok: false, code: "unavailable", message: "history is unavailable" };
+	return {
+		ok: true,
+		data: await ctx.deps.history(ctx.actor.sessionId, { cursor: params.cursor, limit: params.limit ?? 20 }),
+	};
+}
+
 export const lifecycleHandlers: Pick<
 	ToolHandlers,
-	"neta_scope" | "neta_ready" | "neta_close" | "neta_pin" | "neta_status" | "neta_mode"
+	"neta_scope" | "neta_ready" | "neta_close" | "neta_pin" | "neta_status" | "neta_history" | "neta_mode"
 > = {
 	neta_scope: (ctx, args) => recordScope(ctx as LifecycleToolContext, args),
 	neta_ready: (ctx, args) => markReady(ctx as LifecycleToolContext, args),
 	neta_close: (ctx, args) => closeMission(ctx as LifecycleToolContext, args),
 	neta_pin: (ctx, args) => pinTurn(ctx as LifecycleToolContext, args),
 	neta_status: (ctx, args) => missionStatus(ctx as LifecycleToolContext, args),
+	neta_history: (ctx, args) => conversationHistory(ctx as LifecycleToolContext, args),
 	neta_mode: (ctx, args) => switchMode(ctx as LifecycleToolContext, args),
 };

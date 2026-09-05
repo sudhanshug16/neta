@@ -1,7 +1,9 @@
 import { join } from "node:path";
+import { type ConversationInboxStore, openConversationInboxStore } from "./conversation-inbox.ts";
 import { type ConversationStore, openConversationStore } from "./conversations.ts";
 import { type EventLog, openEventLog } from "./event-log.ts";
 import { ensureDir } from "./files.ts";
+import { type GlanceStore, openGlanceStore } from "./glance.ts";
 import { type MissionRegistry, openMissionRegistry } from "./mission-registry.ts";
 import { netaDir } from "./paths.ts";
 import {
@@ -21,6 +23,8 @@ export interface Store {
 	missions: MissionRegistry;
 	events: EventLog;
 	conversations: ConversationStore;
+	inbox: ConversationInboxStore;
+	glance: GlanceStore;
 	close(): Promise<void>;
 }
 
@@ -30,7 +34,16 @@ export interface Store {
 export async function openStore(): Promise<Store> {
 	const dir = netaDir();
 	await ensureDir(dir);
-	for (const sub of ["workspaces", "leaders", "missions", "events", "conversations", "worktrees", "charters"]) {
+	for (const sub of [
+		"workspaces",
+		"leaders",
+		"missions",
+		"events",
+		"conversations",
+		"glance",
+		"worktrees",
+		"charters",
+	]) {
 		await ensureDir(join(dir, sub));
 	}
 	const machine = openMachineStore();
@@ -45,6 +58,8 @@ export async function openStore(): Promise<Store> {
 		missions,
 		events,
 		conversations: openConversationStore(),
+		inbox: openConversationInboxStore(),
+		glance: openGlanceStore(),
 		close: async () => {
 			await missions.close();
 			await events.close();
@@ -52,9 +67,11 @@ export async function openStore(): Promise<Store> {
 	};
 }
 
+export * from "./conversation-inbox.ts";
 export * from "./conversations.ts";
 export * from "./event-log.ts";
 export * from "./files.ts";
+export * from "./glance.ts";
 export * from "./mission-index.ts";
 export * from "./mission-registry.ts";
 export * from "./paths.ts";

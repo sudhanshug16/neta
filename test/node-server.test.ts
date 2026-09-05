@@ -4,7 +4,7 @@ import { connect, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Machine } from "../src/core/types.ts";
-import { encodeLine, NodeError, type RpcId } from "../src/node/protocol.ts";
+import { encodeLine, NodeError, PROTOCOL_VERSION, type RpcId } from "../src/node/protocol.ts";
 import {
 	type Connection,
 	createServer,
@@ -155,7 +155,7 @@ function hello(id: RpcId = 1, params?: unknown): Record<string, unknown> {
 		jsonrpc: "2.0",
 		id,
 		method: "hello",
-		params: params ?? { token: TOKEN, client: "cli", protocolVersion: 1 },
+		params: params ?? { token: TOKEN, client: "cli", protocolVersion: PROTOCOL_VERSION },
 	};
 }
 
@@ -197,7 +197,7 @@ describe("hello handshake", () => {
 		const server = await startTestServer({}, dir);
 		try {
 			const client = await openClient(server.socketPath);
-			client.send(hello(1, { token: "wrong", client: "cli", protocolVersion: 1 }));
+			client.send(hello(1, { token: "wrong", client: "cli", protocolVersion: PROTOCOL_VERSION }));
 			const frame = await client.nextFrame();
 			expect(errorOf(frame)).toMatchObject({ code: -32000, data: { code: "UNAUTHORIZED" } });
 			await client.closed;
@@ -230,7 +230,11 @@ describe("hello handshake", () => {
 			const client = await openClient(server.socketPath);
 			client.send(hello());
 			const welcomed = await client.nextFrame();
-			expect(welcomed.result).toMatchObject({ machine: MACHINE, protocolVersion: 1, nodeVersion: "0.0.0-test" });
+			expect(welcomed.result).toMatchObject({
+				machine: MACHINE,
+				protocolVersion: PROTOCOL_VERSION,
+				nodeVersion: "0.0.0-test",
+			});
 			expect(typeof (welcomed.result as { pid: number }).pid).toBe("number");
 			client.send({ jsonrpc: "2.0", id: 2, method: "snapshot", params: { a: 1 } });
 			const answered = await client.nextFrame();

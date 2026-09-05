@@ -203,6 +203,13 @@ final class ChatViewModelTests: XCTestCase {
 		XCTAssertTrue(vm.turns[1].cancelled)
 	}
 
+	func testClosedTurnNotificationBeforePromptAcknowledgementStaysClosed() {
+		let vm = makeViewModel()
+		vm.apply(makeChange(turn: makeTurn("race", startedAt: 1_000, endedAt: 1_001)))
+		vm.acknowledgePrompt(turnId: "race")
+		XCTAssertNil(vm.openTurnId)
+	}
+
 	/// The target is the newest turn that actually DRAWS. A turn with no
 	/// blocks renders nothing and has no view to scroll to (the Node opens
 	/// the user turn before any block exists), so scrolling to it left the

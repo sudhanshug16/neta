@@ -285,7 +285,7 @@ describe("missions.get and events.list", () => {
 });
 
 describe("mission.pin", () => {
-	test("appends user.pinned, changes no Mission field, broadcasts one state", async () => {
+	test("appends user.pinned, changes no Mission field, and broadcasts the event", async () => {
 		const world = freshWorld();
 		const result = (await call(world, "mission.pin", { missionId: M1.id, pinned: true })) as {
 			missionId: string;
@@ -295,7 +295,21 @@ describe("mission.pin", () => {
 		expect(world.events).toEqual([
 			{ workspaceId: W1, kind: "user.pinned", missionId: M1.id, data: { pinned: true } },
 		]);
-		expect(world.broadcasts).toEqual([{ method: "state", params: { kind: "mission", record: M1 } }]);
+		expect(world.broadcasts).toEqual([
+			{
+				method: "event",
+				params: {
+					event: {
+						workspaceId: W1,
+						kind: "user.pinned",
+						missionId: M1.id,
+						data: { pinned: true },
+						seq: 1,
+						at: "2026-03-01T00:00:00.000Z",
+					},
+				},
+			},
+		]);
 		expect(MISSIONS.find((m) => m.id === M1.id)).toEqual(M1);
 		expect((await failsWith(call(world, "mission.pin", { missionId: ulid(), pinned: false }))).symbol).toBe(
 			"NOT_FOUND",

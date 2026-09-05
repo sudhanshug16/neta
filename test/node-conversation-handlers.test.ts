@@ -113,13 +113,17 @@ function stubAcp(captured: { onTurn?: (n: TurnNotification) => void }): NodeAcp 
 	return {
 		createSession: () => Promise.reject(new Error("not implemented in this test")),
 		ensureSession: () => Promise.reject(new Error("not implemented in this test")),
-		prompt: (id, text) => {
-			acpCalls.push({ op: "prompt", args: [id, text] });
+		prompt: (id, text, _attachments, provenance) => {
+			acpCalls.push({ op: "prompt", args: [id, text, provenance] });
 			if (acpPromptReject !== undefined) {
 				return Promise.reject(acpPromptReject);
 			}
 			check(id);
 			return Promise.resolve(ulid());
+		},
+		capabilities: (id) => {
+			check(id);
+			return { image: true, embeddedContext: true };
 		},
 		setModel: (id, model) => {
 			acpCalls.push({ op: "setModel", args: [id, model] });
@@ -150,16 +154,16 @@ function stubStore(): NodeStore {
 	return {
 		machine: () => missing(),
 		listWorkspaces: () => missing(),
-		listLeaders: () => missing(),
+		listLeaders: () => [],
 		listMissions: () => missing(),
-		listAgents: () => missing(),
+		listAgents: () => [],
 		getWorkspace: () => undefined,
 		getLeader: () => undefined,
 		getMission: () => undefined,
 		getAgent: () => undefined,
 		putWorkspace: () => Promise.reject(new Error("not implemented in this test")),
 		putAgent: () => Promise.reject(new Error("not implemented in this test")),
-		putLeader: () => Promise.reject(new Error("not implemented in this test")),
+		putLeader: () => Promise.resolve(),
 		compact: () => Promise.reject(new Error("not implemented in this test")),
 		appendEvent: () => Promise.reject(new Error("not implemented in this test")),
 		listEvents: () => Promise.reject(new Error("not implemented in this test")),
@@ -334,7 +338,32 @@ describe("prompt, cancel, setModel and models.list", () => {
 		};
 		expect(typeof result.turnId).toBe("string");
 		expect(conn.sent).toEqual([]);
-		expect(acpCalls).toEqual([{ op: "prompt", args: [SA, "hi"] }]);
+		expect(acpCalls).toEqual([{ op: "prompt", args: [SA, "hi", { readerDirected: true }] }]);
+	});
+
+	test("attachment prompts are capability checked and bounded", async () => {
+		acpCalls.length = 0;
+		const captured: { onTurn?: (n: TurnNotification) => void } = {};
+		const conn = testConn();
+		const ctx = testCtx(captured, [conn]);
+		const attachment = { id: "one", kind: "image", name: "shot.png", mimeType: "image/png", dataBase64: "aGk=" };
+		const result = await call(ctx, conn, "conversation.prompt", {
+			sessionId: SA,
+			text: "",
+			attachments: [attachment],
+		});
+		expect(result).toHaveProperty("turnId");
+		expect(await call(ctx, conn, "conversation.capabilities", { sessionId: SA })).toEqual({
+			image: true,
+			embeddedContext: true,
+		});
+		await expect(
+			call(ctx, conn, "conversation.prompt", {
+				sessionId: SA,
+				text: "",
+				attachments: [{ ...attachment, dataBase64: "%%%" }],
+			}),
+		).rejects.toMatchObject({ symbol: "INVALID_PARAMS" });
 	});
 
 	test("a rejecting ACP stub yields PROVIDER_ERROR, NodeErrors pass through", async () => {

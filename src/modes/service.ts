@@ -115,22 +115,32 @@ export class ModeService {
 		if (current.mode === "leadPlus") {
 			return { result: { approved: true }, snapshot: current };
 		}
+		const result = await this.evaluateLeadPlus(subject, record);
+		if (!result.approved) {
+			return { result, snapshot: current };
+		}
+		return { result, snapshot: await this.applyApprovedLeadPlus(subject, record) };
+	}
+
+	async evaluateLeadPlus(subject: ModeSubject, record: DecisionRecord): Promise<Approval> {
 		const mission = this.deps.mission(record.missionId);
-		const result = evaluateRequest({
+		return evaluateRequest({
 			record,
 			mission,
 			caller: subject,
 			reservations: parseReservations(this.deps.charter(subject.workspaceId)),
 		});
-		if (!result.approved) {
-			return { result, snapshot: current };
-		}
-		const snapshot = await this.switch(subject, current.mode, "leadPlus", "tool", {
+	}
+
+	async applyApprovedLeadPlus(subject: ModeSubject, record: DecisionRecord): Promise<ModeSnapshot> {
+		const current = await this.snapshot(subject);
+		if (current.mode === "leadPlus") return current;
+		const mission = this.deps.mission(record.missionId);
+		return this.switch(subject, current.mode, "leadPlus", "tool", {
 			record,
 			missionId: record.missionId,
 			mission: mission === undefined ? undefined : { number: mission.number, name: mission.name },
 		});
-		return { result, snapshot };
 	}
 
 	// Closing or abandoning a mission returns its lead to `lead`, with the

@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import ObjectiveC
 
 /// One command the debug driver understands.
 ///
@@ -18,18 +19,31 @@ public enum DebugCommand: Hashable, Sendable {
 	case chat(Bool)
 	case resize(width: Double, height: Double)
 	case wait(milliseconds: Int)
+	case awaitReady(milliseconds: Int)
+	case awaitState(milliseconds: Int, predicate: String)
 	case shot(path: String)
+	case shotContent(path: String)
 	case menu
+	/// Sets the chat composer's draft text (empty clears it). It types into
+	/// the real `NSTextView` behind SwiftUI's `TextEditor`, so the binding
+	/// updates exactly as it does under a person's hands; there is no other
+	/// way in, because the composer's model is owned by the chat panel and
+	/// the driver holds only the store and the shell.
+	case draft(text: String)
 	/// Reports the real window chrome: appearance, style mask and whether
 	/// the content runs under the title bar. The only way to see, on a
 	/// machine whose window server composites nothing, that `WindowChrome`
 	/// actually landed.
 	case window
 	case state
+	case axDump
+	case axPress(label: String)
+	case restartService
 	/// The modifiers are a raw `NSEvent.ModifierFlags` value:
 	/// `ModifierFlags` is not `Hashable`, and this enum is.
 	case key(characters: String, modifiers: UInt)
 	case click(x: Double, y: Double)
+	case drag(x0: Double, y0: Double, x1: Double, y1: Double)
 	case quit
 
 	/// Parses one line. The verb is case-insensitive; a `shot` path keeps
@@ -84,22 +98,55 @@ public enum DebugCommand: Hashable, Sendable {
 					"wait wants milliseconds, got \(quoted(rest))")
 			}
 			return .wait(milliseconds: ms)
+		case "await-ready":
+			guard let ms = Int(rest), ms > 0 else {
+				throw DebugCommandError("await-ready wants positive milliseconds")
+			}
+			return .awaitReady(milliseconds: ms)
+		case "await-state":
+			let parts = rest.split(separator: " ", maxSplits: 1)
+			guard parts.count == 2, let ms = Int(parts[0]), ms > 0,
+				validStatePredicate(String(parts[1])) else {
+				throw DebugCommandError("await-state wants positive milliseconds and a predicate")
+			}
+			return .awaitState(milliseconds: ms, predicate: String(parts[1]))
 		case "shot":
 			guard !rest.isEmpty else {
 				throw DebugCommandError("shot wants a path")
 			}
 			return .shot(path: rest)
+		case "shot-content":
+			guard !rest.isEmpty else {
+				throw DebugCommandError("shot-content wants a path")
+			}
+			return .shotContent(path: rest)
 		case "menu":
 			try requireNoArgument(rest, verb: verb)
 			return .menu
+		case "draft":
+			// The remainder of the line, spaces and all: a draft is prose.
+			return .draft(text: rest)
 		case "window":
 			try requireNoArgument(rest, verb: verb)
 			return .window
 		case "state":
 			try requireNoArgument(rest, verb: verb)
 			return .state
+		case "ax-dump":
+			try requireNoArgument(rest, verb: verb)
+			return .axDump
+		case "ax-press":
+			guard !rest.isEmpty else { throw DebugCommandError("ax-press wants an accessibility label") }
+			return .axPress(label: rest)
+		case "restart-service":
+			try requireNoArgument(rest, verb: verb)
+			return .restartService
 		case "key":
 			return try parseKey(rest)
+		case "drag":
+			let parts = rest.split(separator: " ")
+			guard parts.count == 4, let x0 = Double(parts[0]), let y0 = Double(parts[1]), let x1 = Double(parts[2]), let y1 = Double(parts[3]) else { throw DebugCommandError("drag wants four numbers") }
+			return .drag(x0: x0, y0: y0, x1: x1, y1: y1)
 		case "click":
 			let parts = rest.split(separator: " ", omittingEmptySubsequences: true)
 			guard parts.count == 2,
@@ -145,6 +192,15 @@ public enum DebugCommand: Hashable, Sendable {
 			throw DebugCommandError(
 				"select wants leader, mission or agent, got \(quoted(kind))")
 		}
+	}
+
+	private static func validStatePredicate(_ value: String) -> Bool {
+		if value == "open" || value == "idle" { return true }
+		if value.hasPrefix("session-not ") { return value.count > "session-not ".count }
+		let parts = value.split(separator: " ")
+		let statuses = Set(["queued", "delivering", "delivered", "uncertain", "discarded"])
+		return parts.count == 3 && parts[0] == "inbox" && statuses.contains(String(parts[1]))
+			&& Int(parts[2]).map { $0 >= 0 } == true
 	}
 
 	/// `key cmd+l`, `key cmd+shift+n`, `key escape`. The modifier names are
@@ -262,10 +318,28 @@ public struct DebugCommandError: Error, CustomStringConvertible, Hashable, Senda
 	/// Keeps the running driver alive; the app has nowhere else to hold it.
 	private static var running: DebugDriver?
 
+	/// Makes SwiftUI publish its virtual accessibility nodes to this process.
+	/// This is deliberately opt-in and must run before an `NSHostingView` is
+	/// created; normal launches never change AppKit accessibility behaviour.
+	public static func enableAccessibilityIfRequested(
+		environment: [String: String] = ProcessInfo.processInfo.environment
+	) {
+		guard let path = environment[environmentKey],
+			!path.trimmingCharacters(in: .whitespaces).isEmpty
+		else { return }
+		NSApplication.shared.accessibilitySetValue(
+			true,
+			forAttribute: NSAccessibility.Attribute(rawValue: "AXEnhancedUserInterface"))
+	}
+
 	private let directory: URL
 	private let store: Store
 	private let shell: ShellState
 	private var pump: Task<Void, Never>?
+	/// The last requested canvas size. The headless window server can clamp a
+	/// titled window below this height, but the content capture still lays out
+	/// the live root at this exact size offscreen.
+	private var requestedContentSize: NSSize?
 
 	public init(directory: URL, store: Store, shell: ShellState) {
 		self.directory = directory
@@ -409,13 +483,32 @@ public struct DebugCommandError: Error, CustomStringConvertible, Hashable, Senda
 				throw DebugCommandError("no window")
 			}
 			window.setContentSize(NSSize(width: width, height: height))
+			requestedContentSize = NSSize(width: width, height: height)
 			window.displayIfNeeded()
 		case .wait(let ms):
 			try? await Task.sleep(for: .milliseconds(ms))
+		case .awaitReady(let ms):
+			let deadline = ContinuousClock.now + .milliseconds(ms)
+			while !store.sessionsReady || store.currentWorkspaceId == nil {
+				guard ContinuousClock.now < deadline else { throw DebugCommandError("readiness timeout after \(ms) ms") }
+				try? await Task.sleep(for: .milliseconds(25))
+			}
+			return "ready workspace=\(store.currentWorkspaceId ?? "-")"
+		case .awaitState(let ms, let predicate):
+			let deadline = ContinuousClock.now + .milliseconds(ms)
+			while !matchesState(predicate) {
+				guard ContinuousClock.now < deadline else { throw DebugCommandError("state timeout after \(ms) ms: \(predicate)") }
+				try? await Task.sleep(for: .milliseconds(25))
+			}
+			return predicate
 		case .shot(let path):
 			return try await capture(to: path)
+		case .shotContent(let path):
+			return try await captureContent(to: path)
 		case .menu:
 			return DebugDriver.menuDump()
+		case .draft(let text):
+			return try setDraft(text)
 		case .window:
 			guard let window = targetWindow else {
 				throw DebugCommandError("no window")
@@ -430,6 +523,8 @@ public struct DebugCommandError: Error, CustomStringConvertible, Hashable, Senda
 			case .agent(let id):
 				selection = "agent:" + (store.agentsById[id]?.name ?? id)
 			}
+			let composer = targetWindow?.contentView.flatMap { DebugDriver.firstComposerTextView(in: $0) }
+			let responder = targetWindow?.firstResponder
 			return "selection=\(selection)"
 				+ " navigator=\(shell.navigatorVisible)"
 				+ " chat=\(shell.chatVisible)"
@@ -442,16 +537,140 @@ public struct DebugCommandError: Error, CustomStringConvertible, Hashable, Senda
 				// whether the session is wrong or the tail never landed.
 				+ " workspaces=\(store.workspaces.count)"
 				+ " session=\(shell.sessionId(in: store) ?? "-")"
+				+ " responder=\(responder.map { String(describing: type(of: $0)) } ?? "nil")"
+				+ " composerFrame=\(composer.map { NSStringFromRect($0.frame) } ?? "nil")"
+				+ " composerChars=\(composer?.string.count ?? -1)"
+				+ " keyDown=\(composer?.keyDownCount ?? -1) returns=\(composer?.returnCount ?? -1)"
+				+ " pastes=\(composer?.pasteCount ?? -1) pasteHandled=\(composer?.lastPasteHandled ?? false)"
+				+ " model={\(composer?.debugState?() ?? "nil")} \(inboxCounts(composer))"
+		case .axDump:
+			return DebugDriver.accessibilityDump()
+		case .axPress(let label):
+			let matches = DebugDriver.accessibilityElements().filter { $0.matches(label) }
+			guard !matches.isEmpty else {
+				throw DebugCommandError("no accessibility element labelled or identified \(label)")
+			}
+			guard matches.count == 1 else {
+				throw DebugCommandError("accessibility element \(label) is ambiguous (\(matches.count) matches); use a unique identifier")
+			}
+			let returned = DebugDriver.performAccessibilityPress(matches[0].object)
+			return "dispatched \(label) returned=\(returned)"
+		case .restartService:
+			guard store.nodeRecoveryAvailable else { throw DebugCommandError("service recovery is unavailable") }
+			store.requestNodeRecovery()
+			return "requested"
 		case .key(let characters, let modifiers):
 			return try sendKey(
 				characters: characters,
 				modifiers: NSEvent.ModifierFlags(rawValue: modifiers))
 		case .click(let x, let y):
 			return try await sendClick(x: x, y: y)
+		case .drag(let x0, let y0, let x1, let y1):
+			return try await sendDrag(x0: x0, y0: y0, x1: x1, y1: y1)
 		case .quit:
 			break
 		}
 		return ""
+	}
+
+	private func inboxCounts(_ composer: ComposerNSTextView?) -> String {
+		let messages = composer?.debugInbox?() ?? []
+		let count = { status in messages.count { $0.status == status } }
+		return "inboxQueued=\(count("queued")) inboxDelivering=\(count("delivering")) inboxDelivered=\(count("delivered")) inboxUncertain=\(count("uncertain")) inboxDiscarded=\(count("discarded"))"
+	}
+
+	private func matchesState(_ predicate: String) -> Bool {
+		let composer = targetWindow?.contentView.flatMap { DebugDriver.firstComposerTextView(in: $0) }
+		let state = composer?.debugState?() ?? ""
+		if predicate == "open" { return state.contains("open=true") }
+		if predicate == "idle" { return state.contains("open=false") && state.contains("submitting=false") && state.contains("stopping=false") }
+		if predicate.hasPrefix("session-not ") {
+			let old = String(predicate.dropFirst("session-not ".count))
+			return !old.isEmpty && shell.sessionId(in: store).map { $0 != old } == true
+		}
+		let parts = predicate.split(separator: " ")
+		if parts.count == 3, parts[0] == "inbox", let minimum = Int(parts[2]), minimum >= 0 {
+			return (composer?.debugInbox?() ?? []).count { $0.status == String(parts[1]) } >= minimum
+		}
+		return false
+	}
+
+	private struct AccessibilityElement {
+		let object: NSObject
+		let role: String?
+		let label: String?
+		let identifier: String?
+
+		func matches(_ value: String) -> Bool { identifier == value || label == value }
+	}
+
+	private static func accessibilityObjectValue(_ object: NSObject, _ name: String) -> AnyObject? {
+		let selector = NSSelectorFromString(name)
+		guard object.responds(to: selector) else { return nil }
+		return object.perform(selector)?.takeUnretainedValue()
+	}
+
+	private static func accessibilityString(_ object: NSObject, _ name: String) -> String? {
+		guard let value = accessibilityObjectValue(object, name) else { return nil }
+		if let string = value as? String, !string.isEmpty { return string }
+		return nil
+	}
+
+	private static func accessibilityElements() -> [AccessibilityElement] {
+		for window in NSApp.windows {
+			window.contentView?.layoutSubtreeIfNeeded()
+			window.contentView?.displayIfNeeded()
+		}
+		var pending: [NSObject] = NSApp.windows.compactMap(\.contentView)
+		var visited = Set<ObjectIdentifier>()
+		var result: [AccessibilityElement] = []
+		let childSelectors = [
+			"accessibilityChildren", "accessibilityVisibleChildren",
+			"accessibilityContents", "accessibilityRows", "accessibilityColumns",
+			"accessibilityTabs",
+		]
+		while let object = pending.popLast(), result.count < 4_000 {
+			guard visited.insert(ObjectIdentifier(object)).inserted else { continue }
+			if let hidden = accessibilityObjectValue(object, "accessibilityHidden") as? NSNumber,
+				hidden.boolValue
+			{
+				continue
+			}
+			result.append(AccessibilityElement(
+				object: object,
+				role: accessibilityString(object, "accessibilityRole"),
+				label: accessibilityString(object, "accessibilityLabel"),
+				identifier: accessibilityString(object, "accessibilityIdentifier")))
+			if let view = object as? NSView {
+				pending.append(contentsOf: view.subviews.reversed())
+			}
+			for selector in childSelectors {
+				guard let raw = accessibilityObjectValue(object, selector) else { continue }
+				if let children = raw as? [NSObject] {
+					pending.append(contentsOf: children.reversed())
+				} else if let child = raw as? NSObject {
+					pending.append(child)
+				}
+			}
+		}
+		return result
+	}
+
+	private static func performAccessibilityPress(_ object: NSObject) -> Bool {
+		let selector = NSSelectorFromString("accessibilityPerformPress")
+		guard object.responds(to: selector) else { return false }
+		typealias Press = @convention(c) (AnyObject, Selector) -> Bool
+		let implementation = class_getMethodImplementation(type(of: object), selector)
+		let press = unsafeBitCast(implementation, to: Press.self)
+		return press(object, selector)
+	}
+
+	private static func accessibilityDump() -> String {
+		accessibilityElements().compactMap { element in
+			guard element.label != nil || element.identifier != nil else { return nil }
+			let name = element.identifier.map { "\(element.label ?? "")#\($0)" } ?? element.label!
+			return "\(element.role ?? "unknown"):\(name)"
+		}.joined(separator: " | ")
 	}
 
 	/// Every menu in the real `NSApp.mainMenu`, as
@@ -537,8 +756,14 @@ public struct DebugCommandError: Error, CustomStringConvertible, Hashable, Senda
 		guard let window = targetWindow else {
 			throw DebugCommandError("no window")
 		}
+		let priorResponder = window.firstResponder
 		NSApplication.shared.activate()
 		window.makeKeyAndOrderFront(nil)
+		if let priorResponder, window.firstResponder !== priorResponder {
+			guard window.makeFirstResponder(priorResponder) else {
+				throw DebugCommandError("could not restore \(type(of: priorResponder)) as first responder")
+			}
+		}
 		guard let event = NSEvent.keyEvent(
 			with: .keyDown,
 			location: .zero,
@@ -553,11 +778,67 @@ public struct DebugCommandError: Error, CustomStringConvertible, Hashable, Senda
 		else {
 			throw DebugCommandError("could not build the key event")
 		}
+		// A background test app has no key window, so AppKit's Edit > Paste
+		// command validates but cannot route through the responder chain. Invoke
+		// the actual responder selector in that one diagnostic case; production
+		// Cmd-V continues through the standard menu and the same override.
+		if modifiers == .command, characters == "v",
+			let composer = window.firstResponder as? ComposerNSTextView
+		{
+			composer.paste(nil)
+			return "via ComposerNSTextView.paste"
+		}
 		if NSApplication.shared.mainMenu?.performKeyEquivalent(with: event) == true {
 			return "via menu"
 		}
 		window.sendEvent(event)
-		return "via window"
+		return "via window to \(window.firstResponder.map { String(describing: type(of: $0)) } ?? "nil")"
+	}
+
+	/// Replaces the composer's draft with `text` by typing it into the real
+	/// text view, so SwiftUI's binding sees an ordinary edit.
+	///
+	/// The composer's `ComposerModel` is built and owned by `ChatPanelModel`
+	/// inside `RootView`, which the driver cannot reach: it holds the store
+	/// and the shell only. The view hierarchy can be reached, and the
+	/// `TextEditor` behind the field is an `NSTextView`, so selecting
+	/// everything and inserting goes through `NSTextInputClient` and fires
+	/// the same change notification a keystroke does.
+	private func setDraft(_ text: String) throws -> String {
+		guard let window = targetWindow, let content = window.contentView else {
+			throw DebugCommandError("no window")
+		}
+		guard let field = DebugDriver.firstComposerTextView(in: content) else {
+			throw DebugCommandError("no composer field in the window")
+		}
+		NSApplication.shared.activate()
+		window.makeKeyAndOrderFront(nil)
+		guard window.makeFirstResponder(field) else {
+			throw DebugCommandError("composer refused first responder")
+		}
+		let whole = NSRange(location: 0, length: (field.string as NSString).length)
+		field.insertText(text, replacementRange: whole)
+		field.didChangeText()
+		window.displayIfNeeded()
+		return "\(field.string.count) characters"
+	}
+
+	/// The first `NSTextView` in a depth-first walk of `view`. The composer
+	/// is the only editable text in the window, so the first one found is it.
+	static func firstTextView(in view: NSView) -> NSTextView? {
+		if let text = view as? NSTextView { return text }
+		for child in view.subviews {
+			if let found = firstTextView(in: child) { return found }
+		}
+		return nil
+	}
+
+	static func firstComposerTextView(in view: NSView) -> ComposerNSTextView? {
+		if let text = view as? ComposerNSTextView { return text }
+		for child in view.subviews {
+			if let found = firstComposerTextView(in: child) { return found }
+		}
+		return nil
 	}
 
 	/// A synthesized click at a point in the window's own coordinates, origin
@@ -584,6 +865,14 @@ public struct DebugCommandError: Error, CustomStringConvertible, Hashable, Senda
 		NSApplication.shared.sendEvent(down)
 		try? await Task.sleep(for: .milliseconds(60))
 		NSApplication.shared.sendEvent(up)
+		return ""
+	}
+
+	private func sendDrag(x0: Double, y0: Double, x1: Double, y1: Double) async throws -> String {
+		guard let window = targetWindow else { throw DebugCommandError("no window") }
+		func event(_ type: NSEvent.EventType, _ point: NSPoint) -> NSEvent? { NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1) }
+		guard let down = event(.leftMouseDown, NSPoint(x: x0, y: y0)), let drag = event(.leftMouseDragged, NSPoint(x: x1, y: y1)), let up = event(.leftMouseUp, NSPoint(x: x1, y: y1)) else { throw DebugCommandError("could not build drag events") }
+		NSApplication.shared.sendEvent(down); NSApplication.shared.sendEvent(drag); NSApplication.shared.sendEvent(up)
 		return ""
 	}
 
@@ -633,18 +922,80 @@ public struct DebugCommandError: Error, CustomStringConvertible, Hashable, Senda
 			skipped = DebugDriver.windowImage == nil
 				? "no window capture symbol" : "window capture nil"
 		}
+		try writeContentView(window, to: url)
+		return "via view (\(skipped))"
+	}
+
+	/// Captures the live root at the last requested logical size. The headless
+	/// window server may clamp a titled window below that height, so this grows
+	/// the content view only while laying it out and drawing it offscreen.
+	private func captureContent(to path: String) async throws -> String {
+		guard let window = targetWindow else {
+			throw DebugCommandError("no window")
+		}
+		NSApplication.shared.activate()
+		window.orderFrontRegardless()
+		window.displayIfNeeded()
+		await Task.yield()
+		try? await Task.sleep(for: .milliseconds(150))
+		let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+		try? FileManager.default.createDirectory(
+			at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+		guard let view = window.contentView else {
+			throw DebugCommandError("the content view could not be captured")
+		}
+		try DebugDriver.writeOneXContent(
+			view, requestedSize: requestedContentSize ?? view.bounds.size, to: url)
+		return "via content view"
+	}
+
+	/// Draws an existing live root at `requestedSize` into an explicit 1x
+	/// bitmap, then restores its frame. This is a real SwiftUI layout pass at
+	/// the requested geometry, without adding pixels, padding, or scaling a
+	/// smaller render to a larger image.
+	static func writeOneXContent(
+		_ view: NSView, requestedSize: NSSize, to url: URL
+	) throws {
+		guard requestedSize.width > 0, requestedSize.height > 0 else {
+			throw DebugCommandError("the requested content size is invalid")
+		}
+		let originalFrame = view.frame
+		defer {
+			view.frame = originalFrame
+			view.layoutSubtreeIfNeeded()
+		}
+		view.setFrameSize(requestedSize)
+		view.layoutSubtreeIfNeeded()
+		view.displayIfNeeded()
+		let width = Int(requestedSize.width.rounded())
+		let height = Int(requestedSize.height.rounded())
+		guard let rep = NSBitmapImageRep(
+			bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height,
+			bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+			isPlanar: false, colorSpaceName: .deviceRGB,
+			bitmapFormat: .alphaFirst, bytesPerRow: 0, bitsPerPixel: 0)
+		else {
+			throw DebugCommandError("the content bitmap could not be allocated")
+		}
+		view.cacheDisplay(in: view.bounds, to: rep)
+		guard let data = rep.representation(using: .png, properties: [:]) else {
+			throw DebugCommandError("the content bitmap would not encode as PNG")
+		}
+		try data.write(to: url)
+	}
+
+	private func writeContentView(_ window: NSWindow, to url: URL) throws {
 		guard let view = window.contentView,
 			view.bounds.width > 0, view.bounds.height > 0,
 			let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds)
 		else {
-			throw DebugCommandError("neither the window nor its view could be captured")
+			throw DebugCommandError("the content view could not be captured")
 		}
 		view.cacheDisplay(in: view.bounds, to: rep)
 		guard let data = rep.representation(using: .png, properties: [:]) else {
 			throw DebugCommandError("the view bitmap would not encode as PNG")
 		}
 		try data.write(to: url)
-		return "via view (\(skipped))"
 	}
 
 	/// The window-server capture of one of our own windows.

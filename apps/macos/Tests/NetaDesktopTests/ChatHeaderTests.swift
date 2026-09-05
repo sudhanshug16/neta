@@ -67,6 +67,13 @@ final class ChatHeaderTests: XCTestCase {
 			"Claude · claude-opus-5 · Running")
 	}
 
+	func testOpenTurnUsesRespondingInsteadOfDurableLeaderState() {
+		let store = store()
+		XCTAssertEqual(
+			ChatPath.subtitle(for: .leader, store: store, isResponding: true),
+			"Claude · claude-opus-5 · Responding")
+	}
+
 	func testReadOnlyAgentSubtitle() {
 		let store = store()
 		XCTAssertEqual(

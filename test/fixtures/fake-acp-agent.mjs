@@ -20,6 +20,10 @@
  *   CONFIG_UPDATE - emits a config_option_update switching the model to
  *           "fixture-fast", the way a backend reports a mid-session change
  *   MODE_UPDATE - emits a current_mode_update switching the mode to "plan"
+ *   EXIT_MID_TURN - emits one chunk and disconnects before a terminal response
+ *   MCP_E2E_CREATE/RUN/READY/CLOSE - drives the injected Neta MCP proxy
+ *           through a controlled mission lifecycle; requires
+ *           --mission-e2e-control <directory>
  *   WAIT_FOR_NOTICE - pauses the first turn so a test can queue a notice
  *   WAIT_FOR_BARRIER - pauses until the test releases its file barrier
  * Anything else is echoed back as the assistant message.
@@ -46,12 +50,15 @@ import * as acp from "@agentclientprotocol/sdk";
 let _trapSigterm = false;
 
 const useConfigOptions = process.argv.includes("--config-options");
+const unrestrictedModeIndex = process.argv.indexOf("--unrestricted-mode");
+const unrestrictedMode = unrestrictedModeIndex === -1 ? undefined : process.argv[unrestrictedModeIndex + 1];
 const bare = process.argv.includes("--bare");
 const missingExactOpus = process.argv.includes("--missing-exact-opus");
 const missingMax = process.argv.includes("--missing-max");
 const failSetConfig = process.argv.includes("--fail-set-config");
 const unsupportedResume = process.argv.includes("--unsupported-resume");
 const rejectResume = process.argv.includes("--reject-resume");
+const allowResumeCwdChange = process.argv.includes("--allow-resume-cwd-change");
 const sessionStoreIndex = process.argv.indexOf("--session-store");
 const sessionStore = sessionStoreIndex === -1 ? undefined : process.argv[sessionStoreIndex + 1];
 // A Claude-shaped backend whose own default is the model Neta must never run.
@@ -65,6 +72,8 @@ const barrierFileIndex = process.argv.indexOf("--barrier-file");
 const barrierFile = barrierFileIndex === -1 ? undefined : process.argv[barrierFileIndex + 1];
 const barrierReadyFileIndex = process.argv.indexOf("--barrier-ready-file");
 const barrierReadyFile = barrierReadyFileIndex === -1 ? undefined : process.argv[barrierReadyFileIndex + 1];
+const missionControlIndex = process.argv.indexOf("--mission-e2e-control");
+const missionControl = missionControlIndex === -1 ? undefined : process.argv[missionControlIndex + 1];
 
 const stored =
 	sessionStore && existsSync(sessionStore)
@@ -72,12 +81,127 @@ const stored =
 		: { counter: 0, sessions: {} };
 const sessions = new Set(Object.keys(stored.sessions));
 const activePrompts = new Map();
+const pendingSteers = new Map();
 let counter = 0;
 /** Whatever the client asked us to launch at session/new, echoed back on request. */
 let mcpServers = [];
 const selectedConfig = new Map();
 let selectedLegacyModel = "test-model";
 const mcpChildren = [];
+
+function missionState() {
+	if (!missionControl) throw new Error("MCP_E2E requires --mission-e2e-control");
+	const path = `${missionControl}/state.json`;
+	return existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : {};
+}
+
+function saveMissionState(next) {
+	if (!missionControl) throw new Error("MCP_E2E requires --mission-e2e-control");
+	writeFileSync(`${missionControl}/state.json`, JSON.stringify(next), "utf8");
+}
+
+function recordMcp(entry) {
+	if (!missionControl) return;
+	const path = `${missionControl}/mcp.ndjson`;
+	writeFileSync(path, `${existsSync(path) ? readFileSync(path, "utf8") : ""}${JSON.stringify(entry)}\n`, "utf8");
+}
+
+function mcpActorId() {
+	const server = mcpServers.find((item) => item.name === "neta");
+	if (!server) throw new Error("MCP_E2E has no Neta MCP server");
+	const index = server.args.indexOf("--actor");
+	return index === -1 ? undefined : server.args[index + 1];
+}
+
+/** Call the exact MCP command ACP injected, never the Node socket directly. */
+function callNetaTool(name, args) {
+	const server = mcpServers.find((item) => item.name === "neta");
+	if (!server) return Promise.reject(new Error("MCP_E2E has no Neta MCP server"));
+	const env = Object.fromEntries((server.env ?? []).map((entry) => [entry.name, entry.value]));
+	return new Promise((resolve, reject) => {
+		const child = spawn(server.command, server.args ?? [], {
+			env: { ...process.env, ...env },
+			stdio: ["pipe", "pipe", "pipe"],
+		});
+		let buffer = "";
+		let stderr = "";
+		let settled = false;
+		const timeout = setTimeout(
+			() => fail(new Error("MCP_E2E timed out waiting for Neta MCP after 10 seconds")),
+			10_000,
+		);
+		const settle = (fn) => {
+			if (!settled) {
+				settled = true;
+				clearTimeout(timeout);
+				fn();
+			}
+		};
+		const fail = (error) =>
+			settle(() => {
+				child.kill();
+				reject(error);
+			});
+		child.on("error", fail);
+		child.stderr.on("data", (chunk) => {
+			stderr += chunk.toString("utf8");
+		});
+		child.stdout.on("data", (chunk) => {
+			buffer += chunk.toString("utf8");
+			for (let newline = buffer.indexOf("\n"); newline >= 0; newline = buffer.indexOf("\n")) {
+				const line = buffer.slice(0, newline);
+				buffer = buffer.slice(newline + 1);
+				if (!line.trim()) continue;
+				let frame;
+				try {
+					frame = JSON.parse(line);
+				} catch {
+					fail(new Error("MCP_E2E received invalid MCP JSON"));
+					return;
+				}
+				if (frame.id === 1) {
+					if (frame.error) {
+						fail(new Error(frame.error.message ?? "MCP initialize failed"));
+						return;
+					}
+					recordMcp({
+						phase: "initialized",
+						command: server.command,
+						args: server.args.filter((arg, index, all) => arg !== "--token" && all[index - 1] !== "--token"),
+						result: frame.result,
+					});
+					child.stdin.write(
+						`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} })}\n`,
+					);
+					child.stdin.write(
+						`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name, arguments: args } })}\n`,
+					);
+					continue;
+				}
+				if (frame.id !== 2) continue;
+				child.stdin.end();
+				recordMcp({ phase: "tool", name, arguments: args, result: frame.result, error: frame.error, stderr });
+				if (frame.error) {
+					settle(() => reject(new Error(frame.error.message ?? "MCP tool failed")));
+					return;
+				}
+				settle(() => resolve(frame.result));
+			}
+		});
+		child.on("close", (code) => {
+			if (code !== 0 && buffer === "") settle(() => reject(new Error(stderr || `MCP exited ${code}`)));
+		});
+		child.stdin.write(
+			`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "fake-acp-e2e", version: "1" } } })}\n`,
+		);
+	});
+}
+
+function toolData(result) {
+	const text = result?.content?.[0]?.text;
+	if (result?.isError || typeof text !== "string") throw new Error(`MCP tool failed: ${text ?? "no result"}`);
+	return JSON.parse(text.split("\n")[0]);
+}
 
 function launchMcpServers(servers) {
 	if (!launchMcp) return;
@@ -100,7 +224,7 @@ function persist() {
 }
 
 /** The configOptions wire shape, with the selected model and thought level. */
-function configOptions(current, thoughtLevel = "medium") {
+function configOptions(current, thoughtLevel = "medium", mode = "ask") {
 	const opusOption = missingExactOpus
 		? { value: "opus[1m][high]", name: "Claude Opus 1M High" }
 		: { value: "opus[1m]", name: "Claude Opus 1M" };
@@ -126,8 +250,11 @@ function configOptions(current, thoughtLevel = "medium") {
 				name: "Mode",
 				category: "mode",
 				type: "select",
-				currentValue: "ask",
-				options: [{ value: "ask", name: "Always Ask" }],
+				currentValue: mode,
+				options: [
+					{ value: "ask", name: "Always Ask" },
+					...(unrestrictedMode === undefined ? [] : [{ value: unrestrictedMode, name: "Unrestricted" }]),
+				],
 			},
 		];
 	}
@@ -165,8 +292,11 @@ function configOptions(current, thoughtLevel = "medium") {
 			name: "Mode",
 			category: "mode",
 			type: "select",
-			currentValue: "ask",
-			options: [{ value: "ask", name: "Always Ask" }],
+			currentValue: mode,
+			options: [
+				{ value: "ask", name: "Always Ask" },
+				...(unrestrictedMode === undefined ? [] : [{ value: unrestrictedMode, name: "Unrestricted" }]),
+			],
 		},
 	];
 }
@@ -189,6 +319,7 @@ async function runPrompt(params, cx, signal) {
 	if (promptMarker) writeFileSync(promptMarker, "prompted\n", "utf-8");
 	const sessionId = params.sessionId;
 	const text = params.prompt.map((block) => (block.type === "text" ? block.text : "")).join("");
+	const attachmentKinds = params.prompt.filter((block) => block.type !== "text").map((block) => block.type);
 	const saved = stored.sessions[sessionId];
 	if (saved) {
 		saved.history.push(text);
@@ -213,6 +344,10 @@ async function runPrompt(params, cx, signal) {
 	}
 
 	if (text.includes("REPORT_PID")) await say(cx, sessionId, `pid:${process.pid}\n\n`);
+	if (text.includes("REPORT_SANDBOX_POLICY")) {
+		await say(cx, sessionId, `mode:${selectedConfig.get(sessionId)?.mode ?? "unconfigured"}`);
+		return { stopReason: "end_turn" };
+	}
 
 	if (text.includes("DELAYED_EDIT")) {
 		await say(cx, sessionId, "armed");
@@ -257,6 +392,85 @@ async function runPrompt(params, cx, signal) {
 		const outcome =
 			response.outcome.outcome === "cancelled" ? "cancelled" : `permission=${response.outcome.optionId}`;
 		await say(cx, sessionId, outcome);
+		return { stopReason: "end_turn" };
+	}
+
+	// A deterministic desktop acceptance script.  Each operation travels from
+	// this ACP process through the injected `neta mcp` stdio command, so it
+	// exercises the same proxy and actor-token boundary as a real provider.
+	if (text.includes("MCP_E2E_CREATE")) {
+		let result;
+		try {
+			result = toolData(
+				await callNetaTool("neta_mission", {
+					name: "Checkout verification",
+					objective: "Exercise the Neta mission lifecycle",
+					access: "readOnly",
+					// The lead calls Neta from its initial brief. This is deliberate:
+					// an agent must not need a second user prompt before its injected
+					// MCP tools are usable.
+					lead: { task: "MCP_E2E_BLOCK" },
+				}),
+			);
+		} catch (error) {
+			saveMissionState({ stage: "error", error: String(error) });
+			throw error;
+		}
+		const current = missionState();
+		saveMissionState({
+			...current,
+			missionId: result.id,
+			stage: current.stage === "blocked" ? "blocked" : "created",
+		});
+		await say(cx, sessionId, `created mission ${result.id}`);
+		return { stopReason: "end_turn" };
+	}
+	if (text.includes("MCP_E2E_BLOCK")) {
+		const current = missionState();
+		saveMissionState({ ...current, agentId: mcpActorId(), stage: "blocking" });
+		await callNetaTool("neta_ask", { question: "Choose the checkout refund policy" });
+		saveMissionState({ ...missionState(), stage: "blocked" });
+		await say(cx, sessionId, "waiting for refund policy");
+		return { stopReason: "end_turn" };
+	}
+	if (text.includes("MCP_E2E_RUN")) {
+		const current = missionState();
+		if (!current.agentId) throw new Error("MCP_E2E agent did not report its actor id");
+		await callNetaTool("neta_send", { agentId: current.agentId, text: "MCP_E2E_COMPLETE_WAIT" });
+		await say(cx, sessionId, "agent resumed");
+		return { stopReason: "end_turn" };
+	}
+	if (text.includes("MCP_E2E_COMPLETE_WAIT")) {
+		const current = missionState();
+		saveMissionState({ ...current, stage: "running" });
+		if (!missionControl) throw new Error("MCP_E2E requires --mission-e2e-control");
+		const release = `${missionControl}/complete.release`;
+		while (!existsSync(release) && !signal.aborted) await new Promise((resolve) => setTimeout(resolve, 20));
+		if (signal.aborted) return { stopReason: "cancelled" };
+		await callNetaTool("neta_done", { outcome: "Checkout behavior verified" });
+		saveMissionState({ ...missionState(), stage: "completed" });
+		await say(cx, sessionId, "checkout verified");
+		return { stopReason: "end_turn" };
+	}
+	if (text.includes("MCP_E2E_READY")) {
+		const current = missionState();
+		if (!current.missionId) throw new Error("MCP_E2E has no mission id");
+		await callNetaTool("neta_wait", { missionId: current.missionId, timeoutMs: 1000 });
+		await callNetaTool("neta_ready", { missionId: current.missionId, summary: "Checkout behavior verified" });
+		saveMissionState({ ...missionState(), stage: "ready" });
+		await say(cx, sessionId, "ready to close");
+		return { stopReason: "end_turn" };
+	}
+	if (text.includes("MCP_E2E_CLOSE")) {
+		const current = missionState();
+		if (!current.missionId) throw new Error("MCP_E2E has no mission id");
+		await callNetaTool("neta_close", {
+			missionId: current.missionId,
+			disposition: "abandoned",
+			reason: "fixture complete",
+		});
+		saveMissionState({ ...missionState(), stage: "closed" });
+		await say(cx, sessionId, "mission closed");
 		return { stopReason: "end_turn" };
 	}
 
@@ -337,6 +551,57 @@ async function runPrompt(params, cx, signal) {
 		};
 	}
 
+	if (text.includes("FULL_SEQUENCE")) {
+		await cx.notify(acp.methods.client.session.update, {
+			sessionId,
+			update: {
+				sessionUpdate: "plan",
+				entries: [{ content: "Inspect the workspace", priority: "high", status: "in_progress" }],
+			},
+		});
+		const toolCallId = `call_${++counter}`;
+		for (const status of ["pending", "in_progress", "completed"]) {
+			await new Promise((resolve) => setTimeout(resolve, 15));
+			await cx.notify(acp.methods.client.session.update, {
+				sessionId,
+				update: {
+					sessionUpdate: status === "pending" ? "tool_call" : "tool_call_update",
+					toolCallId,
+					title: status === "pending" ? "Inspect files" : undefined,
+					kind: "read",
+					status,
+					...(status === "completed"
+						? { content: [{ type: "diff", path: "/repo/example.ts", oldText: "old\n", newText: "new\n" }] }
+						: {}),
+				},
+			});
+		}
+		await cx.notify(acp.methods.client.session.update, {
+			sessionId,
+			update: {
+				sessionUpdate: "tool_call_update",
+				toolCallId,
+				content: [{ type: "content", content: { type: "text", text: "inspection metadata" } }],
+			},
+		});
+		await cx.notify(acp.methods.client.session.update, {
+			sessionId,
+			update: { sessionUpdate: "usage_update", used: 100, size: 1000 },
+		});
+		await say(
+			cx,
+			sessionId,
+			`Finished.${attachmentKinds.length === 0 ? "" : `\n\nAttachments received: ${attachmentKinds.join(", ")}`}\n\n- one\n- two\n\n| Item | State |\n| --- | --- |\n| Runtime | Ready |\n\n\`\`\`ts\nconst ready = true;\n\`\`\``,
+		);
+		return { stopReason: "end_turn", usage: { totalTokens: 12, inputTokens: 8, outputTokens: 4, currency: "USD" } };
+	}
+
+	if (text.includes("EXIT_MID_TURN")) {
+		await say(cx, sessionId, "partial before disconnect");
+		setTimeout(() => process.exit(23), 10);
+		await new Promise((resolve) => setTimeout(resolve, 1000));
+	}
+
 	if (text.includes("THINK")) {
 		await cx.notify(acp.methods.client.session.update, {
 			sessionId,
@@ -388,6 +653,12 @@ async function runPrompt(params, cx, signal) {
 		await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
 		return { stopReason: "cancelled" };
 	}
+	if (text.includes("HOLD_FOR_STEER")) {
+		for (let attempts = 0; attempts < 40 && !pendingSteers.has(params.sessionId); attempts += 1)
+			await new Promise((resolve) => setTimeout(resolve, 5));
+		pendingSteers.delete(params.sessionId);
+		return { stopReason: "end_turn" };
+	}
 
 	if (text.includes("SUBSTANTIVE_HANDOFF")) {
 		await say(cx, sessionId, "Substantive report: audited the control path, found the race, and verified the fix.");
@@ -413,8 +684,12 @@ const stream = acp.ndJsonStream(Writable.toWeb(process.stdout), Readable.toWeb(p
 acp.agent({ name: "fake-acp-agent" })
 	.onRequest("initialize", () => ({
 		protocolVersion: acp.PROTOCOL_VERSION,
-		agentCapabilities: unsupportedResume ? {} : { sessionCapabilities: { resume: {} } },
+		agentCapabilities: {
+			promptCapabilities: { image: true, embeddedContext: true },
+			...(unsupportedResume ? {} : { sessionCapabilities: { resume: {} } }),
+		},
 		agentInfo: { name: "fake-acp-agent", version: "1.0.0" },
+		_meta: { steering: { supported: true } },
 	}))
 	.onRequest("session/new", (ctx) => {
 		mcpServers = ctx.params.mcpServers ?? [];
@@ -447,7 +722,7 @@ acp.agent({ name: "fake-acp-agent" })
 		};
 		if (useConfigOptions || claudeShaped) {
 			const current = claudeShaped ? "claude-fable-5" : "fixture-default";
-			selectedConfig.set(sessionId, { model: current, thoughtLevel: "medium" });
+			selectedConfig.set(sessionId, { model: current, thoughtLevel: "medium", mode: "ask" });
 			response.configOptions = configOptions(current);
 		}
 		return response;
@@ -456,15 +731,22 @@ acp.agent({ name: "fake-acp-agent" })
 		if (rejectResume) throw new Error("fixture rejected resume");
 		const saved = stored.sessions[ctx.params.sessionId];
 		if (!saved) throw new Error(`unknown session ${ctx.params.sessionId}`);
-		if (saved.cwd !== ctx.params.cwd) throw new Error("resume cwd mismatch");
+		if (saved.cwd !== ctx.params.cwd && !allowResumeCwdChange) throw new Error("resume cwd mismatch");
+		saved.cwd = ctx.params.cwd;
 		mcpServers = ctx.params.mcpServers ?? [];
 		launchMcpServers(mcpServers);
 		saved.mcpServers = mcpServers;
-		selectedConfig.set(ctx.params.sessionId, { model: saved.model, thoughtLevel: saved.thoughtLevel });
+		selectedConfig.set(ctx.params.sessionId, {
+			model: saved.model,
+			thoughtLevel: saved.thoughtLevel,
+			mode: saved.configMode ?? "ask",
+		});
 		persist();
 		return {
 			modes: { availableModes: [{ id: "test-mode" }], currentModeId: saved.mode },
-			configOptions: useConfigOptions ? configOptions(saved.model, saved.thoughtLevel) : undefined,
+			configOptions: useConfigOptions
+				? configOptions(saved.model, saved.thoughtLevel, saved.configMode ?? "ask")
+				: undefined,
 		};
 	})
 	.onRequest(acp.methods.agent.session.setConfigOption, (ctx) => {
@@ -473,13 +755,15 @@ acp.agent({ name: "fake-acp-agent" })
 		if (!selected) throw new Error("config options are not supported");
 		if (ctx.params.configId === "model") selected.model = ctx.params.value;
 		if (ctx.params.configId === "thought-level") selected.thoughtLevel = ctx.params.value;
+		if (ctx.params.configId === "mode") selected.mode = ctx.params.value;
 		const saved = stored.sessions[ctx.params.sessionId];
 		if (saved) {
 			saved.model = selected.model;
 			saved.thoughtLevel = selected.thoughtLevel;
+			saved.configMode = selected.mode;
 			persist();
 		}
-		return { configOptions: configOptions(selected.model, selected.thoughtLevel) };
+		return { configOptions: configOptions(selected.model, selected.thoughtLevel, selected.mode) };
 	})
 	.onRequest("session/set_model", { parse: (params) => params }, (ctx) => {
 		if (useConfigOptions || claudeShaped) throw new Error("legacy set_model is not supported");
@@ -491,4 +775,19 @@ acp.agent({ name: "fake-acp-agent" })
 		activePrompts.get(ctx.params.sessionId)?.abort();
 	})
 	.onRequest("session/prompt", (ctx) => prompt(ctx.params, ctx.client))
+	.onRequest("_session/steering", { parse: (params) => params }, async (ctx) => {
+		if (!activePrompts.has(ctx.params.sessionId)) {
+			if (ctx.params._meta?.steering?.idleBehavior === "promptRequired")
+				return { outcome: "promptRequired", reason: "noRunningTurn" };
+			throw new Error("fixture refuses detached steering turns");
+		}
+		const text = ctx.params.prompt
+			.filter((block) => block.type === "text")
+			.map((block) => block.text)
+			.join("\n");
+		pendingSteers.set(ctx.params.sessionId, text);
+		await say(ctx.client, ctx.params.sessionId, `steered:${text}`);
+		activePrompts.get(ctx.params.sessionId)?.abort();
+		return { outcome: "injected" };
+	})
 	.connect(stream);

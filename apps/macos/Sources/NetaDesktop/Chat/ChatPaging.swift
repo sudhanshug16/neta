@@ -120,6 +120,7 @@ extension ChatViewModel {
 		}
 		if droppedOlder { droppedOlderTurns = true }
 		if droppedNewer { windowHasNewer = true }
+		contentChanged()
 	}
 
 	// MARK: - Window maintenance
@@ -131,6 +132,7 @@ extension ChatViewModel {
 		olderCursor = page.prevCursor
 		windowHasNewer = false
 		droppedOlderTurns = false
+		if cacheBytes > ChatCache.limitBytes, let anchor = turns.last?.id { trim(around: anchor) }
 	}
 
 	/// Rebuilds the window from a `turnId`-anchored page (04): the newer
@@ -140,6 +142,7 @@ extension ChatViewModel {
 		olderCursor = page.prevCursor
 		windowHasNewer = page.nextCursor != nil
 		droppedOlderTurns = false
+		if cacheBytes > ChatCache.limitBytes, let anchor = turns.first?.id { trim(around: anchor) }
 	}
 
 	/// Merges one backward page in front of the window; the newer side is
@@ -150,6 +153,7 @@ extension ChatViewModel {
 		turns.sort(by: Self.turnOrder)
 		openTurnId = turns.last(where: \.isOpen)?.id
 		olderCursor = page.prevCursor
+		if cacheBytes > ChatCache.limitBytes, let anchor = turns.last?.id { trim(around: anchor) }
 	}
 
 	/// True when `payload` must not disturb the window: the window no longer

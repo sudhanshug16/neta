@@ -109,8 +109,15 @@ Writes: `src/cli/commands/node.ts`, `test/cli-node.test.ts`.
 Contract: `export async function nodeCommand(sub: string, flags):
 Promise<number>` and `export async function openCommand(path?: string):
 Promise<number>`. `node start` runs the Node in the foreground, log on stderr;
-`--detach` spawns it detached with stdio ignored, waits for `node.json` to name
-a live pid, and prints `started  pid <pid>  <socket>`. `node stop` sends
+`--detach` spawns it detached with all three streams ignored — the child's
+stderr is `/dev/null`, so nothing holds an unlinked log open for the Node's
+lifetime — and instead the parent makes a private `mkdtemp` directory and
+names a file in it in `NETA_START_LOG`, into which the child appends the one
+message that explains a start it could not complete. The parent waits for
+`node.json` to name a live pid and the socket to answer, prints
+`started  pid <pid>  <socket>`, and removes the directory; when the child dies
+first, the last lines it wrote there are printed after the failure so the
+reason is visible and not only the timeout. `node stop` sends
 `node.stop`, waits up to 10 s for the pid to disappear, prints `stopped`; with
 no Node it prints `not running`, exit 0. `node status` prints `not running` or
 `running  pid <pid>  socket <path>  protocol <n>  uptime 2h07m`, and with
@@ -258,7 +265,7 @@ travelling in `neta mcp`'s argv, never the environment), and a closing note that
 {
   "providers": {
     "claude": { "command": "npx",
-                "args": ["-y", "@agentclientprotocol/claude-agent-acp@0.68.0"],
+                "args": ["-y", "@agentclientprotocol/claude-agent-acp@0.74.0"],
                 "defaultModel": "sonnet", "env": {} }
   },
   "leader": { "provider": "claude", "model": "sonnet" },

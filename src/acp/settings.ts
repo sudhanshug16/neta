@@ -1,5 +1,6 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { accessSync, constants, readFileSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { delimiter, isAbsolute, join, resolve } from "node:path";
 import type { Access } from "../core/types.ts";
 
 export interface ProviderSettings {
@@ -10,6 +11,7 @@ export interface ProviderSettings {
 	readWriteArgs?: string[];
 	resume: boolean;
 	defaultModel: string;
+	unsandboxedMode?: string;
 	disabled?: boolean;
 }
 
@@ -30,19 +32,21 @@ export interface PartialSettings {
 export const DEFAULT_PROVIDERS: Record<string, ProviderSettings> = {
 	claude: {
 		command: "npx",
-		args: ["-y", "@agentclientprotocol/claude-agent-acp@0.68.0"],
+		args: ["-y", "@agentclientprotocol/claude-agent-acp@0.74.0"],
 		readOnlyArgs: [],
 		readWriteArgs: [],
 		resume: true,
 		defaultModel: "sonnet",
+		unsandboxedMode: "bypassPermissions",
 	},
 	codex: {
 		command: "npx",
-		args: ["-y", "@agentclientprotocol/codex-acp@1.3.0"],
-		readOnlyArgs: ["-c", 'sandbox_mode="read-only"', "-c", 'approval_policy="never"'],
-		readWriteArgs: ["-c", 'sandbox_mode="workspace-write"', "-c", 'approval_policy="never"'],
+		args: ["-y", "@agentclientprotocol/codex-acp@1.10.0"],
+		readOnlyArgs: [],
+		readWriteArgs: [],
 		resume: true,
-		defaultModel: "gpt-5.6-terra[medium]",
+		defaultModel: "",
+		unsandboxedMode: "agent-full-access",
 	},
 	opencode: {
 		command: "opencode",
@@ -51,7 +55,13 @@ export const DEFAULT_PROVIDERS: Record<string, ProviderSettings> = {
 		readWriteArgs: [],
 		resume: true,
 		defaultModel: "",
+		unsandboxedMode: "build",
 	},
+};
+
+const RETIRED_DEFAULT_ARGS: Record<string, string[]> = {
+	claude: ["-y", "@agentclientprotocol/claude-agent-acp@0.68.0"],
+	codex: ["-y", "@agentclientprotocol/codex-acp@1.3.0"],
 };
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -73,6 +83,7 @@ function mergeProvider(base: ProviderSettings | undefined, patch: Partial<Provid
 		readWriteArgs: patch.readWriteArgs === undefined ? base?.readWriteArgs : [...patch.readWriteArgs],
 		resume: patch.resume ?? base?.resume ?? true,
 		defaultModel: patch.defaultModel ?? base?.defaultModel ?? "",
+		unsandboxedMode: patch.unsandboxedMode ?? base?.unsandboxedMode,
 		disabled: patch.disabled ?? base?.disabled,
 	};
 }
@@ -175,12 +186,30 @@ function validateLayer(raw: unknown, where: string, warnings: string[]): Partial
 						warnings.push(`${where}: provider ${name} defaultModel is not a string, ignoring`);
 					}
 				}
+				if (fields.unsandboxedMode !== undefined) {
+					if (isString(fields.unsandboxedMode)) kept.unsandboxedMode = fields.unsandboxedMode;
+					else warnings.push(`${where}: provider ${name} unsandboxedMode is not a string, ignoring`);
+				}
 				if (fields.disabled !== undefined) {
 					if (typeof fields.disabled === "boolean") {
 						kept.disabled = fields.disabled;
 					} else {
 						warnings.push(`${where}: provider ${name} disabled is not a boolean, ignoring`);
 					}
+				}
+				// Settings files generated from an older shipped catalog often
+				// contain the complete built-in launch tuple. Advance only that
+				// exact tuple; partial or custom provider pins remain authoritative.
+				const retired = RETIRED_DEFAULT_ARGS[name];
+				if (
+					retired !== undefined &&
+					kept.command === "npx" &&
+					kept.args !== undefined &&
+					kept.args.length === retired.length &&
+					kept.args.every((arg, index) => arg === retired[index])
+				) {
+					kept.args = [...(DEFAULT_PROVIDERS[name]?.args ?? kept.args)];
+					warnings.push(`${where}: provider ${name} used a retired shipped adapter; using the current default`);
 				}
 				providers[name] = kept;
 			}
@@ -297,6 +326,50 @@ export function launchArgs(p: ProviderSettings, access: Access): string[] {
 	return [...p.args, ...extra];
 }
 
+export function launchEnvironment(p: ProviderSettings, access: Access): Record<string, string> {
+	const environment = { ...p.env };
+	if (p.args.some((arg) => arg.includes("@agentclientprotocol/codex-acp@"))) {
+		environment.INITIAL_AGENT_MODE = access === "readOnly" ? "read-only" : "agent";
+	}
+	return environment;
+}
+
 export function isForbiddenModel(s: Settings, model: string): boolean {
 	return s.forbiddenModels.includes(model);
+}
+
+export function providerPath(provider: ProviderSettings): string {
+	if (provider.env?.PATH !== undefined) return provider.env.PATH;
+	const inherited = (process.env.PATH ?? "").split(delimiter).filter((entry) => entry !== "");
+	const extra = [
+		join(homedir(), ".local", "bin"),
+		join(homedir(), ".opencode", "bin"),
+		join(homedir(), ".bun", "bin"),
+		"/opt/homebrew/bin",
+		"/usr/local/bin",
+		"/usr/bin",
+		"/bin",
+		"/usr/sbin",
+		"/sbin",
+	];
+	return [...new Set([...inherited, ...extra])].join(delimiter);
+}
+
+export function providerCommandAvailable(provider: ProviderSettings, cwd = process.cwd()): boolean {
+	const hasPath = provider.command.includes("/");
+	const candidates = isAbsolute(provider.command)
+		? [provider.command]
+		: hasPath
+			? [resolve(cwd, provider.command)]
+			: providerPath(provider)
+					.split(delimiter)
+					.map((dir) => join(dir, provider.command));
+	return candidates.some((candidate) => {
+		try {
+			accessSync(candidate, constants.X_OK);
+			return statSync(candidate).isFile();
+		} catch {
+			return false;
+		}
+	});
 }

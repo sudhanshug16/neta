@@ -56,6 +56,52 @@ describe("model negotiation", () => {
 		});
 	});
 
+	test("keeps grouped config models and enriches matching rows from legacy metadata", () => {
+		const state = modelStateFrom({
+			configOptions: [
+				{
+					id: "model",
+					category: "model",
+					type: "select",
+					currentValue: "fable",
+					options: [
+						{
+							group: "recommended",
+							name: "Recommended",
+							options: [
+								{ value: "fable", name: "fable" },
+								{ value: "sonnet", name: "Claude Sonnet", description: "Balanced" },
+							],
+						},
+						{ group: "other", name: "Other", options: [{ value: "haiku", name: "Claude Haiku" }] },
+					],
+				},
+			],
+			models: {
+				availableModels: [
+					{ modelId: "fable", name: "Claude Fable 5.1", description: "Newest generation" },
+					{ modelId: "not-selectable", name: "Hidden" },
+				],
+				currentModelId: "fable",
+			},
+		});
+		expect(state.options).toEqual([
+			{ id: "fable", name: "Claude Fable 5.1", description: "Newest generation" },
+			{ id: "sonnet", name: "Claude Sonnet", description: "Balanced" },
+			{ id: "haiku", name: "Claude Haiku" },
+		]);
+	});
+
+	test("legacy models retain provider names and descriptions", () => {
+		const state = modelStateFrom({
+			models: {
+				availableModels: [{ modelId: "fable", name: "Claude Fable 5.1", description: "Newest generation" }],
+				currentModelId: "fable",
+			},
+		});
+		expect(state.options).toEqual([{ id: "fable", name: "Claude Fable 5.1", description: "Newest generation" }]);
+	});
+
 	test("--bare gives none", async () => {
 		const state = modelStateFrom(await newResponse(["--bare"]));
 		expect(state).toEqual({ source: "none", options: [] });

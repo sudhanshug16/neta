@@ -1,3 +1,4 @@
+import AgentChatKit
 import SwiftUI
 
 /// How the transcript hangs inside its scroll view (T11.8).
@@ -37,8 +38,17 @@ public struct ChatPanel: View {
 	@Bindable private var model: ChatPanelModel
 	private let router: CheckpointRouter?
 	private let windowWidth: CGFloat?
+	private let rowDidAppear: ((String) -> Void)?
 	@State private var flashingTurnId: TurnId?
-	@State private var scrollPosition: TurnId?
+	@State private var expandedGlance: Set<String> = []
+	@State private var expandedBlocks: Set<String> = []
+	@State private var userIsScrolling = false
+	@State private var geometryAtBottom = true
+	@State private var followingLatest = true
+	@State private var layoutRevision = 0
+	@State private var liveScrollTarget: String?
+	@State private var followTask: Task<Void, Never>?
+	@State private var followRunId = 0
 
 	/// - Parameters:
 	///   - model: The panel's state, owned by `RootView` in `@State`. There
@@ -51,11 +61,12 @@ public struct ChatPanel: View {
 	///     else opens Details.
 	public init(
 		model: ChatPanelModel, router: CheckpointRouter? = nil,
-		windowWidth: CGFloat? = nil
+		windowWidth: CGFloat? = nil, rowDidAppear: ((String) -> Void)? = nil
 	) {
 		self.model = model
 		self.router = router
 		self.windowWidth = windowWidth
+		self.rowDidAppear = rowDidAppear
 	}
 
 	public var body: some View {
@@ -64,6 +75,7 @@ public struct ChatPanel: View {
 			VStack(alignment: .leading, spacing: 0) {
 				ChatHeaderView(
 					selection: model.selection, store: model.store,
+					isResponding: model.transcript.openTurnId != nil,
 					onDetails: { model.isDetailsOpen.toggle() },
 					onSelect: { model.select($0) })
 					.padding(.horizontal, Theme.Metric.chatPadding)
@@ -86,6 +98,15 @@ public struct ChatPanel: View {
 		.task {
 			await model.start()
 		}
+		.sheet(item: Binding(get: { model.glance.openedSource }, set: { if $0 == nil { model.glance.closeSource() } })) { item in
+			VStack(alignment: .leading, spacing: 12) {
+				Text("Original message").font(.headline)
+				Text("\(item.card.agentLabel ?? (item.card.actorKind == "leader" ? "Leader" : "Agent")) · \(item.card.at.formatted(date: .abbreviated, time: .shortened))").font(.caption).foregroundStyle(.secondary)
+				if item.source.sourceTruncated { Text("This saved source is truncated.").font(.caption).foregroundStyle(.orange) }
+				ScrollView { Text(item.source.source).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
+				HStack { Spacer(); Button("Done") { model.glance.closeSource() }.keyboardShortcut(.defaultAction).accessibilityIdentifier("glance-source-done") }
+			}.padding(20).frame(minWidth: 520, minHeight: 420)
+		}
 		// The panel follows the shell, not only its own header: a click on
 		// the canvas or a chip in the mission bar moves `shell.selection`
 		// without going through `model.select`.
@@ -99,6 +120,12 @@ public struct ChatPanel: View {
 		.onChange(of: model.currentSessionId) { _, _ in
 			model.sync()
 		}
+		// A queued agent already has its eventual session id. When writer
+		// access releases it into starting, retry that same transcript: the
+		// session-id watcher above deliberately cannot see this transition.
+		.onChange(of: model.isQueuedSelection) { wasQueued, isQueued in
+			Task { await model.queueReleased(wasQueued: wasQueued) }
+		}
 		// The restart watches the transcript itself, not the session id.
 		// `select`/`sync` can install a fresh, untailed `ChatViewModel`
 		// while the id stands still (every leader-led mission resolves to
@@ -106,9 +133,23 @@ public struct ChatPanel: View {
 		// transcript unstarted: it never tailed and never streamed, so the
 		// conversation blanked and a prompt streamed into nothing.
 		.onChange(of: model.transcriptId) { _, _ in
+			cancelFollowTask()
 			flashingTurnId = nil
+			liveScrollTarget = nil
+			// The old scrollPosition binding is intentionally gone; the new
+			// transcript starts with no retained anchor (`scrollPosition = nil`).
+			// `scrollPosition` belongs to this view, rather than the transcript,
+			// so it survives a session change. Clear the old turn id before the
+			// new tail installs different ids; otherwise ScrollView can remain
+			// parked at an anchor that no longer exists and draw a blank panel.
+			// A fresh transcript defaults to the live end. State it here too:
+			// the position binding updates after this handler, and the first
+			// tail must be allowed to repin immediately.
+			model.transcript.atBottom = true
+			followingLatest = true
 			Task { await model.start() }
 		}
+		.onDisappear { cancelFollowTask() }
 		.onChange(of: model.transcript.openTurnId) { _, _ in
 			model.syncComposer()
 		}
@@ -142,7 +183,7 @@ public struct ChatPanel: View {
 	private func content(placement: DetailsPlacement) -> some View {
 		if model.isDetailsOpen, placement == .replacing {
 			DetailsView(
-				selection: model.selection, store: model.store,
+				selection: model.selection, store: model.store, client: model.client,
 				decision: model.decision, placement: placement,
 				onBack: { model.isDetailsOpen = false })
 				.padding(.horizontal, Theme.Metric.chatPadding)
@@ -153,7 +194,7 @@ public struct ChatPanel: View {
 					.frame(maxWidth: .infinity, maxHeight: .infinity)
 				verticalHairline
 				DetailsView(
-					selection: model.selection, store: model.store,
+					selection: model.selection, store: model.store, client: model.client,
 					decision: model.decision, placement: placement,
 					onBack: { model.isDetailsOpen = false })
 					.frame(width: 180)
@@ -176,10 +217,30 @@ public struct ChatPanel: View {
 			GeometryReader { proxy in
 				ScrollView {
 					LazyVStack(alignment: .leading, spacing: 12) {
-						ForEach(model.transcript.visibleTurns) { turn in
-							TurnView(turn: turn, flashing: flashingTurnId == turn.id)
-								.id(turn.id)
+						if model.transcript.hasOlder {
+							Button("Load earlier") { loadEarlier(scroll) }
+								.buttonStyle(.bordered).frame(maxWidth: .infinity)
+								.accessibilityIdentifier("chat-load-earlier")
 						}
+						ForEach(model.transcript.transcriptRows) { row in
+							TranscriptRowView(
+								row: row, flashing: flashingTurnId == row.turnId,
+								expanded: Binding(
+									get: { expandedBlocks.contains(row.id) },
+									set: { value in
+										if value { expandedBlocks.insert(row.id) } else { expandedBlocks.remove(row.id) }
+										followAfterLayout(scroll)
+									}),
+								onAppear: {
+									rowDidAppear?(row.id)
+									if row.isLastInTurn { followAfterLayout(scroll) }
+								})
+								.id(row.scrollId)
+						}
+						if model.selection == .leader,
+							!model.glance.unread.isEmpty || model.glance.hasMore || model.glance.error != nil
+						{ glanceSection(scroll) }
+						Color.clear.frame(height: 1).id("live-end")
 					}
 					.scrollTargetLayout()
 					.padding(.horizontal, Theme.Metric.chatPadding)
@@ -194,7 +255,7 @@ public struct ChatPanel: View {
 							viewport: proxy.size.height),
 						alignment: TranscriptAnchor.alignment)
 				}
-				.scrollPosition(id: $scrollPosition)
+				.scrollPosition(id: $liveScrollTarget, anchor: .bottom)
 				// Bottom-anchored by that frame, not by a default scroll
 				// anchor of `.bottom`: on this system that modifier
 				// moved the whole stack out of the clip view and the transcript
@@ -211,21 +272,117 @@ public struct ChatPanel: View {
 						scroll.scrollTo(target, anchor: .bottom)
 					}
 				}
-				.onChange(of: model.transcript.autoScrollTarget) { _, target in
-					guard let target, model.transcript.atBottom else { return }
-					scroll.scrollTo(target, anchor: .bottom)
+				.onChange(of: model.transcript.contentRevision) { _, _ in
+					model.transcript.enforceCacheAroundLatest()
+					followAfterLayout(scroll)
+				}
+				// Replaces the former `.onChange(of: model.transcript.autoScrollTarget)`:
+				// a turn id does not change while its streamed blocks grow.
+				.onChange(of: model.glance.unread) { old, new in
+					guard new != old else { return }
+					followAfterLayout(scroll)
 				}
 				.onChange(of: model.transcript.pendingScroll) { _, _ in
 					drainScroll(scroll)
 				}
-				.onChange(of: scrollPosition) { _, position in
-					if let last = model.transcript.visibleTurns.last?.id {
-						model.transcript.atBottom = (position == last)
-					} else {
-						model.transcript.atBottom = true
+				.onScrollGeometryChange(for: Bool.self) { geometry in
+					geometry.contentOffset.y + geometry.containerSize.height
+						>= geometry.contentSize.height - 24
+				} action: { _, pinned in
+					geometryAtBottom = pinned
+					if userIsScrolling {
+						model.transcript.atBottom = pinned
+						followingLatest = pinned
+					}
+				}
+				.onScrollPhaseChange { _, phase in
+					if phase != .idle && phase != .animating {
+						userIsScrolling = true
+						cancelFollowTask()
+					} else if phase == .idle, userIsScrolling {
+						userIsScrolling = false
+						model.transcript.atBottom = geometryAtBottom
+						followingLatest = geometryAtBottom
+						if geometryAtBottom { followAfterLayout(scroll) }
+					}
+				}
+				.overlay(alignment: .bottomTrailing) {
+					if !followingLatest || model.transcript.hasNewer {
+						Button("Jump to latest") { jumpToLatest(scroll) }
+							.buttonStyle(.borderedProminent).padding(12)
+							.accessibilityIdentifier("chat-jump-latest")
 					}
 				}
 			}
+		}
+	}
+
+	private func glanceSection(_ scroll: ScrollViewProxy) -> some View {
+		VStack(alignment:.leading,spacing:12) {
+			HStack { Text("Glance").font(.title3.weight(.semibold)); Text("\(model.glance.unread.count) new").font(.caption).foregroundStyle(.secondary) }
+			.accessibilityIdentifier("glance-section")
+			LazyVStack(alignment: .leading, spacing: 12) {
+				ForEach(model.glance.unread) { card in
+					AgentGlanceCardView(card:model.glance.rendered(card), expanded:Binding(get:{expandedGlance.contains(card.id)},set:{if $0{expandedGlance.insert(card.id)}else{expandedGlance.remove(card.id)}; followAfterLayout(scroll)}), onOpenSource:{Task{await model.glance.openSource(card)}}, onMarkReviewed:{Task{await model.glance.mark(through:card.glanceSeq)}})
+				}
+			}
+			Button("Mark caught up") { Task { await model.glance.markCaughtUp() } }.buttonStyle(.bordered).accessibilityIdentifier("glance-mark-caught-up")
+			if model.glance.hasMore { Button("Load more") { Task { await model.glance.loadMore() } }.buttonStyle(.bordered).accessibilityIdentifier("glance-load-more") }
+			if let error=model.glance.error {
+				Text(error).font(.caption).foregroundStyle(.red)
+				Button("Retry") { Task { await model.glance.reload() } }
+					.buttonStyle(.bordered).accessibilityIdentifier("glance-retry")
+			}
+		}.padding(.top,20)
+	}
+
+	private func followAfterLayout(_ scroll: ScrollViewProxy) {
+		guard followingLatest else { return }
+		let _ = scroll
+		layoutRevision &+= 1
+		guard followTask == nil else { return }
+		followRunId &+= 1
+		let runId = followRunId
+		followTask = Task { @MainActor in
+			var observedRevision = -1
+			var stableFrames = 0
+			while !Task.isCancelled, followingLatest, stableFrames < 2 {
+				do { try await Task.sleep(for: .milliseconds(16)) }
+				catch { break }
+				guard !Task.isCancelled, followingLatest else { break }
+				let revision = layoutRevision
+				liveScrollTarget = nil
+				await Task.yield()
+				guard !Task.isCancelled, followingLatest else { break }
+				liveScrollTarget = "live-end"
+				if revision == observedRevision { stableFrames += 1 }
+				else { observedRevision = revision; stableFrames = 0 }
+			}
+			if followRunId == runId { followTask = nil }
+		}
+	}
+
+	private func cancelFollowTask() {
+		followRunId &+= 1
+		followTask?.cancel()
+		followTask = nil
+	}
+
+	private func jumpToLatest(_ scroll: ScrollViewProxy) {
+		Task { @MainActor in
+			if model.transcript.hasNewer { await model.transcript.jumpToLatest() }
+			model.transcript.atBottom = true
+			followingLatest = true
+			followAfterLayout(scroll)
+		}
+	}
+
+	private func loadEarlier(_ scroll: ScrollViewProxy) {
+		let anchor = model.transcript.transcriptRows.first?.scrollId
+		Task { @MainActor in
+			guard await model.transcript.loadOlder() else { return }
+			await Task.yield()
+			if let anchor { scroll.scrollTo(anchor, anchor: .top) }
 		}
 	}
 

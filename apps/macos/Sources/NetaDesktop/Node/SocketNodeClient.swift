@@ -1,13 +1,20 @@
 import Foundation
 import Network
+import Darwin
 
 /// The `node.json` descriptor a running Node leaves in `~/.neta` (04-node
 /// T4.2). The file also carries `startedAt`, which this client ignores.
-public struct NodeInfo: Codable, Sendable {
+public struct NodeInfo: Codable, Sendable, Equatable {
 	public let socket: String
 	public let token: String
 	public let pid: Int
 	public let protocolVersion: Int
+	public let runtimeBuild: String?
+
+	public init(socket: String, token: String, pid: Int, protocolVersion: Int, runtimeBuild: String? = nil) {
+		self.socket = socket; self.token = token; self.pid = pid
+		self.protocolVersion = protocolVersion; self.runtimeBuild = runtimeBuild
+	}
 }
 
 /// Starts a Node when `connect()` finds no socket. Sendable so the client
@@ -31,7 +38,11 @@ public struct BundledNodeLauncher: NodeLauncher {
 		process.standardInput = FileHandle.nullDevice
 		process.standardOutput = FileHandle.nullDevice
 		process.standardError = FileHandle.nullDevice
-		try process.run()
+		try await withCheckedThrowingContinuation { continuation in
+			process.terminationHandler = { _ in continuation.resume() }
+			do { try process.run() } catch { continuation.resume(throwing: error) }
+		}
+		guard process.terminationStatus == 0 else { throw NodeClientError.nodeUnavailable }
 	}
 }
 
@@ -42,12 +53,25 @@ public enum NodeClientError: Error, Sendable, Equatable {
 	/// The node's protocol version differs from `SocketNodeClient.protocolVersion`.
 	/// The payload is the version the node reported.
 	case protocolMismatch(Int)
+	case runtimeMismatch
 	/// The node rejected the handshake, e.g. a stale token (`UNAUTHORIZED`).
 	case rejected(String)
 	/// A JSON-RPC error response to a normal request.
 	case rpc(code: Int, message: String)
 	/// The connection dropped; pending requests fail with this.
 	case disconnected
+}
+
+extension NodeClientError: LocalizedError {
+	public var errorDescription: String? {
+		switch self {
+		case .protocolMismatch, .runtimeMismatch:
+			"This app needs to update the running Neta service."
+		case .nodeUnavailable: "The Neta service is unavailable."
+		case .rejected(let message), .rpc(_, let message): message
+		case .disconnected: "The Neta service disconnected."
+		}
+	}
 }
 
 /// Fans one Node's notifications out to every consumer (FIXPASS G4-3).
@@ -121,7 +145,7 @@ final class NotificationHub: @unchecked Sendable {
 /// fail with `.disconnected`; the caller reconnects with a fresh snapshot.
 public actor SocketNodeClient: NodeClient {
 	/// 04's `PROTOCOL_VERSION`.
-	public static let protocolVersion = 1
+	public static let protocolVersion = 3
 
 	/// `~/.neta`, or `$NETA_DIR` when set (04: it overrides the default).
 	public static let defaultDirectory: URL = {
@@ -184,10 +208,10 @@ public actor SocketNodeClient: NodeClient {
 
 	/// Launches at most once per `connect()` call, and at most
 	/// `maxLaunchAttempts` times across consecutive failures.
-	private func launchIfAllowed() async {
+	private func launchIfAllowed() async throws {
 		guard launchAttempts < Self.maxLaunchAttempts else { return }
 		launchAttempts += 1
-		try? await launcher.start()
+		try await launcher.start()
 	}
 
 	// MARK: - Connect
@@ -215,7 +239,7 @@ public actor SocketNodeClient: NodeClient {
 					dropConnection()
 					if !launched {
 						launched = true
-						await launchIfAllowed()
+						try await launchIfAllowed()
 					}
 					guard Date() < deadline else {
 						dropConnection()
@@ -223,7 +247,7 @@ public actor SocketNodeClient: NodeClient {
 						throw NodeClientError.nodeUnavailable
 					}
 					try await Task.sleep(for: retryInterval)
-				case .protocolMismatch, .rejected, .rpc:
+				case .protocolMismatch, .runtimeMismatch, .rejected, .rpc:
 					dropConnection()
 					hub.finishAll()
 					throw error
@@ -232,7 +256,7 @@ public actor SocketNodeClient: NodeClient {
 				dropConnection()
 				if !launched {
 					launched = true
-					await launchIfAllowed()
+					try await launchIfAllowed()
 				}
 				guard Date() < deadline else {
 					dropConnection()
@@ -244,6 +268,73 @@ public actor SocketNodeClient: NodeClient {
 		}
 	}
 
+	/// Uses the bundled CLI's authenticated handshake to stop the recorded
+	/// service during an app upgrade. If that succeeds but the exact same
+	/// descriptor remains live, terminate only that authenticated PID.
+	public func stopIncompatibleNode() async throws {
+		let original = try readNodeInfo()
+		guard let resources = Bundle.main.resourceURL else { throw NodeClientError.nodeUnavailable }
+		let process = Process()
+		process.executableURL = resources.appendingPathComponent("neta", isDirectory: false)
+		process.arguments = ["node", "stop"]
+		process.standardInput = FileHandle.nullDevice
+		process.standardOutput = FileHandle.nullDevice
+		let errors = Pipe()
+		process.standardError = errors
+		var environment = ProcessInfo.processInfo.environment
+		environment["NETA_DIR"] = netaDirectory.path
+		process.environment = environment
+		try await withCheckedThrowingContinuation { continuation in
+			process.terminationHandler = { _ in continuation.resume() }
+			do { try process.run() } catch { continuation.resume(throwing: error) }
+		}
+		let message = String(data: errors.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+			.trimmingCharacters(in: .whitespacesAndNewlines)
+		// This precise failure occurs only after the CLI read the descriptor,
+		// authenticated its token, and received node.stop. Other failures never
+		// authorize signalling a process.
+		let authenticatedTimeout = Self.authorizesForcedStop(message: message, pid: original.pid)
+		let mayForceOwnedService = forceEligible(original)
+		guard process.terminationStatus == 0 || authenticatedTimeout || mayForceOwnedService else {
+			throw NodeClientError.rejected(message?.isEmpty == false ? message! : "The old Neta service could not be stopped.")
+		}
+		for _ in 0..<20 {
+			if kill(pid_t(original.pid), 0) != 0, errno == ESRCH { break }
+			try await Task.sleep(for: .milliseconds(100))
+		}
+		if kill(pid_t(original.pid), 0) == 0, (authenticatedTimeout || mayForceOwnedService),
+			(try? readNodeInfo()) == original
+		{
+			_ = kill(pid_t(original.pid), SIGTERM)
+			for _ in 0..<20 {
+				if kill(pid_t(original.pid), 0) != 0, errno == ESRCH { break }
+				try await Task.sleep(for: .milliseconds(100))
+			}
+			if kill(pid_t(original.pid), 0) == 0, (try? readNodeInfo()) == original {
+				_ = kill(pid_t(original.pid), SIGKILL)
+			}
+		}
+		dropConnection()
+		launchAttempts = 0
+		knownServerVersion = nil
+	}
+
+	static func authorizesForcedStop(message: String?, pid: Int) -> Bool {
+		message?.hasPrefix("neta: timed out waiting for pid \(pid) to stop") == true
+	}
+
+	private func forceEligible(_ info: NodeInfo) -> Bool {
+		guard kill(pid_t(info.pid), 0) == 0, (try? readNodeInfo()) == info else { return false }
+		let socket = URL(fileURLWithPath: resolveSocketPath(info)).standardizedFileURL
+		guard socket.deletingLastPathComponent() == netaDirectory.standardizedFileURL else { return false }
+		var bytes = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+		let count = proc_pidpath(Int32(info.pid), &bytes, UInt32(bytes.count))
+		guard count > 0 else { return false }
+		let path = String(decoding: bytes.prefix(Int(count)).map { UInt8(bitPattern: $0) }, as: UTF8.self)
+		let executable = URL(fileURLWithPath: path).resolvingSymlinksInPath()
+		return executable.lastPathComponent == "neta"
+	}
+
 	/// `retryWindow` in seconds, for the wall-clock deadline above.
 	private var retryWindowSeconds: Double {
 		let components = retryWindow.components
@@ -253,8 +344,17 @@ public actor SocketNodeClient: NodeClient {
 	private func attemptConnect() async throws {
 		let info = try readNodeInfo()
 		knownServerVersion = info.protocolVersion
+		if kill(pid_t(info.pid), 0) != 0, errno == ESRCH {
+			try? FileManager.default.removeItem(at: netaDirectory.appendingPathComponent("node.json"))
+			throw NodeClientError.nodeUnavailable
+		}
 		guard info.protocolVersion == Self.protocolVersion else {
 			throw NodeClientError.protocolMismatch(info.protocolVersion)
+		}
+		if let expected = Bundle.main.object(forInfoDictionaryKey: "NetaRuntimeBuild") as? String,
+			!expected.isEmpty, info.runtimeBuild != expected
+		{
+			throw NodeClientError.runtimeMismatch
 		}
 		let socketPath = resolveSocketPath(info)
 		try await withTimeout(seconds: Self.attemptTimeout) {
@@ -332,10 +432,46 @@ public actor SocketNodeClient: NodeClient {
 	}
 
 	public func prompt(sessionId: Ulid, text: String) async throws -> Ulid {
+		try await prompt(sessionId: sessionId, text: text, attachments: [])
+	}
+
+	public func prompt(sessionId: Ulid, text: String, attachments: [PromptAttachment]) async throws -> Ulid {
 		guard connected else { throw NodeClientError.disconnected }
+		var params: [String: Any] = ["sessionId": sessionId, "text": text]
+		if !attachments.isEmpty {
+			params["attachments"] = attachments.map { ["id": $0.id, "kind": $0.kind.rawValue, "name": $0.name, "mimeType": $0.mimeType, "dataBase64": $0.dataBase64] }
+		}
 		let result: PromptResult = try await sendRequest(
-			method: "conversation.prompt", params: ["sessionId": sessionId, "text": text])
-		return result.turnId
+			method: "conversation.prompt", params: params)
+		guard let id = result.turnId ?? result.messageId else { throw NodeClientError.rejected("Prompt acknowledgement had no id") }
+		return id
+	}
+
+	public func conversationInbox(sessionId: Ulid) async throws -> [InboxMessage] {
+		guard connected else { throw NodeClientError.disconnected }
+		let result: InboxResult = try await sendRequest(method: "conversation.inbox", params: ["sessionId": sessionId])
+		return result.messages
+	}
+
+	public func capabilities(sessionId: Ulid) async throws -> ConversationCapabilities {
+		guard connected else { throw NodeClientError.disconnected }
+		return try await sendRequest(method: "conversation.capabilities", params: ["sessionId": sessionId])
+	}
+
+	public func glanceList(workspaceId: String, after: Int, limit: Int) async throws -> GlancePage {
+		try await sendRequest(method: "glance.list", params: ["workspaceId": workspaceId, "after": after, "limit": limit])
+	}
+	public func glanceSource(workspaceId: String, id: String) async throws -> GlanceSource {
+		try await sendRequest(method: "glance.source", params: ["workspaceId": workspaceId, "id": id])
+	}
+	public func glanceComplete(workspaceId: String, id: String, sourceHash: String, result: GlanceResult) async throws -> GlanceCard {
+		let encoded = try JSONSerialization.jsonObject(with: NetaJSON.encoder.encode(result))
+		let response: GlanceCardEnvelope = try await sendRequest(method: "glance.complete", params: ["workspaceId": workspaceId, "id": id, "sourceHash": sourceHash, "result": encoded])
+		return response.card
+	}
+	public func glanceMarkReviewed(workspaceId: String, through: Int) async throws -> Int {
+		let response: GlanceReviewEnvelope = try await sendRequest(method: "glance.markReviewed", params: ["workspaceId": workspaceId, "throughGlanceSeq": through])
+		return response.reviewedThroughGlanceSeq
 	}
 
 	public func cancel(sessionId: Ulid) async throws {
@@ -354,7 +490,42 @@ public actor SocketNodeClient: NodeClient {
 		guard connected else { throw NodeClientError.disconnected }
 		let result: ModelsResult = try await sendRequest(
 			method: "models.list", params: ["provider": provider])
-		return result.models.map { ModelInfo(id: $0.id, provider: $0.provider, label: $0.name) }
+		return result.models.map { ModelInfo(id: $0.id, provider: $0.provider, label: $0.name, description: $0.description) }
+	}
+
+	public func listModels(sessionId: Ulid) async throws -> [ModelInfo] {
+		guard connected else { throw NodeClientError.disconnected }
+		let result: ModelsResult = try await sendRequest(method: "models.list", params: ["sessionId": sessionId])
+		return result.models.map { ModelInfo(id: $0.id, provider: $0.provider, label: $0.name, description: $0.description) }
+	}
+
+	public func listProviders() async throws -> [ProviderInfo] {
+		try await listProviders(sessionId: "")
+	}
+
+	public func listProviders(sessionId: Ulid) async throws -> [ProviderInfo] {
+		guard connected else { throw NodeClientError.disconnected }
+		let result: ProvidersResult = try await sendRequest(method: "providers.list", params: sessionId.isEmpty ? [:] : ["sessionId": sessionId])
+		return result.providers
+	}
+
+	public func prepareHandoff(sessionId: Ulid) async throws -> String {
+		guard connected else { throw NodeClientError.disconnected }
+		let result: HandoffResult = try await sendRequest(method: "conversation.prepareHandoff", params: ["sessionId": sessionId])
+		return result.markdown
+	}
+
+	public func setProvider(sessionId: Ulid, provider: String, model: String?, handoff: String?) async throws -> ProviderSwitchResult {
+		guard connected else { throw NodeClientError.disconnected }
+		var params: [String: String] = ["sessionId": sessionId, "provider": provider]
+		if let model { params["model"] = model }
+		if let handoff { params["handoff"] = handoff }
+		return try await sendRequest(method: "conversation.setProvider", params: params)
+	}
+
+	public func resetChat(sessionId: Ulid) async throws -> ProviderSwitchResult {
+		guard connected else { throw NodeClientError.disconnected }
+		return try await sendRequest(method: "conversation.reset", params: ["sessionId": sessionId])
 	}
 
 	public func setMode(workspaceId: String, mode: LeaderMode) async throws {
@@ -573,6 +744,9 @@ public actor SocketNodeClient: NodeClient {
 				return nil
 			}
 			return .node(lifecycle)
+		case "glance.changed":
+			guard let change = try? NetaJSON.decoder.decode(GlanceChange.self, from: paramsData) else { return nil }
+			return .glance(change)
 		default:
 			return nil
 		}
@@ -672,13 +846,19 @@ private struct EventsResult: Decodable {
 }
 
 private struct PromptResult: Decodable {
-	let turnId: TurnId
+	let turnId: TurnId?
+	let messageId: Ulid?
+	let status: String?
 }
+private struct InboxResult: Decodable { let messages: [InboxMessage] }
+private struct GlanceCardEnvelope: Decodable { let card: GlanceCard }
+private struct GlanceReviewEnvelope: Decodable { let reviewedThroughGlanceSeq: Int }
 
 private struct WireModel: Decodable {
 	let id: String
 	let name: String
 	let provider: String
+	let description: String?
 }
 
 private struct ModelsResult: Decodable {
@@ -694,3 +874,6 @@ private struct WorkspaceOpenResult: Decodable {
 	let workspace: Workspace
 	let leader: Leader?
 }
+
+private struct ProvidersResult: Decodable { let providers: [ProviderInfo] }
+private struct HandoffResult: Decodable { let sessionId: Ulid; let markdown: String }

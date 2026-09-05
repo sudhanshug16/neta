@@ -23,7 +23,7 @@ export interface WorktreeServiceDeps {
 export interface WorktreeService {
 	prepare(mission: Mission, workspace: Workspace): Promise<Mission>;
 	acquireWriter(m: Mission, w: Workspace, a: AgentId): Promise<LeaseOutcome>;
-	releaseWriter(workspaceId: WorkspaceId, a: AgentId): Promise<void>;
+	releaseWriter(workspaceId: WorkspaceId, a: AgentId): Promise<Array<{ key: string; promoted?: AgentId }>>;
 	refreshIntegration(mission: Mission): Promise<Mission>;
 	close(input: CloseMissionInput): Promise<CloseOutcome>;
 }
@@ -75,7 +75,7 @@ export function createWorktreeService(deps: WorktreeServiceDeps): WorktreeServic
 		},
 
 		async releaseWriter(workspaceId, a) {
-			await deps.leases.release(workspaceId, a);
+			return deps.leases.release(workspaceId, a);
 		},
 
 		async refreshIntegration(mission) {

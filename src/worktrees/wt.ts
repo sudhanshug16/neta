@@ -3,6 +3,8 @@
 // (integration.ts). The binary is invoked directly, always non-interactively:
 // stdin ignored, `-y`, `NO_COLOR=1`, `WORKTRUNK_VERBOSE=0`.
 import { spawn } from "node:child_process";
+import { homedir } from "node:os";
+import { delimiter, join } from "node:path";
 
 export interface WtRun {
 	stdout: string;
@@ -45,7 +47,30 @@ export function wtBinary(): string {
 const DEFAULT_TIMEOUT_MS = 120_000;
 
 function baseEnv(): Record<string, string> {
-	return { ...process.env, NO_COLOR: "1", WORKTRUNK_VERBOSE: "0", TERM: "dumb" } as Record<string, string>;
+	return {
+		...process.env,
+		PATH: wtSearchPath(),
+		NO_COLOR: "1",
+		WORKTRUNK_VERBOSE: "0",
+		TERM: "dumb",
+	} as Record<string, string>;
+}
+
+export function wtSearchPath(inheritedPath = process.env.PATH ?? "", home = homedir()): string {
+	const inherited = inheritedPath.split(delimiter).filter((entry) => entry !== "");
+	return [
+		...new Set([
+			...inherited,
+			join(home, ".local", "bin"),
+			join(home, ".cargo", "bin"),
+			"/opt/homebrew/bin",
+			"/usr/local/bin",
+			"/usr/bin",
+			"/bin",
+			"/usr/sbin",
+			"/sbin",
+		]),
+	].join(delimiter);
 }
 
 export function runWt(argv: readonly string[], o: WtOptions): Promise<WtRun> {
@@ -65,7 +90,11 @@ export function runWt(argv: readonly string[], o: WtOptions): Promise<WtRun> {
 			stderr += chunk.toString("utf8");
 		});
 		child.on("error", (error) => {
-			reject(new WtError(full, { stdout, stderr: stderr === "" ? error.message : stderr, code: undefined }));
+			const missing = (error as NodeJS.ErrnoException).code === "ENOENT";
+			const detail = missing
+				? "Worktrunk executable not found in the app service search path; install Worktrunk, then retry mission creation"
+				: error.message;
+			reject(new WtError(full, { stdout, stderr: stderr === "" ? detail : stderr, code: undefined }));
 		});
 		child.on("close", (code) => {
 			if (code === 0) {

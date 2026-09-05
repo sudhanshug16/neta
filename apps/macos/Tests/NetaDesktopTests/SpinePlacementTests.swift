@@ -243,6 +243,28 @@ final class SpinePlacementTests: XCTestCase {
 		XCTAssertEqual(column.card.minY, 500 + metrics.spineOffset)
 	}
 
+	func testAgentLeadIsNotRepeatedInItsMissionStack() {
+		let mission = Mission(
+			id: "m1", number: 1, workspaceId: "w1", machineId: "m1",
+			name: "mission", objective: "Objective.", changes: [],
+			lead: .agent(agentId: "lead"), agentIds: ["lead", "helper"],
+			access: .readOnly, worktree: nil, state: .running, attention: nil,
+			createdAt: base, closedAt: nil, disposition: nil, closeReason: nil,
+			integration: nil, continuesMissionId: nil)
+		func agent(_ id: String, _ name: String) -> Agent {
+			Agent(id: id, missionId: "m1", workspaceId: "w1", name: name,
+				task: "task", access: .readOnly, provider: "Codex", model: "model",
+				skills: [], sessionId: "s-\(id)", canSpawn: false, state: .running,
+				stateBefore: nil, activity: nil, pendingQuestion: nil, startedAt: base,
+				endedAt: nil, outcome: nil)
+		}
+		let placed = SpinePlacement.place(
+			index: index(missions: [mission]),
+			agents: ["m1": [agent("lead", "Lead"), agent("helper", "Helper")]],
+			range: 0 ..< 1, scrollX: 0, viewport: viewport)
+		XCTAssertEqual(placed.columns[0].stack.items.map(\.id), ["helper"])
+	}
+
 	func testAttentionCardIsTallerButCentred() {
 		let plain = makeMission(
 			id: "p", number: 1, createdAt: base.addingTimeInterval(-100))

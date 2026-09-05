@@ -93,6 +93,7 @@ public enum MissionBarModel {
 	public static func items(
 		missions: [Mission],
 		leader: Leader?,
+		agents: [Agent] = [],
 		nowLabel: String = "Now",
 		nowLit: Bool
 	) -> [MissionBarItem] {
@@ -102,14 +103,27 @@ public enum MissionBarModel {
 		}
 		items.append(.now(label: nowLabel, lit: nowLit))
 		var chips: [MissionBarItem] = []
-		let waiting = missions.filter(\.needsPerson)
+		let presented = missions.map { mission -> Mission in
+			guard mission.state == .running,
+				agents.contains(where: { $0.missionId == mission.id && $0.state == .blocked })
+			else { return mission }
+			return Mission(
+				id: mission.id, number: mission.number, workspaceId: mission.workspaceId,
+				machineId: mission.machineId, name: mission.name, objective: mission.objective,
+				changes: mission.changes, lead: mission.lead, agentIds: mission.agentIds,
+				access: mission.access, worktree: mission.worktree, state: .blocked,
+				attention: mission.attention, createdAt: mission.createdAt, closedAt: mission.closedAt,
+				disposition: mission.disposition, closeReason: mission.closeReason,
+				integration: mission.integration, continuesMissionId: mission.continuesMissionId)
+		}
+		let waiting = presented.filter(\.needsPerson)
 		for state in [MissionState.blocked, .failed, .readyToClose, .mergedNotClosed] {
 			chips += waiting
 				.filter { $0.state == state }
 				.sorted { $0.number < $1.number }
 				.map(MissionBarItem.waiting)
 		}
-		chips += missions
+		chips += presented
 			.filter { $0.state == .running }
 			.sorted { $0.number < $1.number }
 			.map(MissionBarItem.running)

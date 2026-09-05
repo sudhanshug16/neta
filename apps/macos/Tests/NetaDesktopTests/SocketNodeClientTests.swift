@@ -209,6 +209,36 @@ final class SocketNodeClientTests: XCTestCase {
 		}
 	}
 
+	func testDeadLegacyDescriptorIsRemovedAndDoesNotBlockLaunching() async throws {
+		let dir = try Self.emptyDirectory()
+		defer { try? FileManager.default.removeItem(at: dir) }
+		let descriptor = NodeInfo(
+			socket: dir.appendingPathComponent("missing.sock").path,
+			token: "stale", pid: Int(Int32.max), protocolVersion: 1)
+		try JSONEncoder().encode(descriptor).write(to: dir.appendingPathComponent("node.json"))
+		let launcher = StubLauncher()
+		let client = SocketNodeClient(
+			netaDirectory: dir, launcher: launcher,
+			retryWindow: .milliseconds(15), retryInterval: .milliseconds(5))
+		do {
+			try await client.connect()
+			XCTFail("a launcher that creates no socket must remain unavailable")
+		} catch let error as NodeClientError {
+			XCTAssertEqual(error, .nodeUnavailable)
+		}
+		XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("node.json").path))
+		let starts = await launcher.starts
+		XCTAssertEqual(starts, 1)
+	}
+
+	func testForcedStopRequiresTheAuthenticatedTimeoutForTheRecordedPid() {
+		XCTAssertTrue(SocketNodeClient.authorizesForcedStop(
+			message: "neta: timed out waiting for pid 42 to stop", pid: 42))
+		XCTAssertFalse(SocketNodeClient.authorizesForcedStop(message: "bad token", pid: 42))
+		XCTAssertFalse(SocketNodeClient.authorizesForcedStop(
+			message: "neta: timed out waiting for pid 41 to stop", pid: 42))
+	}
+
 	// MARK: - The app's sync loop (G4-2)
 
 	func testBackoffGrowsThenSettlesOnTheSlowInterval() {
@@ -269,6 +299,21 @@ final class SocketNodeClientTests: XCTestCase {
 		XCTAssertTrue(seen, "a notification sent while the snapshot was in flight was dropped")
 	}
 
+	@MainActor
+	func testSyncLoopAutomaticallyUpdatesAnIncompatibleService() async throws {
+		let client = UpgradeStub()
+		let store = Store()
+		let loop = Task { await NodeSync.run(client: client, store: store, backoff: { _ in .milliseconds(1) }) }
+		for _ in 0..<100 {
+			if await client.stopCount > 0 { break }
+			try await Task.sleep(for: .milliseconds(5))
+		}
+		loop.cancel()
+		let stops = await client.stopCount
+		XCTAssertEqual(stops, 1)
+		XCTAssertNil(store.nodeError)
+	}
+
 	// MARK: - Helpers
 
 	private static func emptyDirectory() throws -> URL {
@@ -277,6 +322,26 @@ final class SocketNodeClientTests: XCTestCase {
 		try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 		return dir
 	}
+}
+
+private actor UpgradeStub: NodeClient {
+	private let hub = NotificationHub()
+	private(set) var stopCount = 0
+	private var first = true
+	nonisolated var notifications: AsyncStream<NodeNotification> { hub.subscribe() }
+	func connect() async throws { if first { first = false; throw NodeClientError.protocolMismatch(1) } }
+	func stopIncompatibleNode() async throws { stopCount += 1 }
+	func snapshot() async throws -> Snapshot { throw CancellationError() }
+	func missionsList(workspaceId: String, before: Date?, limit: Int) async throws -> [Mission] { [] }
+	func eventsList(workspaceId: String, before: Date?, limit: Int) async throws -> [Event] { [] }
+	func conversationTail(sessionId: Ulid, cursor: String?, limit: Int, direction: String?, turnId: TurnId?) async throws -> ConversationPage { .init(turns: [], blocks: [], nextCursor: nil, prevCursor: nil) }
+	func prompt(sessionId: Ulid, text: String) async throws -> Ulid { throw NodeClientError.disconnected }
+	func cancel(sessionId: Ulid) async throws {}
+	func setModel(sessionId: Ulid, model: String) async throws {}
+	func listModels(provider: String) async throws -> [ModelInfo] { [] }
+	func setMode(workspaceId: String, mode: LeaderMode) async throws {}
+	func pin(missionId: Ulid, pinned: Bool) async throws {}
+	func archiveAgent(agentId: Ulid, confirmRunning: Bool) async throws {}
 }
 
 /// A launcher that never creates a socket, so `connect()` must exhaust its

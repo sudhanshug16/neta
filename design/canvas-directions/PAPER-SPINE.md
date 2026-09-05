@@ -227,3 +227,41 @@ edges and the spine are content and stay as they are.
 Everything else, including node cards, spine, edges, anchors, checkpoint
 icons and the mission content, stays unchanged. Export all four boards again
 to the same PNG paths when done.
+
+## Revision 4 — sequence layout, no bends (operator direction, 2026-09-04)
+
+The spine is symbolic, not to scale. The card is the anchor.
+
+- Missions and checkpoints form ONE sequence in time order along the spine,
+  oldest left, the leader at Now on the right. Each mission's anchor dot sits
+  on the spine directly beneath (odd numbers, card above) or above (even
+  numbers, card below) its lead card, joined by a straight vertical connector.
+  Nothing bends. Nothing stacks. No overlap resolver.
+- Gap between neighbouring items = elapsed time × pixels-per-hour, clamped to
+  a minimum column of 120 px and a maximum gap of 320 px. Neighbours alternate
+  sides, so 120 px never overlaps 220 px cards. A gap that contains
+  checkpoints widens to at least 28 px per checkpoint plus one.
+- Tick labels (`2w 1w 3d 1d 12h 3h 1h now`) sit in the gap where that age
+  falls, placed proportionally by time inside the gap. They annotate; the
+  sequence carries the chronology.
+- Closed missions: lead node only, 180 px wide, 55% opacity, same rules.
+- Zoom changes only pixels-per-hour and the maximum gap; the minimum column
+  never changes, so zooming out collapses toward a uniform sequence. Nodes
+  never scale. Fit brings every open mission into view when the minimum
+  column allows, else shows the newest.
+
+Apply to "Neta · Spine", "Neta · Typical day" and "Neta · Navigator open":
+move every lead card to sit directly over or under its anchor, replace every
+bent connector with a straight vertical one, respace items by the clamped
+rule (missions AND checkpoint icons participate in the spacing), and re-place
+the tick labels. Keep everything else (glass, mission bar, chat, tooltip,
+fading, colours) exactly as Revision 3 left it. Cards that no longer fit on
+the left continue past the edge.
+
+### Revision 4b — stack links (comment on Col 309, 2026-09-04)
+
+No trunk line and no stubs on the left of an agent stack. Stacked cards link
+vertically: a short 1.4 px violet-32% segment, horizontally centred, joins
+the lead card to the first agent row and each row to the next, and the last
+row to the `+N completed` chip. Row gap becomes 10 px so the link is visible.
+Applies to every mission stack on all three boards.

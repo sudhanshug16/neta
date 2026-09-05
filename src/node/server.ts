@@ -8,16 +8,19 @@ import type {
 	Access,
 	Agent,
 	AgentId,
+	Block,
 	Event,
 	Leader,
 	Machine,
 	Mission,
 	MissionId,
+	PromptAttachment,
 	SessionId,
 	TurnId,
 	Workspace,
 	WorkspaceId,
 } from "../core/types.ts";
+import type { GlanceResult } from "../store/glance.ts";
 import {
 	type ClientKind,
 	type ConversationTailResult,
@@ -55,6 +58,11 @@ export interface NodeStore {
 		id: SessionId,
 		query: { limit: number; cursor?: string },
 	): Promise<Omit<ConversationTailResult, "sessionId">>;
+	recentConversation?(id: SessionId, limit: number): Promise<Block[]>;
+	glanceList?(workspaceId: WorkspaceId, after?: number, limit?: number): Promise<unknown>;
+	glanceGet?(workspaceId: WorkspaceId, id: string): Promise<unknown>;
+	glanceComplete?(workspaceId: WorkspaceId, id: string, sourceHash: string, result: GlanceResult): Promise<unknown>;
+	glanceMarkReviewed?(workspaceId: WorkspaceId, through: number): Promise<number>;
 }
 
 // `netaTools: true` asks for the Neta MCP entry; the adapter builds it,
@@ -62,11 +70,13 @@ export interface NodeStore {
 // under. `actorId` names that actor when it is not the session itself: an
 // agent's session is minted under its `agentId`, per 05.
 export interface SessionRequest {
+	sessionId?: SessionId;
 	workspaceId: WorkspaceId;
 	cwd: string;
 	provider: string;
 	model: string;
 	access: Access;
+	unsandboxed?: boolean;
 	netaTools: boolean;
 	actorId?: string;
 }
@@ -78,15 +88,48 @@ export interface NodeAcp {
 	// id. The caller compares the returned id with the one it passed in and
 	// records the new one when they differ.
 	ensureSession(
-		o: SessionRequest & { sessionId: SessionId },
+		o: SessionRequest & { sessionId: SessionId; allowFresh?: boolean; forceRelaunch?: boolean },
 	): Promise<{ sessionId: SessionId; provider: string; model: string }>;
-	prompt(id: SessionId, text: string): Promise<TurnId>;
+	prompt(
+		id: SessionId,
+		text: string,
+		attachments?: PromptAttachment[],
+		provenance?: { readerDirected: boolean },
+	): Promise<TurnId>;
+	send?(
+		id: SessionId,
+		text: string,
+		attachments: PromptAttachment[],
+		provenance: { readerDirected: boolean },
+	): Promise<import("../core/types.ts").InboxMessage>;
+	listInbox?(id: SessionId): Promise<import("../core/types.ts").InboxMessage[]>;
+	capabilities?(id: SessionId): { image: boolean; embeddedContext: boolean };
 	setModel(id: SessionId, model: string): Promise<void>;
+	switchProvider?(
+		id: SessionId,
+		provider: string,
+		model?: string,
+		handoff?: string,
+	): Promise<{ provider: string; model: string }>;
+	resetSession?(
+		id: SessionId,
+		brief: string,
+		rebind: (selected: { sessionId: SessionId; provider: string; model: string }) => Promise<void>,
+	): Promise<{ sessionId: SessionId; provider: string; model: string }>;
+	listProviders?(o?: { sessionId?: SessionId }): Array<{
+		id: string;
+		label: string;
+		defaultModel: string;
+		available: boolean;
+		unavailableReason?: string;
+		note?: string;
+	}>;
 	listModels(o: ModelsListParams): Promise<ModelsListResult["models"]>;
 	cancel(id: SessionId): Promise<void>;
 	close(id: SessionId): Promise<void>;
 	closeAll(): Promise<void>;
 	onTurn(fn: (notification: TurnNotification) => void): void;
+	isTurnActive?(id: SessionId): boolean;
 }
 
 export interface Hub {

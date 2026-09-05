@@ -755,36 +755,20 @@ final class SpineCanvasTests: XCTestCase {
 	/// edge used to stay there, because nothing outside `pan` and `zoom`
 	/// re-clamps, and the leader was drawn left of the usable right edge
 	/// with dead space beside it until the next gesture.
-	func testWideningTheBandReclampsAViewScrolledBackInTime() async throws {
+	func testWideningKeepsAFreeCanvasPosition() async throws {
 		let store = try await makeStore()
 		let date = store.window.upperBound
 		let (view, shell, viewport, now, _) = makeView(store)
 		_ = view.resolve(size: size, date: date)
-		let index = makeIndex(
-			missions: store.currentMissions, events: store.currentEvents,
-			viewport: viewport)
-		viewport.pan(
-			by: CGSize(width: -120, height: 0), index: index,
-			viewport: viewportRect, contentHeight: size.height,
-			trailingInset: SpineCanvasPipeline.trailingInset(
-				size: size, shell: shell))
+		let index = makeIndex(missions: store.currentMissions, events: store.currentEvents, viewport: viewport)
+		viewport.pan(by: CGSize(width: -120, height: 80), index: index, viewport: viewportRect, contentHeight: 0)
 		_ = view.resolve(size: size, date: date)
 		XCTAssertFalse(now.isLive)
 		let back = viewport.scrollX
-
 		shell.chatVisible = false
-		let trailing = SpineCanvasPipeline.trailingInset(size: size, shell: shell)
-		let live = SpinePlacement.liveScrollX(
-			index: index, viewport: viewportRect, trailingInset: trailing)
-		XCTAssertGreaterThan(
-			back, live, "the wider band puts the live edge below the view")
-		let widened = view.resolve(size: size, date: date)
-		XCTAssertEqual(
-			viewport.scrollX, live, accuracy: 1e-9,
-			"the view is re-clamped onto the new live edge")
-		XCTAssertEqual(
-			widened.window.leader.maxX, size.width - trailing, accuracy: 0.5,
-			"so the leader lands exactly on the usable right edge")
+		_ = view.resolve(size: size, date: date)
+		XCTAssertEqual(viewport.scrollX, back)
+		XCTAssertEqual(viewport.scrollY, 80)
 	}
 
 	// MARK: - Shell insets and content height

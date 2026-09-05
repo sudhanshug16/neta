@@ -19,6 +19,9 @@ export interface Paths {
 	eventMonth(id: WorkspaceId, month: string): string;
 	conversation(id: SessionId): string;
 	conversationMeta(id: SessionId): string;
+	conversationInbox(id: SessionId): string;
+	glanceLog(id: WorkspaceId): string;
+	glanceSource(id: WorkspaceId, cardId: string): string;
 	worktrees(id: WorkspaceId): string;
 	charterHash(id: WorkspaceId): string;
 }
@@ -82,6 +85,9 @@ export function paths(): Paths {
 		eventMonth: (id, month) => join(root, "events", encodeWorkspaceId(id), `${month}.ndjson`),
 		conversation: (id) => join(root, "conversations", `${id}.ndjson`),
 		conversationMeta: (id) => join(root, "conversations", `${id}.meta.json`),
+		conversationInbox: (id) => join(root, "conversations", `${id}.inbox.json`),
+		glanceLog: (id) => join(root, "glance", `${encodeWorkspaceId(id)}.json`),
+		glanceSource: (id, cardId) => join(root, "glance", encodeWorkspaceId(id), `${encodeURIComponent(cardId)}.json`),
 		worktrees: (id) => join(root, "worktrees", `${encodeWorkspaceId(id)}.json`),
 		charterHash: (id) => join(root, "charters", `${encodeWorkspaceId(id)}.hash`),
 	};

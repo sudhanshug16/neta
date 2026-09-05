@@ -13,6 +13,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 declare const NETA_VERSION: string | undefined;
+declare const NETA_BUILD_ID: string | undefined;
 
 let cached: string | undefined;
 
@@ -49,4 +50,9 @@ export function netaVersion(): string {
 	}
 	cached = "0.0.0-dev";
 	return cached;
+}
+
+/** Identity of the exact bundled runtime, independent of the package version. */
+export function netaBuildId(): string | undefined {
+	return typeof NETA_BUILD_ID === "string" && NETA_BUILD_ID.length > 0 ? NETA_BUILD_ID : undefined;
 }

@@ -15,6 +15,7 @@ export interface LifecycleOptions {
 export interface SessionRecord {
 	session: AcpSession;
 	provider: string;
+	netaTools?: boolean;
 }
 
 // The Node's session registry, keyed by Neta sessionId. It also holds the
@@ -96,7 +97,7 @@ export async function switchProvider(
 	if (meta !== undefined) {
 		await store.setMeta(sessionId, { model: next.model });
 	}
-	sessions.set(sessionId, { session: next, provider });
+	sessions.set(sessionId, { session: next, provider, netaTools: record.netaTools });
 	return next;
 }
 

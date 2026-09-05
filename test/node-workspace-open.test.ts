@@ -58,7 +58,7 @@ interface World {
 	// What `ensureSession` was asked for, and the session ids the fake ACP
 	// still holds: anything else comes back under a fresh id, the way a
 	// provider that has forgotten the vendor session does.
-	ensured: Array<{ sessionId: string; cwd: string; access: string }>;
+	ensured: Array<{ sessionId: string; cwd: string; access: string; unsandboxed?: boolean }>;
 	live: Set<string>;
 }
 
@@ -79,6 +79,7 @@ interface CreatedSession {
 	provider: string;
 	model: string;
 	access: string;
+	unsandboxed?: boolean;
 	netaTools: boolean;
 	actorId?: string;
 }
@@ -116,7 +117,7 @@ function testCtx(world: World): NodeContext {
 			return Promise.resolve({ sessionId, provider: o.provider, model: o.model });
 		},
 		ensureSession: (o) => {
-			world.ensured.push({ sessionId: o.sessionId, cwd: o.cwd, access: o.access });
+			world.ensured.push({ sessionId: o.sessionId, cwd: o.cwd, access: o.access, unsandboxed: o.unsandboxed });
 			if (world.live.has(o.sessionId)) {
 				return Promise.resolve({ sessionId: o.sessionId, provider: o.provider, model: o.model });
 			}
@@ -327,6 +328,36 @@ describe("detectWorkspace", () => {
 });
 
 describe("openWorkspace", () => {
+	test("a fresh provider failure still returns the saved workspace and a recoverable leader", async () => {
+		const folder = join(dir, "provider-down");
+		await mkdir(folder, { recursive: true });
+		const world = emptyWorld();
+		const base = testCtx(world);
+		const failedCtx = {
+			...base,
+			acp: {
+				...base.acp,
+				createSession: () => Promise.reject(new Error("adapter did not start")),
+			},
+		};
+		const opened = await openWorkspace(failedCtx, folder);
+		expect(opened.workspace.name).toBe("provider-down");
+		expect(opened.leader.state).toBe("failed");
+		expect(world.workspaces.get(opened.workspace.id)).toEqual(opened.workspace);
+		expect(world.leaders.get(opened.workspace.id)).toEqual(opened.leader);
+		expect(world.broadcasts).toEqual([{ method: "state", params: { kind: "leader", record: opened.leader } }]);
+		expect(world.sessions).toEqual([]);
+
+		// The persisted failed leader is useful, rather than a tombstone: the
+		// ordinary reopen path retries its exact session and can recover it.
+		world.broadcasts.length = 0;
+		const recovered = await openWorkspace(base, folder);
+		expect(recovered.leader.state).toBe("idle");
+		expect(world.ensured[0]?.sessionId).toBe(opened.leader.sessionId);
+		expect(world.ensured[0]?.unsandboxed).toBe(true);
+		expect(recovered.leader.sessionId).not.toBe(opened.leader.sessionId);
+	});
+
 	test("SSH and HTTPS copies open to one workspace with two roots", async () => {
 		const repoA = join(dir, "a");
 		const repoB = join(dir, "b");
@@ -368,8 +399,21 @@ describe("openWorkspace", () => {
 		// The leader is an actor: it asks 03 for the tools entry and never
 		// builds one, so no placeholder actor id or token can leak through.
 		expect(session.netaTools).toBe(true);
+		expect(session.unsandboxed).toBe(true);
 		expect(session.actorId).toBeUndefined();
 		expect(world.broadcasts).toEqual([{ method: "state", params: { kind: "leader", record: first.leader } }]);
+	});
+
+	test("concurrent opens create exactly one leader session", async () => {
+		const repo = join(dir, "concurrent");
+		await initRepo(repo, "git@github.com:acme/concurrent.git");
+		const world = emptyWorld();
+		const ctx = testCtx(world);
+		const opened = await Promise.all(Array.from({ length: 10 }, () => openWorkspace(ctx, repo)));
+		expect(new Set(opened.map((result) => result.leader.sessionId)).size).toBe(1);
+		expect(world.sessions).toHaveLength(1);
+		expect(world.leaders).toHaveLength(1);
+		expect(world.broadcasts).toHaveLength(1);
 	});
 
 	test("a plain folder gets kind folder, a missing path gives NOT_FOUND", async () => {

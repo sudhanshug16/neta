@@ -5,6 +5,7 @@ import type {
 	AgentId,
 	Block,
 	Event,
+	InboxMessage,
 	IsoTime,
 	Leader,
 	LeaderMode,
@@ -12,6 +13,7 @@ import type {
 	Mission,
 	MissionId,
 	MissionState,
+	PromptAttachment,
 	SessionId,
 	Turn,
 	TurnId,
@@ -19,7 +21,7 @@ import type {
 	WorkspaceId,
 } from "../core/types.ts";
 
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 3;
 
 export type ClientKind = "cli" | "desktop" | "tools";
 
@@ -268,7 +270,9 @@ export interface ConversationPromptParams {
 }
 
 export interface ConversationPromptResult {
-	turnId: TurnId;
+	messageId: string;
+	status: InboxMessage["status"];
+	turnId?: TurnId;
 }
 
 export interface ConversationCancelParams {
@@ -284,6 +288,17 @@ export interface ConversationSetModelParams {
 	model: string;
 }
 
+export interface ConversationPromptParams {
+	sessionId: SessionId;
+	text: string;
+	attachments?: PromptAttachment[];
+}
+
+export interface ConversationCapabilitiesResult {
+	image: boolean;
+	embeddedContext: boolean;
+}
+
 export interface ConversationSetModelResult {
 	sessionId: SessionId;
 	model: string;
@@ -293,6 +308,7 @@ export interface ModelInfo {
 	id: string;
 	name: string;
 	provider: string;
+	description?: string;
 }
 
 export interface ModelsListParams {
@@ -302,6 +318,26 @@ export interface ModelsListParams {
 
 export interface ModelsListResult {
 	models: ModelInfo[];
+}
+
+export interface ProviderInfo {
+	id: string;
+	label: string;
+	defaultModel: string;
+	available: boolean;
+	unavailableReason?: string;
+	note?: string;
+}
+
+export interface ProvidersListResult {
+	providers: ProviderInfo[];
+}
+
+export interface ConversationSetProviderResult {
+	sessionId: SessionId;
+	provider: string;
+	model: string;
+	contextReset: true;
 }
 
 export interface LeaderSetModeParams {
@@ -380,6 +416,7 @@ export interface TurnNotification {
 	sessionId: SessionId;
 	turn?: Turn;
 	block?: Block;
+	inbox?: InboxMessage;
 }
 
 export interface NodeNotification {

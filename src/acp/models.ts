@@ -1,6 +1,7 @@
 export interface ModelOption {
 	id: string;
 	name: string;
+	description?: string;
 }
 
 // Which wire shape the provider speaks.
@@ -72,8 +73,16 @@ function selectValues(entry: ConfigOptionLike): ModelOption[] {
 	}
 	const out: ModelOption[] = [];
 	for (const item of entry.options) {
-		if (isRecord(item) && typeof item.value === "string") {
-			out.push({ id: item.value, name: typeof item.name === "string" ? item.name : item.value });
+		if (!isRecord(item)) continue;
+		const choices = Array.isArray(item.options) ? item.options : [item];
+		for (const choice of choices) {
+			if (isRecord(choice) && typeof choice.value === "string") {
+				out.push({
+					id: choice.value,
+					name: typeof choice.name === "string" ? choice.name : choice.value,
+					...(typeof choice.description === "string" ? { description: choice.description } : {}),
+				});
+			}
 		}
 	}
 	return out;
@@ -84,6 +93,22 @@ function selectValues(entry: ConfigOptionLike): ModelOption[] {
 // `models.availableModels` with `currentModelId` (`legacy`), else `none`.
 export function modelStateFrom(response: unknown): ModelState {
 	if (isRecord(response)) {
+		const legacyById = new Map<string, ModelOption>();
+		const models = response.models;
+		if (isRecord(models)) {
+			const like = models as unknown as ModelListLike;
+			if (Array.isArray(like.availableModels)) {
+				for (const item of like.availableModels) {
+					if (isRecord(item) && typeof item.modelId === "string") {
+						legacyById.set(item.modelId, {
+							id: item.modelId,
+							name: typeof item.name === "string" ? item.name : item.modelId,
+							...(typeof item.description === "string" ? { description: item.description } : {}),
+						});
+					}
+				}
+			}
+		}
 		const configOptions = response.configOptions;
 		if (Array.isArray(configOptions)) {
 			for (const entry of configOptions) {
@@ -92,25 +117,28 @@ export function modelStateFrom(response: unknown): ModelState {
 				}
 				const like = entry as ConfigOptionLike;
 				if (like.category === "model" && like.type === "select" && typeof like.id === "string") {
+					const options = selectValues(like).map((option) => {
+						const legacy = legacyById.get(option.id);
+						if (legacy === undefined) return option;
+						return {
+							...option,
+							name: option.name === option.id ? legacy.name : option.name,
+							description: option.description ?? legacy.description,
+						};
+					});
 					return {
 						source: "config",
 						current: typeof like.currentValue === "string" ? like.currentValue : undefined,
-						options: selectValues(like),
+						options,
 						configId: like.id,
 					};
 				}
 			}
 		}
-		const models = response.models;
 		if (isRecord(models)) {
 			const like = models as unknown as ModelListLike;
 			if (Array.isArray(like.availableModels)) {
-				const options: ModelOption[] = [];
-				for (const item of like.availableModels) {
-					if (isRecord(item) && typeof item.modelId === "string") {
-						options.push({ id: item.modelId, name: item.modelId });
-					}
-				}
+				const options = [...legacyById.values()];
 				return {
 					source: "legacy",
 					current: typeof like.currentModelId === "string" ? like.currentModelId : undefined,

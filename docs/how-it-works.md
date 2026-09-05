@@ -102,7 +102,10 @@ broadcasts until it closes.
 Requests cover the whole surface: `snapshot`, `workspace.open`,
 `workspace.list`, `missions.list`, `missions.get`, `events.list`,
 `conversation.tail`, `conversation.untail`, `conversation.prompt`,
-`conversation.cancel`, `conversation.setModel`, `models.list`,
+`conversation.cancel`, `conversation.capabilities`,
+`conversation.prepareHandoff`, `conversation.setProvider`,
+`conversation.reset`,
+`conversation.setModel`, `providers.list`, `models.list`,
 `leader.setMode`, `mission.pin`, `agent.archive`, `node.stop`, and the
 two actor-authenticated tool routes `tools.list` and `tools.call`
 (`src/node/protocol.ts`). Cursors are opaque strings minted by the
@@ -112,6 +115,18 @@ of history. Beyond the standard JSON-RPC codes the Node reports
 `CONFIRMATION_REQUIRED`, `BUSY`, and `PROVIDER_ERROR`, with the
 symbolic name in `error.data` so clients switch on the name
 (`src/node/protocol.ts`).
+
+Protocol version 2 adds structured `plan` and `usage` conversation blocks
+and attachments. `conversation.capabilities` reports whether the active ACP
+session accepts images or embedded files. `conversation.prompt` accepts text
+plus up to ten attachments, capped at 4 MiB each and 5 MiB total. Images map
+to ACP image content and files to embedded resources only when the provider
+advertises the matching capability. Conversation history stores attachment
+id, kind, name, MIME type, and size, never the base64 payload. Tool updates
+reuse their tool-call identity, and usage updates merge into one compact block
+at the turn boundary. A newly installed CLI may greet an older Node with the
+version in its authenticated descriptor solely to request `node.stop`; normal
+clients still require an exact protocol match.
 
 Notifications flow one way, from the Node to every connection past
 `hello`; a client never polls (`src/node/server.ts`). There are four
@@ -266,8 +281,15 @@ Every Git mission receives its own worktree by default, including
 missions that only investigate. Neta never runs `git worktree`
 itself: Worktrunk owns creation, naming, integration, and removal,
 and Neta invokes the `wt` binary and verifies the result
-(`src/worktrees/wt.ts`, `src/worktrees/driver.ts`). Branches read
-`mission/<number>-<slug>`, with the slug derived from the mission name
+(`src/worktrees/wt.ts`, `src/worktrees/driver.ts`).
+
+The Worktrunk runner augments the service's inherited `PATH` with standard
+per-user, Homebrew, and system binary locations on every launch. This makes a
+`wt` installed at `~/.local/bin`, `/opt/homebrew/bin`, or `/usr/local/bin`
+available when Finder starts the app with a minimal environment. An explicit
+`NETA_WT_BIN` remains authoritative. If no executable is available, mission
+creation returns a direct Worktrunk installation error rather than stalling.
+Branches read `mission/<number>-<slug>`, with the slug derived from the mission name
 (`src/worktrees/naming.ts`); the base defaults to the workspace
 default branch, detected once per workspace and cached in memory
 (`src/worktrees/driver.ts`). The base checkout itself is an
@@ -302,8 +324,11 @@ worktree intact and its attention set to the refusal reason
 Only leaders use access modes: the workspace leader and each mission
 lead. Ordinary agents receive fixed read-only or read-write access
 from their lead and never change it. The two modes are `lead` —
-read-only coordination — and `lead++`, which adds build and write
-access ([MANIFESTO.md](../MANIFESTO.md), `src/modes/switch.ts`).
+coordination without a Neta writer lease — and `lead++`, which adds build and
+write authority ([MANIFESTO.md](../MANIFESTO.md), `src/modes/switch.ts`).
+Both workspace and mission leaders select the provider's advertised
+unrestricted ACP mode in either leadership mode. Ordinary agents keep the
+provider sandbox implied by their assigned access.
 
 The workspace leader's mode lives on its leader record as `mode`,
 `modeSince`, and `modeActiveMs`; each mission lead's mode lives as a
@@ -331,8 +356,9 @@ case-insensitively with collapsed whitespace — and the rest of the
 charter stays prose for the model (`src/modes/approval.ts`).
 
 Every change travels one switch path: cancel the active turn at the
-steering boundary, switch session access (`lead++` maps to
-read-write, `lead` to read-only), then re-prompt the same session
+steering boundary, switch Neta session access (`lead++` maps to
+read-write, `lead` to read-only), preserve the leader's unrestricted provider
+mode, then re-prompt the same session
 with a short access-change message (`src/modes/switch.ts`,
 `src/acp/steer.ts`, `src/acp/access.ts`). With no active turn the
 cancel is a no-op and the re-prompt still lands. `lead++` grants no
@@ -397,4 +423,17 @@ settings, leader defaults, and forbidden models live in
 `$NETA_DIR/settings.json` with per-project overrides, described in
 [settings](settings.md) (`src/acp/settings.ts`).
 
-In short: the CLI acts and formats, the desktop renders and caches, the proxy forwards — and the Node owns.
+Workspace overrides are loaded for the actual session working directory, so
+provider launch, availability, and model selection use the same effective
+settings. Live model options come from ACP session configuration and are
+replaced when `config_option_update` arrives; before launch, only a configured
+non-empty default can be shown.
+
+`conversation.reset` replaces the selected owner session atomically with a
+fresh provider and vendor conversation. It keeps provider, model, access,
+leader sandbox policy, MCP actor authority, and current role/mission brief. The
+brief is attached once to the first new user prompt; no old transcript or
+provider handoff is included. The owner record is durably rebound before the
+old session is retired, and a candidate launch or rebind failure leaves the old
+chat usable. Old conversation files remain stored. Queued and archived agents
+cannot be reset.

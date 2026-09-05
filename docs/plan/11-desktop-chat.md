@@ -318,24 +318,73 @@ Writes: `Chat/ChatPanel.swift`, `Chat/ChatPanelModel.swift`,
 Contract:
 ```swift
 @MainActor @Observable final class ChatPanelModel {
-  init(client: any NodeClient, store: Store)
-  private(set) var chat: ChatViewModel
+  init(client: any NodeClient, store: Store, shell: ShellState,
+       selection: Selection? = nil, decision: DecisionRecord? = nil)
+  private(set) var selection: Selection; private(set) var sessionId: SessionId
+  private(set) var transcript: ChatViewModel
   private(set) var composer: ComposerModel; var isDetailsOpen: Bool
-  func select(_ selection: Selection) async
+  var currentSessionId: SessionId { get }   // what the shell's selection resolves to
+  var transcriptId: ObjectIdentifier { get } // which transcript is installed
+  func select(_ selection: Selection)
+  func sync()                               // re-resolve against shell and store
+  func handle(_ action: CheckpointAction) async
   func scrollTo(turnId: TurnId) async
+  func start() async; func syncComposer()
 }
-struct ChatPanel: View { init(model: ChatPanelModel, width: CGFloat) }
+struct ChatPanel: View {
+  init(model: ChatPanelModel, router: CheckpointRouter? = nil,
+       windowWidth: CGFloat? = nil) }
 ```
-Steps: 1. `select` cancels the running stream task, builds a new
-`ChatViewModel` and `ComposerModel` for that session and starts them; the
-same session again is a no-op. 2. `scrollTo` forwards to
-`ChatViewModel.scrollTo`. 3. `isDetailsOpen` is one boolean, set by the
+As shipped, `select`/`sync` rebuild both view models, and the panel watches
+`transcriptId` (not `sessionId`) to restart the transcript: every leader-led
+mission resolves to the leader's own session, so a rebuild happens under an
+unchanged id. For the same reason `ComposerModel.modelLoadKey` — the key
+`ComposerView` runs `.task(id:)` on — is the composer instance, the session
+and the provider (`"<instance UUID>\u{1}<sessionId>\u{1}<provider>"`): a
+rebuilt composer starts with an empty `models`, and a key of session and
+provider alone left its model pill on the one-item fallback menu.
+
+The transcript is bottom-anchored: its scrolled content is at least the
+panel's height and sits at the bottom of it (`TranscriptAnchor`), so the
+newest message is directly above the composer. `.defaultScrollAnchor(.bottom)`
+is not the way — on this system it moved the whole stack out of the scroll
+view's clip and the transcript drew nothing at all.
+Ownership: `RootView` holds the model in `@State` and hands it in. `ChatPanel`
+has no initializer that can build one, deliberately: a model built inside a
+view body is rebuilt on every parent update, and `RootView.body` reads
+`store.missions` and `store.leader`, so the first live notification used to
+throw the transcript, the typed draft and the open inspector away and leave
+the new transcript untailed.
+Steps: 1. `select` moves the shell and rebuilds both view models when the
+selection or its session actually changed; the same pair again is a no-op, so
+a live update cannot wipe a draft. 2. `sync` is the same rebuild resolved from
+the shell and the store instead of an argument: the panel calls it when
+`shell.selection` moves (a canvas click, a mission-bar chip) and when
+`currentSessionId` moves (the first snapshot brings the leader in, a workspace
+switch, a reconnect), and re-tails whenever `sessionId` changes. 3. `handle`
+consumes what 10's `CheckpointRouter` staged: `.scrollToTurn` reveals that turn
+(selecting the session's own conversation first when it is not the one shown),
+`.openDecisionRecord` selects the mission and opens Details. The panel drains
+the router on `router.pending`. 4. `scrollTo` forwards to
+`ChatViewModel.scrollTo`. 5. `isDetailsOpen` is one boolean, set by the
 header's Details button and cleared by the back control;
-`DetailsPlacement.forWidth(width)` picks the layout. 4. The panel composes
+`DetailsPlacement.forWidth(width)` picks the layout. 6. The panel composes
 header, Lead++ strip when visible, a `LazyVStack` transcript scrolled by
-`autoScrollTarget` and `consumeScroll`, then the composer.
+`autoScrollTarget` and `consumeScroll`, then the composer. 7. The composer's
+model list is keyed on `ComposerModel.modelLoadKey` (instance + session +
+provider): `loadModels` returns early until the store has a provider, and the
+provider arrives with the snapshot, not with the selection. 8. The panel wires
+`ComposerModel.onSend` to `ChatViewModel.echoUserMessage`, so the person's own
+message appears the moment it is sent: the Node opens the user turn with no
+blocks at all, so a prompt was invisible until the agent answered. A user block
+the Node does deliver retires the echo carrying the same text, and a re-tail
+keeps echoes the page does not carry itself, so the message shows exactly once.
 Tests: selecting an agent rebuilds both view models on that session id and
-stops the previous stream; the same session again is a no-op; `scrollTo`
-forwards; Details replaces the transcript at 1100 and sits beside it at 1600.
+stops the previous stream; the same session again is a no-op; the session
+arriving with the first snapshot rebuilds the transcript while the selection
+stays `.leader`; a store update that moves neither keeps the draft, the
+inspector and the transcript; `scrollTo` forwards; a checkpoint on a turn
+scrolls to it and one without opens Details; Details replaces the transcript
+at 1100 and sits beside it at 1600.
 Done when: `swift build` and `swift test` pass in `apps/macos`.
 Commit: `feat(desktop): chat panel assembly`

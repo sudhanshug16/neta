@@ -91,13 +91,18 @@ const CASES: SchemaCase[] = [
 ];
 
 describe("tool schemas", () => {
-	test("thirteen tools, unique names, standalone schemas", () => {
-		expect(TOOLS).toHaveLength(13);
-		expect(new Set(TOOLS.map((tool) => tool.name)).size).toBe(13);
+	test("fourteen tools, unique names, standalone schemas", () => {
+		expect(TOOLS).toHaveLength(14);
+		expect(new Set(TOOLS.map((tool) => tool.name)).size).toBe(14);
 		for (const tool of TOOLS) {
 			expect(typeof tool.description).toBe("string");
 			expect(JSON.stringify(tool.inputSchema).includes("$ref")).toBe(false);
 		}
+	});
+
+	test("the live mission tool tells existing leaders to delegate sustained work promptly", () => {
+		const mission = TOOLS.find((tool) => tool.name === "neta_mission");
+		expect(mission?.description).toContain("before broad exploration or repeated reads");
 	});
 
 	for (const schemaCase of CASES) {
@@ -167,12 +172,12 @@ describe("actor tool sets", () => {
 			toolsFor("agent")
 				.map((tool) => tool.name)
 				.sort(),
-		).toEqual(["neta_done", "neta_progress"]);
+		).toEqual(["neta_done", "neta_history", "neta_progress"]);
 	});
 
 	test("leads see everything but mission, close and pin", () => {
 		const names = toolsFor("lead").map((tool) => tool.name);
-		expect(names).toHaveLength(10);
+		expect(names).toHaveLength(11);
 		for (const excluded of ["neta_mission", "neta_close", "neta_pin"]) {
 			expect(names).not.toContain(excluded);
 		}
@@ -180,7 +185,7 @@ describe("actor tool sets", () => {
 
 	test("leaders see everything but progress and done", () => {
 		const names = toolsFor("leader").map((tool) => tool.name);
-		expect(names).toHaveLength(11);
+		expect(names).toHaveLength(12);
 		expect(names).not.toContain("neta_progress");
 		expect(names).not.toContain("neta_done");
 	});

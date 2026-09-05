@@ -59,6 +59,25 @@ final class MissionBarTests: XCTestCase {
 		XCTAssertLessThan(try XCTUnwrap(lastWaiting), try XCTUnwrap(firstRunning))
 	}
 
+	func testBlockedAgentPromotesRunningMissionToAttentionWithoutMutatingStore() async throws {
+		let store = try await fixtureStore()
+		let mission = try XCTUnwrap(store.missions.first(where: { $0.state == .running }))
+		let original = try XCTUnwrap(store.agentsById.values.first)
+		let blocked = Agent(
+			id: original.id, missionId: mission.id, workspaceId: mission.workspaceId,
+			name: original.name, task: original.task, access: original.access,
+			provider: original.provider, model: original.model, skills: original.skills,
+			sessionId: original.sessionId, canSpawn: original.canSpawn, state: .blocked,
+			stateBefore: original.stateBefore, activity: original.activity,
+			pendingQuestion: "Needs a decision", startedAt: original.startedAt,
+			endedAt: original.endedAt, outcome: original.outcome)
+		let items = MissionBarModel.items(
+			missions: [mission], leader: store.leader, agents: [blocked], nowLit: true)
+		let presented = try XCTUnwrap(items.first { if case .waiting = $0 { true } else { false } })
+		XCTAssertEqual(presented.stateLabel, "Blocked")
+		XCTAssertEqual(mission.state, .running, "attention is presentation state only")
+	}
+
 	func testClosedMissionsNeverAppear() async throws {
 		let store = try await fixtureStore()
 		let closedIds = Set(store.missions.filter { $0.state == .closed }.map(\.id))

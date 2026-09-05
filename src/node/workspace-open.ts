@@ -13,10 +13,12 @@ import { execFile } from "node:child_process";
 import { realpath, stat } from "node:fs/promises";
 import { basename } from "node:path";
 import { loadSettings, providerFor } from "../acp/settings.ts";
+import { ulid } from "../core/ids.ts";
 import { pickName } from "../core/names.ts";
 import { nowIso } from "../core/time.ts";
 import type { Leader, Workspace, WorkspaceKind } from "../core/types.ts";
 import { canonicalRemote, workspaceIdFor } from "../core/workspace-id.ts";
+import { createFileLeaseStore, LeaseManager, leaseKeyFor } from "../worktrees/index.ts";
 import { asString, parseParams } from "./handlers-registry.ts";
 import { netaDir } from "./lockfile.ts";
 import { NodeError } from "./protocol.ts";
@@ -114,32 +116,50 @@ function storedName(leader: Leader): string {
 async function createLeader(ctx: NodeContext, workspaceId: string, machineId: string, cwd: string): Promise<Leader> {
 	const { settings } = loadSettings({ netaDir: netaDir(), workspaceRoot: cwd });
 	const providerName = settings.leader.provider;
-	const provider = providerFor(settings, providerName);
-	const model = settings.leader.model ?? provider.defaultModel;
+	const model = settings.leader.model ?? settings.providers[providerName]?.defaultModel ?? "";
 	const name = leaderName(ctx, workspaceId, cwd);
 	// The leader is an actor: 03 mints its token under the session id it is
 	// about to create and builds the `neta` MCP entry from it, so nothing
 	// here has to guess an actor id.
-	const created = await ctx.acp.createSession({
-		workspaceId,
-		cwd,
-		provider: providerName,
-		model,
-		access: "readOnly",
-		netaTools: true,
-	});
-	const leader: Leader = {
+	const sessionId = ulid();
+	const candidate: Leader = {
 		workspaceId,
 		machineId,
 		name,
-		sessionId: created.sessionId,
-		provider: created.provider,
-		model: created.model,
+		sessionId,
+		provider: providerName,
+		model,
 		mode: "lead",
 		modeSince: nowIso(),
 		modeActiveMs: 0,
-		state: "idle",
+		state: "failed",
 	};
+	let leader = candidate;
+	try {
+		providerFor(settings, providerName);
+		const created = await ctx.acp.createSession({
+			sessionId,
+			workspaceId,
+			cwd,
+			provider: providerName,
+			model,
+			access: "readOnly",
+			unsandboxed: true,
+			netaTools: true,
+		});
+		leader = {
+			...candidate,
+			sessionId: created.sessionId,
+			provider: created.provider,
+			model: created.model,
+			state: "idle",
+		};
+	} catch {
+		// Opening a project and starting its provider are separate durable
+		// outcomes. Keep a failed leader beside the already-saved workspace so
+		// the desktop can select it immediately and offer provider recovery;
+		// reopening the workspace retries it through `reviveLeader`.
+	}
 	await ctx.store.putLeader(leader);
 	ctx.hub.broadcast("state", { kind: "leader", record: leader });
 	return leader;
@@ -151,67 +171,123 @@ async function createLeader(ctx: NodeContext, workspaceId: string, machineId: st
 // session back — resumed through the provider when the vendor session allows
 // it, else re-created under a fresh id, which is recorded on the leader and
 // announced so open clients follow the new conversation.
-async function reviveLeader(ctx: NodeContext, leader: Leader, cwd: string): Promise<Leader> {
+async function reviveLeader(ctx: NodeContext, leader: Leader, workspace: Workspace, cwd: string): Promise<Leader> {
+	let effective = leader;
+	let sessionCwd = cwd;
+	if (leader.mode === "leadPlus") {
+		const mission = leader.activeMissionId === undefined ? undefined : ctx.store.getMission(leader.activeMissionId);
+		if (mission === undefined || mission.state === "closed") {
+			effective = { ...leader, mode: "lead", modeSince: nowIso(), modeActiveMs: 0 };
+			await ctx.store.putLeader(effective);
+			ctx.hub.broadcast("state", { kind: "leader", record: effective });
+		} else {
+			sessionCwd = mission.worktree?.path ?? cwd;
+			const leases = new LeaseManager(createFileLeaseStore(netaDir()));
+			const key = leaseKeyFor({ kind: workspace.kind, worktreePath: mission.worktree?.path, root: cwd });
+			if ((await leases.acquire(workspace.id, mission.id, key)) !== "active") {
+				await leases.release(workspace.id, mission.id);
+				effective = { ...leader, mode: "lead", modeSince: nowIso(), modeActiveMs: 0 };
+				await ctx.store.putLeader(effective);
+				ctx.hub.broadcast("state", { kind: "leader", record: effective });
+			}
+		}
+	}
 	let live: { sessionId: string; provider: string; model: string };
 	try {
 		live = await ctx.acp.ensureSession({
-			sessionId: leader.sessionId,
-			workspaceId: leader.workspaceId,
-			cwd,
-			provider: leader.provider,
-			model: leader.model,
-			access: leader.mode === "leadPlus" ? "readWrite" : "readOnly",
+			sessionId: effective.sessionId,
+			workspaceId: effective.workspaceId,
+			cwd: sessionCwd,
+			provider: effective.provider,
+			model: effective.model,
+			access: effective.mode === "leadPlus" ? "readWrite" : "readOnly",
+			unsandboxed: true,
 			netaTools: true,
 		});
 	} catch {
 		// The provider is gone from settings, or will not start: the
 		// workspace still opens, and the mute leader says so on the next
 		// prompt rather than failing the open.
-		return leader;
+		if (effective.mode === "leadPlus" && effective.activeMissionId !== undefined) {
+			await new LeaseManager(createFileLeaseStore(netaDir())).release(workspace.id, effective.activeMissionId);
+			effective = { ...effective, mode: "lead", modeSince: nowIso(), modeActiveMs: 0, state: "failed" };
+			await ctx.store.putLeader(effective);
+			ctx.hub.broadcast("state", { kind: "leader", record: effective });
+		}
+		return effective;
 	}
-	if (live.sessionId === leader.sessionId && live.model === leader.model) {
-		return leader;
+	if (live.sessionId === effective.sessionId && live.model === effective.model && effective.state !== "failed") {
+		return effective;
 	}
-	const updated: Leader = { ...leader, sessionId: live.sessionId, provider: live.provider, model: live.model };
+	const updated: Leader = {
+		...effective,
+		sessionId: live.sessionId,
+		provider: live.provider,
+		model: live.model,
+		state: "idle",
+	};
 	await ctx.store.putLeader(updated);
 	ctx.hub.broadcast("state", { kind: "leader", record: updated });
 	return updated;
 }
 
+const opening = new Map<string, Promise<void>>();
+
+async function withWorkspaceLock<T>(id: string, run: () => Promise<T>): Promise<T> {
+	const previous = opening.get(id) ?? Promise.resolve();
+	let release = (): void => undefined;
+	const current = new Promise<void>((done) => {
+		release = done;
+	});
+	const tail = previous.then(() => current);
+	opening.set(id, tail);
+	await previous;
+	try {
+		return await run();
+	} finally {
+		release();
+		if (opening.get(id) === tail) {
+			opening.delete(id);
+		}
+	}
+}
+
 export async function openWorkspace(ctx: NodeContext, path: string): Promise<{ workspace: Workspace; leader: Leader }> {
 	const detected = await detectWorkspace(path);
 	const id = workspaceIdFor({ kind: detected.kind, remote: detected.remote, path: detected.root });
-	const machineId = ctx.store.machine().id;
-	let workspace = ctx.store.getWorkspace(id);
-	if (workspace === undefined) {
-		workspace = {
-			id,
-			kind: detected.kind,
-			name: detected.name,
-			...(detected.remote === undefined ? {} : { remote: canonicalRemote(detected.remote) }),
-			roots: [{ machineId, path: detected.root }],
-			createdAt: nowIso(),
-		};
-		await ctx.store.putWorkspace(workspace);
-	} else if (!workspace.roots.some((root) => root.machineId === machineId && root.path === detected.root)) {
-		workspace = { ...workspace, roots: [...workspace.roots, { machineId, path: detected.root }] };
-		await ctx.store.putWorkspace(workspace);
-	}
-	let leader = ctx.store.getLeader(id);
-	if (leader === undefined) {
-		leader = await createLeader(ctx, id, machineId, detected.root);
-	} else {
-		if (storedName(leader) === "") {
-			// Backfill on read: a record from before the field existed keeps
-			// its session, mode and counters and gains a name here, once, so
-			// nothing downstream ever sees a leader without one.
-			leader = { ...leader, name: leaderName(ctx, id, detected.root) };
-			await ctx.store.putLeader(leader);
-			ctx.hub.broadcast("state", { kind: "leader", record: leader });
+	return withWorkspaceLock(id, async () => {
+		const machineId = ctx.store.machine().id;
+		let workspace = ctx.store.getWorkspace(id);
+		if (workspace === undefined) {
+			workspace = {
+				id,
+				kind: detected.kind,
+				name: detected.name,
+				...(detected.remote === undefined ? {} : { remote: canonicalRemote(detected.remote) }),
+				roots: [{ machineId, path: detected.root }],
+				createdAt: nowIso(),
+			};
+			await ctx.store.putWorkspace(workspace);
+		} else if (!workspace.roots.some((root) => root.machineId === machineId && root.path === detected.root)) {
+			workspace = { ...workspace, roots: [...workspace.roots, { machineId, path: detected.root }] };
+			await ctx.store.putWorkspace(workspace);
 		}
-		leader = await reviveLeader(ctx, leader, detected.root);
-	}
-	return { workspace, leader };
+		let leader = ctx.store.getLeader(id);
+		if (leader === undefined) {
+			leader = await createLeader(ctx, id, machineId, detected.root);
+		} else {
+			if (storedName(leader) === "") {
+				// Backfill on read: a record from before the field existed keeps
+				// its session, mode and counters and gains a name here, once, so
+				// nothing downstream ever sees a leader without one.
+				leader = { ...leader, name: leaderName(ctx, id, detected.root) };
+				await ctx.store.putLeader(leader);
+				ctx.hub.broadcast("state", { kind: "leader", record: leader });
+			}
+			leader = await reviveLeader(ctx, leader, workspace, detected.root);
+		}
+		return { workspace, leader };
+	});
 }
 
 export const workspaceHandlers: NodeHandlers = {

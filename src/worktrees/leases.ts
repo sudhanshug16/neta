@@ -69,7 +69,7 @@ export function leaseKeyFor(i: { kind: WorkspaceKind; worktreePath?: string; roo
 export class LeaseManager {
 	private readonly store: LeaseStore;
 	private readonly onChange?: (w: WorkspaceId, r: LeaseRecord) => void;
-	private chain: Promise<void> = Promise.resolve();
+	private static readonly chains = new Map<WorkspaceId, Promise<void>>();
 
 	constructor(store: LeaseStore, onChange?: (w: WorkspaceId, r: LeaseRecord) => void) {
 		this.store = store;
@@ -78,12 +78,16 @@ export class LeaseManager {
 
 	// One internal promise chain serialises every read-modify-write so two
 	// concurrent acquires cannot both go active.
-	private enqueue<T>(fn: () => Promise<T>): Promise<T> {
-		const run = this.chain.then(fn);
-		this.chain = run.then(
+	private enqueue<T>(workspaceId: WorkspaceId, fn: () => Promise<T>): Promise<T> {
+		const run = (LeaseManager.chains.get(workspaceId) ?? Promise.resolve()).then(fn);
+		const tail = run.then(
 			() => undefined,
 			() => undefined,
 		);
+		LeaseManager.chains.set(workspaceId, tail);
+		void tail.finally(() => {
+			if (LeaseManager.chains.get(workspaceId) === tail) LeaseManager.chains.delete(workspaceId);
+		});
 		return run;
 	}
 
@@ -92,7 +96,7 @@ export class LeaseManager {
 	}
 
 	acquire(w: WorkspaceId, a: AgentId, key: string): Promise<LeaseOutcome> {
-		return this.enqueue(async () => {
+		return this.enqueue(w, async () => {
 			const state = await this.store.read(w);
 			let record = state.leases[key];
 			if (record === undefined) {
@@ -118,7 +122,7 @@ export class LeaseManager {
 	}
 
 	release(w: WorkspaceId, a: AgentId): Promise<Array<{ key: string; promoted?: AgentId }>> {
-		return this.enqueue(async () => {
+		return this.enqueue(w, async () => {
 			const state = await this.store.read(w);
 			const changed: Array<{ key: string; promoted?: AgentId }> = [];
 			const touched: LeaseRecord[] = [];
@@ -152,8 +156,26 @@ export class LeaseManager {
 		});
 	}
 
+	// A restarted process is no longer a live writer. Clear its ownership
+	// without starting or promoting queued work; recovery remains an explicit
+	// leader decision and the FIFO queue stays intact.
+	interrupt(w: WorkspaceId, a: AgentId): Promise<void> {
+		return this.enqueue(w, async () => {
+			const state = await this.store.read(w);
+			let changed = false;
+			for (const record of Object.values(state.leases)) {
+				if (record.holder === a) {
+					delete record.holder;
+					delete record.since;
+					changed = true;
+				}
+			}
+			if (changed) await this.store.write(state);
+		});
+	}
+
 	queuePosition(w: WorkspaceId, a: AgentId): Promise<number | undefined> {
-		return this.enqueue(async () => {
+		return this.enqueue(w, async () => {
 			const state = await this.store.read(w);
 			for (const record of Object.values(state.leases)) {
 				if (record.holder === a) {
@@ -169,7 +191,7 @@ export class LeaseManager {
 	}
 
 	holder(w: WorkspaceId, key: string): Promise<AgentId | undefined> {
-		return this.enqueue(async () => {
+		return this.enqueue(w, async () => {
 			const state = await this.store.read(w);
 			return state.leases[key]?.holder;
 		});

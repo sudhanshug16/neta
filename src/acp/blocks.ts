@@ -6,6 +6,7 @@ export interface BlockDraft {
 	kind: BlockKind;
 	text: string;
 	data?: Record<string, string | number | boolean | null>;
+	key?: string;
 }
 
 export type SessionSignal = { kind: "model"; model: string } | { kind: "mode"; modeId: string };
@@ -34,17 +35,34 @@ export function blocksFromUpdate(update: SessionUpdate): BlockDraft[] {
 			return [
 				{
 					role: "agent",
-					kind: "status",
+					kind: "usage",
 					text,
 					data: {
-						used: update.used,
-						size: update.size,
+						usedTokens: update.used,
+						contextSize: update.size,
 						costAmount: cost?.amount ?? null,
 						costCurrency: cost?.currency ?? null,
 					},
+					key: "usage",
 				},
 			];
 		}
+		case "plan":
+			return [planBlock(update.entries)];
+		case "plan_update":
+			if (update.plan.type === "items") return [planBlock(update.plan.entries, update.plan.planId)];
+			if (update.plan.type === "markdown") {
+				return [
+					{
+						role: "agent",
+						kind: "plan",
+						text: update.plan.content,
+						data: { planId: update.plan.planId },
+						key: `plan:${update.plan.planId}`,
+					},
+				];
+			}
+			return [];
 		case "config_option_update":
 			return update.configOptions.map((option) => ({
 				role: "agent" as Role,
@@ -65,9 +83,10 @@ function toolBlocks(
 	status: string | null,
 	content: readonly ToolCallContent[] | null | undefined,
 ): BlockDraft[] {
-	const blocks: BlockDraft[] = [
-		{ role: "agent", kind: "tool", text: title, data: { toolCallId, toolKind: kind, status } },
-	];
+	const data: Record<string, string | number | boolean | null> = { toolCallId };
+	if (kind !== null) data.toolKind = kind;
+	if (status !== null) data.status = status;
+	const blocks: BlockDraft[] = [{ role: "agent", kind: "tool", text: title, data, key: `tool:${toolCallId}` }];
 	for (const item of content ?? []) {
 		if (item.type === "diff") {
 			const oldText = item.oldText ?? "";
@@ -80,6 +99,25 @@ function toolBlocks(
 		}
 	}
 	return blocks;
+}
+
+function planBlock(
+	entries: Array<{ content: string; status: "pending" | "in_progress" | "completed" }>,
+	planId?: string,
+): BlockDraft {
+	const status =
+		entries.length > 0 && entries.every((entry) => entry.status === "completed")
+			? "completed"
+			: entries.some((entry) => entry.status === "in_progress")
+				? "in_progress"
+				: "pending";
+	return {
+		role: "agent",
+		kind: "plan",
+		text: entries.map((entry) => `${entry.status === "completed" ? "- [x]" : "- [ ]"} ${entry.content}`).join("\n"),
+		data: { status, ...(planId === undefined ? {} : { planId }) },
+		key: `plan:${planId ?? "default"}`,
+	};
 }
 
 function optionValue(option: { type: string; currentValue: string | boolean }): string {

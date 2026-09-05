@@ -208,6 +208,7 @@ extension Mission {
 // MARK: - Agents
 
 public enum AgentState: String, Codable, Hashable, Sendable {
+	case queued
 	case starting
 	case running
 	case blocked
@@ -389,6 +390,8 @@ public enum BlockKind: String, Codable, Hashable, Sendable {
 	case tool
 	case diff
 	case status
+	case plan
+	case usage
 }
 
 public struct Block: Codable, Hashable, Sendable {
@@ -487,6 +490,21 @@ public struct TurnChange: Codable, Hashable, Sendable {
 	public let sessionId: SessionId
 	public let turn: Turn?
 	public let block: Block?
+	public let inbox: InboxMessage?
+	public init(sessionId: SessionId, turn: Turn? = nil, block: Block? = nil, inbox: InboxMessage? = nil) {
+		self.sessionId = sessionId; self.turn = turn; self.block = block; self.inbox = inbox
+	}
+}
+
+public struct InboxMessage: Codable, Hashable, Sendable {
+	public let id: Ulid
+	public let sessionId: SessionId
+	public let createdAt: Date
+	public let text: String
+	public let attachments: [PromptAttachment]
+	public let status: String
+	public let deliveredAt: Date?
+	public let turnId: TurnId?
 }
 
 /// Mirrors 04's `node` payload: `{phase}`.
@@ -504,6 +522,7 @@ public enum NodeNotification: Sendable {
 	case state(StateChange)
 	case turn(TurnChange)
 	case node(NodeLifecycle)
+	case glance(GlanceChange)
 }
 
 // MARK: - JSON

@@ -14,42 +14,54 @@ import SwiftUI
 /// workspace, machine, Fit and zoom only (MANIFESTO.md "Desktop information
 /// architecture").
 ///
-/// The shell, store and client arrive from the environment, so T9.7's app
-/// wiring only has to inject them on the scene (`.environment(shell)` and
-/// friends propagate to commands; values set inside the window content do
-/// not). Every lookup is optional: a missing value disables nothing and the
-/// action no-ops, so previews without a Node stay usable.
+/// The app passes the shared shell, store and client directly. SwiftUI scene
+/// environment values do not reliably reach `Commands`; direct ownership is
+/// what makes menu shortcuts act on the same window state as visible controls.
 ///
 /// Escape is deliberately absent: it calls `dismissOverlay()` via
 /// `.onExitCommand` in the root view (T9.7), not through the command menu.
 public struct NetaCommands: Commands {
-	@Environment(ShellState.self) private var shell: ShellState?
-	@Environment(Store.self) private var store: Store?
-	@Environment(\.netaNodeClient) private var client: (any NodeClient)?
+	private let shell: ShellState
+	private let store: Store
+	private let client: any NodeClient
 
-	public init() {}
+	public init(shell: ShellState, store: Store, client: any NodeClient) {
+		self.shell = shell
+		self.store = store
+		self.client = client
+	}
 
 	public var body: some Commands {
 		CommandGroup(after: .newItem) {
+			Button("New Project…") { createProject() }
+				.keyboardShortcut("n", modifiers: [.command, .shift])
 			Button("Open Workspace…") { chooseWorkspace() }
 				.keyboardShortcut("o", modifiers: .command)
+			Divider()
+			Button("Install Command Line Tool…") {
+				CommandLineToolInstaller.present()
+			}
 		}
 		CommandGroup(after: .sidebar) {
-			Button(Self.navigatorTitle(visible: shell?.navigatorVisible ?? false)) {
-				shell?.toggleNavigator()
+			Button(Self.navigatorTitle(visible: shell.navigatorVisible)) {
+				shell.toggleNavigator()
 			}
 			.keyboardShortcut("l", modifiers: .command)
 			Divider()
-			Button("Fit Canvas") { shell?.fit() }
+			Button("Fit Canvas") { shell.fit() }
 				.keyboardShortcut("0", modifiers: .command)
-			Button("Zoom In") { shell?.zoomIn() }
+			Button("Zoom In") { shell.zoomIn() }
 				.keyboardShortcut("=", modifiers: .command)
-			Button("Zoom Out") { shell?.zoomOut() }
+			Button("Zoom Out") { shell.zoomOut() }
 				.keyboardShortcut("-", modifiers: .command)
 		}
 		CommandMenu("Session") {
-			Button("Focus Composer") { shell?.composerFocused = true }
+			Button("Quick Switcher") { shell.showQuickSwitcher() }
 				.keyboardShortcut("k", modifiers: .command)
+			Button("Quick Switcher") { shell.showQuickSwitcher() }
+				.keyboardShortcut("i", modifiers: .command)
+			Button("Focus Composer") { shell.composerFocused = true }
+				.keyboardShortcut("k", modifiers: [.command, .shift])
 			Button("Cancel Turn") { cancelTurn() }
 				.keyboardShortcut(".", modifiers: .command)
 		}
@@ -109,6 +121,7 @@ public struct NetaCommands: Commands {
 			let snapshot = try await client.snapshot()
 			store.replace(snapshot: snapshot)
 			store.setCurrentWorkspace(workspace.id)
+			store.markSessionsReady()
 			return true
 		} catch {
 			log.error(
@@ -127,7 +140,6 @@ public struct NetaCommands: Commands {
 	/// File > Open Workspace…: a directory chooser, because a workspace is a
 	/// checkout, not a file.
 	private func chooseWorkspace() {
-		guard let store, let client else { return }
 		let panel = NSOpenPanel()
 		panel.canChooseDirectories = true
 		panel.canChooseFiles = false
@@ -142,10 +154,27 @@ public struct NetaCommands: Commands {
 	/// missing shell, store, client or session no-ops; a failed cancel is
 	/// the Node's state to report, not the menu's.
 	private func cancelTurn() {
-		guard let shell, let store, let client,
-			let sessionId = shell.sessionId(in: store)
+		guard let sessionId = shell.sessionId(in: store)
 		else { return }
 		Task { try? await client.cancel(sessionId: sessionId) }
+	}
+
+	private func createProject() {
+		let panel = NSSavePanel()
+		panel.title = "New Project"
+		panel.prompt = "Create"
+		panel.canCreateDirectories = true
+		panel.nameFieldStringValue = "Project name"
+		guard panel.runModal() == .OK, let url = panel.url else { return }
+		Task { @MainActor in
+			guard !FileManager.default.fileExists(atPath: url.path) else { return }
+			do {
+				try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
+				_ = await Self.openWorkspace(path: url.path, client: client, store: store)
+			} catch {
+				Self.log.error("new project failed: \(String(describing: error), privacy: .public)")
+			}
+		}
 	}
 }
 

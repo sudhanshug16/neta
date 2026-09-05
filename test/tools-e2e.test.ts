@@ -34,6 +34,7 @@ const LEADER_TOOLS = [
 	"neta_agent",
 	"neta_ask",
 	"neta_close",
+	"neta_history",
 	"neta_mission",
 	"neta_mode",
 	"neta_pin",
@@ -282,6 +283,8 @@ test("session tool wiring and end-to-end mission creation", async () => {
 			brief: async (input: SessionLaunch & { sessionId: string }) => {
 				await acp.prompt(input.sessionId, input.task);
 			},
+			close: (id: string) => acp.close(id),
+			failed: () => Promise.resolve(),
 			cancel: (id: string) => acp.cancel(id),
 			prompt: (id: string, text: string) => acp.prompt(id, text).then(() => undefined),
 			wait: () => Promise.resolve({ changed: [] as Agent[], timedOut: true }),
@@ -291,7 +294,7 @@ test("session tool wiring and end-to-end mission creation", async () => {
 			close: () => Promise.reject(new Error("closeout lands in 06")),
 		},
 		skills: { check: () => ({ ok: true as const }) },
-		leases: { acquire: () => Promise.resolve("active" as const) },
+		leases: { acquire: () => Promise.resolve("active" as const), release: () => Promise.resolve() },
 		modes: { requestMode: () => Promise.resolve({ approved: true as const }) },
 	};
 	const router = createRouter(deps, toolHandlers(), tokens);

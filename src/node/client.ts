@@ -35,6 +35,7 @@ export interface ConnectOptions {
 	// launched with `NETA_SOCKET` and no `NETA_DIR`, so it passes the
 	// socket's own directory here rather than guessing at `~/.neta`.
 	dir?: string;
+	protocolVersion?: number;
 }
 
 const RETRY_MS = 100;
@@ -91,7 +92,7 @@ export async function connectNode(o?: ConnectOptions): Promise<NodeClient> {
 		}
 		if (descriptor !== undefined) {
 			try {
-				return await tryConnect(descriptor, client, deadline);
+				return await tryConnect(descriptor, client, deadline, o?.protocolVersion ?? PROTOCOL_VERSION);
 			} catch (error) {
 				if (!(error instanceof NotReadyError)) {
 					throw error;
@@ -139,7 +140,12 @@ function spawnNode(): void {
 	});
 }
 
-async function tryConnect(descriptor: NodeDescriptor, client: ClientKind, deadline: number): Promise<NodeClient> {
+async function tryConnect(
+	descriptor: NodeDescriptor,
+	client: ClientKind,
+	deadline: number,
+	protocolVersion: number,
+): Promise<NodeClient> {
 	const socket: Socket = await new Promise<Socket>((resolve, reject) => {
 		const pending = connect(descriptor.socket);
 		pending.on("connect", () => resolve(pending));
@@ -218,7 +224,7 @@ async function tryConnect(descriptor: NodeDescriptor, client: ClientKind, deadli
 
 	let greeting: HelloResult;
 	try {
-		greeting = await hello(socket, pending, descriptor, client, deadline);
+		greeting = await hello(socket, pending, descriptor, client, deadline, protocolVersion);
 	} catch (error) {
 		socket.destroy();
 		throw error;
@@ -270,6 +276,7 @@ async function hello(
 	descriptor: NodeDescriptor,
 	client: ClientKind,
 	deadline: number,
+	protocolVersion: number,
 ): Promise<HelloResult> {
 	const id = ulid();
 	let rejectHello: (error: Error) => void = () => undefined;
@@ -286,7 +293,7 @@ async function hello(
 				jsonrpc: "2.0",
 				id,
 				method: "hello",
-				params: { token: descriptor.token, client, protocolVersion: PROTOCOL_VERSION },
+				params: { token: descriptor.token, client, protocolVersion },
 			}),
 		);
 	} catch (error) {

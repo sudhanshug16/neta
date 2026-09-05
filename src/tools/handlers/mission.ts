@@ -19,6 +19,7 @@ import type { ToolContext, ToolDeps, ToolHandlers, ToolResult } from "../router.
 import type { AgentParams, AgentSpec, LeadSpec, MissionParams } from "../schemas.ts";
 
 export interface SessionLaunch {
+	sessionId: SessionId;
 	workspaceId: WorkspaceId;
 	missionId: MissionId;
 	// The actor id 05 names for an agent: the token for this session is
@@ -44,6 +45,8 @@ export interface MissionPorts {
 		// what makes it call.
 		launch(input: SessionLaunch): Promise<{ sessionId: SessionId }>;
 		brief(input: SessionLaunch & { sessionId: SessionId }): Promise<void>;
+		close(sessionId: SessionId): Promise<void>;
+		failed(agent: Agent): Promise<void>;
 	};
 	worktrees: { prepare(mission: Mission, workspace: Workspace): Promise<Mission> };
 	// The names resolve under the workspace root (`<root>/.neta/skills`, then
@@ -61,6 +64,7 @@ export interface MissionPorts {
 	// the request rather than a key the caller had to derive.
 	leases: {
 		acquire(input: { mission: Mission; workspace: Workspace; holder: AgentId }): Promise<"active" | "queued">;
+		release(workspaceId: WorkspaceId, holder: AgentId): Promise<void>;
 	};
 }
 
@@ -97,6 +101,7 @@ function allSkills(lead: "self" | LeadSpec, agents: AgentSpec[]): string[] {
 async function launchAgent(
 	ctx: MissionToolContext,
 	mission: Mission,
+	workspace: Workspace,
 	input: {
 		task: string;
 		access: Access;
@@ -106,12 +111,15 @@ async function launchAgent(
 		canSpawn: boolean;
 		taken: Set<string>;
 	},
+	onReserved?: (agent: Agent) => Promise<void>,
 ): Promise<Agent> {
 	const id = ulid();
+	const sessionId = ulid();
 	const name = pickName(input.taken, id);
 	input.taken.add(name);
 	const startedAt = nowIso();
 	const launch: SessionLaunch = {
+		sessionId,
 		workspaceId: mission.workspaceId,
 		missionId: mission.id,
 		agentId: id,
@@ -124,7 +132,6 @@ async function launchAgent(
 		name,
 		worktreePath: mission.worktree?.path,
 	};
-	const { sessionId } = await ctx.deps.sessions.launch(launch);
 	const agent: Agent = {
 		id,
 		missionId: mission.id,
@@ -142,9 +149,28 @@ async function launchAgent(
 	};
 	// On file before the first prompt: the context prompt is what sets the
 	// agent working, and its first tool call resolves through this record.
-	await ctx.deps.store.putAgent(agent);
-	await ctx.deps.sessions.brief({ ...launch, sessionId });
-	return agent;
+	const admitted =
+		input.access !== "readWrite" || (await ctx.deps.leases.acquire({ mission, workspace, holder: id })) === "active";
+	const reserved = admitted ? agent : { ...agent, state: "queued" as const };
+	await ctx.deps.store.putAgent(reserved);
+	await onReserved?.(reserved);
+	if (admitted) {
+		let live = reserved;
+		try {
+			const created = await ctx.deps.sessions.launch(launch);
+			live = created.sessionId === sessionId ? reserved : { ...reserved, sessionId: created.sessionId };
+			if (live.sessionId !== reserved.sessionId) await ctx.deps.store.putAgent(live);
+			await ctx.deps.sessions.brief({ ...launch, sessionId: live.sessionId });
+			return live;
+		} catch (error) {
+			await ctx.deps.sessions.close(live.sessionId).catch(() => undefined);
+			const failed = { ...live, state: "failed" as const, endedAt: nowIso(), outcome: String(error) };
+			await ctx.deps.store.putAgent(failed);
+			await ctx.deps.sessions.failed(failed);
+			return failed;
+		}
+	}
+	return reserved;
 }
 
 // `mission.created` precedes every `agent.spawned`, so launches stay silent
@@ -211,6 +237,9 @@ async function createMission(ctx: MissionToolContext, params: MissionParams): Pr
 	if (workspace.kind === "git") {
 		mission = await ctx.deps.worktrees.prepare(mission, workspace);
 	}
+	// The mission exists before any agent receives its first prompt, so that
+	// its first tool call can resolve both the actor and its owning mission.
+	await ctx.deps.missions.save(mission);
 
 	// The leader's own name is spoken for: two "Halden"s in the mission bar
 	// and on the spine would name one person twice.
@@ -220,30 +249,48 @@ async function createMission(ctx: MissionToolContext, params: MissionParams): Pr
 		mission.lead = { kind: "leader" };
 		await ctx.deps.store.putLeader({ ...leader, activeMissionId: mission.id });
 	} else {
-		const lead = await launchAgent(ctx, mission, {
-			task: params.lead.task,
-			access: mission.access,
-			provider: params.lead.provider ?? leader.provider,
-			model: params.lead.model ?? leader.model,
-			skills: params.lead.skills ?? [],
-			canSpawn: true,
-			taken,
-		});
-		mission.lead = { kind: "agent", agentId: lead.id };
-		mission.agentIds.push(lead.id);
+		const lead = await launchAgent(
+			ctx,
+			mission,
+			workspace,
+			{
+				task: params.lead.task,
+				// Mission leads begin in Lead. The mission's write allowance is a
+				// ceiling; it does not grant effective writer access until Lead++.
+				access: "readOnly",
+				provider: params.lead.provider ?? leader.provider,
+				model: params.lead.model ?? leader.model,
+				skills: params.lead.skills ?? [],
+				canSpawn: true,
+				taken,
+			},
+			async (reserved) => {
+				mission.lead = { kind: "agent", agentId: reserved.id };
+				mission.agentIds.push(reserved.id);
+				await ctx.deps.missions.save(mission);
+			},
+		);
 		launched.push(lead);
 	}
 	for (const spec of params.agents ?? []) {
-		const spawned = await launchAgent(ctx, mission, {
-			task: spec.task,
-			access: spec.access,
-			provider: spec.provider ?? leader.provider,
-			model: spec.model ?? leader.model,
-			skills: spec.skills ?? [],
-			canSpawn: false,
-			taken,
-		});
-		mission.agentIds.push(spawned.id);
+		const spawned = await launchAgent(
+			ctx,
+			mission,
+			workspace,
+			{
+				task: spec.task,
+				access: spec.access,
+				provider: spec.provider ?? leader.provider,
+				model: spec.model ?? leader.model,
+				skills: spec.skills ?? [],
+				canSpawn: false,
+				taken,
+			},
+			async (reserved) => {
+				mission.agentIds.push(reserved.id);
+				await ctx.deps.missions.save(mission);
+			},
+		);
 		launched.push(spawned);
 	}
 	await ctx.deps.missions.save(mission);
@@ -260,13 +307,7 @@ async function createMission(ctx: MissionToolContext, params: MissionParams): Pr
 	// A readWrite mission in a folder workspace shares the checkout, so it
 	// takes the folder lease; when the lease is held it is still created,
 	// only marked queued.
-	let queued = false;
-	if (mission.access === "readWrite" && workspace.kind === "folder") {
-		const holder = mission.agentIds[0] ?? mission.id;
-		if ((await ctx.deps.leases.acquire({ mission, workspace, holder })) === "queued") {
-			queued = true;
-		}
-	}
+	const queued = launched.some((agent) => agent.state === "queued");
 	return {
 		ok: true,
 		data: {
@@ -278,7 +319,7 @@ async function createMission(ctx: MissionToolContext, params: MissionParams): Pr
 	};
 }
 
-async function createAgent(ctx: MissionToolContext, params: AgentParams): Promise<ToolResult> {
+async function createAgentUnlocked(ctx: MissionToolContext, params: AgentParams): Promise<ToolResult> {
 	if (ctx.actor.kind !== "lead" && ctx.actor.kind !== "leader") {
 		return { ok: false, code: "notAuthorised", message: "only a lead or the leader adds agents" };
 	}
@@ -320,7 +361,11 @@ async function createAgent(ctx: MissionToolContext, params: AgentParams): Promis
 	if (workspaceLeader !== undefined) {
 		taken.add(workspaceLeader.name);
 	}
-	const spawned = await launchAgent(ctx, mission, {
+	const workspace = ctx.deps.store.getWorkspace(mission.workspaceId);
+	if (workspace === undefined) {
+		return notFound(`no workspace for mission: ${mission.id}`);
+	}
+	const spawned = await launchAgent(ctx, mission, workspace, {
 		task: params.task,
 		access: params.access,
 		provider: params.provider ?? caller?.provider ?? "unknown",
@@ -332,6 +377,30 @@ async function createAgent(ctx: MissionToolContext, params: AgentParams): Promis
 	await ctx.deps.missions.save({ ...mission, agentIds: [...mission.agentIds, spawned.id] });
 	await announceSpawn(ctx, spawned);
 	return { ok: true, data: { agentId: spawned.id, name: spawned.name, missionId: mission.id } };
+}
+
+const agentMutations = new Map<string, Promise<void>>();
+async function createAgent(ctx: MissionToolContext, params: AgentParams): Promise<ToolResult> {
+	const key =
+		params.missionId ??
+		(ctx.actor.kind === "lead"
+			? ctx.actor.missionId
+			: ctx.deps.store.getLeader(ctx.actor.workspaceId)?.activeMissionId) ??
+		ctx.actor.workspaceId;
+	const previous = agentMutations.get(key) ?? Promise.resolve();
+	let release = (): void => undefined;
+	const current = new Promise<void>((done) => {
+		release = done;
+	});
+	const tail = previous.then(() => current);
+	agentMutations.set(key, tail);
+	await previous;
+	try {
+		return await createAgentUnlocked(ctx, params);
+	} finally {
+		release();
+		if (agentMutations.get(key) === tail) agentMutations.delete(key);
+	}
 }
 
 export const missionHandlers: Pick<ToolHandlers, "neta_mission" | "neta_agent"> = {

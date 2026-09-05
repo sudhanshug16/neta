@@ -227,7 +227,10 @@ async function stopNode(): Promise<number> {
 	}
 	let client: NodeClient;
 	try {
-		client = await NodeClient.connect();
+		// Shutdown is the one safe cross-version operation. A newly installed
+		// CLI greets an older Node with the version from its authenticated
+		// descriptor, asks only for node.stop, then starts no replacement.
+		client = await NodeClient.connect({ protocolVersion: descriptor.protocolVersion });
 	} catch (error) {
 		// The pid died under us: that is "not running", not an error.
 		if ((await liveDescriptor()) === undefined) {

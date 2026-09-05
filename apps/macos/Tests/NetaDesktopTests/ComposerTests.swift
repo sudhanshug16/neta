@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import XCTest
 
 @testable import NetaDesktop
@@ -19,6 +20,11 @@ private actor ComposerStub: NodeClient {
 	var listedModels: [ModelInfo] = []
 	/// When true, `prompt` throws the way a disconnected Node does.
 	var promptFails = false
+	var handoffFails = false
+	var providerFails = false
+	var modelFails = false
+	var modeFails = false
+	private(set) var attachmentCount = 0
 	let notifications: AsyncStream<NodeNotification>
 
 	init() {
@@ -38,10 +44,17 @@ private actor ComposerStub: NodeClient {
 	func setPromptFails(_ fails: Bool) {
 		promptFails = fails
 	}
+	func setProviderFailures(handoff: Bool = false, provider: Bool = false, model: Bool = false) {
+		handoffFails = handoff
+		providerFails = provider
+		modelFails = model
+	}
+	func setModeFails(_ fails: Bool) { modeFails = fails }
 
 	func methods(named method: String) -> [Call] {
 		calls.filter { $0.method == method }
 	}
+	func receivedAttachmentCount() -> Int { attachmentCount }
 
 	func connect() async throws {}
 	func snapshot() async throws -> Snapshot { throw NodeClientError.disconnected }
@@ -61,6 +74,14 @@ private actor ComposerStub: NodeClient {
 		if promptFails { throw NodeClientError.disconnected }
 		return "t-new"
 	}
+	func prompt(sessionId: Ulid, text: String, attachments: [PromptAttachment]) async throws -> Ulid {
+		attachmentCount = attachments.count
+		return try await prompt(sessionId: sessionId, text: text)
+	}
+	func capabilities(sessionId: Ulid) async throws -> ConversationCapabilities {
+		calls.append(Call(method: "capabilities", sessionId: sessionId, text: nil, model: nil, workspaceId: nil, mode: nil))
+		return .init(image: true, embeddedContext: true)
+	}
 
 	func cancel(sessionId: Ulid) async throws {
 		calls.append(Call(
@@ -72,6 +93,24 @@ private actor ComposerStub: NodeClient {
 		calls.append(Call(
 			method: "setModel", sessionId: sessionId, text: nil,
 			model: model, workspaceId: nil, mode: nil))
+		if modelFails { throw NodeClientError.disconnected }
+	}
+
+	func listProviders() async throws -> [ProviderInfo] {
+		[ProviderInfo(id: "alternate", label: "Alternate", defaultModel: "alt-model")]
+	}
+
+	func prepareHandoff(sessionId: Ulid) async throws -> String {
+		if handoffFails { throw NodeClientError.disconnected }
+		return "# Handoff"
+	}
+
+	func setProvider(
+		sessionId: Ulid, provider: String, model: String?, handoff: String?
+	) async throws -> ProviderSwitchResult {
+		calls.append(Call(method: "setProvider", sessionId: sessionId, text: handoff, model: model, workspaceId: nil, mode: nil))
+		if providerFails { throw NodeClientError.disconnected }
+		return ProviderSwitchResult(sessionId: sessionId, provider: provider, model: "alt-model", contextReset: true)
 	}
 
 	func listModels(provider: String) async throws -> [ModelInfo] {
@@ -80,11 +119,16 @@ private actor ComposerStub: NodeClient {
 			model: provider, workspaceId: nil, mode: nil))
 		return listedModels
 	}
+	func listModels(sessionId: Ulid) async throws -> [ModelInfo] {
+		calls.append(Call(method: "listModels", sessionId: sessionId, text: nil, model: nil, workspaceId: nil, mode: nil))
+		return listedModels
+	}
 
 	func setMode(workspaceId: String, mode: LeaderMode) async throws {
 		calls.append(Call(
 			method: "setMode", sessionId: nil, text: nil,
 			model: nil, workspaceId: workspaceId, mode: mode))
+		if modeFails { throw NodeClientError.rpc(code: -32603, message: "mode refused") }
 	}
 
 	func pin(missionId: Ulid, pinned: Bool) async throws {}
@@ -95,6 +139,65 @@ private actor ComposerStub: NodeClient {
 // `setMode` during a turn, line clamping and the archived form.
 @MainActor
 final class ComposerTests: XCTestCase {
+	func testResumePendingKeepsSnapshotButBlocksRPCUntilReady() async {
+		let stub = ComposerStub()
+		let retained = store()
+		retained.beginSessionsResume()
+		let model = ComposerModel(client: stub, store: retained, sessionId: "s-leader", selection: .leader)
+		model.draft = "do not send yet"
+
+		XCTAssertEqual(retained.leader?.name, "Halden", "the durable snapshot remains visible")
+		XCTAssertEqual(model.button, .sendDisabled)
+		await model.loadCapabilities()
+		await model.send()
+		let pendingCapabilities = await stub.methods(named: "capabilities")
+		let pendingPrompts = await stub.methods(named: "prompt")
+		XCTAssertTrue(pendingCapabilities.isEmpty)
+		XCTAssertTrue(pendingPrompts.isEmpty)
+
+		retained.markSessionsReady()
+		await model.loadCapabilities()
+		let readyCapabilities = await stub.methods(named: "capabilities")
+		XCTAssertEqual(readyCapabilities.count, 1)
+		XCTAssertEqual(model.capabilities, .init(image: true, embeddedContext: true))
+	}
+
+	func testProviderFailuresAreVisibleAndDoNotChangeSelection() async {
+		let stub = ComposerStub()
+		let model = leaderModel(client: stub)
+		let original = model.selectedModel
+		await stub.setProviderFailures(handoff: true)
+		let handoff = await model.handoff()
+		XCTAssertNil(handoff)
+		XCTAssertNotNil(model.providerError)
+		XCTAssertTrue(model.providerPickerEnabled)
+
+		await stub.setProviderFailures(provider: true)
+		let provider = ProviderInfo(id: "alternate", label: "Alternate", defaultModel: "alt-model")
+		let failedSwitch = await model.setProvider(provider, handoff: "edited")
+		XCTAssertFalse(failedSwitch)
+		XCTAssertEqual(model.selectedModel, original)
+		XCTAssertNotNil(model.providerError)
+
+		await stub.setProviderFailures(model: true)
+		await model.setModel("broken-model")
+		XCTAssertEqual(model.selectedModel, original)
+		XCTAssertNotNil(model.providerError)
+	}
+
+	func testProviderSuccessClearsPriorErrorAndUpdatesModel() async {
+		let stub = ComposerStub()
+		let model = leaderModel(client: stub)
+		await stub.setProviderFailures(provider: true)
+		let provider = ProviderInfo(id: "alternate", label: "Alternate", defaultModel: "alt-model")
+		let failedSwitch = await model.setProvider(provider, handoff: "edited")
+		XCTAssertFalse(failedSwitch)
+		await stub.setProviderFailures()
+		let switched = await model.setProvider(provider, handoff: "edited")
+		XCTAssertTrue(switched)
+		XCTAssertNil(model.providerError)
+		XCTAssertEqual(model.selectedModel, "alt-model")
+	}
 	private let base = Date(timeIntervalSince1970: 1_780_315_200) // 2026-06-01T12:00:00Z
 	// The workspace is NoScrubs; the leader is Halden. Nothing may
 	// derive the leader's name from the workspace.
@@ -158,6 +261,19 @@ final class ComposerTests: XCTestCase {
 		XCTAssertEqual(prompts.first?.sessionId, "s-leader")
 		XCTAssertEqual(prompts.first?.text, "Void them.")
 		XCTAssertEqual(model.draft, "")
+	}
+
+	func testActiveTurnKeepsSendAvailableAndPromptsWithoutStopping() async {
+		let stub = ComposerStub()
+		let model = leaderModel(client: stub)
+		model.hasOpenTurn = true
+		model.draft = "Steer now"
+		XCTAssertTrue(model.canSendDuringTurn)
+		await model.send()
+		let prompts = await stub.methods(named: "prompt")
+		let cancels = await stub.methods(named: "cancel")
+		XCTAssertEqual(prompts.map(\.text), ["Steer now"])
+		XCTAssertTrue(cancels.isEmpty)
 	}
 
 	/// A prompt that throws reached no Node, so the message it echoed must
@@ -233,6 +349,15 @@ final class ComposerTests: XCTestCase {
 		XCTAssertEqual(modes.first?.mode, .leadPlus)
 	}
 
+	func testSetModeFailureIsVisible() async {
+		let stub = ComposerStub()
+		await stub.setModeFails(true)
+		let store = store()
+		let model = ComposerModel(client: stub, store: store, sessionId: "s-leader", selection: .leader)
+		await model.setMode(.leadPlus)
+		XCTAssertEqual(model.providerError, "Could not change mode: mode refused")
+	}
+
 	func testLoadModelsListsProviderAndSelectsCurrent() async {
 		let stub = ComposerStub()
 		await stub.setListedModels([
@@ -244,7 +369,7 @@ final class ComposerTests: XCTestCase {
 		await model.loadModels()
 		let lists = await stub.methods(named: "listModels")
 		XCTAssertEqual(lists.count, 1)
-		XCTAssertEqual(lists.first?.model, "Claude")
+		XCTAssertEqual(lists.first?.sessionId, "s-leader")
 		XCTAssertEqual(model.models.map(\.id), ["claude-opus-5", "claude-sonnet-4"])
 		XCTAssertEqual(model.selectedModel, "claude-opus-5")
 	}
@@ -306,43 +431,34 @@ final class ComposerTests: XCTestCase {
 		XCTAssertEqual(bare.label, "claude-opus-5")
 		XCTAssertEqual(bare.options.map(\.id), ["claude-opus-5"])
 		let listed = ModelPicker(selected: "claude-opus-5", models: [
-			ModelInfo(id: "claude-opus-5", provider: "Claude", label: "Opus 5"),
+			ModelInfo(id: "claude-opus-5", provider: "Claude", label: "Opus 5", description: "Most capable"),
 			ModelInfo(id: "claude-sonnet-4", provider: "Claude", label: ""),
 		])
 		XCTAssertEqual(listed.label, "Opus 5")
 		XCTAssertEqual(listed.options.map(\.label), ["Opus 5", "claude-sonnet-4"])
+		XCTAssertEqual(listed.options.first?.detail, "Most capable")
 		let unlisted = ModelPicker(selected: "gpt-5-codex", models: [
 			ModelInfo(id: "claude-opus-5", provider: "Claude", label: "Opus 5"),
 		])
 		XCTAssertEqual(unlisted.label, "gpt-5-codex", "an unlisted selection still shows its id")
+		XCTAssertEqual(unlisted.options.map(\.id), ["claude-opus-5", "gpt-5-codex"])
 	}
 
-	/// The controls row is glass, never the stock pickers the fix pass found.
-	func testComposerUsesGlassControlsNotStockPickers() throws {
+	/// Provider and model share one native selector; mode uses the native segmented picker.
+	func testComposerUsesSharedNativeSelectorsAndSegmentedMode() throws {
 		let source = try composerViewSource()
-		XCTAssertFalse(source.contains("pickerStyle("), "no stock picker style, segmented or menu")
-		// Every `Picker(` in the file must be our own `ModelPicker(`: a
-		// re-introduced stock `Picker("Mode", selection:)` with no explicit
-		// style would otherwise slip past the pickerStyle check above.
-		XCTAssertEqual(
-			occurrences(of: "Picker(", in: source),
-			occurrences(of: "ModelPicker(", in: source),
-			"no stock SwiftUI Picker, styled or not")
+		XCTAssertEqual(occurrences(of: "AgentSelector(", in: source), 2)
+		XCTAssertTrue(source.contains("Picker(\"Mode\""))
+		XCTAssertTrue(source.contains(".pickerStyle(.segmented)"))
 		XCTAssertFalse(source.contains("width: 150"), "the mode control is compact")
-		// Revision 3 "Controls on glass": capsule glass with the same rim,
-		// and no outer shadow — so they name the control weight rather than
-		// letting the capsule silhouette float (see Glass.swift).
-		XCTAssertEqual(
-			occurrences(of: "netaControlGlass(.capsule)", in: source), 4,
-			"model pill, mode segments, Stop and the disabled send are glass capsules")
 		XCTAssertFalse(
 			source.contains("netaFloatingGlass"), "no composer control floats over the ground")
-		XCTAssertTrue(source.contains("chevron.down"), "the model pill carries an SF Symbol chevron")
 		XCTAssertTrue(source.contains("Theme.mint"), "the enabled send arrow stays a mint capsule")
 		XCTAssertTrue(source.contains("Theme.Glass.fieldFill"), "the field is inset glass")
 	}
 
-	/// PAPER-SPINE Revision 2: ONE trailing round 30 pt control that becomes
+	/// Each trailing action has the same round 30 pt footprint. While a turn
+	/// runs, Send and Stop are both available so steering does not require a stop.
 	/// the mint send arrow when a person types. The send used to be a mint
 	/// lozenge beside a round Stop, so the silhouette changed under the hand
 	/// as well as the colour; and the disabled form was a bare `Image`, so
@@ -354,8 +470,8 @@ final class ComposerTests: XCTestCase {
 			occurrences(
 				of: ".frame(width: Self.actionSize, height: Self.actionSize)",
 				in: source),
-			3,
-			"Stop, send and disabled send share one round footprint")
+			4,
+			"Stop, active Send, idle Send and disabled Send share one round footprint")
 		XCTAssertFalse(
 			source.contains(".padding(.horizontal, 12)"),
 			"the send arrow is no longer a lozenge")
@@ -428,6 +544,91 @@ final class ComposerTests: XCTestCase {
 		return try String(contentsOf: url, encoding: .utf8)
 	}
 
+	func testAttachmentOnlyPromptSendsBytesAndClearsAfterAcknowledgement() async {
+		let client = ComposerStub()
+		let model = leaderModel(client: client)
+		await model.loadCapabilities()
+		model.addImagePNG(Data([1, 2, 3]))
+		XCTAssertEqual(model.button, .send)
+		await model.send()
+		let count = await client.receivedAttachmentCount()
+		XCTAssertEqual(count, 1)
+		XCTAssertTrue(model.attachments.isEmpty)
+	}
+
+	func testFailedAttachmentPromptKeepsTextAndBytesAndShowsError() async {
+		let client = ComposerStub()
+		await client.setPromptFails(true)
+		let model = leaderModel(client: client)
+		await model.loadCapabilities()
+		model.draft = "inspect"
+		model.addImagePNG(Data([1, 2, 3]))
+		await model.send()
+		XCTAssertEqual(model.draft, "inspect")
+		XCTAssertEqual(model.attachments.first?.data, Data([1, 2, 3]))
+		XCTAssertNotNil(model.attachmentError)
+	}
+
+	func testResponderPasteHandlesImageAndFileAndLeavesPlainTextToNSTextView() async throws {
+		let client = ComposerStub()
+		let model = leaderModel(client: client)
+		await model.loadCapabilities()
+		let view = ComposerNSTextView()
+		view.attachmentPaste = { ComposerPasteboard.paste($0, into: model) }
+
+		let imageBoard = NSPasteboard(name: .init("neta-image-\(UUID())"))
+		imageBoard.clearContents()
+		let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 1, pixelsHigh: 1, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 4, bitsPerPixel: 32)!
+		imageBoard.setData(try XCTUnwrap(bitmap.representation(using: .png, properties: [:])), forType: .png)
+		view.pasteboard = { imageBoard }
+		view.paste(nil)
+		XCTAssertEqual(model.attachments.map(\.kind), [.image])
+
+		let file = FileManager.default.temporaryDirectory.appendingPathComponent("neta-paste-\(UUID()).txt")
+		try Data("file".utf8).write(to: file)
+		defer { try? FileManager.default.removeItem(at: file) }
+		let fileBoard = NSPasteboard(name: .init("neta-file-\(UUID())"))
+		fileBoard.clearContents()
+		fileBoard.writeObjects([file as NSURL])
+		view.pasteboard = { fileBoard }
+		view.paste(nil)
+		XCTAssertEqual(model.attachments.map(\.kind), [.image, .file])
+
+		let textBoard = NSPasteboard(name: .init("neta-text-\(UUID())"))
+		textBoard.clearContents(); textBoard.setString("plain text", forType: .string)
+		view.string = ""; view.setSelectedRange(NSRange(location: 0, length: 0))
+		view.pasteboard = { textBoard }
+		view.paste(nil)
+		XCTAssertEqual(view.string, "plain text")
+	}
+
+	func testComposerTextViewReturnSendsAndShiftReturnInsertsNewline() throws {
+		let view = ComposerNSTextView()
+		var sends = 0
+		view.sendAction = { _ in sends += 1 }
+		func key(_ modifiers: NSEvent.ModifierFlags) throws -> NSEvent {
+			try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: 0, windowNumber: 0, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36))
+		}
+		view.keyDown(with: try key([]))
+		XCTAssertEqual(sends, 1)
+		view.string = "a"; view.setSelectedRange(NSRange(location: 1, length: 0))
+		view.keyDown(with: try key(.shift))
+		XCTAssertEqual(sends, 1)
+		XCTAssertTrue(view.string.contains("\n"))
+	}
+
+	func testComposerInputCoordinatorCanFollowAReplacementBinding() {
+		var oldDraft = "old"
+		var newDraft = "new"
+		let coordinator = ComposerTextInput.Coordinator(text: Binding(
+			get: { oldDraft }, set: { oldDraft = $0 }))
+		coordinator.text = Binding(get: { newDraft }, set: { newDraft = $0 })
+		let view = ComposerNSTextView(); view.string = "typed into replacement"
+		coordinator.textDidChange(Notification(name: NSText.didChangeNotification, object: view))
+		XCTAssertEqual(oldDraft, "old")
+		XCTAssertEqual(newDraft, "typed into replacement")
+	}
+
 	private func leaderModel(client: ComposerStub? = nil) -> ComposerModel {
 		ComposerModel(
 			client: client ?? ComposerStub(), store: store(),
@@ -474,6 +675,7 @@ final class ComposerTests: XCTestCase {
 			],
 			completedCounts: [:], events: [], attention: [],
 			windowDays: 14, protocolVersion: 1, at: base))
+		store.markSessionsReady()
 		return store
 	}
 

@@ -197,13 +197,13 @@ export const registryHandlers: NodeHandlers = {
 			throw new NodeError("NOT_FOUND", `no such mission: ${parsed.missionId}`);
 		}
 		// Pinning changes no Mission field: the event is the whole mutation.
-		await ctx.store.appendEvent({
+		const event = await ctx.store.appendEvent({
 			workspaceId: mission.workspaceId,
 			kind: "user.pinned",
 			missionId: mission.id,
 			data: { pinned: parsed.pinned },
 		});
-		ctx.hub.broadcast("state", { kind: "mission", record: mission });
+		ctx.hub.broadcast("event", { event });
 		return { missionId: mission.id, pinned: parsed.pinned };
 	},
 

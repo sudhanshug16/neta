@@ -40,6 +40,16 @@ import Observation
 	/// `Online`, with a text label beside the dot — status is never colour
 	/// alone.
 	public private(set) var nodeOffline = false
+	public private(set) var nodeError: String?
+	public private(set) var nodeRecoveryAvailable = false
+	public private(set) var nodeRecoveryGeneration = 0
+	public private(set) var nodeRecoveryRequest = 0
+	public private(set) var nodeRecoveryInProgress = false
+	public private(set) var sessionReadinessGeneration = 0
+	/// False while the desktop is reconnecting the persisted ACP session.
+	/// Snapshot records remain visible during this interval, but writes must
+	/// wait until `workspace.open` has successfully resumed the provider.
+	public private(set) var sessionsReady = true
 
 	/// The current workspace's leader. Never `leaders.first`: with two
 	/// workspaces open that picked whichever the Node listed first, not the
@@ -179,6 +189,8 @@ import Observation
 			}
 		case .node(let lifecycle):
 			nodeState = lifecycle
+		case .glance:
+			break
 		}
 	}
 
@@ -199,6 +211,23 @@ import Observation
 	/// `Offline`. The next snapshot clears it.
 	public func setNodeOffline(_ offline: Bool) {
 		nodeOffline = offline
+	}
+	public func setNodeError(_ message: String?, recoveryAvailable: Bool = false) {
+		nodeError = message
+		nodeRecoveryAvailable = message != nil && recoveryAvailable
+	}
+	public func beginNodeRecovery() { nodeRecoveryInProgress = true }
+	public func requestNodeRecovery() { nodeRecoveryRequest += 1 }
+	public func markSessionsReady() {
+		sessionsReady = true
+		sessionReadinessGeneration += 1
+	}
+	public func beginSessionsResume() { sessionsReady = false }
+	public func finishNodeRecovery(error: String?) {
+		nodeRecoveryInProgress = false
+		nodeError = error
+		nodeRecoveryAvailable = false
+		if error == nil { nodeRecoveryGeneration += 1 }
 	}
 
 	/// Merges older pages and moves `window.lowerBound` back. Nothing loaded

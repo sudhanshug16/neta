@@ -44,15 +44,14 @@ describe("mode", () => {
 		expect(result.stdout.trim()).toBe("lead");
 	}, 120000);
 
-	test("mode lead++ exits 0 and a following mode prints lead++ with its active time", async () => {
+	test("mode lead++ without an active mission is refused", async () => {
 		const h = await ensureSetup();
 		const set = await h.run(["mode", "lead++"]);
-		expect(set.code).toBe(0);
-		expect(set.stdout.trim()).toBe("mode lead++");
+		expect(set.code).toBe(1);
+		expect(set.stderr).toContain("Lead++ requires an active mission");
 		const read = await h.run(["mode"]);
 		expect(read.code).toBe(0);
-		expect(read.stdout).toContain("lead++");
-		expect(read.stdout).toContain("active");
+		expect(read.stdout.trim()).toBe("lead");
 	}, 120000);
 
 	test("mode lead exits 0 and a following mode reflects it", async () => {

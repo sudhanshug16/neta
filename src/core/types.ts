@@ -83,7 +83,15 @@ export interface Mission {
 	continuesMissionId?: MissionId;
 }
 
-export type AgentState = "starting" | "running" | "blocked" | "failed" | "completed" | "interrupted" | "archived";
+export type AgentState =
+	| "queued"
+	| "starting"
+	| "running"
+	| "blocked"
+	| "failed"
+	| "completed"
+	| "interrupted"
+	| "archived";
 
 export interface Agent {
 	id: AgentId;
@@ -151,7 +159,26 @@ export interface Event {
 }
 
 export type Role = "user" | "agent" | "system";
-export type BlockKind = "text" | "thought" | "tool" | "diff" | "status";
+export type BlockKind = "text" | "thought" | "tool" | "diff" | "status" | "plan" | "usage";
+
+export interface PromptAttachment {
+	id: string;
+	kind: "image" | "file";
+	name: string;
+	mimeType: string;
+	dataBase64: string;
+}
+export type InboxMessageStatus = "queued" | "delivering" | "delivered" | "uncertain" | "discarded";
+export interface InboxMessage {
+	id: Ulid;
+	sessionId: SessionId;
+	createdAt: IsoTime;
+	text: string;
+	attachments: PromptAttachment[];
+	status: InboxMessageStatus;
+	deliveredAt?: IsoTime;
+	turnId?: TurnId;
+}
 export interface Block {
 	turnId: TurnId;
 	seq: number;
@@ -168,4 +195,5 @@ export interface Turn {
 	endedAt?: IsoTime;
 	role: Role; // who opened the turn
 	cancelled?: boolean;
+	readerDirected?: boolean;
 }

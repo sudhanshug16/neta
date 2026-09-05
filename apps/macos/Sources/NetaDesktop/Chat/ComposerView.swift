@@ -1,4 +1,7 @@
+import AgentChatKit
+import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// The compact `Lead | Lead++` control's pure model (PAPER-SPINE Revision 3).
 ///
@@ -37,6 +40,7 @@ public struct ModelPicker: Equatable, Sendable {
 	public struct Option: Equatable, Sendable, Identifiable {
 		public let id: String
 		public let label: String
+		public let detail: String?
 	}
 
 	public let options: [Option]
@@ -46,14 +50,13 @@ public struct ModelPicker: Equatable, Sendable {
 	/// `loadModels` returns. A model with no label of its own shows its id.
 	public init(selected: String, models: [ModelInfo]) {
 		self.selected = selected
-		let listed = models.map { info in
-			Option(id: info.id, label: info.label.isEmpty ? info.id : info.label)
+		var listed = models.map { info in
+			Option(id: info.id, label: info.label.isEmpty ? info.id : info.label, detail: info.description)
 		}
-		if listed.isEmpty, !selected.isEmpty {
-			options = [Option(id: selected, label: selected)]
-		} else {
-			options = listed
+		if !selected.isEmpty, !listed.contains(where: { $0.id == selected }) {
+			listed.append(Option(id: selected, label: selected, detail: nil))
 		}
+		options = listed
 	}
 
 	/// The pill's label: the selected model's label, or its id when the
@@ -77,6 +80,10 @@ public struct ModelPicker: Equatable, Sendable {
 /// `Read-only · archived` with no controls at all.
 public struct ComposerView: View {
 	@Bindable private var model: ComposerModel
+	@Environment(ShellState.self) private var shell: ShellState?
+	@State private var pendingProvider: ProviderInfo?
+	@State private var handoffMarkdown = ""
+	@State private var choosingFiles = false
 
 	public init(model: ComposerModel) {
 		self.model = model
@@ -93,10 +100,45 @@ public struct ComposerView: View {
 		} else {
 			VStack(alignment: .leading, spacing: 8) {
 				controlsRow
+				AgentProgressView(model.responseProgress)
+				if let error = model.attachmentError ?? model.providerError {
+					Text(error)
+						.font(Theme.text(10, .medium))
+						.foregroundStyle(.red)
+						.accessibilityLabel("Provider error: \(error)")
+				}
 				HStack(alignment: .bottom, spacing: 8) {
+					Button("Attach", systemImage: "paperclip") { choosingFiles = true }
+						.labelStyle(.iconOnly).buttonStyle(.glass).controlSize(.regular)
+						.help("Attach images or files")
+						.disabled(!model.attachmentsEnabled)
 					field
+					if model.canSendDuringTurn { activeSendButton }
 					actionButton
 				}
+				if model.queuedMessageCount > 0 {
+					Text("Queued · \(model.queuedMessageCount)").font(Theme.text(10, .medium)).foregroundStyle(Theme.textSecondary)
+				}
+				ScrollView {
+					VStack(alignment: .leading, spacing: 5) {
+						ForEach(model.pendingInboxMessages, id: \.id) { message in
+							HStack(alignment: .firstTextBaseline, spacing: 7) {
+								Text(message.status == "uncertain" ? "Delivery uncertain" : message.status.capitalized)
+									.font(Theme.text(10, .semibold))
+								Text(message.text.isEmpty ? "Attachment" : message.text)
+									.font(Theme.text(10, .regular)).lineLimit(2)
+								if message.status == "uncertain", !message.text.isEmpty {
+									Button("Copy message") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(message.text, forType: .string) }
+										.buttonStyle(.glass).controlSize(.small)
+										.accessibilityIdentifier("inbox-copy-\(message.id)")
+								}
+							}
+							.foregroundStyle(message.status == "uncertain" ? .orange : Theme.textSecondary)
+							.accessibilityLabel("\(message.status): \(message.text)")
+						}
+					}
+				}.frame(maxHeight: model.pendingInboxMessages.isEmpty ? 0 : 120)
+				attachmentPreviews
 			}
 			// Without this the provider list never arrives and `ModelPicker`
 			// falls back to the one model already selected, so the pill opens
@@ -114,6 +156,15 @@ public struct ComposerView: View {
 			// session alone the load no-ops at launch and never runs again,
 			// leaving the menu with the one model already selected.
 			.task(id: model.modelLoadKey) { await model.loadModels() }
+			.task(id: model.modelLoadKey) { await model.loadProviders() }
+			.task(id: model.modelLoadKey) { await model.loadCapabilities() }
+			.task(id: model.modelLoadKey) { await model.loadInbox() }
+			.fileImporter(isPresented: $choosingFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
+				if case .success(let urls) = result { model.addFiles(urls) }
+			}
+			.sheet(item: $pendingProvider) { provider in
+				handoffSheet(provider)
+			}
 		}
 	}
 
@@ -121,6 +172,7 @@ public struct ComposerView: View {
 
 	private var controlsRow: some View {
 		HStack(spacing: 8) {
+			providerPicker
 			modelPicker
 			if model.showsModeControl {
 				modeControl
@@ -133,72 +185,90 @@ public struct ComposerView: View {
 	}
 
 	private var modelPicker: some View {
-		Menu {
+		AgentSelector(picker.label.isEmpty ? model.modelLabel : picker.label, enabled: model.modelPickerEnabled) {
 			ForEach(picker.options) { option in
-				Button(option.label) {
+				Button {
 					Task { @MainActor in await model.setModel(option.id) }
+				} label: {
+					VStack(alignment: .leading) {
+						Text(option.label)
+						Text(option.detail.map { "\($0) · \(option.id)" } ?? option.id)
+							.font(Theme.text(10, .regular))
+							.foregroundStyle(Theme.textSecondary)
+					}
 				}
+					.accessibilityIdentifier("model-option-\(option.id)")
 			}
-		} label: {
-			HStack(spacing: 4) {
-				Text(picker.label)
-					.font(Theme.text(10, .medium))
-				Image(systemName: "chevron.down")
-					.font(Theme.text(9, .semibold))
-			}
-			.foregroundStyle(Theme.textSecondary)
-			.padding(.horizontal, 10)
-			.frame(minHeight: Theme.Metric.minHitHeight)
 		}
-		.menuStyle(.button)
-		.buttonStyle(.plain)
-		.menuIndicator(.hidden)
-		.fixedSize()
-		.netaControlGlass(.capsule)
-		.disabled(!model.modelPickerEnabled)
 		.accessibilityLabel("Model")
+		.accessibilityIdentifier("composer-model")
+	}
+
+	private var providerPicker: some View {
+		AgentSelector(model.providerLabel, enabled: model.providerPickerEnabled) {
+			ForEach(model.providers) { provider in
+				Button {
+					Task { @MainActor in
+						if let handoff = await model.handoff() {
+							handoffMarkdown = handoff
+							pendingProvider = provider
+						}
+					}
+				} label: {
+					VStack(alignment: .leading) {
+						Text(provider.label)
+						if let reason = provider.unavailableReason ?? provider.note { Text(reason) }
+					}
+				}
+				.disabled(!provider.available)
+				.accessibilityIdentifier("provider-option-\(provider.id)")
+			}
+		}
+		.accessibilityLabel("Provider")
+		.accessibilityIdentifier("composer-provider")
+	}
+
+	private func handoffSheet(_ provider: ProviderInfo) -> some View {
+		VStack(alignment: .leading, spacing: 9) {
+			Text("Switch to \(provider.label)").font(Theme.text(14, .semibold))
+			Text("Review Markdown").font(Theme.text(10, .semibold)).foregroundStyle(Theme.textSecondary)
+			TextEditor(text: $handoffMarkdown).font(Theme.mono(11, .regular)).frame(minHeight: 190)
+			if let error = model.providerError {
+				Text(error).font(Theme.text(10, .medium)).foregroundStyle(.red)
+					.accessibilityLabel("Provider error: \(error)")
+			}
+			HStack {
+				Button("Cancel") { pendingProvider = nil }
+					.disabled(model.isSwitchingProvider)
+				Spacer()
+				Button("Switch Provider") {
+					Task { @MainActor in
+						if await model.setProvider(provider, handoff: handoffMarkdown) { pendingProvider = nil }
+					}
+				}
+				.disabled(model.isSwitchingProvider)
+			}
+		}
+		.padding(14).frame(width: 300)
 	}
 
 	/// Compact glass segments, never a stock segmented picker: both labels
 	/// always show, the selected one on a white lozenge, `Lead++` selected on
 	/// violet glass with violet text.
 	private var modeControl: some View {
-		HStack(spacing: 2) {
-			ForEach(ModeSegments(selected: model.mode).segments, id: \.mode) { segment in
-				modeSegment(segment)
-			}
+		Picker("Mode", selection: Binding(get: { model.mode }, set: { mode in
+			Task { @MainActor in await model.setMode(mode) }
+		})) {
+			Text("Lead").tag(LeaderMode.lead).accessibilityIdentifier("mode-lead")
+			Text("Lead++").tag(LeaderMode.leadPlus).accessibilityIdentifier("mode-lead-plus")
 		}
-		.padding(2)
-		.netaControlGlass(.capsule)
+		.pickerStyle(.segmented)
+		.controlSize(.small)
+		.fixedSize()
+		.labelsHidden()
 		.help(ModeSegments.helpText)
 		.accessibilityLabel("Leader mode")
-	}
-
-	private func modeSegment(_ segment: ModeSegments.Segment) -> some View {
-		Button {
-			Task { @MainActor in await model.setMode(segment.mode) }
-		} label: {
-			Text(segment.label)
-				.font(Theme.text(11, .medium))
-				.foregroundStyle(segmentText(segment))
-				.padding(.horizontal, 10)
-				.frame(minHeight: Theme.Metric.minHitHeight)
-				.background(Capsule().fill(segmentFill(segment)))
-		}
-		.buttonStyle(.plain)
-		.accessibilityLabel(segment.label)
-		.accessibilityAddTraits(segment.isSelected ? [.isSelected] : [])
-	}
-
-	private func segmentFill(_ segment: ModeSegments.Segment) -> Color {
-		guard segment.isSelected else { return .clear }
-		return segment.mode == .leadPlus
-			? Theme.Glass.leadPlusSegment : Theme.Glass.selectedSegment
-	}
-
-	private func segmentText(_ segment: ModeSegments.Segment) -> Color {
-		guard segment.isSelected else { return Theme.textSecondary }
-		return segment.mode == .leadPlus ? Theme.violet : Theme.textPrimary
+		.accessibilityIdentifier("composer-mode")
 	}
 
 	// MARK: - Field
@@ -212,21 +282,18 @@ public struct ComposerView: View {
 
 	private var field: some View {
 		ZStack(alignment: .topLeading) {
-			TextEditor(text: $model.draft)
-				.font(Theme.text(12.5, .regular))
-				.foregroundStyle(Theme.textPrimary)
-				.scrollContentBackground(.hidden)
-				.frame(height: CGFloat(model.lineCount) * 16 + 14)
-				.onKeyPress(keys: [.return], phases: .down) { press in
-					guard press.modifiers.isEmpty else { return .ignored }
+			ComposerTextInput(
+				text: $model.draft,
+				onSend: { text in
+					model.draft = text
 					Task { @MainActor in await model.send() }
-					return .handled
-				}
-				.onKeyPress(keys: ["."], phases: .down) { press in
-					guard press.modifiers == .command else { return .ignored }
-					Task { @MainActor in await model.stop() }
-					return .handled
-				}
+				},
+				onStop: { Task { @MainActor in await model.stop() } },
+				onPaste: pasteAttachments,
+				focusRequested: shell?.composerFocused == true,
+				debugState: { model.debugState }, debugInbox: { model.inboxMessages })
+				.id(model.modelLoadKey)
+				.frame(height: CGFloat(model.lineCount) * 16 + 14)
 				.accessibilityLabel("Message")
 			if model.draft.isEmpty {
 				Text(model.placeholder)
@@ -244,6 +311,26 @@ public struct ComposerView: View {
 		.overlay(
 			RoundedRectangle(cornerRadius: fieldRadius, style: .continuous)
 				.strokeBorder(Theme.Glass.rim, lineWidth: Theme.Glass.rimWidth))
+	}
+
+	private var attachmentPreviews: some View {
+		ScrollView(.horizontal) {
+			HStack(spacing: 8) {
+				ForEach(model.attachments) { attachment in
+					HStack(spacing: 6) {
+						if attachment.kind == .image, let image = NSImage(data: attachment.data) { Image(nsImage: image).resizable().scaledToFill().frame(width: 34, height: 34).clipShape(.rect(cornerRadius: 6)) }
+						else { Image(systemName: "doc") }
+						Text(attachment.name).lineLimit(1)
+						Button("Remove", systemImage: "xmark.circle.fill") { model.removeAttachment(id: attachment.id) }.labelStyle(.iconOnly).buttonStyle(.borderless)
+					}.padding(6).background(.quaternary, in: .rect(cornerRadius: 8))
+				}
+			}
+		}
+		.frame(maxHeight: model.attachments.isEmpty ? 0 : 52)
+	}
+
+	private func pasteAttachments(_ board: NSPasteboard) -> Bool {
+		ComposerPasteboard.paste(board, into: model)
 	}
 
 	// MARK: - Stop / send
@@ -267,6 +354,7 @@ public struct ComposerView: View {
 			.buttonStyle(.plain)
 			.netaControlGlass(.capsule)
 			.accessibilityLabel("Stop")
+			.accessibilityIdentifier("composer-stop")
 		case .send:
 			// PAPER-SPINE Revision 2: ONE trailing round 30 pt control that
 			// becomes the mint send arrow when a person types. The silhouette
@@ -281,6 +369,7 @@ public struct ComposerView: View {
 			.buttonStyle(.plain)
 			.background(Theme.mint, in: Capsule())
 			.accessibilityLabel("Send")
+			.accessibilityIdentifier("composer-send")
 		case .sendDisabled:
 			// A real disabled Button, not a bare image: VoiceOver has to
 			// announce an unavailable control, and "nothing to send" must
@@ -295,7 +384,32 @@ public struct ComposerView: View {
 			.disabled(true)
 			.netaControlGlass(.capsule)
 			.accessibilityLabel("Send")
+			.accessibilityIdentifier("composer-send")
 			.accessibilityValue("Nothing to send")
 		}
+	}
+
+	private var activeSendButton: some View {
+		Button { Task { @MainActor in await model.send() } } label: {
+			Image(systemName: "arrow.up").font(Theme.text(14, .semibold)).foregroundStyle(Theme.ground)
+				.frame(width: Self.actionSize, height: Self.actionSize)
+		}.buttonStyle(.plain).background(Theme.mint, in: Capsule())
+			.accessibilityLabel("Send while working").accessibilityIdentifier("composer-send")
+	}
+}
+
+@MainActor enum ComposerPasteboard {
+	static func paste(_ board: NSPasteboard, into model: ComposerModel) -> Bool {
+		if let urls = board.readObjects(forClasses: [NSURL.self]) as? [URL], !urls.isEmpty {
+			model.addFiles(urls)
+			return true
+		}
+		guard let raw = board.data(forType: .png) ?? board.data(forType: .tiff),
+			let image = NSImage(data: raw), let tiff = image.tiffRepresentation,
+			let bitmap = NSBitmapImageRep(data: tiff),
+			let png = bitmap.representation(using: .png, properties: [:]) else { return false }
+		model.addImagePNG(png)
+		if let text = board.string(forType: .string), !text.isEmpty { model.draft += text }
+		return true
 	}
 }

@@ -27,7 +27,7 @@ public enum CanvasStyle {
 		case .blocked: Theme.amber
 		case .failed: Theme.red
 		case .completed: Theme.green
-		case .starting, .interrupted, .archived: Theme.textSecondary
+		case .queued, .starting, .interrupted, .archived: Theme.textSecondary
 		}
 	}
 
@@ -58,6 +58,7 @@ public enum CanvasStyle {
 	public static func label(for state: AgentState) -> String {
 		switch state {
 		case .starting: "Starting"
+		case .queued: "Queued"
 		case .running: "Running"
 		case .blocked: "Blocked"
 		case .failed: "Failed"
@@ -83,7 +84,7 @@ public enum CanvasStyle {
 			return 0.70
 		case .running:
 			let hasLive = agents.contains {
-				$0.state == .running || $0.state == .starting
+				$0.state == .running || $0.state == .starting || $0.state == .queued
 			}
 			return hasLive ? 1.0 : 0.70
 		}

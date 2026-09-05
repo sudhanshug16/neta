@@ -47,6 +47,7 @@ public enum NavigatorHoverRegion: Hashable, Sendable {
 	public var selection: Selection = .leader
 	public var chatVisible = true
 	public var navigatorVisible = false
+	public var quickSwitcherVisible = false
 	public var composerFocused = false
 	/// Always within `minZoom...maxZoom`: `zoomIn`, `zoomOut` and `fit` are
 	/// the only movers and each clamps. (No `didSet` clamp: assigning the
@@ -128,6 +129,9 @@ public enum NavigatorHoverRegion: Hashable, Sendable {
 		}
 	}
 
+	public func toggleQuickSwitcher() { quickSwitcherVisible.toggle() }
+	public func showQuickSwitcher() { quickSwitcherVisible = true }
+
 	/// Shows the overlay now and cancels any pending auto-hide. Both the
 	/// left-edge hover strip and `⌘L` land here.
 	public func showNavigator() {
@@ -173,20 +177,8 @@ public enum NavigatorHoverRegion: Hashable, Sendable {
 		}
 	}
 
-	/// A click on the canvas, outside every floating surface: it dismisses
-	/// the navigator. Returns true when it consumed the click, so the canvas
-	/// can leave the selection alone. The root view already knows which
-	/// rects the surfaces cover (`ShellLayout.covered`); this is the shell
-	/// side of that click path.
-	///
-	/// It only dismisses when the canvas actually calls it. The canvas owns
-	/// that call site: `SpineCanvasView`'s backdrop is a plain
-	/// `Button(action: handleBackgroundTap)` over a clear rect below the
-	/// nodes, so a click on empty canvas hides the overlay without
-	/// swallowing node clicks. A tap gesture there never fired — measured on
-	/// the running app — so a gesture is not the contract; the button is.
-	/// MANIFESTO.md "Desktop information architecture" — the navigator
-	/// "closes when dismissed".
+	/// Dismisses the navigator for a click on empty canvas. Returns whether it
+	/// consumed the click, leaving the canvas selection unchanged.
 	@discardableResult
 	public func canvasClicked() -> Bool {
 		guard navigatorVisible else { return false }
@@ -202,6 +194,7 @@ public enum NavigatorHoverRegion: Hashable, Sendable {
 			hideNavigator()
 			return true
 		}
+		if quickSwitcherVisible { quickSwitcherVisible = false; return true }
 		if composerFocused {
 			composerFocused = false
 			return true

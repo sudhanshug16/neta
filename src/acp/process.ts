@@ -12,7 +12,7 @@ import {
 } from "@agentclientprotocol/sdk";
 import { nowIso } from "../core/time.ts";
 import type { Access, IsoTime } from "../core/types.ts";
-import { launchArgs, type ProviderSettings } from "./settings.ts";
+import { launchArgs, launchEnvironment, type ProviderSettings, providerPath } from "./settings.ts";
 
 export interface ExitInfo {
 	code: number | null;
@@ -51,7 +51,12 @@ export function spawnProvider(o: SpawnOptions): Promise<ProviderProcess> {
 		try {
 			child = spawn(o.provider.command, launchArgs(o.provider, o.access), {
 				cwd: o.cwd,
-				env: { ...process.env, ...o.provider.env, ...o.env },
+				env: {
+					...process.env,
+					PATH: providerPath(o.provider),
+					...launchEnvironment(o.provider, o.access),
+					...o.env,
+				},
 				stdio: ["pipe", "pipe", "pipe"],
 			});
 		} catch (error) {

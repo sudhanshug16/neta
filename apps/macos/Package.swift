@@ -7,8 +7,15 @@ let package = Package(
 	products: [
 		.executable(name: "NetaDesktop", targets: ["NetaDesktop"]),
 	],
+	dependencies: [
+		.package(path: "../../packages/AgentChatKit"),
+	],
 	targets: [
-		.executableTarget(name: "NetaDesktop", path: "Sources/NetaDesktop"),
+		.executableTarget(
+			name: "NetaDesktop",
+			dependencies: ["AgentChatKit"],
+			path: "Sources/NetaDesktop"
+		),
 		.testTarget(
 			name: "NetaDesktopTests",
 			dependencies: ["NetaDesktop"],

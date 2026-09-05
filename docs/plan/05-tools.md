@@ -141,7 +141,63 @@ lives at `~/.neta/charters/<workspaceId>.hash`; when that differs the store
 emits `charter.changed`. Charters reach `leader` and `lead` contexts only. Each
 name in `skills` resolves `<workspace root>/.neta/skills/<name>.md`, then
 `~/.neta/skills/<name>.md`, inlined into that agent's context; a missing skill
-is a `missingSkill` error and the agent is not spawned.
+is a `missingSkill` error and the agent is not spawned. The workspace root is
+the one on this machine, never the Node's working directory: a detached Node
+runs from wherever it was started, and both the check and the context load
+resolve against the same root, so what `neta_mission` accepts is what the agent
+is briefed with.
+
+## Ports
+
+The handlers never import 02, 03, 06 or 07; the Node wires these in T5.9 and
+the tests stub them.
+
+```ts
+export interface SessionLaunch {
+  workspaceId: WorkspaceId; missionId: MissionId;
+  agentId: AgentId;        // the actor the session's token is minted under
+  task: string; access: Access; provider: string; model: string;
+  skills: string[]; canSpawn: boolean; name: string; worktreePath?: string;
+}
+export interface MissionPorts {
+  numbers: { allocateNumber(workspaceId: WorkspaceId): Promise<number> };
+  missions: { save(mission: Mission): Promise<void> };
+  sessions: {          // the session first, then the Agent record, then the
+                       // context prompt: a fast agent's first tool call has
+                       // to find its own record
+    launch(input: SessionLaunch): Promise<{ sessionId: SessionId }>;
+    brief(input: SessionLaunch & { sessionId: SessionId }): Promise<void>;
+  };
+  worktrees: { prepare(m: Mission, w: Workspace): Promise<Mission> };
+  skills: { check(input: { workspaceId: WorkspaceId; names: string[] }):
+    { ok: true } | { ok: false; missing: string; available: string[] } };
+  leases: {            // 06 owns the key: the worktree path for a git
+                       // mission, the workspace root otherwise
+    acquire(input: { mission: Mission; workspace: Workspace; holder: AgentId }):
+      Promise<"active" | "queued">;
+  };
+}
+export type ModeSubject = { kind: "leader"; workspaceId: WorkspaceId }
+  | { kind: "lead"; workspaceId: WorkspaceId; missionId: MissionId;
+      agentId: string };
+// 07's five denial reasons, plus `unavailable`: not a denial but the Node
+// saying it cannot answer this request at all, which `neta_mode` renders as
+// an error rather than as a decision.
+export type ModeApproval = { approved: true }
+  | { approved: false; reason: DenialReason | "unavailable"; detail: string };
+export interface LifecyclePorts {
+  missions: { save(mission: Mission): Promise<void> };
+  worktrees: { close(input: CloseMissionInput): Promise<CloseOutcome> };
+  modes: { requestMode(input: { subject: ModeSubject; mode: LeaderMode;
+    record?: DecisionRecord }): Promise<ModeApproval> };
+}
+```
+
+`neta_mode` carries the subject that asked, so a request is granted to that
+subject and to nothing else, and both directions are real changes: a return to
+`lead` needs no record and no charter check, but it must be written, announced
+and evented like a grant — it is the leader's only way out of Lead++, which
+outlives a restart.
 
 ## Tasks
 
@@ -294,7 +350,9 @@ Steps: `neta_scope` appends a `MissionChange`, never edits `objective`, emits
 when `disposition: "merged"` carries no `evidence`, when the mission is already
 closed, or when 06 reports a dirty or unmerged worktree without explicit
 abandonment; `neta_pin` emits `user.pinned`; `neta_mode` delegates to
-07's `ModeService.requestLeadPlus`, returning its `Approval` verbatim.
+07's mode service through `modes.requestMode` above (`requestLeadPlus` for a
+grant, `setMode` for the return), returning its `Approval` verbatim and
+rendering `unavailable` as an error.
 Tests: scope is append-only (objective unchanged after two calls, order kept);
 merged without evidence refused, with evidence closes and emits
 `mission.closed`; abandoned needs none; closing twice, and a lead closing at

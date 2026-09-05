@@ -100,10 +100,11 @@ public struct ToolbarCapsule: View {
 				menuLabel(selectedWorkspaceName, tone: Theme.textPrimary)
 			}
 			.menuStyle(.button)
-			.buttonStyle(.plain)
-			.menuIndicator(.hidden)
+			.buttonStyle(.glass)
+			.controlSize(.small)
+			.menuIndicator(.visible)
+			.accessibilityIdentifier("workspace-selector")
 			.fixedSize()
-			.netaGlass(.rounded(controlRadius))
 			.accessibilityLabel("Workspace")
 			if let machines = model.machines {
 				Text(selectedMachineName(in: machines))
@@ -141,12 +142,8 @@ public struct ToolbarCapsule: View {
 	/// A menu label: the name in 12/600 with an SF Symbol chevron, never a
 	/// literal glyph.
 	private func menuLabel(_ text: String, tone: Color) -> some View {
-		HStack(spacing: 4) {
-			Text(text)
-				.font(Theme.text(12, .semibold))
-			Image(systemName: "chevron.down")
-				.font(Theme.text(9, .semibold))
-		}
+		Text(text)
+			.font(Theme.text(12, .semibold))
 		.foregroundStyle(tone)
 		.padding(.horizontal, 10)
 		.frame(minHeight: Theme.Metric.minHitHeight)

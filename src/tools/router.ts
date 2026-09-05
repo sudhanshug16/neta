@@ -26,6 +26,10 @@ export type ToolResult =
 
 export interface ToolDeps {
 	store: NodeStore;
+	history?: (
+		sessionId: SessionId,
+		query: { cursor?: string; limit: number },
+	) => Promise<{ messages: Array<{ turnId: string; role: "user" | "assistant"; text: string }>; nextCursor?: string }>;
 	// 07's `ModeService.decorate`: every leader and lead response passes
 	// through it, so a subject in Lead++ carries the banner and, when one
 	// falls due, the reminder saying why Lead++ is on. Unset (a stubbed

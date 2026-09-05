@@ -13,7 +13,7 @@ with a warning, and the lower layer's value survives.
 {
   "providers": {
     "claude": { "command": "npx",
-                "args": ["-y", "@agentclientprotocol/claude-agent-acp@0.68.0"],
+                "args": ["-y", "@agentclientprotocol/claude-agent-acp@0.74.0"],
                 "defaultModel": "sonnet", "env": {} }
   },
   "leader": { "provider": "claude", "model": "sonnet" },
@@ -38,15 +38,37 @@ stdio.
 | `readWriteArgs` | `[]` | Extra arguments for a session that holds it. |
 | `resume` | `true` | Whether a dead session may be resumed on its vendor conversation id. |
 | `defaultModel` | per provider (see below) | Model id the provider starts on; `""` means whatever the provider already selected. |
+| `unsandboxedMode` | per built-in provider | Advertised ACP `mode` value selected for workspace and mission leaders. |
 | `disabled` | `false` | Set `true` to remove this provider from selection. An explicit request for it fails. |
 
 Shipped providers:
 
 | name | command | args | readOnlyArgs | readWriteArgs | defaultModel |
 | --- | --- | --- | --- | --- | --- |
-| `claude` | `npx` | `-y @agentclientprotocol/claude-agent-acp@0.68.0` | `[]` | `[]` | `sonnet` |
-| `codex` | `npx` | `-y @agentclientprotocol/codex-acp@1.3.0` | `-c sandbox_mode="read-only" -c approval_policy="never"` | `-c sandbox_mode="workspace-write" -c approval_policy="never"` | `gpt-5.6-terra[medium]` |
+| `claude` | `npx` | `-y @agentclientprotocol/claude-agent-acp@0.74.0` | `[]` | `[]` | `sonnet` |
+| `codex` | `npx` | `-y @agentclientprotocol/codex-acp@1.10.0` | `[]` | `[]` | `""` |
 | `opencode` | `opencode` | `acp` | `[]` | `[]` | `""` |
+
+Leaders select the adapter-advertised unrestricted ACP mode after session
+creation: `agent-full-access` for Codex, `bypassPermissions` for Claude, and
+`build` for OpenCode. No unsupported command arguments are added. Ordinary
+agents retain their assigned access policy. A configured `CODEX_PATH`,
+`CODEX_CONFIG`, API base, or other provider environment value is preserved.
+Claude similarly preserves `CLAUDE_CODE_EXECUTABLE`; otherwise its adapter
+uses the Claude Code runtime supplied by its SDK.
+
+Neta reports whether each configured command is executable and gives an
+actionable reason when it is not. For a bare command, provider processes use
+the inherited `PATH` plus `~/.local/bin`, `~/.opencode/bin`, `~/.bun/bin`,
+`/opt/homebrew/bin`, `/usr/local/bin`, and the system binary directories. An
+explicit provider `env.PATH` replaces that search path. Neta never reads shell
+startup files. An installed provider CLI is not necessarily its ACP adapter;
+the shipped `npx` adapters may download on first launch.
+
+Model choices come from the live ACP session. A `config_option_update`
+replaces the session's current options immediately. Before a provider has a
+live session, Neta can show only its configured non-empty `defaultModel`; an
+empty value defers truthfully to the adapter.
 
 ## leader
 

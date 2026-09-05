@@ -27,16 +27,27 @@ import Observation
 	/// showed the person's block and not the agent's). A tail whose
 	/// generation is stale is discarded instead.
 	private var tailGeneration = 0
+	/// Terminal ids prevent a prompt acknowledgement that races behind its
+	/// closing notification from reopening an already-finished turn.
+	private var terminalTurnIds: Set<TurnId> = []
+	private var terminalTurnOrder: [TurnId] = []
 
 	/// Called whenever `openTurnId` changes, so the owning panel can follow
 	/// the open turn immediately instead of only after a tail or a select
 	/// (FIXPASS: the composer stayed on Stop after the turn closed).
 	@ObservationIgnored public var onOpenTurnChange: (() -> Void)?
+	@ObservationIgnored public var onInboxChange: ((InboxMessage) -> Void)?
 
 	public internal(set) var turns: [ChatTurn] = []
 	public var atBottom: Bool = true
 	public internal(set) var openTurnId: TurnId?
 	public internal(set) var pendingScroll: ScrollRequest?
+	/// Changes whenever visible transcript content changes, including a
+	/// streamed replacement inside the current turn. The panel follows this
+	/// instead of the newest turn id, which is stable for an entire response.
+	public private(set) var contentRevision = 0
+	@ObservationIgnored private var cachedRowsRevision = -1
+	@ObservationIgnored private var cachedRows: [TranscriptRow] = []
 
 	// MARK: - Paging window (11-desktop-chat T11.2; behavior in ChatPaging.swift)
 
@@ -67,6 +78,18 @@ import Observation
 	public var autoScrollTarget: TurnId? {
 		guard atBottom else { return nil }
 		return visibleTurns.last?.id
+	}
+
+	/// Block-level rows are cached for one content revision. SwiftUI may ask
+	/// for the transcript repeatedly while measuring a scroll, and rebuilding
+	/// and coalescing hundreds of tool updates on every measurement defeats
+	/// the lazy stack below it.
+	public var transcriptRows: [TranscriptRow] {
+		if cachedRowsRevision != contentRevision {
+			cachedRows = TranscriptRow.rows(for: visibleTurns)
+			cachedRowsRevision = contentRevision
+		}
+		return cachedRows
 	}
 
 	public init(client: any NodeClient, sessionId: SessionId) {
@@ -170,6 +193,7 @@ import Observation
 		if let block = payload.block {
 			insert(block)
 		}
+		if let inbox = payload.inbox { onInboxChange?(inbox) }
 	}
 
 	/// Shows the person's own message at once (FIXPASS "the person's own
@@ -182,15 +206,29 @@ import Observation
 	/// matches it, so the message is never shown twice.
 	@discardableResult
 	public func echoUserMessage(_ text: String, at date: Date = Date()) -> TurnId? {
-		guard !text.isEmpty else { return nil }
+		echoUserMessage(text, attachments: [], at: date)
+	}
+
+	@discardableResult
+	public func echoUserMessage(_ text: String, attachments: [AttachmentDraft], at date: Date = Date()) -> TurnId? {
+		guard !text.isEmpty || !attachments.isEmpty else { return nil }
 		let id = "local-\(UUID().uuidString)"
 		var turn = ChatTurn(id: id, role: .user, startedAt: date, endedAt: date)
-		turn.blocks = [Block(
+		var blocks: [Block] = text.isEmpty ? [] : [Block(
 			turnId: id, seq: 0, at: date, role: .user, kind: .text,
 			text: text, data: nil)]
+		for (index, attachment) in attachments.enumerated() {
+			blocks.append(Block(turnId: id, seq: index + 1, at: date, role: .user, kind: .status, text: attachment.name, data: [
+				"attachmentId": .string(attachment.id), "name": .string(attachment.name),
+				"mimeType": .string(attachment.mimeType), "size": .number(Double(attachment.data.count)),
+				"previewBase64": .string(attachment.kind == .image ? attachment.data.base64EncodedString() : ""),
+			]))
+		}
+		turn.blocks = blocks
 		turns.append(turn)
 		turns.sort(by: Self.turnOrder)
 		echoes.append(turn)
+		contentChanged()
 		return id
 	}
 
@@ -222,7 +260,10 @@ import Observation
 		echoes.removeAll { delivered.contains($0.blocks.first?.text ?? "") }
 		for echo in echoes { merged[echo.id] = echo }
 		turns = merged.values.sorted(by: Self.turnOrder)
+		terminalTurnOrder = Array(turns.filter { !$0.isOpen }.map(\.id).suffix(64))
+		terminalTurnIds = Set(terminalTurnOrder)
 		setOpenTurn(turns.last(where: \.isOpen)?.id)
+		contentChanged()
 	}
 
 	/// Inserts a turn or refreshes its close state by id.
@@ -237,10 +278,12 @@ import Observation
 			turns.sort(by: Self.turnOrder)
 		}
 		if turn.endedAt != nil || turn.cancelled == true {
+			recordTerminal(turn.id)
 			if openTurnId == turn.id { setOpenTurn(nil) }
 		} else {
 			setOpenTurn(turn.id)
 		}
+		contentChanged()
 	}
 
 	/// Files a block into its turn by `seq`; a repeat replaces. A user block
@@ -248,6 +291,12 @@ import Observation
 	/// so the person's message is shown exactly once.
 	func insert(_ block: Block) {
 		if block.role == .user { dropEcho(matching: block.text) }
+		if case .string(let attachmentId) = block.data?["attachmentId"], let echo = echoes.first(where: { turn in
+			turn.blocks.contains { candidate in
+				if case .string(let id) = candidate.data?["attachmentId"] { return id == attachmentId }
+				return false
+			}
+		}) { retireEcho(id: echo.id) }
 		if let index = turns.firstIndex(where: { $0.id == block.turnId }) {
 			turns[index].insert(block)
 		} else {
@@ -257,6 +306,7 @@ import Observation
 			turns.sort(by: Self.turnOrder)
 			setOpenTurn(block.turnId)
 		}
+		contentChanged()
 	}
 
 	/// Retires the echo for a message the Node never received: the prompt
@@ -264,6 +314,39 @@ import Observation
 	/// (11-desktop-chat T11.6).
 	public func retireEcho(_ text: String) {
 		dropEcho(matching: text)
+	}
+
+	public func retireEcho(id: TurnId) {
+		echoes.removeAll { $0.id == id }
+		turns.removeAll { $0.id == id }
+		contentChanged()
+	}
+
+	func contentChanged() { contentRevision &+= 1 }
+
+	/// The protocol pages whole turns, so trimming also keeps whole turns.
+	/// One turn may itself exceed the nominal budget; retaining that sole
+	/// turn is the truthful exception because discarded blocks could not be
+	/// fetched back independently.
+	public func enforceCacheAroundLatest() {
+		guard cacheBytes > ChatCache.limitBytes, let anchor = turns.last?.id else { return }
+		trim(around: anchor)
+	}
+
+	/// Marks the acknowledged prompt open before its first streamed block.
+	/// This bridges the request/notification gap so Stop is immediately real.
+	public func acknowledgePrompt(turnId: TurnId) {
+		guard !terminalTurnIds.contains(turnId) else { return }
+		if let turn = turns.first(where: { $0.id == turnId }), !turn.isOpen { return }
+		setOpenTurn(turnId)
+	}
+
+	private func recordTerminal(_ id: TurnId) {
+		guard terminalTurnIds.insert(id).inserted else { return }
+		terminalTurnOrder.append(id)
+		if terminalTurnOrder.count > 64 {
+			terminalTurnIds.remove(terminalTurnOrder.removeFirst())
+		}
 	}
 
 	/// Retires the echo whose text the Node has now delivered itself.

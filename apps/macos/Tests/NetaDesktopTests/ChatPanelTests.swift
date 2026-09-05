@@ -1,4 +1,6 @@
+import AppKit
 import Foundation
+import SwiftUI
 import XCTest
 
 @testable import NetaDesktop
@@ -11,6 +13,7 @@ private final class CountingNodeClient: NodeClient, @unchecked Sendable {
 	private let hub = NotificationHub()
 	private let lock = NSLock()
 	private var tails: [SessionId: Int] = [:]
+	private var refusedTails: Set<SessionId> = []
 
 	var notifications: AsyncStream<NodeNotification> { hub.subscribe() }
 	var subscriberCount: Int { hub.subscriberCount }
@@ -19,12 +22,24 @@ private final class CountingNodeClient: NodeClient, @unchecked Sendable {
 		lock.withLock { tails[sessionId] ?? 0 }
 	}
 
+	func refuseTails(for sessionId: SessionId) {
+		_ = lock.withLock { refusedTails.insert(sessionId) }
+	}
+
+	func allowTails(for sessionId: SessionId) {
+		_ = lock.withLock { refusedTails.remove(sessionId) }
+	}
+
 	func emit(_ notification: NodeNotification) { hub.broadcast(notification) }
 
 	func conversationTail(
 		sessionId: Ulid, cursor: String?, limit: Int, direction: String?, turnId: TurnId?
 	) async throws -> ConversationPage {
-		lock.withLock { tails[sessionId, default: 0] += 1 }
+		let refused = lock.withLock { () -> Bool in
+			tails[sessionId, default: 0] += 1
+			return refusedTails.contains(sessionId)
+		}
+		if refused { throw NodeClientError.disconnected }
 		return ConversationPage(turns: [], blocks: [], nextCursor: nil, prevCursor: nil)
 	}
 
@@ -152,6 +167,56 @@ final class ChatPanelTests: XCTestCase {
 			client: FixtureNodeClient(), store: store(), shell: shell))
 	}
 
+	func testSameTurnGrowthKeepsHostedTranscriptAtBottom() async throws {
+		let model = ChatPanelModel(client: FixtureNodeClient(), store: store(), shell: ShellState())
+		var appeared = Set<String>()
+		let host = NSHostingView(rootView: ChatPanel(
+			model: model, windowWidth: 420,
+			rowDidAppear: { appeared.insert($0) }))
+		host.frame = NSRect(x: 0, y: 0, width: 420, height: 760)
+		let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+		window.contentView = host; window.orderFrontRegardless()
+		defer { model.transcript.stop(); window.orderOut(nil); window.contentView = nil }
+		try await Task.sleep(for: .milliseconds(100))
+		let turn = Turn(id: "stream", sessionId: "s-leader", startedAt: base, endedAt: nil, role: .user, cancelled: nil)
+		let blocks = (0 ..< 500).map { index in
+			Block(turnId: "stream", seq: index, at: base, role: .agent, kind: .tool,
+				text: "Tool \(index)", data: ["name": .string("Tool \(index)")])
+		}
+		model.transcript.replace(with: ConversationPage(turns: [turn], blocks: blocks, nextCursor: nil, prevCursor: nil))
+		try await Task.sleep(for: .milliseconds(150)); host.layoutSubtreeIfNeeded()
+		let scroll = try XCTUnwrap(Self.descendants(of: host).compactMap { $0 as? NSScrollView }
+			.max { ($0.documentView?.bounds.height ?? 0) < ($1.documentView?.bounds.height ?? 0) })
+		let baselineGap = (scroll.documentView?.bounds.maxY ?? 0) - scroll.contentView.bounds.maxY
+		XCTAssertLessThanOrEqual(baselineGap, 25, "the initial tail follows its live edge")
+		XCTAssertLessThan(
+			appeared.count, 100,
+			"the complete ChatPanel must not materialise all 500 block rows")
+
+		var duringStreamSamples = 0
+		for index in 500 ..< 550 {
+			model.transcript.apply(TurnChange(sessionId: "s-leader", turn: nil, block: Block(
+				turnId: "stream", seq: index, at: base, role: .agent, kind: .tool,
+				text: "Tool \(index)", data: ["name": .string("Tool \(index)")])))
+			try await Task.sleep(for: .milliseconds(8))
+			if index % 10 == 9 {
+				try await Task.sleep(for: .milliseconds(20)); host.layoutSubtreeIfNeeded()
+				let gap = (scroll.documentView?.bounds.maxY ?? 0) - scroll.contentView.bounds.maxY
+				XCTAssertLessThanOrEqual(
+					gap, 90, "rapid streaming may trail by one row, never wait for the stream to stop")
+				duringStreamSamples += 1
+			}
+		}
+		XCTAssertGreaterThanOrEqual(duringStreamSamples, 5)
+		try await Task.sleep(for: .milliseconds(80)); host.layoutSubtreeIfNeeded()
+		let finalGap = (scroll.documentView?.bounds.maxY ?? 0) - scroll.contentView.bounds.maxY
+		XCTAssertLessThanOrEqual(finalGap, 25, "the follower settles exactly at the live edge")
+	}
+
+	private static func descendants(of view: NSView) -> [NSView] {
+		view.subviews + view.subviews.flatMap(descendants(of:))
+	}
+
 	/// The canvas fills `CheckpointRouter` and the chat drains it
 	/// (10-desktop-spine T10.8: "11 consumes this"). Nothing called
 	/// `consume()` at all before this pass, so opening a checkpoint on the
@@ -181,6 +246,12 @@ final class ChatPanelTests: XCTestCase {
 		XCTAssertFalse(
 			source.contains(".onChange(of: model.sessionId)"),
 			"a session-id watch misses a transcript replaced under an unchanged id")
+		XCTAssertTrue(
+			source.contains("scrollPosition = nil"),
+			"a replacement cannot retain another session's scroll anchor")
+		XCTAssertTrue(
+			source.contains("model.transcript.atBottom = true"),
+			"the first tail of the replacement is allowed to repin to its live end")
 	}
 
 	/// The live end is pinned by an explicit `scrollTo`, never by
@@ -286,7 +357,7 @@ final class ChatPanelTests: XCTestCase {
 		await model.start()
 		XCTAssertEqual(client.tailCount("s-leader"), 1, "the panel tailed the leader")
 		XCTAssertTrue(model.transcript.isStreaming)
-		XCTAssertEqual(client.subscriberCount, 1, "on one subscription")
+		XCTAssertEqual(client.subscriberCount, 2, "one transcript and one Glance subscription")
 
 		model.select(.mission("m304"))
 
@@ -336,6 +407,41 @@ final class ChatPanelTests: XCTestCase {
 		XCTAssertNotEqual(model.transcriptId, before, "a new session, a new transcript")
 		await model.start()
 		XCTAssertEqual(client.tailCount("s-ag-thane"), 1)
+		XCTAssertTrue(model.transcript.isStreaming)
+	}
+
+	func testQueuedAgentRetriesItsSameSessionWhenWriterAccessReleases() async {
+		let store = store()
+		let client = CountingNodeClient()
+		let model = ChatPanelModel(client: client, store: store, shell: ShellState())
+		model.select(.agent("ag-thane"))
+		let current = try! XCTUnwrap(store.agentsById["ag-thane"])
+		func withState(_ state: AgentState) -> Agent {
+			Agent(
+				id: current.id, missionId: current.missionId, workspaceId: current.workspaceId,
+				name: current.name, task: current.task, access: current.access,
+				provider: current.provider, model: current.model, skills: current.skills,
+				sessionId: current.sessionId, canSpawn: current.canSpawn, state: state,
+				stateBefore: current.stateBefore, activity: current.activity,
+				pendingQuestion: current.pendingQuestion, startedAt: current.startedAt,
+				endedAt: current.endedAt, outcome: current.outcome)
+		}
+		store.apply(notification: .state(StateChange(kind: .agent, record: .agent(withState(.queued)))))
+		model.sync()
+		XCTAssertTrue(model.composer.isQueued)
+		client.refuseTails(for: "s-ag-thane")
+		await model.start()
+		XCTAssertEqual(client.tailCount("s-ag-thane"), 1, "the queued session refuses its first tail")
+		model.composer.draft = "must not send"
+		await model.composer.send()
+		XCTAssertEqual(model.composer.draft, "must not send", "direct calls share the queued guard")
+
+		store.apply(notification: .state(StateChange(kind: .agent, record: .agent(withState(.starting)))))
+		client.allowTails(for: "s-ag-thane")
+		await model.queueReleased(wasQueued: true)
+
+		XCTAssertFalse(model.composer.isQueued)
+		XCTAssertEqual(client.tailCount("s-ag-thane"), 2, "the unchanged session retries its tail")
 		XCTAssertTrue(model.transcript.isStreaming)
 	}
 

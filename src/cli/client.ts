@@ -107,7 +107,12 @@ export class NodeClient {
 	// is launched with `NETA_SOCKET` and no `NETA_DIR`, so it looks beside
 	// the socket. `timeoutMs` raises the 5 s default for a caller (a test on
 	// a loaded machine) that can afford to wait longer for a cold start.
-	static async connect(opts?: { start?: boolean; dir?: string; timeoutMs?: number }): Promise<NodeClient> {
+	static async connect(opts?: {
+		start?: boolean;
+		dir?: string;
+		timeoutMs?: number;
+		protocolVersion?: number;
+	}): Promise<NodeClient> {
 		const start = opts?.start ?? false;
 		const dir = opts?.dir ?? netaDir();
 		if (!start) {
@@ -133,12 +138,14 @@ export class NodeClient {
 				client: "cli",
 				autostart: start,
 				timeoutMs: opts?.timeoutMs ?? CONNECT_TIMEOUT_MS,
+				protocolVersion: opts?.protocolVersion,
 				...(opts?.dir === undefined ? {} : { dir: opts.dir }),
 			});
 		} catch (error) {
 			throw mapConnectError(error);
 		}
-		if (inner.hello.protocolVersion !== PROTOCOL_VERSION) {
+		const expectedProtocol = opts?.protocolVersion ?? PROTOCOL_VERSION;
+		if (inner.hello.protocolVersion !== expectedProtocol) {
 			const spoken = inner.hello.protocolVersion;
 			await inner.close().catch(() => undefined);
 			throw new CliError(2, `node speaks protocol ${spoken}, this CLI speaks ${PROTOCOL_VERSION}`);

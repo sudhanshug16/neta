@@ -129,18 +129,8 @@ public final class SpineCanvasPipeline {
 			let moved = lastUsableWidth != usable
 				|| lastContentWidth != content
 			if lastUsableWidth == nil || (moved && nowState.isLive) {
-				viewportState.jump(to: SpinePlacement.liveScrollX(
+				viewportState.recenter(to: SpinePlacement.liveScrollX(
 					index: index, viewport: viewport,
-					trailingInset: trailingInset))
-			} else if moved {
-				// Scrolled back in time and the band moved under it —
-				// widening the window or hiding the chat lowers the live
-				// edge below the current `scrollX`. Nothing else re-clamps
-				// outside `pan` and `zoom`, so the leader would be drawn
-				// left of the usable right edge with dead space beside it
-				// until the next gesture.
-				viewportState.jump(to: SpinePlacement.clampScrollX(
-					viewportState.scrollX, index: index, viewport: viewport,
 					trailingInset: trailingInset))
 			}
 			lastUsableWidth = usable
@@ -244,6 +234,17 @@ public final class SpineCanvasPipeline {
 			size: size, chatVisible: shell.chatVisible,
 			navigatorVisible: shell.navigatorVisible)
 			.covered
+	}
+
+	/// Mouse drags start on empty canvas only; wheel panning remains available
+	/// over cards. Layout rects are the same geometry the interactive views use.
+	public static func dragExclusions(window: VisibleWindow, scrollY: CGFloat) -> [CGRect] {
+		var rects = [window.leader.offsetBy(dx: 0, dy: -scrollY)]
+		for column in window.columns {
+			rects.append(column.card.offsetBy(dx: 0, dy: -scrollY))
+			rects.append(contentsOf: column.rows.map { $0.offsetBy(dx: 0, dy: -scrollY) })
+		}
+		return rects
 	}
 }
 
@@ -374,7 +375,7 @@ public struct SpineCanvasView: View {
 			atCursorX: visible.midX - visible.minX,
 			index: index(), viewport: visible, trailingInset: trailing)
 		guard wasLive else { return }
-		viewport.jump(to: SpinePlacement.liveScrollX(
+		viewport.recenter(to: SpinePlacement.liveScrollX(
 			index: index(), viewport: visible, trailingInset: trailing))
 	}
 
@@ -538,7 +539,9 @@ public struct SpineCanvasView: View {
 			.frame(width: size.width, height: size.height)
 			.background(
 				TrackpadPanCapture(
-					isEnabled: true, excludedRects: excluded,
+					isEnabled: !shell.quickSwitcherVisible, excludedRects: excluded,
+					dragExclusions: excluded + SpineCanvasPipeline.dragExclusions(
+						window: canvas.window, scrollY: viewport.scrollY),
 					onScroll: { delta in
 						viewport.pan(
 							by: delta,
@@ -546,7 +549,10 @@ public struct SpineCanvasView: View {
 							viewport: visible,
 							contentHeight: SpineCanvasPipeline.contentHeight(
 								window: canvas.window, viewport: visible),
-							trailingInset: trailing)
+						trailingInset: trailing)
+					}, onDrag: { delta in
+						viewport.pan(by: delta, index: index(), viewport: visible,
+							contentHeight: 0, trailingInset: trailing)
 					}))
 			.onContinuousHover { phase in
 				switch phase {

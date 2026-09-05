@@ -16,6 +16,7 @@ export type ToolName =
 	| "neta_mode"
 	| "neta_pin"
 	| "neta_status"
+	| "neta_history"
 	| "neta_progress"
 	| "neta_ask"
 	| "neta_done";
@@ -93,6 +94,10 @@ export interface PinParams {
 
 // No params; the empty object keeps every tool shaped alike.
 export type StatusParams = Record<string, never>;
+export interface HistoryParams {
+	cursor?: string;
+	limit?: number;
+}
 
 export interface ProgressParams {
 	text: string;
@@ -117,6 +122,7 @@ export interface ToolParams {
 	neta_mode: ModeParams;
 	neta_pin: PinParams;
 	neta_status: StatusParams;
+	neta_history: HistoryParams;
 	neta_progress: ProgressParams;
 	neta_ask: AskParams;
 	neta_done: DoneParams;
@@ -192,7 +198,8 @@ const DECISION_RECORD: JsonSchema = {
 export const TOOLS: readonly ToolDef[] = [
 	{
 		name: "neta_mission",
-		description: "create and start a mission, the only way one starts",
+		description:
+			"create and start a mission, the only way one starts; for sustained work call this promptly before broad exploration or repeated reads",
 		inputSchema: {
 			type: "object",
 			additionalProperties: false,
@@ -316,6 +323,19 @@ export const TOOLS: readonly ToolDef[] = [
 		description: "open-mission state",
 		inputSchema: { type: "object", additionalProperties: false, properties: {} },
 		actors: ["leader", "lead"],
+	},
+	{
+		name: "neta_history",
+		description: "read earlier user and assistant messages from this conversation",
+		inputSchema: {
+			type: "object",
+			additionalProperties: false,
+			properties: {
+				cursor: { type: "string" },
+				limit: { type: "integer", minimum: 1, maximum: 50 },
+			},
+		},
+		actors: ["leader", "lead", "agent"],
 	},
 	{
 		name: "neta_progress",

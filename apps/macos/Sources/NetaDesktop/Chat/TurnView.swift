@@ -1,11 +1,89 @@
+import AgentChatKit
 import SwiftUI
+
+/// A single lazily materialised transcript block. Keeping the row at block
+/// granularity matters because ACP commonly stores a complete prompt and a
+/// long agent response as one turn.
+public struct TranscriptRow: Identifiable, Equatable, Sendable {
+	public let id: String
+	public let turnId: TurnId
+	public let block: Block
+	public let isFirstInTurn: Bool
+	public let isLastInTurn: Bool
+	public let timestamp: Date
+	public var scrollId: String { isFirstInTurn ? turnId : id }
+
+	static func rows(for turns: [ChatTurn]) -> [TranscriptRow] {
+		turns.flatMap { turn in
+			let blocks = AgentChatAdapter.displayBlocks(turn.blocks)
+			return blocks.enumerated().map { index, block in
+				TranscriptRow(
+					id: "\(turn.id):\(block.seq)", turnId: turn.id, block: block,
+					isFirstInTurn: index == 0, isLastInTurn: index == blocks.count - 1,
+					timestamp: turn.startedAt)
+			}
+		}
+	}
+}
+
+/// One block row used by the panel's top-level LazyVStack. Expansion state
+/// stays in the panel so recycling a row does not forget a disclosure.
+public struct TranscriptRowView: View {
+	let row: TranscriptRow
+	let flashing: Bool
+	@Binding var expanded: Bool
+	var onAppear: (() -> Void)?
+
+	public var body: some View {
+		VStack(alignment: .leading, spacing: 6) {
+			rowBody
+			if row.isLastInTurn {
+				Text(Self.timeFormatter.string(from: row.timestamp))
+					.font(Theme.mono(10, .regular)).foregroundStyle(Theme.textSecondary)
+					.frame(maxWidth: .infinity, alignment: row.block.role == .user ? .trailing : .leading)
+			}
+		}
+		.overlay { if flashing { RoundedRectangle(cornerRadius: TurnView.bubbleRadius).fill(Theme.violet.opacity(0.18)) } }
+		.onAppear { onAppear?() }
+	}
+
+	@ViewBuilder private var rowBody: some View {
+		switch TurnView.presentation(for: row.block.role) {
+		case .userBubble:
+			HStack(spacing: 0) {
+				Spacer(minLength: 48)
+				blockView.netaGlass(.rounded(TurnView.bubbleRadius), tint: Theme.Glass.userBubble)
+			}
+		case .agentBubble:
+			HStack(spacing: 0) {
+				blockView.background(
+					Theme.Glass.agentBubble,
+					in: RoundedRectangle(cornerRadius: TurnView.bubbleRadius, style: .continuous))
+				Spacer(minLength: 48)
+			}
+		case .systemLine:
+			blockView.frame(maxWidth: .infinity, alignment: .center)
+		}
+	}
+
+	private var blockView: some View {
+		AgentMessageBlockView(block: AgentChatAdapter.block(row.block), expanded: $expanded)
+			.padding(10)
+	}
+
+	private static let timeFormatter: DateFormatter = {
+		let formatter = DateFormatter(); formatter.locale = Locale(identifier: "en_US_POSIX")
+		formatter.dateFormat = "HH:mm"; return formatter
+	}()
+}
 
 /// One transcript turn (11-desktop-chat T11.4).
 ///
 /// The person's blocks sit in a violet glass bubble (`Theme.Glass.userBubble`,
 /// the 0.35 of Revision 3 surface 2, with the glass rim) pushed to the
-/// trailing edge; agent and system blocks sit on `Theme.Glass.agentBubble` at
-/// 0.06 on the leading edge. The timestamp renders beneath in 10 px mono.
+/// trailing edge; agent blocks sit on `Theme.Glass.agentBubble` at 0.06 on
+/// the leading edge. System blocks are unbubbled, centred status lines. The
+/// timestamp renders beneath in 10 px mono.
 /// When `flashing` becomes true the turn flashes once — the scroll-to-turn
 /// reveal from `ChatPaging` — then settles. Block expansion state lives here;
 /// `BlockView` only reports its toggle.
@@ -39,6 +117,30 @@ public struct TurnView: View {
 		let id: Int
 		let role: Role
 		let blocks: [Block]
+	}
+
+	/// The visual treatment is determined by each block run's role, because
+	/// a turn can contain both a person's prompt and an agent reply.
+	enum BlockRunPresentation: Equatable {
+		case userBubble
+		case agentBubble
+		case systemLine
+	}
+
+	static func presentation(for role: Role) -> BlockRunPresentation {
+		switch role {
+		case .user: .userBubble
+		case .agent: .agentBubble
+		case .system: .systemLine
+		}
+	}
+
+	static func timestampAlignment(for role: Role?) -> Alignment {
+		switch role {
+		case .user: .trailing
+		case .system: .center
+		case .agent, nil: .leading
+		}
 	}
 
 	/// The turn's blocks split into same-role runs, in `seq` order.
@@ -79,7 +181,7 @@ public struct TurnView: View {
 				.foregroundStyle(Theme.textSecondary)
 				.frame(
 					maxWidth: .infinity,
-					alignment: runs.last?.role == .user ? .trailing : .leading)
+					alignment: Self.timestampAlignment(for: runs.last?.role))
 		}
 		.onAppear {
 			if flashing {
@@ -93,16 +195,20 @@ public struct TurnView: View {
 		}
 	}
 
-	/// One bubble: the person's blocks trailing on violet glass, everyone
-	/// else's leading on the 0.06 agent tone.
+	/// One block run: people and agents get their respective bubbles; system
+	/// events remain a centred, unbubbled status line.
+	@ViewBuilder
 	private func runBody(_ run: BlockRun) -> some View {
-		HStack(spacing: 0) {
-			if run.role == .user {
+		switch Self.presentation(for: run.role) {
+		case .userBubble:
+			HStack(spacing: 0) {
 				Spacer(minLength: 48)
 				blocksStack(run.blocks)
 					.netaGlass(.rounded(Self.bubbleRadius), tint: Theme.Glass.userBubble)
 					.overlay { flash }
-			} else {
+			}
+		case .agentBubble:
+			HStack(spacing: 0) {
 				blocksStack(run.blocks)
 					.background(
 						Theme.Glass.agentBubble,
@@ -111,6 +217,9 @@ public struct TurnView: View {
 					.overlay { flash }
 				Spacer(minLength: 48)
 			}
+		case .systemLine:
+			blocksStack(run.blocks)
+				.frame(maxWidth: .infinity)
 		}
 	}
 
@@ -130,14 +239,13 @@ public struct TurnView: View {
 
 	private func blocksStack(_ blocks: [Block]) -> some View {
 		VStack(alignment: .leading, spacing: 8) {
-			ForEach(blocks, id: \.seq) { block in
-				BlockView(block: block, expanded: expandedSeqs.contains(block.seq)) {
-					if expandedSeqs.contains(block.seq) {
-						expandedSeqs.remove(block.seq)
-					} else {
-						expandedSeqs.insert(block.seq)
-					}
-				}
+			ForEach(AgentChatAdapter.displayBlocks(blocks), id: \.seq) { block in
+				AgentMessageBlockView(block: AgentChatAdapter.block(block), expanded: Binding(
+					get: { expandedSeqs.contains(block.seq) },
+					set: { value in
+						if value { expandedSeqs.insert(block.seq) }
+						else { expandedSeqs.remove(block.seq) }
+					}))
 			}
 		}
 		.padding(10)

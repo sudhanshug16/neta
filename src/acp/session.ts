@@ -1,4 +1,5 @@
 import type {
+	ContentBlock,
 	RequestPermissionResponse,
 	SessionConfigOption,
 	SessionNotification,
@@ -6,7 +7,7 @@ import type {
 } from "@agentclientprotocol/sdk";
 import { ulid } from "../core/ids.ts";
 import { nowIso } from "../core/time.ts";
-import type { Access, Block, SessionId, Turn, TurnId } from "../core/types.ts";
+import type { Access, Block, PromptAttachment, SessionId, Turn, TurnId } from "../core/types.ts";
 import { type BlockDraft, blocksFromUpdate, canCoalesce, signalFromUpdate } from "./blocks.ts";
 import type { McpServerSpec } from "./mcp.ts";
 import { type ModelOption, type ModelState, modelStateFrom, planModel } from "./models.ts";
@@ -17,11 +18,13 @@ export interface StartOptions {
 	settings: Settings;
 	provider: string;
 	access: Access;
+	unsandboxed?: boolean;
 	cwd: string;
 	model?: string;
 	mcpServers?: McpServerSpec[];
 	resumeVendorSessionId?: string;
 	sessionId?: SessionId;
+	steeringSafe?: boolean;
 }
 
 export type SessionEvent =
@@ -38,10 +41,18 @@ export interface AcpSession {
 	readonly provider: string;
 	readonly cwd: string;
 	readonly access: Access;
+	readonly unsandboxed: boolean;
 	readonly model: string;
 	readonly openTurnId?: TurnId;
 	readonly configOptions: readonly SessionConfigOption[];
-	prompt(text: string): TurnId;
+	readonly promptCapabilities: { image: boolean; embeddedContext: boolean };
+	readonly steeringSupported: boolean;
+	prompt(text: string, attachments?: PromptAttachment[]): TurnId;
+	steer(
+		messageId: string,
+		text: string,
+		attachments?: PromptAttachment[],
+	): Promise<"injected" | "promptRequired" | "failed">;
 	cancel(): Promise<void>;
 	listModels(): ModelOption[];
 	setModel(model: string): Promise<void>;
@@ -97,10 +108,14 @@ async function startInner(opts: StartOptions): Promise<AcpSession> {
 	let model = "";
 	let modelState: ModelState = { source: "none", options: [] };
 	let configOptions: SessionConfigOption[] = [];
+	let promptCapabilities = { image: false, embeddedContext: false };
+	let steeringSupported = false;
 	let openTurnId: TurnId | undefined;
 	const turnEndWaiters: Array<() => void> = [];
 	let seq = 0;
 	let last: LastBlock | undefined;
+	let keyed = new Map<string, LastBlock>();
+	let pendingUsage: BlockDraft | undefined;
 	let closed = false;
 	let iteratorTaken = false;
 
@@ -138,8 +153,21 @@ async function startInner(opts: StartOptions): Promise<AcpSession> {
 		}
 	}
 
-	function emitBlock(draft: BlockDraft): void {
-		if (openTurnId === undefined) {
+	function emitBlock(draft: BlockDraft, targetTurnId: TurnId | undefined = openTurnId): void {
+		if (targetTurnId === undefined) {
+			return;
+		}
+		const prior = draft.key === undefined ? undefined : keyed.get(draft.key);
+		if (prior !== undefined) {
+			const next = { ...draft, text: draft.text === "" ? prior.block.text : draft.text };
+			prior.draft = next;
+			prior.block = {
+				...prior.block,
+				text: next.text,
+				...(next.data === undefined ? {} : { data: { ...prior.block.data, ...next.data } }),
+			};
+			last = prior;
+			push({ type: "block", block: prior.block });
 			return;
 		}
 		if (last !== undefined && canCoalesce(last.draft, draft)) {
@@ -152,7 +180,7 @@ async function startInner(opts: StartOptions): Promise<AcpSession> {
 		}
 		seq += 1;
 		const block: Block = {
-			turnId: openTurnId,
+			turnId: targetTurnId,
 			seq,
 			at: nowIso(),
 			role: draft.role,
@@ -161,6 +189,7 @@ async function startInner(opts: StartOptions): Promise<AcpSession> {
 			...(draft.data === undefined ? {} : { data: draft.data }),
 		};
 		last = { draft: { ...draft }, block };
+		if (draft.key !== undefined) keyed.set(draft.key, last);
 		push({ type: "block", block });
 	}
 
@@ -169,7 +198,8 @@ async function startInner(opts: StartOptions): Promise<AcpSession> {
 			return;
 		}
 		for (const draft of blocksFromUpdate(notification.update)) {
-			emitBlock(draft);
+			if (draft.kind === "usage") pendingUsage = draft;
+			else emitBlock(draft);
 		}
 		const signal = signalFromUpdate(notification.update);
 		if (signal?.kind === "model") {
@@ -181,11 +211,14 @@ async function startInner(opts: StartOptions): Promise<AcpSession> {
 		}
 		if (notification.update.sessionUpdate === "config_option_update") {
 			configOptions = notification.update.configOptions;
+			modelState = modelStateFrom({ configOptions });
+			if (modelState.current !== undefined) model = modelState.current;
 		}
 	}
 
 	function permissionFor(options: Array<{ kind: string; optionId: string }>): RequestPermissionResponse {
-		const kinds = access === "readWrite" ? ["allow_once", "allow_always"] : ["reject_once"];
+		const kinds =
+			opts.unsandboxed === true || access === "readWrite" ? ["allow_once", "allow_always"] : ["reject_once"];
 		for (const kind of kinds) {
 			const found = options.find((option) => option.kind === kind);
 			if (found !== undefined) {
@@ -203,7 +236,9 @@ async function startInner(opts: StartOptions): Promise<AcpSession> {
 				return;
 			}
 			closed = true;
-			push({ type: "interrupted", turnId: openTurnId, exit });
+			const interruptedTurnId = openTurnId;
+			clearTurn();
+			push({ type: "interrupted", turnId: interruptedTurnId, exit });
 			endStream();
 			try {
 				next.connection.close();
@@ -223,6 +258,12 @@ async function startInner(opts: StartOptions): Promise<AcpSession> {
 				requestPermission: async (p) => permissionFor(p.options ?? []),
 			},
 		});
+		promptCapabilities = {
+			image: next.initialize.agentCapabilities?.promptCapabilities?.image ?? false,
+			embeddedContext: next.initialize.agentCapabilities?.promptCapabilities?.embeddedContext ?? false,
+		};
+		const meta = next.initialize._meta as { steering?: { supported?: unknown } } | null | undefined;
+		steeringSupported = opts.steeringSafe === true && meta?.steering?.supported === true;
 		let vendor: string;
 		let response: unknown;
 		if (resumeId !== undefined && provider.resume) {
@@ -257,6 +298,25 @@ async function startInner(opts: StartOptions): Promise<AcpSession> {
 		}
 	}
 
+	function promptBlocks(text: string, attachments: readonly PromptAttachment[]): ContentBlock[] {
+		const blocks: ContentBlock[] = text === "" ? [] : [{ type: "text", text }];
+		for (const attachment of attachments) {
+			if (attachment.kind === "image") {
+				blocks.push({ type: "image", data: attachment.dataBase64, mimeType: attachment.mimeType });
+			} else {
+				blocks.push({
+					type: "resource",
+					resource: {
+						uri: `attachment:${encodeURIComponent(attachment.id)}/${encodeURIComponent(attachment.name)}`,
+						mimeType: attachment.mimeType,
+						blob: attachment.dataBase64,
+					},
+				});
+			}
+		}
+		return blocks;
+	}
+
 	async function applyModelPlan(wanted: string | undefined): Promise<void> {
 		const plan = planModel(modelState, wanted, opts.settings.forbiddenModels);
 		if (plan.call !== undefined && proc !== undefined) {
@@ -281,10 +341,34 @@ async function startInner(opts: StartOptions): Promise<AcpSession> {
 		}
 	}
 
+	async function applySandboxPolicy(): Promise<void> {
+		const wanted = opts.unsandboxed === true ? provider.unsandboxedMode : undefined;
+		if (wanted === undefined || proc === undefined) return;
+		const mode = configOptions.find(
+			(option): option is SessionConfigOption & { type: "select" } =>
+				option.id === "mode" && option.type === "select",
+		);
+		const advertised = mode?.options.some((option) =>
+			"value" in option ? option.value === wanted : option.options.some((nested) => nested.value === wanted),
+		);
+		if (mode === undefined || advertised !== true) {
+			throw new Error(`provider ${opts.provider} does not advertise unsandboxed mode ${wanted}`);
+		}
+		const response = await proc.connection.agent.request("session/set_config_option", {
+			sessionId: vendorSessionId,
+			configId: "mode",
+			value: wanted,
+		});
+		if (response.configOptions !== undefined && response.configOptions !== null) {
+			configOptions = response.configOptions;
+		}
+	}
+
 	// --- boot ---
 	const first = await launch(opts.resumeVendorSessionId);
 	vendorSessionId = first.vendor;
 	absorbResponse(first.response);
+	await applySandboxPolicy();
 	const wanted = opts.model ?? (provider.defaultModel === "" ? undefined : provider.defaultModel);
 	await applyModelPlan(wanted);
 	if (model === "" && wanted !== undefined) {
@@ -307,6 +391,9 @@ async function startInner(opts: StartOptions): Promise<AcpSession> {
 		get access() {
 			return access;
 		},
+		get unsandboxed() {
+			return opts.unsandboxed === true;
+		},
 		get model() {
 			return model;
 		},
@@ -316,8 +403,14 @@ async function startInner(opts: StartOptions): Promise<AcpSession> {
 		get configOptions() {
 			return configOptions;
 		},
+		get promptCapabilities() {
+			return promptCapabilities;
+		},
+		get steeringSupported() {
+			return steeringSupported;
+		},
 
-		prompt(text: string): TurnId {
+		prompt(text: string, attachments: PromptAttachment[] = []): TurnId {
 			if (closed) {
 				throw new SessionClosedError();
 			}
@@ -328,6 +421,8 @@ async function startInner(opts: StartOptions): Promise<AcpSession> {
 			const turn: Turn = { id: turnId, sessionId, startedAt: nowIso(), role: "user" };
 			openTurnId = turnId;
 			last = undefined;
+			keyed = new Map();
+			pendingUsage = undefined;
 			push({ type: "turn", turn });
 			void (async (): Promise<void> => {
 				const current = proc;
@@ -338,7 +433,7 @@ async function startInner(opts: StartOptions): Promise<AcpSession> {
 				try {
 					response = await current.connection.agent.request("session/prompt", {
 						sessionId: vendorSessionId,
-						prompt: [{ type: "text", text }],
+						prompt: promptBlocks(text, attachments),
 					});
 				} catch (error) {
 					if (openTurnId !== turnId || closed) {
@@ -358,17 +453,26 @@ async function startInner(opts: StartOptions): Promise<AcpSession> {
 				}
 				if (response.usage !== undefined && response.usage !== null) {
 					const usage = response.usage;
-					emitBlock({
+					const finalUsage: BlockDraft = {
 						role: "agent",
-						kind: "status",
-						text: `${usage.totalTokens} total tokens (${usage.inputTokens} in · ${usage.outputTokens} out)`,
+						kind: "usage",
+						text: `${usage.totalTokens} tokens`,
 						data: {
+							...(pendingUsage as BlockDraft | undefined)?.data,
 							inputTokens: usage.inputTokens,
 							outputTokens: usage.outputTokens,
 							totalTokens: usage.totalTokens,
+							thoughtTokens: usage.thoughtTokens ?? null,
+							cachedReadTokens: usage.cachedReadTokens ?? null,
+							cachedWriteTokens: usage.cachedWriteTokens ?? null,
 						},
-					});
+						key: "usage",
+					};
+					emitBlock(finalUsage);
+				} else if (pendingUsage !== undefined) {
+					emitBlock(pendingUsage);
 				}
+				pendingUsage = undefined;
 				push({
 					type: "turnEnd",
 					turnId,
@@ -378,6 +482,41 @@ async function startInner(opts: StartOptions): Promise<AcpSession> {
 				clearTurn();
 			})();
 			return turnId;
+		},
+
+		steer: async (messageId, text, attachments = []) => {
+			if (closed || proc === undefined) throw new SessionClosedError();
+			if (!steeringSupported || openTurnId === undefined) return "promptRequired";
+			const turnId = openTurnId;
+			const agent = proc.connection.agent as unknown as {
+				request(method: string, params: unknown): Promise<unknown>;
+			};
+			const response = (await agent.request("_session/steering", {
+				sessionId: vendorSessionId,
+				prompt: promptBlocks(text, attachments),
+				_meta: { steering: { idleBehavior: "promptRequired" } },
+			})) as { outcome?: unknown };
+			if (response.outcome === "promptRequired") return "promptRequired";
+			if (response.outcome !== "injected") return "failed";
+			if (text !== "") emitBlock({ role: "user", kind: "text", text, data: { messageId } }, turnId);
+			for (const attachment of attachments)
+				emitBlock(
+					{
+						role: "user",
+						kind: "status",
+						text: attachment.name,
+						data: {
+							messageId,
+							attachmentId: attachment.id,
+							attachmentKind: attachment.kind,
+							name: attachment.name,
+							mimeType: attachment.mimeType,
+							size: Buffer.from(attachment.dataBase64, "base64").byteLength,
+						},
+					},
+					turnId,
+				);
+			return "injected";
 		},
 
 		cancel: async (): Promise<void> => {
@@ -444,6 +583,7 @@ async function startInner(opts: StartOptions): Promise<AcpSession> {
 			const relaunched = await launch(vendorSessionId);
 			vendorSessionId = relaunched.vendor;
 			absorbResponse(relaunched.response);
+			await applySandboxPolicy();
 		},
 
 		close: async (): Promise<void> => {

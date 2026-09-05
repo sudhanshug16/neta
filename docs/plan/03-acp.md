@@ -17,8 +17,8 @@ the `Settings` type in T3.1. Shipped defaults, all with `resume: true`:
 
 | name | command | args | readOnlyArgs | readWriteArgs | defaultModel |
 |---|---|---|---|---|---|
-| `claude` | `npx` | `-y @agentclientprotocol/claude-agent-acp@0.68.0` | `[]` | `[]` | `sonnet` |
-| `codex` | `npx` | `-y @agentclientprotocol/codex-acp@1.3.0` | `-c sandbox_mode="read-only" -c approval_policy="never"` | `-c sandbox_mode="workspace-write" -c approval_policy="never"` | `gpt-5.6-terra[medium]` |
+| `claude` | `npx` | `-y @agentclientprotocol/claude-agent-acp@0.74.0` | `[]` | `[]` | `sonnet` |
+| `codex` | `npx` | `-y @agentclientprotocol/codex-acp@1.10.0` | `[]` | `[]` | `""` |
 | `opencode` | `opencode` | `acp` | `[]` | `[]` | `""` |
 
 `leader` defaults to `{ provider: "claude" }`; `forbiddenModels` to `[]` (v2
@@ -28,7 +28,9 @@ hard-coded a Claude Fable ban, v3 makes it the operator's list); `defaultModel:
 ## Decisions this workstream encodes
 
 - **Model is per session, never per tier**, and it survives resume.
-- **Access is enforced twice**: launch args, then the permission answer.
+- **Ordinary-agent access is enforced twice**: launch args, then the permission
+  answer. Leaders separately select the adapter-advertised unrestricted ACP
+  mode; Lead/Lead++ continues to govern Neta authority and writer leases.
 - **Steering never injects**: cancel, wait for the boundary, prompt again.
 - **Recovery does not replay**: a dead process gives one `interrupted` event
   with the last turn id; reviving is decided above this layer.
@@ -49,9 +51,10 @@ Writes: `src/acp/settings.ts`, `test/acp-settings.test.ts`.
 Contract:
 ```ts
 export interface ProviderSettings { command: string; args: string[]; env?: Record<string, string>;
-  readOnlyArgs?: string[]; readWriteArgs?: string[]; resume: boolean; defaultModel: string; disabled?: boolean }
+  readOnlyArgs?: string[]; readWriteArgs?: string[]; resume: boolean; defaultModel: string;
+  unsandboxedMode?: string; disabled?: boolean }
 export interface Settings { providers: Record<string, ProviderSettings>;
-  leader: { provider: string; model?: string }; forbiddenModels: string[] }
+  leader: { provider: string; model?: string; name?: string }; forbiddenModels: string[] }
 export interface PartialSettings { providers?: Record<string, Partial<ProviderSettings>>;
   leader?: Partial<Settings["leader"]>; forbiddenModels?: string[] }
 export const DEFAULT_PROVIDERS: Record<string, ProviderSettings>;
@@ -77,7 +80,7 @@ Commit: `feat(acp): provider settings`
 Goal: spawn one provider, speak ACP over its stdio, and kill it for certain.
 Reads: this file, `src/acp/settings.ts`, and `node_modules/@agentclientprotocol/sdk/dist/acp.d.ts` for the client API.
 Writes: `src/acp/process.ts`, `test/acp-process.test.ts`, `package.json`.
-Dependency: the first runtime dependency, `@agentclientprotocol/sdk` pinned exactly at `1.3.0`, in `dependencies` (the fixture already imports it).
+Dependency: `@agentclientprotocol/sdk` pinned exactly at `1.4.0` in `dependencies`.
 Contract:
 ```ts
 export interface ExitInfo { code: number | null; signal: string | null; at: IsoTime }

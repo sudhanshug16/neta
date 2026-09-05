@@ -5,6 +5,12 @@ import XCTest
 
 @testable import NetaDesktop
 
+private final class ClosureTarget: NSObject {
+	let action: () -> Void
+	init(_ action: @escaping () -> Void) { self.action = action }
+	@objc func invoke() { action() }
+}
+
 /// Contract for the headless debug driver: every command form parses,
 /// garbage is refused with a reason, an agent name resolves case-insensitively
 /// against a fixture-backed store, and nothing at all happens without
@@ -29,11 +35,18 @@ final class DebugDriverTests: XCTestCase {
 			("window", .window),
 			("resize 1600 1000", .resize(width: 1600, height: 1000)),
 			("wait 500", .wait(milliseconds: 500)),
+			("await-ready 5000", .awaitReady(milliseconds: 5000)),
+			("await-state 5000 idle", .awaitState(milliseconds: 5000, predicate: "idle")),
+			("await-state 5000 session-not old", .awaitState(milliseconds: 5000, predicate: "session-not old")),
+			("await-state 5000 inbox uncertain 1", .awaitState(milliseconds: 5000, predicate: "inbox uncertain 1")),
 			("shot /tmp/a.png", .shot(path: "/tmp/a.png")),
 			("shot /tmp/a b.png", .shot(path: "/tmp/a b.png")),
+			("shot-content /tmp/content view.png", .shotContent(path: "/tmp/content view.png")),
 			("quit", .quit),
 			("menu", .menu),
 			("state", .state),
+			("ax-dump", .axDump),
+			("ax-press Send", .axPress(label: "Send")),
 			("key cmd+l", .key(characters: "l", modifiers: NSEvent.ModifierFlags.command.rawValue)),
 			("key cmd+shift+k", .key(
 				characters: "k",
@@ -41,6 +54,12 @@ final class DebugDriverTests: XCTestCase {
 			("key escape", .key(characters: "\u{1B}", modifiers: 0)),
 			("key cmd+.", .key(characters: ".", modifiers: NSEvent.ModifierFlags.command.rawValue)),
 			("click 400 300", .click(x: 400, y: 300)),
+			("drag 1 2 3 4", .drag(x0: 1, y0: 2, x1: 3, y1: 4)),
+			// A draft is prose: the remainder of the line is kept whole,
+			// spaces, punctuation and all, and an empty one clears the field.
+			("draft Close #305 once the checks pass.", .draft(
+				text: "Close #305 once the checks pass.")),
+			("draft", .draft(text: "")),
 			("  fit  ", .fit),
 		]
 		for (line, expected) in cases {
@@ -69,14 +88,23 @@ final class DebugDriverTests: XCTestCase {
 			"resize 0 0",
 			"wait soon",
 			"wait -1",
+			"await-ready 0",
+			"await-state 0 idle",
+			"await-state 5000",
+			"await-state 5000 someday",
+			"await-state 5000 inbox mystery 1",
 			"shot",
+			"shot-content",
 			"fit now",
 			"quit please",
 			"menu bar",
 			"state of things",
+			"ax-dump extra",
+			"ax-press",
 			"key",
 			"key cmd",
 			"key cmd+wiggle",
+			"drag 1 2 3",
 			"click 400",
 			"click here there",
 		]
@@ -121,6 +149,62 @@ final class DebugDriverTests: XCTestCase {
 		XCTAssertFalse(
 			FileManager.default.fileExists(atPath: directory.path),
 			"the gated driver must not create its directory")
+	}
+
+	func testAccessibilityPressUsesRealControlsAndRejectsDuplicateLabels() async throws {
+		var presses = 0
+		let target = ClosureTarget { presses += 1 }
+		let first = NSButton(title: "Probe", target: target, action: #selector(ClosureTarget.invoke))
+		first.setAccessibilityIdentifier("probe-action")
+		let firstRoot = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 200))
+		firstRoot.addSubview(first)
+		let firstWindow = NSWindow(contentRect: firstRoot.frame, styleMask: [.titled], backing: .buffered, defer: false)
+		firstWindow.isReleasedWhenClosed = false
+		firstWindow.animationBehavior = .none
+		firstWindow.contentView = firstRoot
+		firstWindow.orderFront(nil)
+
+		let second = NSButton(title: "Probe", target: nil, action: nil)
+		let secondRoot = NSView(frame: NSRect(x: 0, y: 0, width: 200, height: 100))
+		secondRoot.addSubview(second)
+		let secondWindow = NSWindow(contentRect: secondRoot.frame, styleMask: [.titled], backing: .buffered, defer: false)
+		secondWindow.isReleasedWhenClosed = false
+		secondWindow.animationBehavior = .none
+		secondWindow.contentView = secondRoot
+		secondWindow.orderFront(nil)
+
+		let directory = FileManager.default.temporaryDirectory.appendingPathComponent("neta-driver-ax-\(UUID().uuidString)")
+		try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+		let driver = DebugDriver(directory: directory, store: Store(), shell: ShellState())
+		let pressed = await driver.execute(line: "ax-press probe-action")
+		XCTAssertTrue(pressed.contains("dispatched probe-action"), pressed)
+		XCTAssertEqual(presses, 1)
+		let ambiguous = await driver.execute(line: "ax-press Probe")
+		XCTAssertTrue(ambiguous.contains("ambiguous"), ambiguous)
+
+		for window in [secondWindow, firstWindow] {
+			window.orderOut(nil)
+			window.contentView = nil
+			window.close()
+		}
+		try? FileManager.default.removeItem(at: directory)
+		await Task.yield()
+	}
+
+	func testOneXContentCaptureUsesRequestedGeometryAndRestoresTheLiveView() throws {
+		let view = NSView(frame: NSRect(x: 4, y: 6, width: 20, height: 30))
+		let original = view.frame
+		let url = FileManager.default.temporaryDirectory
+			.appendingPathComponent("neta-content-\(UUID().uuidString).png")
+		defer { try? FileManager.default.removeItem(at: url) }
+
+		try DebugDriver.writeOneXContent(
+			view, requestedSize: NSSize(width: 1600, height: 1000), to: url)
+
+		let image = try XCTUnwrap(NSBitmapImageRep(data: Data(contentsOf: url)))
+		XCTAssertEqual(image.pixelsWide, 1600)
+		XCTAssertEqual(image.pixelsHigh, 1000)
+		XCTAssertEqual(view.frame, original, "capture restores the live root")
 	}
 
 	/// The state commands move the shell, `now` included.

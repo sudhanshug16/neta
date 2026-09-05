@@ -40,7 +40,7 @@ import type { MissionPorts, SessionLaunch } from "../tools/handlers/mission.ts";
 import { toolHandlers } from "../tools/launch.ts";
 import { type Actor, createRouter, type ToolDeps } from "../tools/router.ts";
 import { createFileLeaseStore, createWorktreeService, LeaseManager, WorktrunkDriver } from "../worktrees/index.ts";
-import { asOptionalString, asString, parseParams } from "./handlers-registry.ts";
+import { asOptionalBoolean, asOptionalString, asString, parseParams } from "./handlers-registry.ts";
 import type { AdaptedAcp, AdaptedStore } from "./lifecycle.ts";
 import { netaDir } from "./lockfile.ts";
 import { NodeError } from "./protocol.ts";
@@ -96,6 +96,8 @@ export interface ModeMountPorts {
 }
 
 export interface ModeMount {
+	evaluateLeadPlus(subject: ModeSubject, record: DecisionRecord): Promise<ModeApproval>;
+	applyApprovedLeadPlus(subject: ModeSubject, record: DecisionRecord): Promise<void>;
 	// `neta_mode`'s port (05) and `leader.setMode`'s body (04) both land
 	// here, so a tool grant and a click in the UI get the same record, the
 	// same clock and the same reminders.
@@ -221,6 +223,10 @@ export function modeMount(ports: ModeMountPorts): ModeMount {
 	}
 
 	return {
+		evaluateLeadPlus: async (input, record) => service.evaluateLeadPlus(modeSubjectOf(input), record),
+		applyApprovedLeadPlus: async (input, record) => {
+			await guarded(modeSubjectOf(input), () => service.applyApprovedLeadPlus(modeSubjectOf(input), record));
+		},
 		requestMode: async (input) => {
 			const subject = modeSubjectOf(input.subject);
 			if (input.mode === "lead") {
@@ -404,6 +410,11 @@ export function toolMount(o: ToolMountOptions): {
 		},
 		saveMission: (mission) => saveMission(mission, false),
 		onMissionClosed: async (mission) => {
+			// Make closure visible before any FIFO handoff. Promotion then skips
+			// queued members of this mission and may safely start another one.
+			await saveMission(mission, false);
+			for (const agentId of mission.agentIds) await releaseHolder(mission.workspaceId, agentId);
+			await releaseHolder(mission.workspaceId, mission.id);
 			const leader = o.store.getLeader(mission.workspaceId);
 			if (leader?.activeMissionId === mission.id) {
 				await o.store.putLeader({ ...leader, activeMissionId: undefined });
@@ -417,8 +428,8 @@ export function toolMount(o: ToolMountOptions): {
 
 	// A new agent's first prompt is its context: the working agreement for its
 	// kind, the charter (lead and leader only), its skills and its task. The
-	// mission brief is not in it — the mission record is not saved until every
-	// session in it has launched — so the task carries the objective.
+	// task carries the agent's bounded assignment; the mission and its
+	// ownership are already durable before this prompt is sent.
 	function contextFor(input: { canSpawn: boolean; task: string; skills: string[]; root: string }): string {
 		const kind = input.canSpawn ? ("lead" as const) : ("agent" as const);
 		const charter = loadCharter(input.root, homedir());
@@ -443,12 +454,185 @@ export function toolMount(o: ToolMountOptions): {
 	// composed by `launch` before that session existed and consumed by the
 	// `brief` that follows it.
 	const briefs = new Map<AgentId, string>();
+	const pendingReleases = new Map<string, Agent>();
+	const pendingCloses = new Map<string, { input: CloseMissionInput; subject: ModeSubject; agent?: Agent }>();
+	const pendingModes = new Map<
+		string,
+		{ subject: ModeSubject; mode: LeaderMode; record?: DecisionRecord; mission: Mission; holder: string }
+	>();
+	async function promote(changed: Array<{ promoted?: AgentId }>): Promise<void> {
+		const pending = [...changed];
+		while (pending.length > 0) {
+			const promoted = pending.shift()?.promoted;
+			if (promoted === undefined) continue;
+			const next = o.store.getAgent(promoted);
+			const mission = next === undefined ? undefined : o.store.getMission(next.missionId);
+			if (next === undefined || mission === undefined || next.state !== "queued" || mission.state === "closed") {
+				if (next !== undefined) pending.push(...(await worktrees.releaseWriter(next.workspaceId, next.id)));
+				continue;
+			}
+			let sessionId = next.sessionId;
+			try {
+				const request = {
+					sessionId,
+					workspaceId: next.workspaceId,
+					cwd: mission.worktree?.path ?? rootFor(next.workspaceId),
+					provider: next.provider,
+					model: next.model,
+					access: next.access,
+					unsandboxed: next.canSpawn,
+					netaTools: true,
+					actorId: next.id,
+				};
+				const created =
+					next.stateBefore === "interrupted"
+						? await o.acp.ensureSession({ ...request, allowFresh: false })
+						: await o.acp.createSession(request);
+				sessionId = created.sessionId;
+				const starting = { ...next, sessionId, state: "starting" as const };
+				await o.store.putAgent(starting);
+				o.hub().broadcast("state", { kind: "agent", record: starting });
+				await o.acp.prompt(
+					sessionId,
+					contextFor({
+						canSpawn: next.canSpawn,
+						task: next.task,
+						skills: next.skills,
+						root: rootFor(next.workspaceId),
+					}),
+				);
+			} catch (error) {
+				await o.acp.close(sessionId).catch(() => undefined);
+				const failed = { ...next, sessionId, state: "failed" as const, endedAt: nowIso(), outcome: String(error) };
+				await o.store.putAgent(failed);
+				o.hub().broadcast("state", { kind: "agent", record: failed });
+				pending.push(...(await worktrees.releaseWriter(failed.workspaceId, failed.id)));
+			}
+		}
+	}
+	async function releaseHolder(workspaceId: WorkspaceId, holder: string): Promise<void> {
+		await promote(await worktrees.releaseWriter(workspaceId, holder));
+	}
+	async function finishPendingClose(sessionId: string): Promise<CloseOutcome> {
+		const pending = pendingCloses.get(sessionId);
+		if (pending === undefined) throw new NodeError("NOT_FOUND", "no pending close for session");
+		const leader = leaderOf(pending.input.mission.workspaceId);
+		await o.acp.ensureSession({
+			sessionId,
+			workspaceId: pending.input.mission.workspaceId,
+			cwd: rootFor(pending.input.mission.workspaceId),
+			provider: pending.agent?.provider ?? leader.provider,
+			model: pending.agent?.model ?? leader.model,
+			access: "readOnly",
+			unsandboxed: pending.subject.kind === "lead" || pending.agent === undefined,
+			netaTools: true,
+			...(pending.agent === undefined ? {} : { actorId: pending.agent.id }),
+			forceRelaunch: true,
+			allowFresh: false,
+		});
+		await modes.requestMode({ subject: pending.subject, mode: "lead" });
+		const outcome = await worktrees.close(pending.input);
+		if (!outcome.ok) {
+			const holder = pending.agent?.id ?? pending.input.mission.id;
+			await releaseHolder(pending.input.mission.workspaceId, holder);
+		}
+		await saveMission(outcome.mission);
+		pendingCloses.delete(sessionId);
+		return outcome;
+	}
+	async function recordDeferredCloseFailure(sessionId: string, error: unknown): Promise<void> {
+		const pending = pendingCloses.get(sessionId);
+		if (pending === undefined) return;
+		pendingCloses.delete(sessionId);
+		const failed = { ...pending.input.mission, attention: `Close failed: ${String(error)}` };
+		await saveMission(failed);
+		await o.store.appendEvent({
+			workspaceId: failed.workspaceId,
+			kind: "mission.failed",
+			missionId: failed.id,
+			sessionId,
+			data: { reason: String(error) },
+		});
+	}
+	async function applyPendingMode(sessionId: string): Promise<void> {
+		const pending = pendingModes.get(sessionId);
+		if (pending === undefined) return;
+		pendingModes.delete(sessionId);
+		try {
+			const agent = pending.subject.kind === "lead" ? o.store.getAgent(pending.subject.agentId) : undefined;
+			await o.acp.ensureSession({
+				sessionId,
+				workspaceId: pending.subject.workspaceId,
+				cwd: pending.mission.worktree?.path ?? rootFor(pending.subject.workspaceId),
+				provider: agent?.provider ?? leaderOf(pending.subject.workspaceId).provider,
+				model: agent?.model ?? leaderOf(pending.subject.workspaceId).model,
+				access: pending.mode === "leadPlus" ? "readWrite" : "readOnly",
+				unsandboxed: true,
+				netaTools: true,
+				...(agent === undefined ? {} : { actorId: agent.id }),
+				forceRelaunch: pending.mission.worktree !== undefined,
+				allowFresh: false,
+			});
+			if (pending.mode === "leadPlus" && pending.record !== undefined) {
+				await modes.applyApprovedLeadPlus(pending.subject, pending.record);
+			} else {
+				await modes.requestMode({ subject: pending.subject, mode: "lead" });
+				await releaseHolder(pending.subject.workspaceId, pending.holder);
+			}
+			return;
+		} catch (error) {
+			await o.acp.close(sessionId).catch(() => undefined);
+			await releaseHolder(pending.subject.workspaceId, pending.holder);
+			const failedMission = { ...pending.mission, attention: `Lead++ failed: ${String(error)}` };
+			await saveMission(failedMission);
+			await o.store.appendEvent({
+				workspaceId: failedMission.workspaceId,
+				kind: "mission.failed",
+				missionId: failedMission.id,
+				sessionId,
+				data: { reason: String(error) },
+			});
+			throw error;
+		}
+	}
+
+	async function releaseAndPromote(agent: Agent): Promise<void> {
+		await o.acp.close(agent.sessionId).catch(() => undefined);
+		await releaseHolder(agent.workspaceId, agent.id);
+	}
+
+	o.acp.onTurn((notification) => {
+		if (notification.turn?.endedAt === undefined) return;
+		if (pendingCloses.has(notification.sessionId)) {
+			void finishPendingClose(notification.sessionId).catch((error) =>
+				recordDeferredCloseFailure(notification.sessionId, error),
+			);
+			return;
+		}
+		const pendingMode = pendingModes.get(notification.sessionId);
+		if (pendingMode !== undefined) {
+			if (notification.turn.cancelled === true) {
+				pendingModes.delete(notification.sessionId);
+				void releaseHolder(pendingMode.subject.workspaceId, pendingMode.holder).catch(() => undefined);
+			} else {
+				void applyPendingMode(notification.sessionId).catch(() => undefined);
+			}
+		}
+		const agent = pendingReleases.get(notification.sessionId);
+		if (agent === undefined) return;
+		pendingReleases.delete(notification.sessionId);
+		void releaseAndPromote(agent);
+	});
 
 	const missions: MissionPorts["missions"] = { save: (mission) => saveMission(mission) };
 
 	const deps: ToolDeps &
 		MissionPorts & {
 			sessions: {
+				release(agent: Agent): Promise<void>;
+				resume(agent: Agent): Promise<Agent>;
+				failed(agent: Agent): Promise<void>;
+				startQueued(agent: Agent, text: string): Promise<Agent>;
 				cancel(sessionId: string): Promise<void>;
 				prompt(sessionId: string, text: string): Promise<void>;
 				wait(input: {
@@ -468,6 +652,19 @@ export function toolMount(o: ToolMountOptions): {
 			};
 		} = {
 		store: o.store,
+		history: async (sessionId, query) => {
+			const page = await o.store.tailConversation(sessionId, query);
+			return {
+				messages: page.blocks
+					.filter((block) => block.kind === "text" && (block.role === "user" || block.role === "agent"))
+					.map((block) => ({
+						turnId: block.turnId,
+						role: block.role === "user" ? ("user" as const) : ("assistant" as const),
+						text: block.text,
+					})),
+				...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
+			};
+		},
 		// 05: every leader and lead tool response passes through 07's
 		// `decorate`, so a subject in Lead++ is told, on every single call,
 		// how long it has been active and why.
@@ -497,12 +694,125 @@ export function toolMount(o: ToolMountOptions): {
 		// one place instead of re-deriving it here.
 		leases: {
 			acquire: (input) => worktrees.acquireWriter(input.mission, input.workspace, input.holder),
+			release: releaseHolder,
 		},
 		worktrees: {
 			prepare: (mission, workspace) => worktrees.prepare(mission, workspace),
-			close: (input) => worktrees.close(input),
+			close: async (input) => {
+				if ([...pendingReleases.values()].some((agent) => agent.missionId === input.mission.id)) {
+					return {
+						ok: false as const,
+						attention: "a writer is still finishing",
+						mission: input.mission,
+					};
+				}
+				const subject: ModeSubject =
+					input.mission.lead.kind === "agent"
+						? {
+								kind: "lead",
+								workspaceId: input.mission.workspaceId,
+								missionId: input.mission.id,
+								agentId: input.mission.lead.agentId,
+							}
+						: { kind: "leader", workspaceId: input.mission.workspaceId };
+				if ((await modes.snapshot(subject)).mode === "leadPlus") {
+					const agent = subject.kind === "lead" ? o.store.getAgent(subject.agentId) : undefined;
+					const sessionId = agent?.sessionId ?? leaderOf(input.mission.workspaceId).sessionId;
+					pendingCloses.set(sessionId, { input, subject, ...(agent === undefined ? {} : { agent }) });
+					if (o.acp.isTurnActive?.(sessionId) === true) {
+						return { ok: false, attention: "close scheduled after the active turn", mission: input.mission };
+					}
+					try {
+						return await finishPendingClose(sessionId);
+					} catch (error) {
+						await recordDeferredCloseFailure(sessionId, error);
+						return {
+							ok: false,
+							attention: `Close failed: ${String(error)}`,
+							mission: o.store.getMission(input.mission.id) ?? input.mission,
+						};
+					}
+				}
+				return worktrees.close(input);
+			},
 		},
 		sessions: {
+			startQueued: async (agent, text) => {
+				const mission = o.store.getMission(agent.missionId);
+				const workspace = o.store.getWorkspace(agent.workspaceId);
+				if (mission === undefined || workspace === undefined)
+					throw new NodeError("NOT_FOUND", "queued writer has no mission");
+				if ((await worktrees.acquireWriter(mission, workspace, agent.id)) !== "active")
+					throw new NodeError("BUSY", "writer remains queued");
+				let sessionId = agent.sessionId;
+				try {
+					const request = {
+						sessionId,
+						workspaceId: agent.workspaceId,
+						cwd: mission.worktree?.path ?? rootFor(agent.workspaceId),
+						provider: agent.provider,
+						model: agent.model,
+						access: agent.access,
+						unsandboxed: agent.canSpawn,
+						netaTools: true,
+						actorId: agent.id,
+					};
+					const created =
+						agent.stateBefore === "interrupted"
+							? await o.acp.ensureSession({ ...request, allowFresh: false })
+							: await o.acp.createSession(request);
+					sessionId = created.sessionId;
+					const starting = { ...agent, sessionId, state: "starting" as const };
+					await o.store.putAgent(starting);
+					o.hub().broadcast("state", { kind: "agent", record: starting });
+					await o.acp.prompt(
+						sessionId,
+						`${contextFor({ canSpawn: agent.canSpawn, task: agent.task, skills: agent.skills, root: rootFor(agent.workspaceId) })}\n\nLeader continuation: ${text}`,
+					);
+					return starting;
+				} catch (error) {
+					await o.acp.close(sessionId).catch(() => undefined);
+					await releaseAndPromote({ ...agent, sessionId });
+					throw error;
+				}
+			},
+			failed: releaseAndPromote,
+			resume: async (agent) => {
+				const mission = o.store.getMission(agent.missionId);
+				if (mission === undefined) throw new NodeError("NOT_FOUND", `no mission for agent: ${agent.id}`);
+				if (agent.access === "readWrite") {
+					const workspace = o.store.getWorkspace(agent.workspaceId);
+					if (workspace === undefined) throw new NodeError("NOT_FOUND", `no workspace for agent: ${agent.id}`);
+					if ((await worktrees.acquireWriter(mission, workspace, agent.id)) !== "active") {
+						const queued = { ...agent, state: "queued" as const, stateBefore: "interrupted" as const };
+						await o.store.putAgent(queued);
+						o.hub().broadcast("state", { kind: "agent", record: queued });
+						throw new NodeError("BUSY", "writer recovery is queued");
+					}
+				}
+				try {
+					const live = await o.acp.ensureSession({
+						sessionId: agent.sessionId,
+						workspaceId: agent.workspaceId,
+						cwd: mission.worktree?.path ?? rootFor(agent.workspaceId),
+						provider: agent.provider,
+						model: agent.model,
+						access: agent.access,
+						unsandboxed: agent.canSpawn,
+						netaTools: true,
+						actorId: agent.id,
+						allowFresh: false,
+					});
+					return live.sessionId === agent.sessionId ? agent : { ...agent, sessionId: live.sessionId };
+				} catch (error) {
+					if (agent.access === "readWrite") await releaseAndPromote(agent);
+					throw error;
+				}
+			},
+			release: async (agent) => {
+				if (o.acp.isTurnActive?.(agent.sessionId) === true) pendingReleases.set(agent.sessionId, agent);
+				else await releaseAndPromote(agent);
+			},
 			// The session only: 05 writes the Agent record next, and `brief`
 			// sends the context prompt after it. The token is minted under
 			// the agent id, which is the actor id the router resolves.
@@ -522,11 +832,13 @@ export function toolMount(o: ToolMountOptions): {
 					root: rootFor(input.workspaceId),
 				});
 				const created = await o.acp.createSession({
+					sessionId: input.sessionId,
 					workspaceId: input.workspaceId,
 					cwd: input.worktreePath ?? rootFor(input.workspaceId),
 					provider: input.provider,
 					model: input.model,
 					access: input.access,
+					unsandboxed: input.canSpawn,
 					netaTools: true,
 					actorId: input.agentId,
 				});
@@ -547,6 +859,7 @@ export function toolMount(o: ToolMountOptions): {
 						}),
 				);
 			},
+			close: (sessionId) => o.acp.close(sessionId),
 			cancel: (sessionId) => o.acp.cancel(sessionId),
 			prompt: async (sessionId, text) => {
 				await o.acp.prompt(sessionId, text);
@@ -573,7 +886,67 @@ export function toolMount(o: ToolMountOptions): {
 			// charter gate, the active-time clock and the reminders, and a
 			// mission lead is a subject of its own — its mode never touches
 			// the workspace leader's.
-			requestMode: (input) => modes.requestMode(input),
+			requestMode: async (input) => {
+				if (input.mode === "lead") {
+					const sessionId =
+						input.subject.kind === "lead"
+							? o.store.getAgent(input.subject.agentId)?.sessionId
+							: leaderOf(input.subject.workspaceId).sessionId;
+					const missionId =
+						input.subject.kind === "lead"
+							? input.subject.missionId
+							: o.store.getLeader(input.subject.workspaceId)?.activeMissionId;
+					const mission = missionId === undefined ? undefined : o.store.getMission(missionId);
+					if (sessionId === undefined || mission === undefined)
+						return { approved: false, reason: "unavailable", detail: "active mission session is unavailable" };
+					const holder = input.subject.kind === "lead" ? input.subject.agentId : mission.id;
+					pendingModes.set(sessionId, { subject: input.subject, mode: "lead", mission, holder });
+					if (o.acp.isTurnActive?.(sessionId) === true) return { approved: true };
+					try {
+						await applyPendingMode(sessionId);
+						return { approved: true };
+					} catch (error) {
+						return { approved: false, reason: "unavailable", detail: String(error) };
+					}
+				}
+				if (input.record === undefined)
+					return { approved: false, reason: "incompleteRecord", detail: "record is missing" };
+				const approval = await modes.evaluateLeadPlus(input.subject, input.record);
+				if (!approval.approved) return approval;
+				const mission = o.store.getMission(input.record.missionId);
+				const workspace = mission === undefined ? undefined : o.store.getWorkspace(mission.workspaceId);
+				if (mission === undefined || workspace === undefined)
+					return { approved: false, reason: "missionMissing", detail: "mission is unavailable" };
+				const holder = input.subject.kind === "lead" ? input.subject.agentId : mission.id;
+				if ((await worktrees.acquireWriter(mission, workspace, holder)) !== "active") {
+					return { approved: false, reason: "unavailable", detail: "writer access is queued" };
+				}
+				const sessionId =
+					input.subject.kind === "lead"
+						? o.store.getAgent(input.subject.agentId)?.sessionId
+						: leaderOf(input.subject.workspaceId).sessionId;
+				if (sessionId === undefined) {
+					await releaseHolder(input.subject.workspaceId, holder);
+					return { approved: false, reason: "unavailable", detail: "session is unavailable" };
+				}
+				const prior = pendingModes.get(sessionId);
+				if (prior !== undefined && prior.holder !== holder)
+					await releaseHolder(prior.subject.workspaceId, prior.holder);
+				pendingModes.set(sessionId, {
+					subject: input.subject,
+					mode: "leadPlus",
+					record: input.record,
+					mission,
+					holder,
+				});
+				if (o.acp.isTurnActive?.(sessionId) === true) return { approved: true };
+				try {
+					await applyPendingMode(sessionId);
+					return { approved: true };
+				} catch (error) {
+					return { approved: false, reason: "unavailable", detail: String(error) };
+				}
+			},
 			snapshot: (subject) => modes.snapshot(subject),
 		},
 	};
@@ -615,7 +988,8 @@ export function toolMount(o: ToolMountOptions): {
 				throw new NodeError("INVALID_PARAMS", "leader.setMode mode is lead or leadPlus");
 			}
 			const leader = leaderOf(parsed.workspaceId);
-			const mission = parsed.missionId === undefined ? undefined : o.store.getMission(parsed.missionId);
+			const missionId = parsed.missionId ?? leader.activeMissionId;
+			const mission = missionId === undefined ? undefined : o.store.getMission(missionId);
 			if (parsed.missionId !== undefined && mission === undefined) {
 				throw new NodeError("NOT_FOUND", `no such mission: ${parsed.missionId}`);
 			}
@@ -628,8 +1002,76 @@ export function toolMount(o: ToolMountOptions): {
 							agentId: mission.lead.agentId,
 						}
 					: { kind: "leader", workspaceId: parsed.workspaceId };
-			await modes.setMode(subject, parsed.mode);
+			const agent = subject.kind === "lead" ? o.store.getAgent(subject.agentId) : undefined;
+			const sessionId = agent?.sessionId ?? leader.sessionId;
+			const pending = parsed.mode === "lead" ? pendingModes.get(sessionId) : undefined;
+			if (parsed.mode === "lead") pendingModes.delete(sessionId);
+			if (mission === undefined) {
+				if (parsed.mode === "leadPlus") throw new NodeError("INVALID_PARAMS", "Lead++ requires an active mission");
+				await o.acp.ensureSession({
+					sessionId,
+					workspaceId: parsed.workspaceId,
+					cwd: rootFor(parsed.workspaceId),
+					provider: leader.provider,
+					model: leader.model,
+					access: "readOnly",
+					unsandboxed: true,
+					netaTools: true,
+					allowFresh: false,
+				});
+				await modes.setMode(subject, "lead");
+				return { leader: o.store.getLeader(parsed.workspaceId) ?? leader };
+			}
+			const workspace = o.store.getWorkspace(mission.workspaceId);
+			if (workspace === undefined) throw new NodeError("NOT_FOUND", `no workspace for mission: ${mission.id}`);
+			const holder = agent?.id ?? mission.id;
+			if (pending !== undefined) await releaseHolder(mission.workspaceId, pending.holder);
+			if (parsed.mode === "leadPlus" && (await worktrees.acquireWriter(mission, workspace, holder)) !== "active") {
+				throw new NodeError("BUSY", "writer access is queued");
+			}
+			try {
+				await o.acp.ensureSession({
+					sessionId,
+					workspaceId: mission.workspaceId,
+					cwd: mission.worktree?.path ?? rootFor(mission.workspaceId),
+					provider: agent?.provider ?? leader.provider,
+					model: agent?.model ?? leader.model,
+					access: parsed.mode === "leadPlus" ? "readWrite" : "readOnly",
+					unsandboxed: true,
+					netaTools: true,
+					...(agent === undefined ? {} : { actorId: agent.id }),
+					forceRelaunch: true,
+					allowFresh: false,
+				});
+				await modes.setMode(subject, parsed.mode);
+			} catch (error) {
+				if (parsed.mode === "leadPlus") await releaseHolder(mission.workspaceId, holder);
+				throw error;
+			}
+			if (parsed.mode === "lead") await releaseHolder(mission.workspaceId, holder);
 			return { leader: o.store.getLeader(parsed.workspaceId) ?? leader };
+		},
+
+		"agent.archive": async (_ctx: NodeContext, params: unknown) => {
+			const parsed = parseParams({ agentId: asString, confirm: asOptionalBoolean }, params);
+			const agent = o.store.getAgent(parsed.agentId);
+			if (agent === undefined) throw new NodeError("NOT_FOUND", `no such agent: ${parsed.agentId}`);
+			if ((agent.state === "starting" || agent.state === "running") && parsed.confirm !== true) {
+				throw new NodeError("CONFIRMATION_REQUIRED", "archiving a live agent needs confirm: true");
+			}
+			await o.acp.close(agent.sessionId);
+			const archived = { ...agent, state: "archived" as const };
+			await o.store.putAgent(archived);
+			await deps.sessions.release(archived);
+			await o.store.appendEvent({
+				workspaceId: agent.workspaceId,
+				kind: "agent.archived",
+				missionId: agent.missionId,
+				agentId: agent.id,
+				data: {},
+			});
+			o.hub().broadcast("state", { kind: "agent", record: archived });
+			return { agent: archived };
 		},
 	};
 	return {

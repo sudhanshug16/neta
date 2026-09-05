@@ -22,6 +22,7 @@ export interface NodeDescriptor {
 	token: string;
 	pid: number;
 	protocolVersion: number;
+	runtimeBuild?: string;
 	startedAt: IsoTime;
 }
 

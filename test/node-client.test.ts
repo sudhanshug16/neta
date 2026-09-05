@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { Machine } from "../src/core/types.ts";
 import { connectNode, type NodeClient } from "../src/node/client.ts";
 import { writeDescriptor } from "../src/node/lockfile.ts";
+import { PROTOCOL_VERSION } from "../src/node/protocol.ts";
 import {
 	type Connection,
 	createServer,
@@ -116,7 +117,7 @@ describe("against a real server", () => {
 		const client = await connectNode();
 		closers.push(() => client.close());
 		expect(client.hello.machine).toEqual(MACHINE);
-		expect(client.hello.protocolVersion).toBe(1);
+		expect(client.hello.protocolVersion).toBe(PROTOCOL_VERSION);
 		expect(await client.request<{ echoed: { a: number } }>("snapshot", { a: 1 })).toEqual({ echoed: { a: 1 } });
 		await client.close();
 	});

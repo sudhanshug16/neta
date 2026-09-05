@@ -99,6 +99,7 @@ function stubHandlers(overrides?: Partial<ToolHandlers>): { handlers: ToolHandle
 			neta_mode: (_ctx, _args) => ok("neta_mode"),
 			neta_pin: (_ctx, _args) => ok("neta_pin"),
 			neta_status: (_ctx, _args) => ok("neta_status"),
+			neta_history: (_ctx, _args) => ok("neta_history"),
 			neta_progress: (_ctx, _args) => ok("neta_progress"),
 			neta_ask: (_ctx, _args) => ok("neta_ask"),
 			neta_done: (_ctx, _args) => ok("neta_done"),
@@ -251,6 +252,7 @@ describe("tool router rendering", () => {
 			"neta_agent",
 			"neta_ask",
 			"neta_close",
+			"neta_history",
 			"neta_mission",
 			"neta_mode",
 			"neta_pin",
@@ -260,7 +262,7 @@ describe("tool router rendering", () => {
 			"neta_status",
 			"neta_wait",
 		]);
-		expect(agentTools.map((t) => t.name).sort()).toEqual(["neta_done", "neta_progress"]);
+		expect(agentTools.map((t) => t.name).sort()).toEqual(["neta_done", "neta_history", "neta_progress"]);
 		expect(refused).toEqual({ ok: false, code: "notAuthorised", message: "bad token or unknown actor" });
 	});
 });

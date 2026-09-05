@@ -122,8 +122,12 @@ still represented by a mission so its isolation, access, and closeout remain
 visible; the workspace leader may act as that mission's lead instead of
 spawning another agent.
 
-The workspace leader's conversation is one continuous ACP conversation per
-workspace and machine. It is never reset. It compacts as it grows, and the
+The workspace leader's conversation is continuous by default per workspace and
+machine. A person may explicitly reset the selected chat to a fresh provider
+conversation when its direction is no longer useful. Reset preserves the old
+transcript as history and retains the owner, project, mission, provider, model,
+access, and role instructions; it carries no prior conversational context. It
+compacts as it grows, and the
 mission record — numbers, names, objectives, dispositions, and checkpoints —
 is the leader's durable memory. How that compaction works, and how the mission
 record serves as memory, is not yet designed.
@@ -147,10 +151,17 @@ cannot create children, so the hierarchy cannot grow without bound.
 
 Only workspace leaders and mission leads use leadership modes:
 
-- **Lead** — read-only coordination. The leader may reason, inspect, talk to the
-  user, create missions, and create agents, but it cannot mutate the workspace.
-- **Lead++** — everything in Lead plus build and write access. A Lead++ leader
-  may still create and direct agents.
+- **Lead** — coordination authority. The leader may reason, inspect, talk to the
+  user, create missions, and create agents, but it does not take Neta's writer
+  lease or mutate the workspace.
+- **Lead++** — everything in Lead plus Neta's build and writer authority. A
+  Lead++ leader may still create and direct agents.
+
+Workspace leaders and mission leads run their provider process unsandboxed in
+both modes. They need machine, network, and MCP access to coordinate the whole
+mission. Lead versus Lead++ still controls Neta's mutation authority and writer
+lease; it is not a provider-process sandbox. Ordinary agents remain sandboxed
+according to the read-only or read-write access their lead assigned.
 
 Leaders begin in Lead. The user may change the selected leader's mode from chat
 or the UI. A leader may also request Lead++ automatically by submitting a
@@ -350,12 +361,20 @@ and below it. Agents stack away from the spine beneath their mission lead. A
 mission's position never changes after it is placed; finishing a mission
 changes its state, not its place.
 
-Zoom stretches time horizontally. Nodes never scale, so text stays readable at
-every zoom level. Fit fits a time window. Vertical movement is pan only.
+Missions and checkpoints form one sequence in time order along the spine. Each
+mission's anchor sits directly beneath or above its card, joined by a straight
+vertical connector; nothing bends and nothing stacks. The gap between
+neighbours is elapsed time clamped between a minimum column and a maximum gap,
+so a quiet weekend reads as a wider gap and a burst of missions packs tightly.
+Tick labels sit where day and hour boundaries fall between items; they
+annotate, and the sequence carries the chronology.
 
-The time scale is a lens around the visible window: linear room in view,
-compression on both sides. It must remain usable when the spine holds 100,000
-missions. Only the visible window is hydrated, and rendering is virtualized.
+Zoom changes only how much elapsed time shows: at minimum zoom the spine is a
+uniform sequence, at maximum a long gap stretches to its cap. Nodes never
+scale. Fit brings every open mission into view when the minimum column allows,
+otherwise it shows the newest. Vertical movement is pan only. The spine must
+remain usable at 100,000 missions; only the visible range is materialised, and
+rendering is virtualised.
 
 The Now control has two states: lit when the view is at the live edge, and
 showing how far back the view is when it is not. When the workspace leader is
@@ -533,7 +552,8 @@ both.
 
 These remain deliberately unresolved:
 
-- How the lens time scale behaves across months and at 100,000 missions.
+- The minimum column, maximum gap and pixels-per-hour defaults, tuned on
+  realistic data.
 - Whether leader activity should show as a subtle texture on the spine, or not
   at all.
 - How the leader conversation compacts, and how the mission record serves as

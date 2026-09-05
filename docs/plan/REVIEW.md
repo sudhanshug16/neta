@@ -15,7 +15,7 @@ Edits across `docs/plan/`, by class. Appendices untouched.
   `turnRange`); `missionId?` on `leader.setMode` (08's `--mission <n>`);
   `connectedClients()` and the Lead++ ticker 07 has the Node drive; and a T4.10
   fixture of fourteen missions across every `MissionState`, which 09 T9.9/T9.10
-  and 10 T10.9 test against.
+  and 10 T10.10 test against.
 - `05-tools.md`: `session/load` → `session/resume`, 03's name (2 places); T5.9
   uses 03's `McpServerSpec`/`netaMcpServer` instead of redeclaring it; named the
   callees 06's `WorktreeService.prepare`/`.close` and 07's
@@ -62,8 +62,9 @@ Edits across `docs/plan/`, by class. Appendices untouched.
 
 - `00-reset.md`: one "Done when" atop Tasks; T0.1/T0.2 gained Reads, Writes,
   Contract, Tests, Commit; T0.3–T0.6 gained Steps, T0.6 Tests.
-- `01-domain.md`: one "Done when" atop Tasks; Steps for T1.2–T1.6; Contract for
+- `01-domain.md`: one "Done when" atop Tasks; Steps for T1.2–T1.5; Contract for
   T1.3, T1.4, T1.5.
+- `10-desktop-spine.md`: one "Done when" atop Tasks, as 00 and 01 have.
 - 02–12 already carried all eight fields. Ids are `T<workstream>.<n>`, unique.
 
 ## 4. Scope creep

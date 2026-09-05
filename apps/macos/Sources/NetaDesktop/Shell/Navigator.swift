@@ -31,6 +31,10 @@ public struct NavigatorModel: Equatable, Sendable {
 	/// Every other machine in `machines` is a root the Node knows about but
 	/// cannot answer for, so it reads `Offline`.
 	public let onlineMachineId: MachineId?
+	/// The connected machine record, when the Node is reachable. Workspace
+	/// rows use it directly even when the selected workspace has one root
+	/// (and therefore no legacy machine chooser).
+	public let connectedMachine: Machine?
 	/// Open missions, number descending.
 	public let open: [Row]
 	/// Closed missions, `closedAt` descending.
@@ -58,6 +62,7 @@ public struct NavigatorModel: Equatable, Sendable {
 			selectedWorkspaceId: selected,
 			machines: machines(in: store, selected: selected),
 			onlineMachineId: store.nodeOffline ? nil : store.machine?.id,
+			connectedMachine: store.nodeOffline ? nil : store.machine,
 			open: missions
 				.filter { $0.state != .closed && matches(number: $0.number, name: $0.name, query: query) }
 				.sorted { $0.number > $1.number }
@@ -82,6 +87,13 @@ public struct NavigatorModel: Equatable, Sendable {
 	/// The dot's colour, which repeats what the label already says.
 	public func machineTint(for machine: Machine) -> Color {
 		machine.id == onlineMachineId ? Theme.mint : Theme.textSecondary
+	}
+
+	@MainActor public func onlineRoots(for workspace: Workspace) -> [MachineRow] {
+		guard let machine = connectedMachine,
+			workspace.roots.contains(where: { $0.machineId == machine.id })
+		else { return [] }
+		return [MachineRow(id: machine.id, name: machine.name, status: "Online", tint: Theme.mint)]
 	}
 
 	/// The jump predicate, shared with the overlay's local filtering: empty
@@ -227,6 +239,7 @@ public struct WorkspaceRow: Equatable, Identifiable, Sendable {
 	public let monogram: String
 	public let name: String
 	public let isSelected: Bool
+	public let machines: [MachineRow]
 
 	/// The row's fill: the navigator board's `--surface-sel`, white 7.5 %.
 	/// The semibold name, the lifted monogram tile and the `.isSelected`
@@ -331,11 +344,10 @@ public struct NavigatorSection: Equatable, Identifiable, Sendable {
 	}
 }
 
-/// The floating navigator panel: a `Jump to…` field with a `⌘L` hint, then
-/// WORKSPACES, MACHINE when the model carries one, then MISSIONS as the OPEN
-/// and ARCHIVED groups. No leader row, no counts, no cards, no status tiles,
-/// and no placeholder row when a group is empty — an empty group is simply
-/// not drawn.
+/// The floating project navigator: project actions followed by searchable
+/// workspace rows. A workspace nests the currently connected machine only
+/// when that workspace has a root on it; unknown and offline machines are
+/// omitted.
 ///
 /// The panel overlays the canvas and moves nothing. Typing filters the
 /// model's rows with the same predicate as `NavigatorModel.make`. It is an
@@ -355,6 +367,8 @@ public struct NavigatorOverlay: View {
 	private let shell: ShellState
 	private let onSelect: (Selection) -> Void
 	private let onSelectWorkspace: (WorkspaceId) -> Void
+	private let onOpenProject: () -> Void
+	private let onNewProject: () -> Void
 	@State private var query = ""
 
 	/// - Parameters:
@@ -366,12 +380,16 @@ public struct NavigatorOverlay: View {
 	public init(
 		model: NavigatorModel, shell: ShellState,
 		onSelect: @escaping (Selection) -> Void,
-		onSelectWorkspace: @escaping (WorkspaceId) -> Void = { _ in }
+		onSelectWorkspace: @escaping (WorkspaceId) -> Void = { _ in },
+		onOpenProject: @escaping () -> Void = {},
+		onNewProject: @escaping () -> Void = {}
 	) {
 		self.model = model
 		self.shell = shell
 		self.onSelect = onSelect
 		self.onSelectWorkspace = onSelectWorkspace
+		self.onOpenProject = onOpenProject
+		self.onNewProject = onNewProject
 	}
 
 	/// Switches the shell to `id`: the store takes the selection (the toolbar
@@ -390,6 +408,10 @@ public struct NavigatorOverlay: View {
 	public var body: some View {
 		VStack(alignment: .leading, spacing: 12) {
 			searchField
+			HStack(spacing: 8) {
+				Button("Open Project", action: onOpenProject).buttonStyle(.borderedProminent)
+				Button("New Project", action: onNewProject).buttonStyle(.bordered)
+			}
 			ScrollView(.vertical, showsIndicators: false) {
 				VStack(alignment: .leading, spacing: 0) {
 					ForEach(Array(sections(query: query).enumerated()), id: \.element.id) {
@@ -413,53 +435,28 @@ public struct NavigatorOverlay: View {
 		.onExitCommand { shell.hideNavigator() }
 	}
 
-	/// Exactly what the panel draws for `query`, top to bottom: WORKSPACES,
-	/// MACHINE when the model carries one, then MISSIONS with its OPEN and
-	/// ARCHIVED groups. An empty group is left out, and MISSIONS with it when
-	/// both are empty — the design has no placeholder row.
+	/// Exactly what the panel draws for `query`: matching workspaces and the
+	/// connected machine nested under each workspace that has a local root.
 	///
 	/// `body` renders this list and nothing else, so a test that builds it
 	/// reads the headers, the row text and the selected state the overlay
 	/// puts on screen.
 	public func sections(query: String) -> [NavigatorSection] {
-		var sections: [NavigatorSection] = [
+		let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
+		return [
 			NavigatorSection(
 				header: .workspaces,
-				rows: model.workspaces.map { workspace in
+				rows: model.workspaces.filter {
+					needle.isEmpty || $0.name.localizedCaseInsensitiveContains(needle)
+				}.map { workspace in
 					.workspace(WorkspaceRow(
 						id: workspace.id,
 						monogram: Self.monogram(for: workspace.name),
 						name: workspace.name,
-						isSelected: model.isSelected(workspace)))
+						isSelected: model.isSelected(workspace),
+						machines: model.onlineRoots(for: workspace)))
 				})
 		]
-		if let machines = model.machines {
-			sections.append(NavigatorSection(
-				header: .machine,
-				rows: machines.map { machine in
-					.machine(MachineRow(
-						id: machine.id,
-						name: machine.name,
-						status: model.machineLabel(for: machine),
-						tint: model.machineTint(for: machine)))
-				}))
-		}
-		let open = model.open.filter {
-			NavigatorModel.matches(number: $0.number, name: $0.name, query: query)
-		}
-		let archived = model.archived.filter {
-			NavigatorModel.matches(number: $0.number, name: $0.name, query: query)
-		}
-		guard !open.isEmpty || !archived.isEmpty else { return sections }
-		sections.append(NavigatorSection(header: .missions, rows: []))
-		if !open.isEmpty {
-			sections.append(NavigatorSection(header: .open, rows: open.map(NavigatorRow.mission)))
-		}
-		if !archived.isEmpty {
-			sections.append(
-				NavigatorSection(header: .archived, rows: archived.map(NavigatorRow.mission)))
-		}
-		return sections
 	}
 
 	/// Row activation: jumps to the mission's lead conversation and closes
@@ -522,6 +519,7 @@ public struct NavigatorOverlay: View {
 	/// work: `row.fill`'s lifted row, the brighter monogram tile and a
 	/// heavier name, beside the plain rows.
 	private func workspaceRow(_ row: WorkspaceRow) -> some View {
+		VStack(alignment: .leading, spacing: 2) {
 		Button { select(row) } label: {
 			HStack(spacing: 8) {
 				Text(row.monogram)
@@ -534,8 +532,8 @@ public struct NavigatorOverlay: View {
 					.font(Theme.text(12, row.isSelected ? .semibold : .medium))
 					.foregroundStyle(row.isSelected ? Theme.textPrimary : Theme.textSecondary)
 					.lineLimit(1)
-				Spacer(minLength: 0)
-			}
+			Spacer(minLength: 0)
+		}
 			.padding(.horizontal, 6)
 			.frame(minHeight: Theme.Metric.minHitHeight)
 			.background(
@@ -543,6 +541,10 @@ public struct NavigatorOverlay: View {
 			.contentShape(RoundedRectangle(cornerRadius: NavigatorStyle.rowRadius))
 		}
 		.buttonStyle(.plain)
+		ForEach(row.machines) { machine in
+			machineRow(machine).padding(.leading, NavigatorStyle.monogram + 8)
+		}
+		}
 		.accessibilityLabel(row.name)
 		.accessibilityAddTraits(row.isSelected ? [.isSelected] : [])
 	}

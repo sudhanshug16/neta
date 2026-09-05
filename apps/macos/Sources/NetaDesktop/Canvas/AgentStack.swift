@@ -50,6 +50,7 @@ public struct AgentStack: Sendable, Equatable {
 		case .running: return 2
 		case .starting: return 3
 		case .interrupted: return 4
+		case .queued: return 5
 		case .completed, .archived: return Int.max
 		}
 	}

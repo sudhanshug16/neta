@@ -77,11 +77,13 @@ export async function closeMission(i: CloseMissionInput, d: CloseoutDeps): Promi
 			attention: undefined,
 		};
 		d.emit("mission.closed", closed.id, { disposition: i.disposition });
+		// The Node callback persists the closed state before handing a released
+		// slot to its scheduler, so a queued member of this mission is skipped.
+		await d.onMissionClosed(closed);
 		for (const agentId of closed.agentIds) {
 			await d.leases.release(w, agentId);
 		}
 		await d.leases.release(w, closed.id);
-		await d.onMissionClosed(closed);
 		return { ok: true, mission: closed };
 	} finally {
 		await d.leases.release(w, i.mission.id);

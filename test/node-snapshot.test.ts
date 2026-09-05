@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { ulid } from "../src/core/ids.ts";
 import type { Agent, AgentState, Event, IsoTime, Leader, Mission, MissionState, Workspace } from "../src/core/types.ts";
-import { NodeError } from "../src/node/protocol.ts";
+import { NodeError, PROTOCOL_VERSION } from "../src/node/protocol.ts";
 import type { NodeAcp, NodeContext, NodeStore } from "../src/node/server.ts";
 import { buildSnapshot, snapshotHandlers } from "../src/node/snapshot.ts";
 
@@ -225,7 +225,7 @@ describe("buildSnapshot", () => {
 		expect(snapshot.missions).toHaveLength(18);
 		expect(snapshot.hasOlder).toBe(true);
 		expect(snapshot.windowDays).toBe(14);
-		expect(snapshot.protocolVersion).toBe(1);
+		expect(snapshot.protocolVersion).toBe(PROTOCOL_VERSION);
 		expect(typeof snapshot.at).toBe("string");
 	});
 

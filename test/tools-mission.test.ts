@@ -97,6 +97,8 @@ function fixture(kind: Workspace["kind"], opts?: { lease?: "active" | "queued"; 
 			brief: async (input) => {
 				briefs.push(input.agentId);
 			},
+			close: () => Promise.resolve(),
+			failed: () => Promise.resolve(),
 		},
 		worktrees: {
 			prepare: async (mission) => {
@@ -125,6 +127,7 @@ function fixture(kind: Workspace["kind"], opts?: { lease?: "active" | "queued"; 
 		},
 		leases: {
 			acquire: () => Promise.resolve(opts?.lease ?? "active"),
+			release: () => Promise.resolve(),
 		},
 	};
 	return {
@@ -184,7 +187,7 @@ describe("neta_mission", () => {
 			});
 			expect(result.ok).toBe(true);
 		}
-		expect(f.saved.map((m) => m.number)).toEqual([1, 2]);
+		expect(f.saved.map((m) => m.number)).toEqual([1, 1, 2, 2]);
 	});
 
 	test("mission.created precedes every agent.spawned", async () => {
@@ -270,7 +273,7 @@ describe("neta_mission", () => {
 		expect(f.saved).toHaveLength(0);
 	});
 
-	test("a readWrite folder mission that cannot take the lease is created and queued", async () => {
+	test("a self-led mission does not take writer access before Lead++", async () => {
 		const f = fixture("folder", { lease: "queued" });
 		const result = await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
 			name: "queued work",
@@ -280,11 +283,26 @@ describe("neta_mission", () => {
 		});
 		expect(result.ok).toBe(true);
 		if (result.ok) {
-			expect(result.data.queued).toBe(true);
+			expect(result.data.queued).toBeUndefined();
 			expect(result.data.worktree).toBeNull();
 		}
-		expect(f.saved).toHaveLength(1);
+		expect(f.saved).toHaveLength(2);
 		expect(f.events).toEqual(["mission.created"]);
+	});
+
+	test("a delegated lead begins readOnly and does not consume the writer lease", async () => {
+		const f = fixture("git", { lease: "queued" });
+		const result = await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+			name: "serialized writer",
+			objective: "wait for the worktree",
+			access: "readWrite",
+			lead: { task: "write only after admission" },
+		});
+		expect(result.ok).toBe(true);
+		if (result.ok) expect(result.data.queued).toBeUndefined();
+		expect(f.launches).toHaveLength(1);
+		expect(f.launches[0]?.access).toBe("readOnly");
+		expect(f.briefs).toHaveLength(1);
 	});
 });
 

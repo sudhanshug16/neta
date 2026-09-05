@@ -288,7 +288,7 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 const dir = process.env.NETA_DIR;
 await new Promise((done) => setTimeout(done, 300));
-await writeFile(join(dir, "node.json"), JSON.stringify({ socket: join(dir, "node.sock"), token: "fake-token", pid: process.pid, protocolVersion: 1, startedAt: new Date(0).toISOString() }));
+await writeFile(join(dir, "node.json"), JSON.stringify({ socket: join(dir, "node.sock"), token: "fake-token", pid: process.pid, protocolVersion: ${PROTOCOL_VERSION}, startedAt: new Date(0).toISOString() }));
 const server = createServer((socket) => {
   let buffer = "";
   socket.on("data", (chunk) => {
@@ -298,7 +298,7 @@ const server = createServer((socket) => {
     const message = JSON.parse(buffer.slice(0, newline));
     buffer = buffer.slice(newline + 1);
     if (message.method === "hello") {
-      socket.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { machine: { id: "01ARZ3NDEKTSV4RRFFQ69G5FAV", name: "fake", createdAt: new Date(0).toISOString() }, protocolVersion: 1, nodeVersion: "fake", pid: process.pid } }) + "\\n");
+      socket.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { machine: { id: "01ARZ3NDEKTSV4RRFFQ69G5FAV", name: "fake", createdAt: new Date(0).toISOString() }, protocolVersion: ${PROTOCOL_VERSION}, nodeVersion: "fake", pid: process.pid } }) + "\\n");
     } else if (message.id !== undefined) {
       socket.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: {} }) + "\\n");
     }

@@ -9,6 +9,9 @@ import type { AskParams, DoneParams, ProgressParams, SendParams, WaitParams } fr
 
 export interface CoordinationPorts {
 	sessions: {
+		release?(agent: Agent): Promise<void>;
+		resume?(agent: Agent): Promise<Agent>;
+		startQueued?(agent: Agent, text: string): Promise<Agent>;
 		cancel(sessionId: SessionId): Promise<void>;
 		prompt(sessionId: SessionId, text: string): Promise<void>;
 		wait(input: {
@@ -93,11 +96,24 @@ async function sendToAgent(ctx: CoordinationToolContext, params: SendParams): Pr
 		});
 		return { ok: true, data: { agentId: agent.id, delivered: "answered" } };
 	}
+	if (agent.state === "queued" && ctx.deps.sessions.startQueued !== undefined) {
+		const started = await ctx.deps.sessions.startQueued(agent, params.text);
+		return { ok: true, data: { agentId: started.id, delivered: "started" } };
+	}
 	if (agent.state === "starting" || agent.state === "running" || agent.state === "interrupted") {
+		const live =
+			agent.state === "interrupted" && ctx.deps.sessions.resume !== undefined
+				? await ctx.deps.sessions.resume(agent)
+				: agent;
 		// Resteer: cancel the turn, wait for the cancellation boundary, then
 		// prompt the same session.
-		await ctx.deps.sessions.cancel(agent.sessionId);
-		await ctx.deps.sessions.prompt(agent.sessionId, params.text);
+		if (agent.state !== "interrupted") {
+			await ctx.deps.sessions.cancel(live.sessionId);
+		}
+		await ctx.deps.sessions.prompt(live.sessionId, params.text);
+		if (agent.state === "interrupted") {
+			await ctx.deps.store.putAgent({ ...live, state: "running", stateBefore: undefined });
+		}
 		return { ok: true, data: { agentId: agent.id, delivered: "resteered" } };
 	}
 	return refused(`agent ${agent.id} is ${agent.state}`);
@@ -169,6 +185,7 @@ async function recordDone(ctx: CoordinationToolContext, params: DoneParams): Pro
 		sessionId: agent.sessionId,
 		data: {},
 	});
+	await ctx.deps.sessions.release?.(finished);
 	// A lead's mission stays open: closing is the leader's `neta_close`.
 	return { ok: true, data: { agentId: agent.id, state: finished.state } };
 }

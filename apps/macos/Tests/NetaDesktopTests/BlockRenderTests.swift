@@ -1,4 +1,6 @@
+import AppKit
 import Foundation
+import SwiftUI
 import XCTest
 
 @testable import NetaDesktop
@@ -14,6 +16,35 @@ final class BlockRenderTests: XCTestCase {
 		Block(
 			turnId: "t1", seq: 0, at: Date(timeIntervalSince1970: 0),
 			role: role, kind: kind, text: text, data: data)
+	}
+
+	@MainActor func testOneLargeTurnMaterialisesOnlyVisibleBlockRows() async throws {
+		let at = Date(timeIntervalSince1970: 1_780_315_200)
+		let blocks = (0 ..< 500).map { index in
+			Block(turnId: "large", seq: index, at: at, role: .agent, kind: .tool,
+				text: "Tool \(index)", data: ["name": .string("Tool \(index)")])
+		}
+		let rows = TranscriptRow.rows(for: [ChatTurn(
+			id: "large", role: .agent, startedAt: at, endedAt: at, blocks: blocks)])
+		var appeared = Set<String>()
+		let view = ScrollView {
+			LazyVStack {
+				ForEach(rows) { row in
+					TranscriptRowView(
+						row: row, flashing: false, expanded: .constant(false),
+						onAppear: { appeared.insert(row.id) })
+				}
+			}
+		}.frame(width: 420, height: 600)
+		let host = NSHostingView(rootView: view)
+		host.frame = NSRect(x: 0, y: 0, width: 420, height: 600)
+		let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+		window.contentView = host; window.orderFrontRegardless()
+		defer { window.orderOut(nil); window.contentView = nil }
+		try await Task.sleep(for: .milliseconds(150))
+		host.layoutSubtreeIfNeeded(); host.displayIfNeeded()
+		XCTAssertGreaterThan(appeared.count, 0)
+		XCTAssertLessThan(appeared.count, 80, "a 500-block turn must not eagerly build every expensive row")
 	}
 
 	// MARK: - BlockStyle.of
@@ -175,7 +206,7 @@ final class BlockRenderTests: XCTestCase {
 	/// on the wire), so a bubble styled by `turn.role` drew the leader's
 	/// answer inside the person's violet bubble. Runs follow the blocks'
 	/// own roles.
-	func testBlocksSplitIntoRunsByTheirOwnRole() {
+	@MainActor func testBlocksSplitIntoRunsByTheirOwnRole() {
 		let at = Date(timeIntervalSince1970: 1_780_315_200)
 		func block(_ seq: Int, _ role: Role, _ text: String) -> Block {
 			Block(
@@ -200,7 +231,34 @@ final class BlockRenderTests: XCTestCase {
 		XCTAssertFalse(
 			source.contains("turn.role =="),
 			"a bubble follows its blocks' roles, never the turn's")
-		XCTAssertTrue(source.contains("run.role == .user"))
+		XCTAssertTrue(source.contains("Self.presentation(for: run.role)"))
+	}
+
+	@MainActor func testSystemRunsUseAnUnbubbledCenteredStatusPresentation() {
+		XCTAssertEqual(TurnView.presentation(for: .user), .userBubble)
+		XCTAssertEqual(TurnView.presentation(for: .agent), .agentBubble)
+		XCTAssertEqual(TurnView.presentation(for: .system), .systemLine)
+		XCTAssertEqual(TurnView.timestampAlignment(for: .system), .center)
+	}
+
+	func testUsageAdapterRendersContextAndCostWithoutInventingInputTokens() {
+		let wire = Block(turnId: "turn", seq: 1, at: Date(), role: .system, kind: .usage, text: "", data: [
+			"usedTokens": .number(1_250), "contextSize": .number(32_000),
+			"costAmount": .number(0.0125), "costCurrency": .string("USD"),
+		])
+		let usage = AgentChatAdapter.block(wire).usage
+		XCTAssertEqual(usage?.usedTokens, 1_250)
+		XCTAssertEqual(usage?.contextSize, 32_000)
+		XCTAssertNil(usage?.inputTokens)
+		XCTAssertTrue(usage?.summary.contains("context") == true)
+		XCTAssertTrue(usage?.summary.contains("$") == true)
+	}
+
+	func testUsageAdapterDoesNotTrapOnRoundedIntUpperBoundary() {
+		let wire = Block(turnId: "turn", seq: 1, at: Date(), role: .system, kind: .usage, text: "", data: [
+			"inputTokens": .number(Double(Int.max)),
+		])
+		XCTAssertNil(AgentChatAdapter.block(wire).usage)
 	}
 
 	private func turnViewSource() throws -> String {

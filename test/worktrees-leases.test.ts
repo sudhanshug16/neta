@@ -56,6 +56,16 @@ describe("writer leases", () => {
 		expect(seen.map((record) => record.holder)).toEqual(["a2"]);
 	});
 
+	test("interrupting a holder preserves the queue without starting it", async () => {
+		const manager = new LeaseManager(memoryStore());
+		await manager.acquire(W, "a1" as AgentId, KEY);
+		await manager.acquire(W, "a2" as AgentId, KEY);
+		await manager.interrupt(W, "a1" as AgentId);
+		expect(await manager.holder(W, KEY)).toBeUndefined();
+		expect(await manager.queuePosition(W, "a2" as AgentId)).toBe(1);
+		expect(await manager.acquire(W, "a2" as AgentId, KEY)).toBe("active");
+	});
+
 	test("releasing a queued agent leaves the holder alone", async () => {
 		const manager = new LeaseManager(memoryStore());
 		await manager.acquire(W, "a1" as AgentId, KEY);

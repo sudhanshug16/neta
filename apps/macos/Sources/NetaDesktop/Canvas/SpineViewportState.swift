@@ -31,6 +31,9 @@ public enum ZoomStep: Sendable {
 	/// left border landed on the viewport edge with nothing beside it and the
 	/// oldest column read as clipped even though nothing was cut off.
 	public static let fitLeadingMargin: CGFloat = 12
+	/// A safety rail for an otherwise unbounded canvas. It is deliberately
+	/// unrelated to mission content: an empty workspace is still pannable.
+	public static let maxPan: CGFloat = 1_000_000
 
 	public private(set) var pxPerHour: Double
 	public private(set) var maxPitch: CGFloat
@@ -66,11 +69,9 @@ public enum ZoomStep: Sendable {
 		by delta: CGSize, index: SpineIndex, viewport: CGRect,
 		contentHeight: CGFloat, trailingInset: CGFloat = 0
 	) {
-		scrollX = SpinePlacement.clampScrollX(
-			scrollX + delta.width, index: index, viewport: viewport,
-			trailingInset: trailingInset)
-		let maxY = max(0, contentHeight - viewport.height)
-		scrollY = min(max(scrollY + delta.height, 0), maxY)
+		guard delta.width.isFinite, delta.height.isFinite else { return }
+		scrollX = min(max(scrollX + delta.width, -Self.maxPan), Self.maxPan)
+		scrollY = min(max(scrollY + delta.height, -Self.maxPan), Self.maxPan)
 	}
 
 	/// Applies a resolved scroll target: the shell's Now jump
@@ -79,6 +80,11 @@ public enum ZoomStep: Sendable {
 	/// sequence is narrower than the viewport, so nothing is clamped here.
 	public func jump(to scrollX: CGFloat) {
 		self.scrollX = scrollX
+	}
+
+	public func recenter(to scrollX: CGFloat) {
+		self.scrollX = min(max(scrollX, -Self.maxPan), Self.maxPan)
+		scrollY = 0
 	}
 
 	/// Pinch zoom: scales the spacing about the cursor, re-solving `scrollX`
@@ -113,9 +119,7 @@ public enum ZoomStep: Sendable {
 		let rebuilt = index.respaced(pxPerHour: next, maxPitch: maxPitch)
 		let nextX = SpineTicks.x(
 			index: rebuilt, t: t, now: .infinity)
-		scrollX = SpinePlacement.clampScrollX(
-			nextX - atCursorX, index: rebuilt, viewport: viewport,
-			trailingInset: trailingInset)
+		scrollX = min(max(nextX - atCursorX, -Self.maxPan), Self.maxPan)
 	}
 
 	/// ⌘= zooms in ×1.25, ⌘- zooms out ×0.8, about the viewport centre.
@@ -145,12 +149,11 @@ public enum ZoomStep: Sendable {
 	public func fit(
 		index: SpineIndex, viewport: CGRect, trailingInset: CGFloat = 0
 	) {
-		scrollY = 0
 		let usable = max(0, viewport.width - trailingInset)
 		guard let first = index.earliestOpen, index.count > 0 else {
-			scrollX = SpinePlacement.liveScrollX(
+			recenter(to: SpinePlacement.liveScrollX(
 				index: index, viewport: viewport,
-				trailingInset: trailingInset)
+				trailingInset: trailingInset))
 			return
 		}
 		if spanFits(
@@ -175,9 +178,10 @@ public enum ZoomStep: Sendable {
 			pxPerHour = Self.minPxPerHour
 		}
 		maxPitch = Self.maxPitch(for: pxPerHour)
-		scrollX = SpinePlacement.liveScrollX(
+		recenter(to: SpinePlacement.liveScrollX(
 			index: index.respaced(pxPerHour: pxPerHour, maxPitch: maxPitch),
 			viewport: viewport, trailingInset: trailingInset)
+		)
 	}
 
 	/// Expands or collapses a mission's completed-agent stack in place.

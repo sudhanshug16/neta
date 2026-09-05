@@ -14,10 +14,12 @@ public struct ChatHeaderModel: Equatable, Sendable {
 	public let subtitle: String
 	public let showsLeaderTag: Bool
 
-	@MainActor public static func make(selection: Selection, store: Store) -> ChatHeaderModel {
+	@MainActor public static func make(
+		selection: Selection, store: Store, isResponding: Bool = false
+	) -> ChatHeaderModel {
 		ChatHeaderModel(
 			segments: ChatPath.segments(for: selection, store: store),
-			subtitle: ChatPath.subtitle(for: selection, store: store),
+			subtitle: ChatPath.subtitle(for: selection, store: store, isResponding: isResponding),
 			showsLeaderTag: ChatPath.showsLeaderTag(for: selection))
 	}
 
@@ -52,19 +54,23 @@ public struct ChatHeaderView: View {
 	private let store: Store
 	private let onDetails: () -> Void
 	private let onSelect: (Selection) -> Void
+	private let isResponding: Bool
 
 	public init(
 		selection: Selection, store: Store,
+		isResponding: Bool = false,
 		onDetails: @escaping () -> Void, onSelect: @escaping (Selection) -> Void
 	) {
 		self.selection = selection
 		self.store = store
+		self.isResponding = isResponding
 		self.onDetails = onDetails
 		self.onSelect = onSelect
 	}
 
 	public var body: some View {
-		let model = ChatHeaderModel.make(selection: selection, store: store)
+		let model = ChatHeaderModel.make(
+			selection: selection, store: store, isResponding: isResponding)
 		HStack(alignment: .center, spacing: 8) {
 			if model.showsAvatar {
 				avatar

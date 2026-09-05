@@ -59,28 +59,30 @@ public enum ChatPath {
 	/// `read-only`/`read-write` before the state for agents. A mission
 	/// resolves to its lead (the leader's session when the lead is the
 	/// leader); unknown ids fall back to the leader.
-	@MainActor public static func subtitle(for s: Selection, store: Store) -> String {
+	@MainActor public static func subtitle(
+		for s: Selection, store: Store, isResponding: Bool = false
+	) -> String {
 		switch s {
 		case .leader:
-			return leaderSubtitle(store.leader)
+			return leaderSubtitle(store.leader, isResponding: isResponding)
 		case .mission(let id):
 			guard let mission = store.missionsById[id] else {
-				return leaderSubtitle(store.leader)
+				return leaderSubtitle(store.leader, isResponding: isResponding)
 			}
 			switch mission.lead {
 			case .leader:
-				return leaderSubtitle(store.leader)
+				return leaderSubtitle(store.leader, isResponding: isResponding)
 			case .agent(let agentId):
 				guard let agent = store.agentsById[agentId] else {
-					return leaderSubtitle(store.leader)
+					return leaderSubtitle(store.leader, isResponding: isResponding)
 				}
-				return agentSubtitle(agent)
+				return agentSubtitle(agent, isResponding: isResponding)
 			}
 		case .agent(let id):
 			guard let agent = store.agentsById[id] else {
-				return leaderSubtitle(store.leader)
+				return leaderSubtitle(store.leader, isResponding: isResponding)
 			}
-			return agentSubtitle(agent)
+			return agentSubtitle(agent, isResponding: isResponding)
 		}
 	}
 
@@ -116,13 +118,15 @@ public enum ChatPath {
 			selection: segment.selection, isLast: isLast)
 	}
 
-	private static func leaderSubtitle(_ leader: Leader?) -> String {
+	private static func leaderSubtitle(_ leader: Leader?, isResponding: Bool) -> String {
 		guard let leader else { return "" }
-		return "\(leader.provider) · \(leader.model) · \(leaderStateLabel(leader.state))"
+		let state = isResponding ? "Responding" : leaderStateLabel(leader.state)
+		return "\(leader.provider) · \(leader.model) · \(state)"
 	}
 
-	private static func agentSubtitle(_ agent: Agent) -> String {
-		"\(agent.provider) · \(agent.model) · \(accessLabel(agent.access)) · \(agentStateLabel(agent.state))"
+	private static func agentSubtitle(_ agent: Agent, isResponding: Bool) -> String {
+		let state = isResponding ? "Responding" : agentStateLabel(agent.state)
+		return "\(agent.provider) · \(agent.model) · \(accessLabel(agent.access)) · \(state)"
 	}
 
 	private static func accessLabel(_ access: Access) -> String {
@@ -142,6 +146,7 @@ public enum ChatPath {
 
 	private static func agentStateLabel(_ state: AgentState) -> String {
 		switch state {
+		case .queued: return "Queued"
 		case .starting: return "Starting"
 		case .running: return "Running"
 		case .blocked: return "Blocked"
