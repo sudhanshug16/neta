@@ -40,13 +40,12 @@ Closing the TUI alone never stops the Node.
 
 Bare `neta` in an interactive terminal opens the native client. `neta tui PATH`
 explicitly opens a project; otherwise the last machine, workspace and selected
-agent are restored. The old Toad workspace selection is imported on first use.
-`neta chat` keeps the plain terminal client, and `neta tui --legacy` retains Toad
-for rollback. Existing legacy conversations are not silently converted:
-`neta tui --migrate` starts fresh OpenCode context while preserving Neta history,
-leader identity and mission records. Migration is refused while that conversation
-is busy. Old provider transcripts remain in Neta's conversation store; they are
-not presented as native OpenCode history.
+agent are restored. `neta chat` keeps the plain terminal client. Existing legacy
+conversations are not silently converted: `neta tui --migrate` starts fresh
+OpenCode context while preserving Neta history, leader identity and mission
+records. Migration is refused while that conversation is busy. Old provider
+transcripts remain in Neta's conversation store; they are not presented as native
+OpenCode history.
 
 The managed runtime can also launch the client with `bun run --cwd vendor/opencode/runtime/packages/cli ./src/index.ts neta`.
 If it must start the Node itself, it uses Neta's `dist/main.js` or `NETA_ENGINE_ENTRY`.
@@ -164,10 +163,11 @@ bun test --cwd packages/core test/permission.test.ts
 The runtime fixture uses a local fake OpenAI-compatible server, a temporary Node,
 private OpenCode directories and no real model credentials. The optional terminal
 check uses an isolated tmux server and removes it on exit. It checks native
-rendering, paths, workspace switching, draft retention and reopening the last workspace. The runtime check
-also covers Neta MCP connection, read-only permissions, view detachment, leader
-reset, cancellation, expired-sign-in errors and exact native identity after Node restart. The runtime fixture skips if
-the sibling fork has not been installed; that skip is not a passing runtime gate.
+rendering, paths, workspace switching, draft retention and reopening the last
+workspace. The runtime check also covers Neta MCP connection, read-only
+permissions, view detachment, leader reset, cancellation, expired-sign-in errors
+and exact native identity after Node restart. The repository-managed runtime must
+be installed with `bun run setup:opencode`; a missing runtime is not a passing gate.
 
 `build:opencode` builds and stages the current platform's native executable under
 `dist/opencode/PLATFORM-ARCH/`. A packaged Node bundle can find it without Bun or

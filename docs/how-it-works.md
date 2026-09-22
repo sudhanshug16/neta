@@ -15,8 +15,8 @@ session through ACP. An authenticated, per-view HTTP gateway lets the renderer
 read that same session while routing sends and cancellation through the Node.
 Closing the gateway leaves the runtime alive. This is native OpenCode execution,
 not a Codex CLI renderer. See [the integration contract](opencode.md) for setup,
-reset, compatibility and validation boundaries. Toad remains an explicit rollback
-client; the Claude SDK migration is deferred.
+reset, compatibility and validation boundaries. The Claude SDK migration is
+deferred.
 
 Startup restores the last workspace and selected actor. The client starts a missing
 Node and compares the running Node's build identity with its own; an idle service

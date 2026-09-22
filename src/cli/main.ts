@@ -3,7 +3,6 @@ import { realpathSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { openCodeCommand } from "../opencode/launcher.ts";
-import { toadCommand } from "../toad/launcher.ts";
 // The `neta` command entry: argument parsing, dispatch and exit codes (08).
 // Every command is a thin client of the Node over its socket; this module owns
 // the command line shape only. Later tasks fill in the handlers behind the
@@ -57,7 +56,6 @@ const COMMAND_TABLE = `usage: neta [command] [options]
   neta model <id>                        set the model of the attached conversation
   neta mcp --actor <id> --token <t>      stdio MCP server for one ACP session
   neta tui [path] [--migrate] [--host id]  open native OpenCode chat and the Neta spine
-  neta tui --legacy [--demo]              open the retired Toad client
   neta version                            print the version from package.json
 
 <dur> is <n>[mhdw], e.g. 90m, 3d. --json is accepted only where listed above.`;
@@ -145,13 +143,11 @@ function parseOpen(tokens: string[]): Command | Usage {
 
 function parseTui(tokens: string[]): Command | Usage {
 	const split = splitFlags(tokens, {
-		booleans: ["legacy", "demo", "migrate"],
+		booleans: ["migrate"],
 		values: { host: (value) => value.length > 0 },
 	});
 	if ("usage" in split) return split;
 	if (split.args.length > 1) return { usage: "neta tui takes at most one workspace path" };
-	if ((split.flags.legacy || split.flags.demo) && (split.flags.migrate || split.flags.host || split.args.length))
-		return { usage: "legacy Toad mode does not support native migration or a workspace path" };
 	return { name: "tui", ...split };
 }
 
@@ -322,13 +318,11 @@ const handlers: Record<Command["name"], (cmd: Command) => number | Promise<numbe
 	model: (cmd) => withClient((client) => modelCommand(client, cmd.args[0] as string)),
 	mcp: (cmd) => mcpCommand(cmd.flags),
 	tui: (cmd) =>
-		cmd.flags.legacy === true || cmd.flags.demo === true
-			? toadCommand(cmd.flags.demo === true)
-			: openCodeCommand(
-					cmd.args[0],
-					cmd.flags.migrate === true,
-					typeof cmd.flags.host === "string" ? cmd.flags.host : undefined,
-				),
+		openCodeCommand(
+			cmd.args[0],
+			cmd.flags.migrate === true,
+			typeof cmd.flags.host === "string" ? cmd.flags.host : undefined,
+		),
 	version: printVersion,
 };
 

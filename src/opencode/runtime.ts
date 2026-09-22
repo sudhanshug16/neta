@@ -77,12 +77,14 @@ export function validateOpenCodeSource(fork: string, pinPath: string): void {
 
 class OpenCodeSourceDriftError extends Error {}
 
-function sourceDriftError(fork: string, error: unknown): OpenCodeSourceDriftError {
+function sourceDriftError(fork: string, explicitOverride: boolean, error: unknown): OpenCodeSourceDriftError {
 	const detail = error instanceof Error ? error.message : "unknown validation failure";
+	const recovery = explicitOverride
+		? "Preserve that explicit checkout and update it to the reviewed pin, or remove NETA_OPENCODE_DIR to use the managed runtime."
+		: "Run bun run setup:opencode to recreate the repository-managed runtime.";
 	return new OpenCodeSourceDriftError(
 		`Neta OpenCode source at ${fork} does not match the reviewed integration (${detail}). ` +
-			"It was not launched. Preserve that checkout and use a fresh path instead: " +
-			"NETA_OPENCODE_DIR=/path/to/clean-neta-opencode-v2 bun run setup:opencode.",
+			`It was not launched. ${recovery}`,
 	);
 }
 
@@ -100,6 +102,7 @@ export function openCodeInvocation(options: OpenCodeRuntimeOptions = {}): {
 	}
 	const here = dirname(fileURLToPath(import.meta.url));
 	const root = options.root ?? (here.endsWith("/dist") ? dirname(here) : resolve(here, "../.."));
+	const explicitOverride = environment.NETA_OPENCODE_DIR !== undefined;
 	const fork = environment.NETA_OPENCODE_DIR ?? managedOpenCodeDir(root);
 	const v2 = existsSync(join(fork, "packages/cli/src/acp/service.ts")) && !existsSync(join(fork, "packages/opencode"));
 	const binary = join(
@@ -122,7 +125,7 @@ export function openCodeInvocation(options: OpenCodeRuntimeOptions = {}): {
 	try {
 		validateOpenCodeSource(fork, join(root, "vendor", "opencode", "integration.json"));
 	} catch (error) {
-		throw sourceDriftError(fork, error);
+		throw sourceDriftError(fork, explicitOverride, error);
 	}
 	return {
 		command: environment.NETA_BUN ?? "bun",

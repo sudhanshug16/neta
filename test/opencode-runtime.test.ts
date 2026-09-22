@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openCodeInvocation } from "../src/opencode/runtime.ts";
@@ -58,6 +58,19 @@ async function fixture(): Promise<{ root: string; fork: string; shell: string }>
 	return { root, fork, shell };
 }
 
+async function copyReviewedFixtureSources(source: string, target: string): Promise<void> {
+	for (const path of [
+		"bun.lock",
+		"neta-fork.json",
+		"packages/cli/src/acp/service.ts",
+		"packages/tui/src/neta/shell.tsx",
+	]) {
+		const destination = join(target, path);
+		await mkdir(join(destination, ".."), { recursive: true });
+		await writeFile(destination, await readFile(join(source, path)));
+	}
+}
+
 test("selects a source fork only when it matches the reviewed pin", async () => {
 	const { root, fork } = await fixture();
 	try {
@@ -71,6 +84,35 @@ test("selects a source fork only when it matches the reviewed pin", async () => 
 	}
 });
 
+test("selects the repository-managed runtime when no override is set", async () => {
+	const { root, fork } = await fixture();
+	const managed = join(root, "vendor/opencode/runtime");
+	try {
+		await git(root, ["clone", "--quiet", fork, managed]);
+		await copyReviewedFixtureSources(fork, managed);
+		expect(openCodeInvocation({ root, environment: { NETA_BUN: "fixture-bun" } })).toEqual({
+			command: "fixture-bun",
+			args: ["run", "--cwd", join(managed, "packages/cli"), "./src/index.ts"],
+			apiVersion: 2,
+		});
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("directs a stale repository-managed runtime to setup", async () => {
+	const { root, fork, shell } = await fixture();
+	const managed = join(root, "vendor/opencode/runtime");
+	try {
+		await git(root, ["clone", "--quiet", fork, managed]);
+		await copyReviewedFixtureSources(fork, managed);
+		await writeFile(join(managed, "packages/tui/src/neta/shell.tsx"), `${shell}// stale\n`);
+		expect(() => openCodeInvocation({ root, environment: {} })).toThrow("Run bun run setup:opencode");
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
 test("refuses a source fork when a reviewed UI file drifts", async () => {
 	const { root, fork, shell } = await fixture();
 	try {
@@ -79,7 +121,7 @@ test("refuses a source fork when a reviewed UI file drifts", async () => {
 			"does not match the reviewed integration (reviewed source differs: packages/tui/src/neta/shell.tsx)",
 		);
 		expect(() => openCodeInvocation({ root, environment: { NETA_OPENCODE_DIR: fork } })).toThrow(
-			"NETA_OPENCODE_DIR=/path/to/clean-neta-opencode-v2 bun run setup:opencode",
+			"Preserve that explicit checkout and update it to the reviewed pin",
 		);
 	} finally {
 		await rm(root, { recursive: true, force: true });

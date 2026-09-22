@@ -44,7 +44,7 @@
 		"setup:opencode": "bun scripts/setup-opencode.ts",
 		"build:opencode": "bun scripts/build-opencode.ts",
 		"test:opencode": "bun test test/opencode-gateway.test.ts test/opencode-v2-native.test.ts",
-		"build": "bun build src/cli/main.ts --target=node --outdir=dist --sourcemap=linked && chmod +x dist/main.js && bash scripts/stage-codex-acp.sh && bun scripts/stage-toad.ts",
+		"build": "bun build src/cli/main.ts --target=node --outdir=dist --sourcemap=linked && chmod +x dist/main.js && bash scripts/stage-codex-acp.sh",
 		"clean": "rm -rf dist",
 		"typecheck": "tsc --noEmit",
 		"check": "biome check --write --error-on-warnings . && bun run typecheck",

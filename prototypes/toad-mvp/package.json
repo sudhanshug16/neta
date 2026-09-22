@@ -1,9 +1,0 @@
-{
-  "name": "neta-toad-mvp",
-  "private": true,
-  "scripts": {
-    "start": "uv run --frozen python app.py",
-    "test": "uv run --frozen python -m unittest discover -s . -v",
-    "demo": "uv run --frozen python app.py --demo"
-  }
-}

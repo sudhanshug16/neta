@@ -54,7 +54,6 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     env:
-      NETA_OPENCODE_DIR: ${{ github.workspace }}/../neta-opencode-v2
       NETA_RELEASE_BUILD: "1"
       NETA_REQUIRED_CONFORMANCE: "1"
     steps:

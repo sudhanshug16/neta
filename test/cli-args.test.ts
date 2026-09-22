@@ -20,16 +20,15 @@ function usageOf(argv: string[]): string {
 }
 
 describe("cli command table", () => {
-	test("native TUI supports workspace and machine selection with explicit legacy fallback", () => {
+	test("native TUI supports workspace and machine selection", () => {
 		expect(commandOf(["tui", "/project", "--host", "remote", "--migrate"])).toEqual({
 			name: "tui",
 			args: ["/project"],
 			flags: { host: "remote", migrate: true },
 		});
-		expect(commandOf(["tui", "--legacy"])).toEqual({ name: "tui", args: [], flags: { legacy: true } });
 		expect(commandOf(["chat"])).toEqual({ name: "attach", args: [], flags: { legacy: true } });
-		expect(usageOf(["tui", "--legacy", "--migrate"])).toContain("legacy");
-		expect(usageOf(["tui", "--demo", "/project"])).toContain("legacy");
+		expect(usageOf(["tui", "--legacy"])).toContain("unknown flag");
+		expect(usageOf(["tui", "--demo"])).toContain("unknown flag");
 	});
 	test("bare neta attaches", () => {
 		expect(commandOf([])).toEqual({ name: "attach", args: [], flags: {} });
@@ -135,7 +134,6 @@ describe("cli command table", () => {
 	test("version", () => {
 		expect(commandOf(["version"])).toEqual({ name: "version", args: [], flags: {} });
 	});
-
 });
 
 describe("cli durations", () => {

@@ -126,7 +126,7 @@ Preserve OpenCode chat interactions. Use its extension slots/routes/keymaps for 
 | Submit outcome is uncertain | Reconcile request/turn identity before offering retry; never duplicate work automatically |
 | Close and reopen UI | Running work continues; history catches up without duplicate messages |
 
-Use `/models` and `/connect` with native semantics where compatible. Add `/reset`, workspace/machine navigation, and Neta-specific commands to the same command palette. Surface commands relevant to the active runtime; there must be no Toad commands or actions that accidentally create a second workspace leader. Preserve useful native commands, adapting conflicts explicitly.
+Use `/models` and `/connect` with native semantics where compatible. Add `/reset`, workspace/machine navigation, and Neta-specific commands to the same command palette. Surface commands relevant to the active runtime; retired-client commands and actions must not create a second workspace leader. Preserve useful native commands, adapting conflicts explicitly.
 
 Reset should use a serialized operation and request ID: prepare a candidate, durably compare-and-swap the owner generation, announce the new binding, then retire the old session. Late events from the previous generation cannot recreate its tab or overwrite current state. Recover an interrupted reset from its durable operation record. Rehydrate a missing in-memory session from stored identity before declaring “no such session.”
 
@@ -160,7 +160,7 @@ Ship provider/model selection, authentication recovery, exactly-once reset, pres
 
 Use the new client for new sessions after the gates pass. Preserve existing transcripts and durable mission/leader records. Active legacy runs remain on their original runtime. Provide explicit fresh-session migration with optional handoff; never feed old tool-call records into a different runtime and label it a resume.
 
-Keep Toad available as a rollback client during the transition; stop adding features to it. Preserve existing ACP provider support until the replacement/compatibility behavior is accepted. Avoid maintaining two active leaders for the same workspace during rollout.
+The retired rollback client has been removed. Preserve existing ACP provider support until the replacement/compatibility behavior is accepted. Avoid maintaining two active leaders for the same workspace during rollout.
 
 Build a reproducible Neta distribution for the target macOS/Linux machines. The OpenTUI client brings a different runtime/artifact requirement from Neta's current Node-only bundle; package and verify it explicitly. Pin the Node/fork/adapter compatibility tuple, preserve upstream license notices, and test installation plus SSH attachment on a clean machine. A successful development command is not a packaging test.
 
