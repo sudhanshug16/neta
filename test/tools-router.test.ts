@@ -91,7 +91,7 @@ function stubHandlers(overrides?: Partial<ToolHandlers>): { handlers: ToolHandle
 		handlers: {
 			neta_mission: (_ctx, _args) => ok("neta_mission"),
 			neta_agent: (_ctx, _args) => ok("neta_agent"),
-			neta_wait: (_ctx, _args) => ok("neta_wait"),
+			neta_model: (_ctx, _args) => ok("neta_model"),
 			neta_send: (_ctx, _args) => ok("neta_send"),
 			neta_scope: (_ctx, _args) => ok("neta_scope"),
 			neta_ready: (_ctx, _args) => ok("neta_ready"),
@@ -227,7 +227,7 @@ describe("tool router rendering", () => {
 		expect(leadCall.isError).toBe(false);
 		expect(textOf(leadCall)).toContain("[neta] needs you: #14 mission 14 — blocked");
 		expect(textOf(leadCall).split("\n")[0]).toBe(JSON.stringify({ called: "neta_status" }));
-		expect(textOf(leaderCall)).toContain("[neta] running: #15 mission 15");
+		expect(textOf(leaderCall)).toContain("[neta] open: #15 mission 15");
 		expect(textOf(agentCall)).toBe(JSON.stringify({ called: "neta_progress" }));
 	});
 
@@ -255,14 +255,29 @@ describe("tool router rendering", () => {
 			"neta_history",
 			"neta_mission",
 			"neta_mode",
+			"neta_model",
 			"neta_pin",
 			"neta_ready",
 			"neta_scope",
 			"neta_send",
 			"neta_status",
-			"neta_wait",
 		]);
-		expect(agentTools.map((t) => t.name).sort()).toEqual(["neta_done", "neta_history", "neta_progress"]);
+		expect(agentTools.map((t) => t.name).sort()).toEqual([
+			"neta_done",
+			"neta_history",
+			"neta_model",
+			"neta_progress",
+		]);
 		expect(refused).toEqual({ ok: false, code: "notAuthorised", message: "bad token or unknown actor" });
 	});
+});
+
+test("successful MCP results remain objects even when reminder text follows the JSON", async () => {
+	const { router, leaderId, leaderToken } = setup();
+	const response = await router.call(leaderId, leaderToken, "neta_status", {});
+	expect(response.structuredContent).toEqual({ called: "neta_status" });
+	expect(textOf(response)).toContain("[neta]");
+	expect(() => JSON.parse(textOf(response))).toThrow();
+	const denied = await router.call(leaderId, "invalid", "neta_status", {});
+	expect(denied.structuredContent).toBeUndefined();
 });

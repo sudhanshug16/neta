@@ -171,7 +171,12 @@ describe("conversation store", () => {
 			model: "sonnet",
 			createdAt: "2026-09-03T17:00:00.000Z",
 		});
-		const next = await store.setMeta(sessionId, { model: "opus", vendorSessionId: "v-1" });
+		const next = await store.setMeta(sessionId, {
+			model: "opus",
+			vendorSessionId: "v-1",
+			bindingGeneration: "runtime-2",
+		});
+		expect((await store.meta(sessionId))?.bindingGeneration).toBe("runtime-2");
 		expect(next.model).toBe("opus");
 		expect(next.vendorSessionId).toBe("v-1");
 		expect(next.createdAt).toBe("2026-09-03T17:00:00.000Z");

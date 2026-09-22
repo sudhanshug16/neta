@@ -1,0 +1,1744 @@
+use super::support::*;
+
+#[test]
+fn tmux_compat_list_clients_attached_readonly_ignore_size_flags_when_frozen_tmux_is_available(
+) -> Result<(), Box<dyn Error>> {
+    let harness = TmuxCompatHarness::new("tmux-compat-list-clients-attached-flags")?;
+    let Some(tmux_binary) = frozen_tmux_or_skip(&harness)? else {
+        return Ok(());
+    };
+    let _guard = pty_tmux_compat_lock();
+    let (config, expected_overrides) = config_with_clean_homes(&harness)?;
+
+    let create = harness.run_pair_with(
+        &tmux_binary,
+        &["new-session", "-d", "-s", "alpha"],
+        config.clone(),
+    )?;
+    assert_quiet_success(&create);
+
+    let mut rmux_attach = spawn_rmux_attached_client(&harness, "alpha")?;
+    let mut tmux_attach = spawn_tmux_attached_client(&harness, &tmux_binary, "alpha")?;
+
+    let list_clients = wait_for_pair_run(
+        &harness,
+        &tmux_binary,
+        &["list-clients", "-F", "#{client_flags}"],
+        config,
+        Duration::from_secs(5),
+        |run| {
+            run.tmux.status_code == Some(0)
+                && run.rmux.status_code == Some(0)
+                && !run.tmux.stdout.is_empty()
+                && !run.rmux.stdout.is_empty()
+        },
+    )?;
+    rmux_attach.assert_running("rmux")?;
+    tmux_attach.assert_running("tmux")?;
+    assert_run_metadata(
+        &list_clients,
+        &harness,
+        &tmux_binary,
+        &["list-clients", "-F", "#{client_flags}"],
+        &expected_overrides,
+    );
+    assert_exact_tmux_compat(&list_clients);
+    assert_eq!(
+        list_clients.tmux.stdout_string(),
+        "attached,focused,ignore-size,read-only,UTF-8\n"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn tmux_compat_detached_new_session_ignores_populated_tmux_when_frozen_tmux_is_available(
+) -> Result<(), Box<dyn Error>> {
+    let harness = TmuxCompatHarness::new("tmux-compat-detached-new-session-tmux")?;
+    let Some(tmux_binary) = frozen_tmux_or_skip(&harness)? else {
+        return Ok(());
+    };
+    let (config, mut expected_overrides) = config_with_clean_homes(&harness)?;
+    let tmux_value = format!("{},1,0", harness.rmux_socket_path().display());
+    let config = config.with_tmux(tmux_value.clone());
+    for (name, value) in &mut expected_overrides {
+        if name == "TMUX" {
+            *value = Some(OsString::from(&tmux_value));
+        }
+    }
+    let argv = ["new-session", "-d", "-s", "alpha"];
+    let create = harness.run_pair_with(&tmux_binary, &argv, config)?;
+
+    assert_run_metadata(&create, &harness, &tmux_binary, &argv, &expected_overrides);
+    assert_quiet_success(&create);
+
+    Ok(())
+}
+
+#[test]
+fn tmux_compat_attached_client_utf8_flags_follow_ascii_locale_without_top_level_u_when_frozen_tmux_is_available(
+) -> Result<(), Box<dyn Error>> {
+    let harness = TmuxCompatHarness::new("tmux-compat-client-utf8-ascii-attach")?;
+    let Some(tmux_binary) = frozen_tmux_or_skip(&harness)? else {
+        return Ok(());
+    };
+    let _guard = pty_tmux_compat_lock();
+    let (config, _) = config_with_clean_homes(&harness)?;
+    let create =
+        harness.run_pair_with(&tmux_binary, &["new-session", "-d", "-s", "alpha"], config)?;
+    assert_quiet_success(&create);
+
+    let client_environment = [("TERM", "vt100"), ("LC_ALL", "C"), ("LANG", "C")];
+    let mut rmux_attach =
+        spawn_rmux_attached_client_with(&harness, "alpha", &[], &client_environment)?;
+    let mut tmux_attach =
+        spawn_tmux_attached_client_with(&harness, &tmux_binary, "alpha", &[], &client_environment)?;
+
+    let list_clients = wait_for_pair_run(
+        &harness,
+        &tmux_binary,
+        &["list-clients", "-F", "#{client_utf8}|#{client_flags}"],
+        tmux_compat_config(),
+        Duration::from_secs(5),
+        |run| {
+            run.tmux.status_code == Some(0)
+                && run.rmux.status_code == Some(0)
+                && !run.tmux.stdout.is_empty()
+                && !run.rmux.stdout.is_empty()
+        },
+    )?;
+    rmux_attach.assert_running("rmux")?;
+    tmux_attach.assert_running("tmux")?;
+    assert_exact_tmux_compat(&list_clients);
+    assert_eq!(
+        list_clients.tmux.stdout_string(),
+        "0|attached,focused,ignore-size,read-only\n"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn tmux_compat_choose_client_multi_attached_overlay_rows_when_frozen_tmux_is_available(
+) -> Result<(), Box<dyn Error>> {
+    let harness = TmuxCompatHarness::new("tmux-compat-choose-client-multi-overlay")?;
+    let Some(tmux_binary) = frozen_tmux_or_skip(&harness)? else {
+        return Ok(());
+    };
+    let _guard = pty_tmux_compat_lock();
+    let config = tmux_compat_config()
+        .with_env("LC_ALL", "C.UTF-8")
+        .with_env("LC_CTYPE", "C.UTF-8");
+
+    let create = harness.run_pair_with(
+        &tmux_binary,
+        &["new-session", "-d", "-s", "alpha", "-x", "80", "-y", "24"],
+        config.clone(),
+    )?;
+    assert_quiet_success(&create);
+
+    let mut rmux_first = spawn_rmux_attached_client(&harness, "alpha")?;
+    let mut rmux_second = spawn_rmux_attached_client(&harness, "alpha")?;
+    let mut tmux_first = spawn_tmux_attached_client(&harness, &tmux_binary, "alpha")?;
+    let mut tmux_second = spawn_tmux_attached_client(&harness, &tmux_binary, "alpha")?;
+
+    let ready = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < ready {
+        let run = harness.run_pair_with(
+            &tmux_binary,
+            &["list-clients", "-F", "#{session_name}"],
+            config.clone(),
+        )?;
+        if run.rmux.stdout_string().lines().count() >= 2
+            && run.tmux.stdout_string().lines().count() >= 2
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    rmux_first.assert_running("rmux")?;
+    rmux_second.assert_running("rmux")?;
+    tmux_first.assert_running("tmux")?;
+    tmux_second.assert_running("tmux")?;
+    let _ = drain_pty(&mut rmux_first)?;
+    let _ = drain_pty(&mut tmux_first)?;
+
+    let choose = harness.run_pair_with(&tmux_binary, &["choose-client"], config)?;
+    assert_quiet_success(&choose);
+    let mut rmux_bytes = Vec::new();
+    let mut tmux_bytes = Vec::new();
+    let mut rmux_cells = Vec::new();
+    let mut tmux_cells = Vec::new();
+    for _ in 0..10 {
+        std::thread::sleep(Duration::from_millis(100));
+        rmux_bytes.extend(drain_pty(&mut rmux_first)?);
+        tmux_bytes.extend(drain_pty(&mut tmux_first)?);
+        rmux_cells = render_cells(&rmux_bytes, 80, 24)
+            .into_iter()
+            .map(|line| normalize_pts_paths(line.trim_end()))
+            .collect::<Vec<_>>();
+        tmux_cells = render_cells(&tmux_bytes, 80, 24)
+            .into_iter()
+            .map(|line| normalize_pts_paths(line.trim_end()))
+            .collect::<Vec<_>>();
+        if [0usize, 1, 11, 22].into_iter().all(|row| {
+            if row == 11 {
+                collapse_repeated_horizontal_borders(&rmux_cells[row])
+                    == collapse_repeated_horizontal_borders(&tmux_cells[row])
+            } else {
+                rmux_cells[row] == tmux_cells[row]
+            }
+        }) {
+            break;
+        }
+    }
+
+    for row in [0usize, 1, 11, 22] {
+        if row == 11 {
+            assert_eq!(
+                collapse_repeated_horizontal_borders(&rmux_cells[row]),
+                collapse_repeated_horizontal_borders(&tmux_cells[row]),
+                "row {row} mismatch"
+            );
+        } else {
+            assert_eq!(rmux_cells[row], tmux_cells[row], "row {row} mismatch");
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn tmux_compat_control_mode_guard_tuple_and_exit_framing_when_frozen_tmux_is_available(
+) -> Result<(), Box<dyn Error>> {
+    // Cluster H compatibility scenario: check the tmux-observed `%begin`/`%end`/
+    // `%error`/`%exit` tuple across the two deterministic control-mode exit
+    // triggers (immediate EOF and command-followed-by-EOF). tmux terminates
+    // both transcripts with a bare `%exit\n`. rmux baseline build silently closes the
+    // EOF-only stream and omits the trailing `%exit\n` after a command, so
+    // both assertions below fail on the baseline build release HEAD
+    // 0b03537875071738f9a49b01b42b8b6d7f10e5a8 and pass only after the
+    // EOF-to-`%exit` promotion in `forward_control` lands.
+    let harness = TmuxCompatHarness::new("tmux-compat-control-mode-guard-exit-framing")?;
+    let Some(tmux_binary) = frozen_tmux_or_skip(&harness)? else {
+        return Ok(());
+    };
+
+    // Both scenarios below run against a pre-created session so that the
+    // default `new-session` command exercised by plain `-C` starts from the
+    // same live-server state in tmux and rmux. Cold-start default-session
+    // behavior has separate CLI regression coverage.
+    let (config, _) = config_with_clean_homes(&harness)?;
+    let create =
+        harness.run_pair_with(&tmux_binary, &["new-session", "-d", "-s", "alpha"], config)?;
+    assert_quiet_success(&create);
+
+    // Scenario 1: immediate EOF. tmux-observed expected final tuple is the
+    // bare `%exit\n` terminator (kind=exit, reason=None). Plain `-C` must
+    // emit no `-CC` DCS wrapper, so the raw bytes end in `%exit\n` with no
+    // `\u001b\\` suffix and no `\u001bP1000p` prefix.
+    let eof_tmux = run_tmux_control_mode(&harness, &tmux_binary, "")?;
+    let eof_rmux = run_rmux_control_mode(&harness, "")?;
+    assert_eq!(eof_tmux.status_code, Some(0));
+    assert_eq!(eof_rmux.status_code, Some(0));
+    assert!(
+        eof_tmux.stderr.is_empty(),
+        "tmux stderr must be empty on EOF: {:?}",
+        eof_tmux.stderr
+    );
+    assert!(
+        eof_rmux.stderr.is_empty(),
+        "rmux stderr must be empty on EOF: {:?}",
+        eof_rmux.stderr
+    );
+    assert_eq!(
+        last_control_line(&eof_tmux.stdout).as_deref(),
+        Some("%exit"),
+        "tmux EOF transcript must end with bare %exit: {:?}",
+        eof_tmux.stdout
+    );
+    assert_eq!(
+        last_control_line(&eof_rmux.stdout).as_deref(),
+        Some("%exit"),
+        "rmux EOF transcript must end with bare %exit: {:?}",
+        eof_rmux.stdout
+    );
+    assert!(
+        !eof_rmux.stdout.contains(rmux_proto::CONTROL_CONTROL_START),
+        "plain -C must not emit the -CC DCS prefix: {:?}",
+        eof_rmux.stdout
+    );
+    assert!(
+        !eof_rmux.stdout.contains(rmux_proto::CONTROL_CONTROL_END),
+        "plain -C must not emit the -CC DCS suffix: {:?}",
+        eof_rmux.stdout
+    );
+    assert!(
+        !eof_tmux.stdout.contains(rmux_proto::CONTROL_CONTROL_START),
+        "tmux plain -C must not emit the -CC DCS prefix: {:?}",
+        eof_tmux.stdout
+    );
+
+    // Scenario 2: single command + EOF. The tmux-observed tuple shape for
+    // the user command is (Begin, <time>, N, 1) paired with (End, <time>,
+    // N, 1), followed by a bare `%exit\n`. The `<time>` field is
+    // wall-clock and is normalized away; the command number is normalized
+    // within each implementation because tmux uses a long-lived global
+    // counter and rmux restarts it per control session, but the paired
+    // begin/end must reuse the exact same command number and the flags
+    // column must be `1` on both.
+    let commands = "display-message -p hello\n";
+    let cmd_tmux = run_tmux_control_mode(&harness, &tmux_binary, commands)?;
+    let cmd_rmux = run_rmux_control_mode(&harness, commands)?;
+    assert_eq!(cmd_tmux.status_code, Some(0));
+    assert_eq!(cmd_rmux.status_code, Some(0));
+    assert!(cmd_tmux.stderr.is_empty());
+    assert!(cmd_rmux.stderr.is_empty());
+    assert_eq!(
+        last_control_line(&cmd_tmux.stdout).as_deref(),
+        Some("%exit"),
+        "tmux command transcript must end with bare %exit: {:?}",
+        cmd_tmux.stdout
+    );
+    assert_eq!(
+        last_control_line(&cmd_rmux.stdout).as_deref(),
+        Some("%exit"),
+        "rmux command transcript must end with bare %exit: {:?}",
+        cmd_rmux.stdout
+    );
+
+    let tmux_guards = control_guard_tuples(&cmd_tmux.stdout);
+    let rmux_guards = control_guard_tuples(&cmd_rmux.stdout);
+    let tmux_last_begin = tmux_guards
+        .iter()
+        .rev()
+        .find(|guard| guard.kind == "begin")
+        .expect("tmux must emit at least one %begin for the user command");
+    let tmux_last_end = tmux_guards
+        .iter()
+        .rev()
+        .find(|guard| guard.kind == "end")
+        .expect("tmux must emit at least one %end for the user command");
+    let rmux_last_begin = rmux_guards
+        .iter()
+        .rev()
+        .find(|guard| guard.kind == "begin")
+        .expect("rmux must emit at least one %begin for the user command");
+    let rmux_last_end = rmux_guards
+        .iter()
+        .rev()
+        .find(|guard| guard.kind == "end")
+        .expect("rmux must emit at least one %end for the user command");
+    assert_eq!(
+        tmux_last_begin.flags, 1,
+        "tmux anchors user-command %begin flags to 1"
+    );
+    assert_eq!(
+        tmux_last_end.flags, 1,
+        "tmux anchors user-command %end flags to 1"
+    );
+    assert_eq!(rmux_last_begin.flags, tmux_last_begin.flags);
+    assert_eq!(rmux_last_end.flags, tmux_last_end.flags);
+    assert_eq!(
+        tmux_last_begin.command_number, tmux_last_end.command_number,
+        "tmux pairs %begin and %end with the same command number"
+    );
+    assert_eq!(
+        rmux_last_begin.command_number, rmux_last_end.command_number,
+        "rmux must pair %begin and %end with the same command number"
+    );
+
+    let tmux_payload = extract_control_frame_payload_lines(&cmd_tmux.stdout);
+    let rmux_payload = extract_control_frame_payload_lines(&cmd_rmux.stdout);
+    assert!(
+        tmux_payload.iter().any(|line| line == "hello"),
+        "tmux payload must contain the display-message output: {tmux_payload:?}"
+    );
+    assert!(
+        rmux_payload.iter().any(|line| line == "hello"),
+        "rmux payload must contain the display-message output: {rmux_payload:?}"
+    );
+
+    // tmux emits an initial control attach guard pair with flags=0, then
+    // every user command guard uses flags=1. The concrete absolute command
+    // numbers may differ, but rmux must keep them positive and monotonic.
+    assert!(
+        !rmux_guards.is_empty(),
+        "rmux transcript must contain at least one guard tuple: {:?}",
+        cmd_rmux.stdout
+    );
+    assert!(
+        rmux_guards
+            .iter()
+            .any(|guard| guard.kind == "begin" && guard.flags == 0),
+        "rmux transcript must include the initial flags=0 control guard: {rmux_guards:?}"
+    );
+    assert_eq!(
+        rmux_last_begin.flags, 1,
+        "last rmux %begin must be the user command guard: {rmux_last_begin:?}"
+    );
+    assert_eq!(
+        rmux_last_end.flags, 1,
+        "last rmux %end must be the user command guard: {rmux_last_end:?}"
+    );
+    let rmux_begin_numbers = rmux_guards
+        .iter()
+        .filter(|guard| guard.kind == "begin")
+        .map(|guard| guard.command_number)
+        .collect::<Vec<_>>();
+    assert!(
+        rmux_begin_numbers.iter().all(|number| *number >= 1),
+        "rmux command numbers must be positive: {rmux_begin_numbers:?}"
+    );
+    assert!(
+        rmux_begin_numbers.windows(2).all(|pair| pair[1] > pair[0]),
+        "rmux command numbers must be strictly monotonic: {rmux_begin_numbers:?}"
+    );
+
+    // Plain `-C` must not wrap either transcript in the `-CC` DCS envelope.
+    assert!(
+        !cmd_rmux.stdout.contains(rmux_proto::CONTROL_CONTROL_START),
+        "plain -C command transcript must not contain DCS prefix: {:?}",
+        cmd_rmux.stdout
+    );
+    assert!(
+        !cmd_rmux.stdout.contains(rmux_proto::CONTROL_CONTROL_END),
+        "plain -C command transcript must not contain DCS suffix: {:?}",
+        cmd_rmux.stdout
+    );
+    assert!(
+        !cmd_tmux.stdout.contains(rmux_proto::CONTROL_CONTROL_START),
+        "tmux plain -C command transcript must not contain DCS prefix: {:?}",
+        cmd_tmux.stdout
+    );
+
+    // Scenario 3: command parse failure + EOF. The tmux-observed failure
+    // tuple is (Begin, <time>, N, 1) followed by (Error, <time>, N, 1)
+    // and then the same bare `%exit\n` terminator. The concrete diagnostic
+    // text is not part of Cluster H; this assertion checks the tuple shape
+    // and the flags/command-number relationship.
+    let error_commands = "no-such-rmux-cluster-h-command\n";
+    let error_tmux = run_tmux_control_mode(&harness, &tmux_binary, error_commands)?;
+    let error_rmux = run_rmux_control_mode(&harness, error_commands)?;
+    assert_eq!(error_tmux.status_code, Some(0));
+    assert_eq!(error_rmux.status_code, Some(0));
+    assert!(error_tmux.stderr.is_empty());
+    assert!(error_rmux.stderr.is_empty());
+    assert_eq!(
+        last_control_line(&error_tmux.stdout).as_deref(),
+        Some("%exit"),
+        "tmux error transcript must end with bare %exit: {:?}",
+        error_tmux.stdout
+    );
+    assert_eq!(
+        last_control_line(&error_rmux.stdout).as_deref(),
+        Some("%exit"),
+        "rmux error transcript must end with bare %exit: {:?}",
+        error_rmux.stdout
+    );
+
+    let tmux_error_guards = control_guard_tuples(&error_tmux.stdout);
+    let rmux_error_guards = control_guard_tuples(&error_rmux.stdout);
+    let tmux_error_begin = tmux_error_guards
+        .iter()
+        .rev()
+        .find(|guard| guard.kind == "begin")
+        .expect("tmux must emit %begin before the parse error");
+    let tmux_error = tmux_error_guards
+        .iter()
+        .rev()
+        .find(|guard| guard.kind == "error")
+        .expect("tmux must emit %error for the parse error");
+    let rmux_error_begin = rmux_error_guards
+        .iter()
+        .rev()
+        .find(|guard| guard.kind == "begin")
+        .expect("rmux must emit %begin before the parse error");
+    let rmux_error = rmux_error_guards
+        .iter()
+        .rev()
+        .find(|guard| guard.kind == "error")
+        .expect("rmux must emit %error for the parse error");
+    assert_eq!(tmux_error_begin.flags, 1);
+    assert_eq!(tmux_error.flags, 1);
+    assert_eq!(rmux_error_begin.flags, tmux_error_begin.flags);
+    assert_eq!(rmux_error.flags, tmux_error.flags);
+    assert_eq!(
+        tmux_error_begin.command_number, tmux_error.command_number,
+        "tmux pairs parse-error %begin and %error with one command number"
+    );
+    assert_eq!(
+        rmux_error_begin.command_number, rmux_error.command_number,
+        "rmux must pair parse-error %begin and %error with one command number"
+    );
+
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct ControlGuardTuple {
+    kind: String,
+    command_number: u64,
+    flags: u8,
+}
+
+fn control_guard_tuples(output: &str) -> Vec<ControlGuardTuple> {
+    let mut guards = Vec::new();
+    for line in output.lines() {
+        let parsed = line
+            .strip_prefix("%begin ")
+            .map(|rest| ("begin", rest))
+            .or_else(|| line.strip_prefix("%end ").map(|rest| ("end", rest)))
+            .or_else(|| line.strip_prefix("%error ").map(|rest| ("error", rest)));
+        let Some((kind, rest)) = parsed else {
+            continue;
+        };
+        let mut parts = rest.split_whitespace();
+        let _time = parts.next();
+        let command_number = parts.next().and_then(|value| value.parse::<u64>().ok());
+        let flags = parts.next().and_then(|value| value.parse::<u8>().ok());
+        if let (Some(command_number), Some(flags)) = (command_number, flags) {
+            guards.push(ControlGuardTuple {
+                kind: kind.to_owned(),
+                command_number,
+                flags,
+            });
+        }
+    }
+    guards
+}
+
+fn last_control_line(output: &str) -> Option<String> {
+    output
+        .lines()
+        .rfind(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+#[test]
+fn tmux_compat_list_clients_control_mode_flags_when_frozen_tmux_is_available(
+) -> Result<(), Box<dyn Error>> {
+    let harness = TmuxCompatHarness::new("tmux-compat-list-clients-control-flags")?;
+    let Some(tmux_binary) = frozen_tmux_or_skip(&harness)? else {
+        return Ok(());
+    };
+    let (config, _) = config_with_clean_homes(&harness)?;
+    let create =
+        harness.run_pair_with(&tmux_binary, &["new-session", "-d", "-s", "alpha"], config)?;
+    assert_quiet_success(&create);
+
+    let commands = "attach-session -t alpha\nlist-clients -F '#{client_flags}'\n";
+    let tmux_run = run_tmux_control_mode(&harness, &tmux_binary, commands)?;
+    let rmux_run = run_rmux_control_mode(&harness, commands)?;
+    assert_eq!(tmux_run.status_code, Some(0));
+    assert_eq!(rmux_run.status_code, Some(0));
+    assert!(tmux_run.stderr.is_empty());
+    assert!(rmux_run.stderr.is_empty());
+
+    let tmux_flags = extract_control_frame_payload_lines(&tmux_run.stdout);
+    let rmux_flags = extract_control_frame_payload_lines(&rmux_run.stdout);
+    assert_eq!(rmux_flags, tmux_flags);
+    assert_eq!(
+        tmux_flags,
+        vec!["attached,focused,control-mode,UTF-8".to_owned()]
+    );
+
+    Ok(())
+}
+
+#[test]
+fn tmux_compat_switch_client_round_trips_the_listed_control_name_when_frozen_tmux_is_available(
+) -> Result<(), Box<dyn Error>> {
+    let harness = TmuxCompatHarness::new("tmux-compat-switch-listed-control-client")?;
+    let Some(tmux_binary) = frozen_tmux_or_skip(&harness)? else {
+        return Ok(());
+    };
+    let config = tmux_compat_config();
+    for session in ["alpha", "beta"] {
+        let create = harness.run_pair_with(
+            &tmux_binary,
+            &["new-session", "-d", "-s", session],
+            config.clone(),
+        )?;
+        assert_quiet_success(&create);
+    }
+
+    let mut tmux_control =
+        LiveControlClient::spawn(tmux_control_mode_command(&harness, &tmux_binary, &[], &[])?)?;
+    let mut rmux_control =
+        LiveControlClient::spawn(rmux_control_mode_command(&harness, &[], &[])?)?;
+    tmux_control.send("attach-session -t alpha\n")?;
+    rmux_control.send("attach-session -t alpha\n")?;
+
+    let listed = wait_for_pair_run(
+        &harness,
+        &tmux_binary,
+        &["list-clients", "-t", "alpha", "-F", "#{client_name}"],
+        config.clone(),
+        Duration::from_secs(5),
+        |run| {
+            run.tmux.stdout_string().trim().starts_with("client-")
+                && run.rmux.stdout_string().trim().starts_with("client-")
+        },
+    )?;
+    assert_success_without_stderr(&listed);
+    let tmux_name = listed.tmux.stdout_string().trim().to_owned();
+    let rmux_name = listed.rmux.stdout_string().trim().to_owned();
+    tmux_control.send(&format!("switch-client -c {tmux_name} -t beta\n"))?;
+    rmux_control.send(&format!("switch-client -c {rmux_name} -t beta\n"))?;
+
+    let switched = wait_for_pair_run(
+        &harness,
+        &tmux_binary,
+        &["list-clients", "-t", "beta", "-F", "#{session_name}"],
+        config,
+        Duration::from_secs(5),
+        |run| run.tmux.stdout_string() == "beta\n" && run.rmux.stdout_string() == "beta\n",
+    )?;
+    assert_success_without_stderr(&switched);
+    assert_eq!(switched.rmux.stdout, switched.tmux.stdout);
+    Ok(())
+}
+
+/// Frozen tmux 3.7b, measured 2026-07-26 with an 80x24 session and a real
+/// 101x40 PTY client. A control client already on the session receives exactly
+///
+/// ```text
+/// %client-session-changed /dev/pts/19 $0 alpha
+/// %layout-change @0 ccfd,101x39,0,0,0 ccfd,101x39,0,0,0 *
+/// ```
+///
+/// in that order. The client token is the same tty path `list-clients` reports,
+/// and the `client-session-changed` hook receives that path as `hook_client`.
+#[test]
+fn tmux_compat_initial_pty_attach_notifies_once_before_layout_and_runs_hook_when_frozen_tmux_is_available(
+) -> Result<(), Box<dyn Error>> {
+    let harness = TmuxCompatHarness::new("tmux-compat-initial-pty-session-changed")?;
+    let Some(tmux_binary) = frozen_tmux_or_skip(&harness)? else {
+        return Ok(());
+    };
+    let _guard = pty_tmux_compat_lock();
+    let config = tmux_compat_config().with_timeout(Duration::from_secs(10));
+
+    let create = harness.run_pair_with(
+        &tmux_binary,
+        &[
+            "new-session",
+            "-d",
+            "-s",
+            "alpha",
+            "-x",
+            "80",
+            "-y",
+            "24",
+            "sleep 1000",
+        ],
+        config.clone(),
+    )?;
+    assert_quiet_success(&create);
+    let window_size = harness.run_pair_with(
+        &tmux_binary,
+        &["set-option", "-g", "window-size", "largest"],
+        config.clone(),
+    )?;
+    assert_quiet_success(&window_size);
+    let hook_buffer = harness.run_pair_with(
+        &tmux_binary,
+        &["set-buffer", "-b", "initial-pty-hook", "start,"],
+        config.clone(),
+    )?;
+    assert_quiet_success(&hook_buffer);
+    let hook = harness.run_pair_with(
+        &tmux_binary,
+        &[
+            "set-hook",
+            "-g",
+            "client-session-changed",
+            "if-shell -F '#{m/r:^/dev/(pts/[0-9]+|tty[^/]+)$,#{hook_client}}' \
+             'set-buffer -a -b initial-pty-hook pty,'",
+        ],
+        config.clone(),
+    )?;
+    assert_quiet_success(&hook);
+
+    let mut tmux_watching = LiveControlClient::spawn_capturing(tmux_control_mode_command(
+        &harness,
+        &tmux_binary,
+        &[],
+        &[],
+    )?)?;
+    let mut rmux_watching =
+        LiveControlClient::spawn_capturing(rmux_control_mode_command(&harness, &[], &[])?)?;
+    tmux_watching.send("attach-session -t alpha\n")?;
+    rmux_watching.send("attach-session -t alpha\n")?;
+    let watching = wait_for_pair_run(
+        &harness,
+        &tmux_binary,
+        &["list-clients", "-t", "alpha", "-F", "#{client_name}"],
+        config.clone(),
+        Duration::from_secs(5),
+        |run| {
+            run.tmux.stdout_string().lines().count() == 1
+                && run.rmux.stdout_string().lines().count() == 1
+        },
+    )?;
+    assert_success_without_stderr(&watching);
+
+    let tmux_cursor = tmux_watching.notification_cursor();
+    let rmux_cursor = rmux_watching.notification_cursor();
+    let client_size = PtyTerminalSize {
+        cols: 101,
+        rows: 40,
+    };
+    let mut tmux_attach =
+        spawn_tmux_attached_input_client_at_size(&harness, &tmux_binary, "alpha", client_size)?;
+    let mut rmux_attach = spawn_rmux_attached_input_client_at_size(&harness, "alpha", client_size)?;
+
+    let listed = wait_for_pair_run(
+        &harness,
+        &tmux_binary,
+        &["list-clients", "-t", "alpha", "-F", "#{client_name}"],
+        config.clone(),
+        Duration::from_secs(5),
+        |run| {
+            run.tmux.stdout_string().lines().count() == 2
+                && run.rmux.stdout_string().lines().count() == 2
+        },
+    )?;
+    assert_success_without_stderr(&listed);
+    tmux_attach.assert_running("tmux PTY")?;
+    rmux_attach.assert_running("rmux PTY")?;
+    let tmux_pty_name = listed_pty_client_name(&listed.tmux.stdout_string())?;
+    let rmux_pty_name = listed_pty_client_name(&listed.rmux.stdout_string())?;
+
+    let changed =
+        |line: &str| line.starts_with("%client-session-changed ") && line.ends_with(" alpha");
+    let resized = |line: &str| line.starts_with("%layout-change ") && line.contains(",101x39,");
+    let tmux_changed = tmux_watching.wait_for_notification(
+        tmux_cursor,
+        Duration::from_secs(5),
+        "tmux control observing initial PTY attach",
+        changed,
+    )?;
+    let rmux_changed = rmux_watching.wait_for_notification(
+        rmux_cursor,
+        Duration::from_secs(5),
+        "rmux control observing initial PTY attach",
+        changed,
+    )?;
+    tmux_watching.wait_for_notification(
+        tmux_cursor,
+        Duration::from_secs(5),
+        "tmux control observing initial PTY resize",
+        resized,
+    )?;
+    rmux_watching.wait_for_notification(
+        rmux_cursor,
+        Duration::from_secs(5),
+        "rmux control observing initial PTY resize",
+        resized,
+    )?;
+
+    assert_eq!(
+        notification_client_name(&tmux_changed),
+        Some(tmux_pty_name.as_str()),
+        "frozen tmux oracle changed: {tmux_changed}"
+    );
+    assert_eq!(
+        notification_client_name(&rmux_changed),
+        Some(rmux_pty_name.as_str()),
+        "rmux must report the PTY name list-clients exposes: {rmux_changed}"
+    );
+    for (label, client, cursor) in [
+        ("tmux", &tmux_watching, tmux_cursor),
+        ("rmux", &rmux_watching, rmux_cursor),
+    ] {
+        let (changed_index, layout_index) = client
+            .notification_index_pair(cursor, changed, resized)
+            .unwrap_or_else(|| panic!("{label} did not report both attach notifications"));
+        assert!(
+            changed_index < layout_index,
+            "{label} must report the PTY session change before its layout change"
+        );
+        assert_eq!(
+            client
+                .notifications_since(cursor)
+                .iter()
+                .filter(|line| changed(line))
+                .count(),
+            1,
+            "{label} must report one PTY session change"
+        );
+    }
+
+    let hook_output = wait_for_pair_run(
+        &harness,
+        &tmux_binary,
+        &["show-buffer", "-b", "initial-pty-hook"],
+        config,
+        Duration::from_secs(5),
+        |run| {
+            run.tmux.status_code == Some(0)
+                && run.rmux.status_code == Some(0)
+                && run.tmux.stdout_string() != "start,"
+                && run.rmux.stdout_string() != "start,"
+        },
+    )?;
+    assert_success_without_stderr(&hook_output);
+    assert_eq!(
+        hook_output.tmux.stdout_string(),
+        "start,pty,",
+        "frozen tmux must run the hook once with a PTY hook_client"
+    );
+    assert_eq!(
+        hook_output.rmux.stdout_string(),
+        "start,pty,",
+        "rmux must run the hook once with a PTY hook_client"
+    );
+
+    tmux_watching.assert_running("tmux watching control")?;
+    rmux_watching.assert_running("rmux watching control")?;
+    Ok(())
+}
+
+fn listed_pty_client_name(output: &str) -> Result<String, Box<dyn Error>> {
+    output
+        .lines()
+        .find(|line| !line.starts_with("client-"))
+        .map(str::to_owned)
+        .ok_or_else(|| format!("list-clients did not report a PTY client: {output:?}").into())
+}
+
+/// Frozen tmux 3.7b, measured 2026-07-25 with two `-C` clients on one session:
+/// the client that stays behind is told
+///
+/// ```text
+/// %client-session-changed client-74711 $1 beta
+/// %client-detached client-74711
+/// ```
+///
+/// The token is the same name `list-clients -F '#{client_name}'` reports for
+/// the client that moved. A frontend keys its client table on that name, so
+/// this pins the token itself rather than the `%client-session-changed `
+/// prefix alone.
+#[test]
+fn tmux_compat_control_notifications_name_the_client_list_clients_reports_when_frozen_tmux_is_available(
+) -> Result<(), Box<dyn Error>> {
+    let harness = TmuxCompatHarness::new("tmux-compat-control-notification-client-name")?;
+    let Some(tmux_binary) = frozen_tmux_or_skip(&harness)? else {
+        return Ok(());
+    };
+    let _guard = pty_tmux_compat_lock();
+    let config = tmux_compat_config().with_timeout(Duration::from_secs(10));
+    for session in ["alpha", "beta"] {
+        let create = harness.run_pair_with(
+            &tmux_binary,
+            &["new-session", "-d", "-s", session],
+            config.clone(),
+        )?;
+        assert_quiet_success(&create);
+    }
+
+    let mut tmux_switching =
+        LiveControlClient::spawn(tmux_control_mode_command(&harness, &tmux_binary, &[], &[])?)?;
+    let mut rmux_switching =
+        LiveControlClient::spawn(rmux_control_mode_command(&harness, &[], &[])?)?;
+    tmux_switching.send("attach-session -t alpha\n")?;
+    rmux_switching.send("attach-session -t alpha\n")?;
+
+    // Only the moving client is attached yet, so `list-clients` names it
+    // unambiguously - the name a frontend would hold on to.
+    let listed = wait_for_pair_run(
+        &harness,
+        &tmux_binary,
+        &["list-clients", "-t", "alpha", "-F", "#{client_name}"],
+        config.clone(),
+        Duration::from_secs(5),
+        |run| {
+            run.tmux.stdout_string().lines().count() == 1
+                && run.rmux.stdout_string().lines().count() == 1
+        },
+    )?;
+    assert_success_without_stderr(&listed);
+    let tmux_name = listed.tmux.stdout_string().trim().to_owned();
+    let rmux_name = listed.rmux.stdout_string().trim().to_owned();
+    assert!(tmux_name.starts_with("client-"), "{tmux_name}");
+    assert_eq!(
+        rmux_name.starts_with("client-"),
+        tmux_name.starts_with("client-"),
+        "rmux names control clients the way tmux does: {rmux_name}"
+    );
+
+    let mut tmux_watching = LiveControlClient::spawn_capturing(tmux_control_mode_command(
+        &harness,
+        &tmux_binary,
+        &[],
+        &[],
+    )?)?;
+    let mut rmux_watching =
+        LiveControlClient::spawn_capturing(rmux_control_mode_command(&harness, &[], &[])?)?;
+    tmux_watching.send("attach-session -t alpha\n")?;
+    rmux_watching.send("attach-session -t alpha\n")?;
+    let attached = wait_for_pair_run(
+        &harness,
+        &tmux_binary,
+        &["list-clients", "-t", "alpha", "-F", "#{client_name}"],
+        config,
+        Duration::from_secs(5),
+        |run| {
+            run.tmux.stdout_string().lines().count() == 2
+                && run.rmux.stdout_string().lines().count() == 2
+        },
+    )?;
+    assert_success_without_stderr(&attached);
+
+    let tmux_cursor = tmux_watching.notification_cursor();
+    let rmux_cursor = rmux_watching.notification_cursor();
+    tmux_switching.send("switch-client -t beta\n")?;
+    rmux_switching.send("switch-client -t beta\n")?;
+
+    let moved =
+        |line: &str| line.starts_with("%client-session-changed ") && line.ends_with(" beta");
+    let tmux_changed = tmux_watching.wait_for_notification(
+        tmux_cursor,
+        Duration::from_secs(5),
+        "tmux watching control",
+        moved,
+    )?;
+    let rmux_changed = rmux_watching.wait_for_notification(
+        rmux_cursor,
+        Duration::from_secs(5),
+        "rmux watching control",
+        moved,
+    )?;
+    assert_eq!(
+        notification_client_name(&tmux_changed),
+        Some(tmux_name.as_str()),
+        "frozen tmux oracle changed: {tmux_changed}"
+    );
+    assert_eq!(
+        notification_client_name(&rmux_changed),
+        Some(rmux_name.as_str()),
+        "rmux must name the moved client the way list-clients does: {rmux_changed}"
+    );
+
+    let tmux_cursor = tmux_watching.notification_cursor();
+    let rmux_cursor = rmux_watching.notification_cursor();
+    tmux_switching.send("detach-client\n")?;
+    rmux_switching.send("detach-client\n")?;
+
+    let detached = |line: &str| line.starts_with("%client-detached ");
+    let tmux_detached = tmux_watching.wait_for_notification(
+        tmux_cursor,
+        Duration::from_secs(5),
+        "tmux watching control",
+        detached,
+    )?;
+    let rmux_detached = rmux_watching.wait_for_notification(
+        rmux_cursor,
+        Duration::from_secs(5),
+        "rmux watching control",
+        detached,
+    )?;
+    assert_eq!(
+        notification_client_name(&tmux_detached),
+        Some(tmux_name.as_str()),
+        "frozen tmux oracle changed: {tmux_detached}"
+    );
+    assert_eq!(
+        notification_client_name(&rmux_detached),
+        Some(rmux_name.as_str()),
+        "rmux must name the departed client the way list-clients does: {rmux_detached}"
+    );
+
+    tmux_watching.assert_running("tmux watching control")?;
+    rmux_watching.assert_running("rmux watching control")?;
+    Ok(())
+}
+
+/// Returns the client-name token of a `%client-*` notification line.
+fn notification_client_name(line: &str) -> Option<&str> {
+    line.split(' ').nth(1)
+}
+
+#[test]
+fn tmux_compat_control_commands_do_not_refresh_client_activity_when_frozen_tmux_is_available(
+) -> Result<(), Box<dyn Error>> {
+    let harness = TmuxCompatHarness::new("tmux-compat-control-client-activity")?;
+    let Some(tmux_binary) = frozen_tmux_or_skip(&harness)? else {
+        return Ok(());
+    };
+    let create = harness.run_pair_with(
+        &tmux_binary,
+        &["new-session", "-d", "-s", "alpha"],
+        tmux_compat_config(),
+    )?;
+    assert_quiet_success(&create);
+
+    let first = concat!(
+        "attach-session -t alpha\n",
+        "display-message -p 'activity=#{client_activity}'\n",
+    );
+    let second = "display-message -p 'activity=#{client_activity}'\n";
+    let stages = [
+        (first, Duration::from_millis(1_200)),
+        (second, Duration::ZERO),
+    ];
+    let tmux_run = run_tmux_control_mode_staged(&harness, &tmux_binary, &stages)?;
+    let rmux_run = run_rmux_control_mode_staged(&harness, &stages)?;
+    assert_eq!(tmux_run.status_code, Some(0));
+    assert_eq!(rmux_run.status_code, Some(0));
+    assert!(tmux_run.stderr.is_empty(), "{:?}", tmux_run.stderr);
+    assert!(rmux_run.stderr.is_empty(), "{:?}", rmux_run.stderr);
+
+    let activity_lines = |output: &str| {
+        extract_control_frame_payload_lines(output)
+            .into_iter()
+            .filter(|line| line.starts_with("activity="))
+            .collect::<Vec<_>>()
+    };
+    let tmux_activity = activity_lines(&tmux_run.stdout);
+    let rmux_activity = activity_lines(&rmux_run.stdout);
+    assert_eq!(tmux_activity.len(), 2, "{:?}", tmux_run.stdout);
+    assert_eq!(rmux_activity.len(), 2, "{:?}", rmux_run.stdout);
+    assert_eq!(tmux_activity[0], tmux_activity[1]);
+    assert_eq!(rmux_activity[0], rmux_activity[1]);
+    let timestamp = |line: &str| {
+        line.strip_prefix("activity=")
+            .expect("activity line prefix")
+            .parse::<i64>()
+            .expect("client_activity is a Unix timestamp")
+    };
+    assert!(
+        timestamp(&tmux_activity[0]).abs_diff(timestamp(&rmux_activity[0])) <= 30,
+        "tmux and rmux registration timestamps use different epochs: tmux={tmux_activity:?}, rmux={rmux_activity:?}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn tmux_compat_control_geometry_survives_policy_switches_when_frozen_tmux_is_available(
+) -> Result<(), Box<dyn Error>> {
+    let harness = TmuxCompatHarness::new("tmux-compat-control-geometry-policy-switch")?;
+    let Some(tmux_binary) = frozen_tmux_or_skip(&harness)? else {
+        return Ok(());
+    };
+    let _guard = pty_tmux_compat_lock();
+    let config = tmux_compat_config();
+
+    // Frozen tmux 3.7b oracle, measured 2026-07-25. Disabling the status line
+    // isolates the reported control geometry from visible-content row accounting.
+    for argv in [
+        ["new-session", "-d", "-s", "source", "-x", "83", "-y", "27"].as_slice(),
+        ["new-session", "-d", "-s", "normal", "-x", "79", "-y", "23"].as_slice(),
+        ["new-session", "-d", "-s", "manual", "-x", "73", "-y", "19"].as_slice(),
+        ["set-option", "-t", "source", "status", "off"].as_slice(),
+        ["set-option", "-t", "normal", "status", "off"].as_slice(),
+        ["set-option", "-t", "manual", "status", "off"].as_slice(),
+        [
+            "set-option",
+            "-w",
+            "-t",
+            "source:0",
+            "window-size",
+            "manual",
+        ]
+        .as_slice(),
+        [
+            "set-option",
+            "-w",
+            "-t",
+            "normal:0",
+            "window-size",
+            "largest",
+        ]
+        .as_slice(),
+        [
+            "set-option",
+            "-w",
+            "-t",
+            "manual:0",
+            "window-size",
+            "manual",
+        ]
+        .as_slice(),
+    ] {
+        let run = harness.run_pair_with(&tmux_binary, argv, config.clone())?;
+        assert_quiet_success(&run);
+    }
+
+    let mut rmux_normal = spawn_rmux_attached_input_client(&harness, "normal")?;
+    let mut rmux_manual = spawn_rmux_attached_input_client(&harness, "manual")?;
+    let mut tmux_normal = spawn_tmux_attached_input_client(&harness, &tmux_binary, "normal")?;
+    let mut tmux_manual = spawn_tmux_attached_input_client(&harness, &tmux_binary, "manual")?;
+    let _attached = wait_for_pair_run(
+        &harness,
+        &tmux_binary,
+        &["list-clients", "-F", "#{session_name}|#{client_flags}"],
+        config,
+        Duration::from_secs(5),
+        |run| {
+            let ready = |output: String| {
+                let lines = output.lines().collect::<Vec<_>>();
+                lines.len() == 2 && lines.iter().all(|line| !line.contains("ignore-size"))
+            };
+            ready(run.tmux.stdout_string()) && ready(run.rmux.stdout_string())
+        },
+    )?;
+    let first = concat!(
+        "attach-session -t source\n",
+        "refresh-client -C 101x31\n",
+        "display-message -p 'refreshed=#{session_name}|#{window_width}x#{window_height}|#{client_width}x#{client_height}'\n",
+        "list-clients -t source -F 'listed=#{session_name}|#{client_width}x#{client_height}|#{client_control_mode}'\n",
+        "switch-client -t normal\n",
+    );
+    let second = concat!(
+        "display-message -p 'normal=#{session_name}|#{window_width}x#{window_height}|#{client_width}x#{client_height}'\n",
+        "switch-client -t manual\n",
+    );
+    let third = "display-message -p 'manual=#{session_name}|#{window_width}x#{window_height}|#{client_width}x#{client_height}'\n";
+    // Keep stdin open between switches so tmux can commit its deferred client
+    // session change and policy resize before the next format probe runs.
+    let stages = [
+        (first, Duration::from_millis(200)),
+        (second, Duration::from_millis(200)),
+        (third, Duration::ZERO),
+    ];
+    let tmux_run = run_tmux_control_mode_staged(&harness, &tmux_binary, &stages)?;
+    let rmux_run = run_rmux_control_mode_staged(&harness, &stages)?;
+    assert_eq!(tmux_run.status_code, Some(0));
+    assert_eq!(rmux_run.status_code, Some(0));
+    assert!(tmux_run.stderr.is_empty(), "{:?}", tmux_run.stderr);
+    assert!(rmux_run.stderr.is_empty(), "{:?}", rmux_run.stderr);
+
+    let tmux_lines = extract_control_frame_payload_lines(&tmux_run.stdout);
+    let rmux_lines = extract_control_frame_payload_lines(&rmux_run.stdout);
+    assert_eq!(rmux_lines, tmux_lines);
+    assert_eq!(
+        tmux_lines,
+        vec![
+            "refreshed=source|83x27|101x",
+            "listed=source|101x|1",
+            "normal=normal|101x31|101x",
+            "manual=manual|73x19|101x",
+        ]
+    );
+
+    rmux_normal.assert_running("rmux normal")?;
+    rmux_manual.assert_running("rmux manual")?;
+    tmux_normal.assert_running("tmux normal")?;
+    tmux_manual.assert_running("tmux manual")?;
+
+    Ok(())
+}
+
+#[test]
+fn tmux_compat_control_geometry_includes_every_control_client_when_frozen_tmux_is_available(
+) -> Result<(), Box<dyn Error>> {
+    let harness = TmuxCompatHarness::new("tmux-compat-control-geometry-multi-client")?;
+    let Some(tmux_binary) = frozen_tmux_or_skip(&harness)? else {
+        return Ok(());
+    };
+    let _guard = pty_tmux_compat_lock();
+
+    // Frozen tmux 3.7b oracle, measured 2026-07-25. Status is disabled so
+    // client rows and window rows have the same geometry accounting.
+    assert_multi_control_geometry(
+        &harness,
+        &tmux_binary,
+        "largest",
+        "100x40",
+        "60x20",
+        "100x40",
+    )?;
+    assert_multi_control_geometry(
+        &harness,
+        &tmux_binary,
+        "smallest",
+        "60x20",
+        "100x40",
+        "60x20",
+    )?;
+
+    Ok(())
+}
+
+fn assert_multi_control_geometry(
+    harness: &TmuxCompatHarness,
+    tmux_binary: &Path,
+    policy: &str,
+    first_size: &str,
+    second_size: &str,
+    expected_window_size: &str,
+) -> Result<(), Box<dyn Error>> {
+    let config = tmux_compat_config().with_timeout(Duration::from_secs(10));
+    for argv in [
+        ["new-session", "-d", "-s", policy].as_slice(),
+        ["set-option", "-t", policy, "status", "off"].as_slice(),
+        ["set-option", "-w", "-t", policy, "window-size", policy].as_slice(),
+    ] {
+        let run = harness.run_pair_with(tmux_binary, argv, config.clone())?;
+        assert_eq!(
+            run.rmux.status_code,
+            Some(0),
+            "rmux setup failed for {argv:?}: timed_out={} stderr={:?}",
+            run.rmux.timed_out,
+            run.rmux.stderr_string()
+        );
+        assert_quiet_success(&run);
+    }
+
+    let mut tmux_first =
+        LiveControlClient::spawn(tmux_control_mode_command(harness, tmux_binary, &[], &[])?)?;
+    let mut rmux_first = LiveControlClient::spawn(rmux_control_mode_command(harness, &[], &[])?)?;
+    let mut tmux_second =
+        LiveControlClient::spawn(tmux_control_mode_command(harness, tmux_binary, &[], &[])?)?;
+    let mut rmux_second = LiveControlClient::spawn(rmux_control_mode_command(harness, &[], &[])?)?;
+
+    let first_commands = format!("attach-session -t {policy}\nrefresh-client -C {first_size}\n");
+    let second_commands = format!("attach-session -t {policy}\nrefresh-client -C {second_size}\n");
+    tmux_first.send(&first_commands)?;
+    rmux_first.send(&first_commands)?;
+    tmux_second.send(&second_commands)?;
+    rmux_second.send(&second_commands)?;
+
+    let expected_widths = {
+        let width = |size: &str| {
+            size.split_once('x')
+                .expect("control geometry uses WIDTHxHEIGHT")
+                .0
+                .to_owned()
+        };
+        let mut widths = vec![width(first_size), width(second_size)];
+        widths.sort();
+        widths
+    };
+    let _clients = wait_for_pair_run(
+        harness,
+        tmux_binary,
+        &["list-clients", "-t", policy, "-F", "#{client_width}"],
+        config.clone(),
+        Duration::from_secs(5),
+        |run| {
+            let sorted_widths = |output: String| {
+                let mut widths = output.lines().map(ToOwned::to_owned).collect::<Vec<_>>();
+                widths.sort();
+                widths
+            };
+            sorted_widths(run.tmux.stdout_string()) == expected_widths
+                && sorted_widths(run.rmux.stdout_string()) == expected_widths
+        },
+    )?;
+
+    let dimensions = harness.run_pair_with(
+        tmux_binary,
+        &[
+            "display-message",
+            "-p",
+            "-t",
+            policy,
+            "#{window_width}x#{window_height}",
+        ],
+        config,
+    )?;
+    assert_success_without_stderr(&dimensions);
+    assert_eq!(dimensions.rmux.stdout, dimensions.tmux.stdout);
+    assert_eq!(
+        dimensions.tmux.stdout_string(),
+        format!("{expected_window_size}\n")
+    );
+
+    tmux_first.assert_running("tmux first")?;
+    rmux_first.assert_running("rmux first")?;
+    tmux_second.assert_running("tmux second")?;
+    rmux_second.assert_running("rmux second")?;
+    Ok(())
+}
+
+#[test]
+fn tmux_compat_undeclared_control_client_owns_no_geometry_when_frozen_tmux_is_available(
+) -> Result<(), Box<dyn Error>> {
+    let harness = TmuxCompatHarness::new("tmux-compat-control-geometry-undeclared")?;
+    let Some(tmux_binary) = frozen_tmux_or_skip(&harness)? else {
+        return Ok(());
+    };
+    let _guard = pty_tmux_compat_lock();
+
+    // Frozen tmux 3.7b oracle, measured 2026-07-25: a control client owns a
+    // size only once it has announced one with `refresh-client -C`
+    // (`ignore_client_size()` skips a CLIENT_CONTROL client that has no
+    // CLIENT_SIZECHANGED). A second control client attaching without announcing
+    // one leaves the 120x40 the first client established, under every automatic
+    // policy — including `latest`, where it is the newest client, and
+    // `smallest`, where its 80x24 placeholder would otherwise win.
+    for policy in ["latest", "largest", "smallest"] {
+        assert_undeclared_control_geometry(&harness, &tmux_binary, policy, "120x40")?;
+    }
+
+    Ok(())
+}
+
+fn assert_undeclared_control_geometry(
+    harness: &TmuxCompatHarness,
+    tmux_binary: &Path,
+    policy: &str,
+    declared_size: &str,
+) -> Result<(), Box<dyn Error>> {
+    let session = format!("undeclared-{policy}");
+    let config = tmux_compat_config().with_timeout(Duration::from_secs(10));
+    for argv in [
+        ["new-session", "-d", "-s", session.as_str()].as_slice(),
+        ["set-option", "-t", session.as_str(), "status", "off"].as_slice(),
+        [
+            "set-option",
+            "-w",
+            "-t",
+            session.as_str(),
+            "window-size",
+            policy,
+        ]
+        .as_slice(),
+    ] {
+        let run = harness.run_pair_with(tmux_binary, argv, config.clone())?;
+        assert_eq!(
+            run.rmux.status_code,
+            Some(0),
+            "rmux setup failed for {argv:?}: timed_out={} stderr={:?}",
+            run.rmux.timed_out,
+            run.rmux.stderr_string()
+        );
+        assert_quiet_success(&run);
+    }
+
+    let mut tmux_sized =
+        LiveControlClient::spawn(tmux_control_mode_command(harness, tmux_binary, &[], &[])?)?;
+    let mut rmux_sized = LiveControlClient::spawn(rmux_control_mode_command(harness, &[], &[])?)?;
+    let sized_commands =
+        format!("attach-session -t {session}\nrefresh-client -C {declared_size}\n");
+    tmux_sized.send(&sized_commands)?;
+    rmux_sized.send(&sized_commands)?;
+
+    let declared_width = declared_size
+        .split_once('x')
+        .expect("control geometry uses WIDTHxHEIGHT")
+        .0;
+    let sorted_widths = |output: String| {
+        let mut widths = output.lines().map(ToOwned::to_owned).collect::<Vec<_>>();
+        widths.sort();
+        widths
+    };
+    let list_widths = [
+        "list-clients",
+        "-t",
+        session.as_str(),
+        "-F",
+        "#{client_width}",
+    ];
+    let _sized_client = wait_for_pair_run(
+        harness,
+        tmux_binary,
+        &list_widths,
+        config.clone(),
+        Duration::from_secs(5),
+        |run| {
+            let expected = vec![declared_width.to_owned()];
+            sorted_widths(run.tmux.stdout_string()) == expected
+                && sorted_widths(run.rmux.stdout_string()) == expected
+        },
+    )?;
+
+    // The second client only attaches. This is the state every control client
+    // starts in, iTerm2's `-CC` included, before its first `refresh-client -C`.
+    let mut tmux_undeclared =
+        LiveControlClient::spawn(tmux_control_mode_command(harness, tmux_binary, &[], &[])?)?;
+    let mut rmux_undeclared =
+        LiveControlClient::spawn(rmux_control_mode_command(harness, &[], &[])?)?;
+    let attach_only = format!("attach-session -t {session}\n");
+    tmux_undeclared.send(&attach_only)?;
+    rmux_undeclared.send(&attach_only)?;
+
+    let expected_widths = {
+        let mut widths = vec![declared_width.to_owned(), "80".to_owned()];
+        widths.sort();
+        widths
+    };
+    let _both_clients = wait_for_pair_run(
+        harness,
+        tmux_binary,
+        &list_widths,
+        config.clone(),
+        Duration::from_secs(5),
+        |run| {
+            sorted_widths(run.tmux.stdout_string()) == expected_widths
+                && sorted_widths(run.rmux.stdout_string()) == expected_widths
+        },
+    )?;
+
+    let dimensions = harness.run_pair_with(
+        tmux_binary,
+        &[
+            "display-message",
+            "-p",
+            "-t",
+            session.as_str(),
+            "#{window_width}x#{window_height}",
+        ],
+        config,
+    )?;
+    assert_success_without_stderr(&dimensions);
+    assert_eq!(dimensions.rmux.stdout, dimensions.tmux.stdout, "{policy}");
+    assert_eq!(
+        dimensions.tmux.stdout_string(),
+        format!("{declared_size}\n"),
+        "{policy}"
+    );
+
+    tmux_sized.assert_running("tmux sized")?;
+    rmux_sized.assert_running("rmux sized")?;
+    tmux_undeclared.assert_running("tmux undeclared")?;
+    rmux_undeclared.assert_running("rmux undeclared")?;
+    Ok(())
+}
+
+#[test]
+fn tmux_compat_attached_client_top_level_terminal_runtime_overrides_when_frozen_tmux_is_available(
+) -> Result<(), Box<dyn Error>> {
+    let harness = TmuxCompatHarness::new("tmux-compat-client-runtime-top-level-attach")?;
+    let Some(tmux_binary) = frozen_tmux_or_skip(&harness)? else {
+        return Ok(());
+    };
+    let _guard = pty_tmux_compat_lock();
+    let (config, _) = config_with_clean_homes(&harness)?;
+    let create =
+        harness.run_pair_with(&tmux_binary, &["new-session", "-d", "-s", "alpha"], config)?;
+    assert_quiet_success(&create);
+
+    let client_environment = [("TERM", "vt100"), ("LC_ALL", "C"), ("LANG", "C")];
+    let top_level_args = ["-u", "-2", "-T", "RGB"];
+    let mut rmux_attach =
+        spawn_rmux_attached_client_with(&harness, "alpha", &top_level_args, &client_environment)?;
+    let mut tmux_attach = spawn_tmux_attached_client_with(
+        &harness,
+        &tmux_binary,
+        "alpha",
+        &top_level_args,
+        &client_environment,
+    )?;
+
+    let list_clients = wait_for_pair_run(
+        &harness,
+        &tmux_binary,
+        &[
+            "list-clients",
+            "-F",
+            "#{client_termname}|#{client_termtype}|#{client_termfeatures}|#{client_utf8}|#{client_flags}",
+        ],
+        tmux_compat_config(),
+        Duration::from_secs(5),
+        |run| {
+            run.tmux.status_code == Some(0)
+                && run.rmux.status_code == Some(0)
+                && !run.tmux.stdout.is_empty()
+                && !run.rmux.stdout.is_empty()
+        },
+    )?;
+    rmux_attach.assert_running("rmux")?;
+    tmux_attach.assert_running("tmux")?;
+    let tmux_line = list_clients.tmux.stdout_string();
+    let rmux_line = list_clients.rmux.stdout_string();
+    let tmux_parts = tmux_line
+        .trim_end()
+        .split('|')
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    let rmux_parts = rmux_line
+        .trim_end()
+        .split('|')
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    assert_eq!(tmux_parts.len(), 5);
+    assert_eq!(rmux_parts.len(), 5);
+    assert_eq!(tmux_parts[0], "vt100");
+    assert_eq!(rmux_parts[0], tmux_parts[0]);
+    assert_eq!(rmux_parts[1], tmux_parts[1]);
+    assert_eq!(rmux_parts[3], tmux_parts[3]);
+    assert_eq!(rmux_parts[4], tmux_parts[4]);
+    assert_eq!(tmux_parts[3], "1");
+    assert!(
+        tmux_parts[2].split(',').any(|feature| feature == "256"),
+        "expected tmux termfeatures to include 256, got {:?}",
+        tmux_parts[2]
+    );
+    assert!(
+        tmux_parts[2].split(',').any(|feature| feature == "RGB"),
+        "expected tmux termfeatures to include RGB, got {:?}",
+        tmux_parts[2]
+    );
+    assert!(
+        rmux_parts[2].split(',').any(|feature| feature == "256"),
+        "expected rmux termfeatures to include 256, got {:?}",
+        rmux_parts[2]
+    );
+    assert!(
+        rmux_parts[2].split(',').any(|feature| feature == "RGB"),
+        "expected rmux termfeatures to include RGB, got {:?}",
+        rmux_parts[2]
+    );
+
+    Ok(())
+}
+
+#[test]
+fn tmux_compat_control_mode_top_level_terminal_runtime_overrides_when_frozen_tmux_is_available(
+) -> Result<(), Box<dyn Error>> {
+    let harness = TmuxCompatHarness::new("tmux-compat-client-runtime-top-level-control")?;
+    let Some(tmux_binary) = frozen_tmux_or_skip(&harness)? else {
+        return Ok(());
+    };
+    let (config, _) = config_with_clean_homes(&harness)?;
+    let create =
+        harness.run_pair_with(&tmux_binary, &["new-session", "-d", "-s", "alpha"], config)?;
+    assert_quiet_success(&create);
+
+    let client_environment = [("TERM", "vt100"), ("LC_ALL", "C"), ("LANG", "C")];
+    let top_level_args = ["-u", "-2", "-T", "RGB"];
+    let commands = "attach-session -t alpha\nlist-clients -F '#{client_termname}|#{client_termtype}|#{client_termfeatures}|#{client_utf8}|#{client_flags}'\n";
+    let tmux_run = run_tmux_control_mode_with(
+        &harness,
+        &tmux_binary,
+        commands,
+        &top_level_args,
+        &client_environment,
+    )?;
+    let rmux_run =
+        run_rmux_control_mode_with(&harness, commands, &top_level_args, &client_environment)?;
+    assert_eq!(tmux_run.status_code, Some(0));
+    assert_eq!(rmux_run.status_code, Some(0));
+    assert!(tmux_run.stderr.is_empty());
+    assert!(rmux_run.stderr.is_empty());
+
+    let tmux_lines = extract_control_frame_payload_lines(&tmux_run.stdout);
+    let rmux_lines = extract_control_frame_payload_lines(&rmux_run.stdout);
+    assert_eq!(rmux_lines, tmux_lines);
+    assert_eq!(
+        tmux_lines,
+        vec!["vt100||256,RGB|1|attached,focused,control-mode,UTF-8".to_owned()]
+    );
+
+    Ok(())
+}
+
+#[test]
+fn tmux_compat_new_window_control_mode_start_directory_and_shell_command_when_frozen_tmux_is_available(
+) -> Result<(), Box<dyn Error>> {
+    let harness = TmuxCompatHarness::new("tmux-compat-new-window-control-mode-spawn")?;
+    let Some(tmux_binary) = frozen_tmux_or_skip(&harness)? else {
+        return Ok(());
+    };
+    let config = tmux_compat_config();
+    let start_directory = harness.tmpdir().join("new-window-cwd");
+    fs::create_dir_all(&start_directory)?;
+    let start_directory = start_directory.to_string_lossy().into_owned();
+
+    let create = harness.run_pair_with(
+        &tmux_binary,
+        &["new-session", "-d", "-s", "alpha"],
+        config.clone(),
+    )?;
+    assert_quiet_success(&create);
+
+    let commands = format!(
+        "new-window -d -t alpha -c {} -- sh -c 'pwd; printf \"ARGV0=[%s]\\n\" \"$0\"; printf \"ARGV=\"; for arg in \"$@\"; do printf \"[%s]\" \"$arg\"; done; printf \"\\n\"; printf \"shell=quoted ; value\\n\"; exec sleep 30' foo 'bar baz'\n",
+        shell_quote(&start_directory)
+    );
+    let tmux_run = run_tmux_control_mode(&harness, &tmux_binary, &commands)?;
+    let rmux_run = run_rmux_control_mode(&harness, &commands)?;
+    assert_eq!(tmux_run.status_code, Some(0));
+    assert_eq!(rmux_run.status_code, Some(0));
+    assert!(tmux_run.stderr.is_empty());
+    assert!(rmux_run.stderr.is_empty());
+
+    let expected_lines = vec![
+        start_directory.clone(),
+        "ARGV0=[foo]".to_owned(),
+        "ARGV=[bar baz]".to_owned(),
+        "shell=quoted ; value".to_owned(),
+    ];
+    let capture = wait_for_pair_run(
+        &harness,
+        &tmux_binary,
+        &["capture-pane", "-p", "-t", "alpha:1.0"],
+        config,
+        Duration::from_secs(5),
+        |run| {
+            run.tmux.status_code == Some(0)
+                && run.rmux.status_code == Some(0)
+                && nonempty_capture_lines(&run.tmux.stdout_string()) == expected_lines
+                && nonempty_capture_lines(&run.rmux.stdout_string()) == expected_lines
+        },
+    )?;
+    assert_exact_tmux_compat(&capture);
+
+    Ok(())
+}
+
+#[test]
+fn tmux_compat_respawn_window_control_mode_start_directory_and_shell_command_when_frozen_tmux_is_available(
+) -> Result<(), Box<dyn Error>> {
+    let harness = TmuxCompatHarness::new("tmux-compat-respawn-window-control-mode-spawn")?;
+    let Some(tmux_binary) = frozen_tmux_or_skip(&harness)? else {
+        return Ok(());
+    };
+    let config = tmux_compat_config();
+    let start_directory = harness.tmpdir().join("respawn-window-cwd");
+    fs::create_dir_all(&start_directory)?;
+    let start_directory = start_directory.to_string_lossy().into_owned();
+
+    let create = harness.run_pair_with(
+        &tmux_binary,
+        &["new-session", "-d", "-s", "alpha"],
+        config.clone(),
+    )?;
+    assert_quiet_success(&create);
+
+    let commands = format!(
+        "respawn-window -k -t alpha:0 -c {} -- sh -c 'pwd; printf \"ARGV0=[%s]\\n\" \"$0\"; printf \"ARGV=\"; for arg in \"$@\"; do printf \"[%s]\" \"$arg\"; done; printf \"\\n\"; printf \"shell=quoted ; value\\n\"; exec sleep 30' foo 'bar baz'\n",
+        shell_quote(&start_directory)
+    );
+    let tmux_run = run_tmux_control_mode(&harness, &tmux_binary, &commands)?;
+    let rmux_run = run_rmux_control_mode(&harness, &commands)?;
+    assert_eq!(tmux_run.status_code, Some(0));
+    assert_eq!(rmux_run.status_code, Some(0));
+    assert!(tmux_run.stderr.is_empty());
+    assert!(rmux_run.stderr.is_empty());
+
+    let expected_lines = vec![
+        start_directory.clone(),
+        "ARGV0=[foo]".to_owned(),
+        "ARGV=[bar baz]".to_owned(),
+        "shell=quoted ; value".to_owned(),
+    ];
+    let capture = wait_for_pair_run(
+        &harness,
+        &tmux_binary,
+        &["capture-pane", "-p", "-t", "alpha:0.0"],
+        config,
+        Duration::from_secs(5),
+        |run| {
+            run.tmux.status_code == Some(0)
+                && run.rmux.status_code == Some(0)
+                && nonempty_capture_lines(&run.tmux.stdout_string()) == expected_lines
+                && nonempty_capture_lines(&run.rmux.stdout_string()) == expected_lines
+        },
+    )?;
+    assert_exact_tmux_compat(&capture);
+
+    Ok(())
+}
+
+#[test]
+fn tmux_compat_control_mode_window_id_targets_and_new_window_exact_slot_when_frozen_tmux_is_available(
+) -> Result<(), Box<dyn Error>> {
+    let harness = TmuxCompatHarness::new("tmux-compat-control-mode-window-id-targets")?;
+    let Some(tmux_binary) = frozen_tmux_or_skip(&harness)? else {
+        return Ok(());
+    };
+    let config = tmux_compat_config();
+
+    let create = harness.run_pair_with(
+        &tmux_binary,
+        &["new-session", "-d", "-s", "alpha"],
+        config.clone(),
+    )?;
+    assert_quiet_success(&create);
+
+    let window_id_run = harness.run_pair_with(
+        &tmux_binary,
+        &["display-message", "-p", "-t", "alpha:0", "#{window_id}"],
+        config.clone(),
+    )?;
+    assert_exact_tmux_compat(&window_id_run);
+    let window_id = window_id_run.tmux.stdout_string().trim().to_owned();
+
+    let new_window_commands = "new-window -d -t alpha:2 -- sleep 30\n";
+    let tmux_new_window = run_tmux_control_mode(&harness, &tmux_binary, new_window_commands)?;
+    let rmux_new_window = run_rmux_control_mode(&harness, new_window_commands)?;
+    assert_eq!(tmux_new_window.status_code, Some(0));
+    assert_eq!(rmux_new_window.status_code, Some(0));
+    assert!(tmux_new_window.stderr.is_empty());
+    assert!(rmux_new_window.stderr.is_empty());
+
+    let new_window_display = wait_for_pair_run(
+        &harness,
+        &tmux_binary,
+        &[
+            "display-message",
+            "-p",
+            "-t",
+            "alpha:2",
+            "#{window_index}|#{pane_current_command}",
+        ],
+        config.clone(),
+        Duration::from_secs(5),
+        |run| {
+            run.tmux.status_code == Some(0)
+                && run.rmux.status_code == Some(0)
+                && run.tmux.stdout == b"2|sleep\n"
+                && run.rmux.stdout == b"2|sleep\n"
+        },
+    )?;
+    assert_exact_tmux_compat(&new_window_display);
+
+    let respawn_and_display_commands = format!("respawn-window -k -t {window_id} -- sleep 30\n");
+    let tmux_respawn =
+        run_tmux_control_mode(&harness, &tmux_binary, &respawn_and_display_commands)?;
+    let rmux_respawn = run_rmux_control_mode(&harness, &respawn_and_display_commands)?;
+    assert_eq!(tmux_respawn.status_code, Some(0));
+    assert_eq!(rmux_respawn.status_code, Some(0));
+    assert!(tmux_respawn.stderr.is_empty());
+    assert!(rmux_respawn.stderr.is_empty());
+
+    let expected_respawn = format!("alpha|0|{window_id}|sleep");
+    let respawn_display_commands = format!(
+        "display-message -p -t {window_id} '#{{session_name}}|#{{window_index}}|#{{window_id}}|#{{pane_current_command}}'\n"
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (tmux_display, rmux_display) = loop {
+        let tmux_display =
+            run_tmux_control_mode(&harness, &tmux_binary, &respawn_display_commands)?;
+        let rmux_display = run_rmux_control_mode(&harness, &respawn_display_commands)?;
+        if tmux_display.status_code == Some(0)
+            && rmux_display.status_code == Some(0)
+            && tmux_display.stderr.is_empty()
+            && rmux_display.stderr.is_empty()
+            && extract_control_frame_payload_lines(&tmux_display.stdout)
+                == vec![expected_respawn.clone()]
+            && extract_control_frame_payload_lines(&rmux_display.stdout)
+                == vec![expected_respawn.clone()]
+        {
+            break (tmux_display, rmux_display);
+        }
+
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "timed out waiting for respawn-window compatibility readiness: tmux stdout={:?} stderr={:?} rmux stdout={:?} stderr={:?}",
+                tmux_display.stdout, tmux_display.stderr, rmux_display.stdout, rmux_display.stderr
+            )
+            .into());
+        }
+
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(
+        extract_control_frame_payload_lines(&tmux_display.stdout),
+        vec![expected_respawn.clone()]
+    );
+    assert_eq!(
+        extract_control_frame_payload_lines(&rmux_display.stdout),
+        vec![expected_respawn]
+    );
+
+    Ok(())
+}

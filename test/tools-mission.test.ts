@@ -386,7 +386,7 @@ describe("neta_agent", () => {
 		);
 		expect(result.ok).toBe(true);
 		if (result.ok) {
-			expect(result.data.missionId).toBe(missionId);
+			expect(result.data.missionId).toBe(f.store.getMission(missionId)?.number);
 			expect(typeof result.data.agentId).toBe("string");
 			expect(typeof result.data.name).toBe("string");
 		}
@@ -396,7 +396,7 @@ describe("neta_agent", () => {
 	test("a lead naming another mission is refused", async () => {
 		const f = fixture("folder");
 		const missionId = await withMission(f);
-		const other = ulid();
+		const other = await withMission(f);
 		const leadId = f.saved[0]?.agentIds[0] ?? "";
 		const lead = f.store.getAgent(leadId);
 		if (lead === undefined) {
@@ -458,4 +458,169 @@ describe("neta_agent", () => {
 			expect(result.code).toBe("notFound");
 		}
 	});
+});
+
+test("worker model selection is persisted before launch and before writer queue admission", async () => {
+	for (const lease of ["active", "queued"] as const) {
+		const f = fixture("folder", { lease });
+		f.ports.sessions.selectModel = async () => ({ provider: "opencode", model: "openai/connected" });
+		const result = await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+			name: "connected workers",
+			objective: "inspect",
+			access: "readWrite",
+			lead: "self",
+			agents: [{ task: "inspect", access: "readWrite", provider: "codex", model: "obsolete" }],
+		});
+		expect(result.ok).toBe(true);
+		const mission = f.store.listMissions(f.leaderActor.workspaceId)[0];
+		if (!mission) throw new Error("missing mission");
+		const agent = f.store.listAgents(mission.id)[0];
+		expect(agent?.provider).toBe("opencode");
+		expect(agent?.model).toBe("openai/connected");
+		if (lease === "active") expect(f.launches[0]?.model).toBe("openai/connected");
+		else expect(f.launches).toHaveLength(0);
+	}
+});
+
+test("unavailable staffing model leaves no mission or agent behind", async () => {
+	const f = fixture("folder");
+	f.ports.sessions.selectModel = async () => {
+		throw new Error("requested model unavailable");
+	};
+	await expect(
+		missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+			name: "light worker",
+			objective: "inspect branch",
+			access: "readOnly",
+			lead: "self",
+			agents: [{ task: "inspect", access: "readOnly", model: "missing-small" }],
+		}),
+	).rejects.toThrow("requested model unavailable");
+	expect(f.store.listMissions(f.leaderActor.workspaceId)).toHaveLength(0);
+	expect(f.launches).toHaveLength(0);
+});
+
+test("staffing preserves ordered permitted fallback models and rejects unavailable alternatives before reservation", async () => {
+	const f = fixture("folder");
+	f.ports.sessions.selectModel = async ({ provider, model }) => {
+		if (model === "unavailable") throw new Error("alternative unavailable");
+		return { provider, model };
+	};
+	await expect(
+		missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+			name: "invalid plan",
+			objective: "inspect",
+			access: "readOnly",
+			lead: "self",
+			agents: [{ task: "inspect", access: "readOnly", model: "small", fallbackModels: ["unavailable"] }],
+		}),
+	).rejects.toThrow("alternative unavailable");
+	expect(f.store.listMissions(f.leaderActor.workspaceId)).toHaveLength(0);
+	const result = await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+		name: "small models",
+		objective: "inspect",
+		access: "readOnly",
+		lead: { task: "lead", model: "small", fallbackModels: ["second", "third"] },
+		agents: [{ task: "inspect", access: "readOnly", model: "small" }],
+	});
+	expect(result.ok).toBe(true);
+	expect(f.launches[0]?.fallbackModels).toEqual(["second", "third"]);
+	expect(f.launches[1]?.fallbackModels).toEqual([]);
+	const mission = f.store.listMissions(f.leaderActor.workspaceId)[0]!;
+	expect(f.store.listAgents(mission.id)[0]).toMatchObject({
+		requestedModel: "small",
+		fallbackModels: ["second", "third"],
+	});
+});
+
+test("effort routing happens once per child before mission side effects and persists through writer queues", async () => {
+	for (const lease of ["active", "queued"] as const) {
+		const f = fixture("git", { lease });
+		const calls: { task: string; effort?: number }[] = [];
+		f.ports.sessions.routeModel = async (input) => {
+			expect(f.prepares).toHaveLength(0);
+			expect(f.saved).toHaveLength(0);
+			expect(f.launches).toHaveLength(0);
+			calls.push(input);
+			return {
+				provider: "opencode",
+				model: "openai/luna",
+				routing: {
+					effort: 1,
+					method: "fixed",
+					selectedModel: "openai/luna",
+					candidates: ["openai/luna"],
+					reason: "Configured effort 1",
+					warnings: [],
+				},
+			};
+		};
+		f.ports.sessions.selectModel = async ({ provider, model }) => ({ provider, model });
+		const response = await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+			name: "response check",
+			objective: "Confirm startup",
+			access: "readWrite",
+			lead: { task: "confirm", effort: 1 },
+			agents: [{ task: "check", effort: 1, access: "readWrite" }],
+		});
+		expect(response.ok).toBe(true);
+		expect(calls).toHaveLength(2);
+		expect(calls.map((c) => c.effort)).toEqual([1, 1]);
+		const agents = f.store.listAgents(f.saved[0].id);
+		expect(agents).toHaveLength(2);
+		for (const agent of agents) {
+			expect(agent.model).toBe("openai/luna");
+			expect(agent.routing?.effort).toBe(1);
+		}
+		expect(agents.find((a) => !a.canSpawn)?.state).toBe(lease === "queued" ? "queued" : "starting");
+		if (response.ok)
+			expect(response.data.agents).toEqual(
+				agents.map((a) => ({ id: a.id, name: a.name, model: a.model, routing: a.routing })),
+			);
+	}
+});
+
+test("a routing failure leaves no mission, worktree, agents or launches behind", async () => {
+	const f = fixture("git");
+	let calls = 0;
+	f.ports.sessions.routeModel = async () => {
+		calls++;
+		throw new Error("Jev abstained");
+	};
+	await expect(
+		missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+			name: "response check",
+			objective: "Confirm startup",
+			access: "readOnly",
+			lead: { task: "confirm", effort: 1 },
+		}),
+	).rejects.toThrow("Jev abstained");
+	expect(calls).toBe(1);
+	expect(f.saved).toHaveLength(0);
+	expect(f.prepares).toHaveLength(0);
+	expect(f.launches).toHaveLength(0);
+});
+
+test("adding an agent passes mission context and effort to routing exactly once", async () => {
+	const f = fixture("folder");
+	await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+		name: "check",
+		objective: "Read repository status",
+		access: "readOnly",
+		lead: "self",
+	});
+	let calls = 0;
+	f.ports.sessions.routeModel = async (input) => {
+		calls++;
+		expect(input).toMatchObject({ task: "inspect branch", objective: "Read repository status", effort: 2 });
+		return { provider: "opencode", model: "openai/luna" };
+	};
+	const response = await missionHandlers.neta_agent(ctx(f, f.leaderActor), {
+		task: "inspect branch",
+		access: "readOnly",
+		effort: 2,
+	});
+	expect(response.ok).toBe(true);
+	expect(calls).toBe(1);
+	expect(f.launches[0].model).toBe("openai/luna");
 });

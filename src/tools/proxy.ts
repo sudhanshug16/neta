@@ -228,8 +228,14 @@ export async function runProxy(options: ProxyOptions): Promise<number> {
 					{ name: params.name, arguments: params.arguments ?? {} },
 					options.actorId,
 					options.token,
-				)) as { content: unknown; isError: unknown };
-				send(ok(id, { content: result.content, isError: result.isError }));
+				)) as { content: unknown; isError: unknown; structuredContent?: unknown };
+				send(
+					ok(id, {
+						content: result.content,
+						isError: result.isError,
+						...(result.structuredContent === undefined ? {} : { structuredContent: result.structuredContent }),
+					}),
+				);
 			} catch (error) {
 				send(ok(id, unavailable(`error unavailable: ${error instanceof Error ? error.message : String(error)}`)));
 			}

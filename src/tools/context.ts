@@ -3,9 +3,9 @@
 // task. The agreements are string imports so the bundle reads no files;
 // charters and skills are read from disk at session launch.
 import { createHash } from "node:crypto";
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Mission } from "../core/types.ts";
+import type { Access, Mission } from "../core/types.ts";
 import agentAgreement from "./prompts/agent.md" with { type: "text" };
 import leadAgreement from "./prompts/lead.md" with { type: "text" };
 import leaderAgreement from "./prompts/leader.md" with { type: "text" };
@@ -73,6 +73,7 @@ export function loadCharter(root: string, homeDir: string): Charter | undefined 
 export interface SkillText {
 	name: string;
 	text: string;
+	path?: string;
 }
 
 function skillNames(dir: string): string[] {
@@ -85,22 +86,29 @@ function skillNames(dir: string): string[] {
 		}
 		throw error;
 	}
-	return entries.filter((entry) => entry.endsWith(".md")).map((entry) => entry.slice(0, -".md".length));
+	return entries.flatMap((entry) => {
+		if (entry.endsWith(".md")) return [entry.slice(0, -".md".length)];
+		return existsSync(join(dir, entry, "SKILL.md")) ? [entry] : [];
+	});
 }
 
 function isTraversing(name: string): boolean {
-	return name.includes("/") || name.includes("..");
+	return name.includes("/") || name.includes("\\") || name.includes("..") || name.includes("\0");
 }
 
-// Each name resolves `<workspace root>/.neta/skills/<name>.md`, then
-// `~/.neta/skills/<name>.md`. A missing skill reports the name and the
-// available list; a traversing name is rejected.
+// Project skills precede user skills. Preserve Neta's flat files and also
+// resolve the standard SKILL.md directories used by OpenCode.
 export function loadSkills(
 	names: string[],
 	root: string,
 	homeDir: string,
 ): { ok: true; skills: SkillText[] } | { ok: false; missing: string; available: string[] } {
-	const dirs = [join(root, ".neta", "skills"), join(homeDir, ".neta", "skills")];
+	const dirs = [
+		...[root, homeDir].flatMap((base) =>
+			[".neta", ".agents", ".claude", ".opencode"].map((dir) => join(base, dir, "skills")),
+		),
+		join(homeDir, ".config", "opencode", "skills"),
+	];
 	const available = [...new Set(dirs.flatMap((dir) => skillNames(dir)))].sort();
 	const skills: SkillText[] = [];
 	for (const name of names) {
@@ -108,22 +116,27 @@ export function loadSkills(
 			return { ok: false, missing: name, available };
 		}
 		let text: string | undefined;
+		let path: string | undefined;
 		for (const dir of dirs) {
 			text = readText(join(dir, `${name}.md`));
-			if (text !== undefined) {
-				break;
-			}
+			if (text !== undefined) break;
+			path = join(dir, name, "SKILL.md");
+			text = readText(path);
+			if (text !== undefined) break;
+			path = undefined;
 		}
 		if (text === undefined) {
 			return { ok: false, missing: name, available };
 		}
-		skills.push({ name, text });
+		skills.push({ name, text, ...(path === undefined ? {} : { path }) });
 	}
 	return { ok: true, skills };
 }
 
 export interface ContextInput {
 	kind: ActorKind;
+	self?: { id: string; name: string };
+	access?: Access;
 	charter?: Charter;
 	skills?: SkillText[];
 	mission?: Mission;
@@ -134,7 +147,7 @@ function missionBrief(mission: Mission): string {
 	const lines = [
 		`# Mission: ${mission.name} (#${mission.number})`,
 		`Objective: ${mission.objective}`,
-		`Access: ${mission.access}`,
+		`Mission access ceiling: ${mission.access} (not this actor’s current access)`,
 	];
 	if (mission.worktree !== undefined) {
 		lines.push(`Worktree: ${mission.worktree.path}`);
@@ -147,12 +160,25 @@ function missionBrief(mission: Mission): string {
 
 export function composeContext(input: ContextInput): string {
 	const parts = [agreement(input.kind)];
+	if (input.self) {
+		parts.push(
+			`# Your identity\nYou are ${input.self.name}. Your actor ID is ${input.self.id}. This is your own session, not a delegated worker. Do not send messages to yourself. Only a successful neta_agent call creates a separate worker; use the returned agent ID to address it.`,
+		);
+	}
+	parts.push(
+		`# Current assignment\nActor: ${input.kind}\nAssigned access: ${input.access ?? "readOnly"}. ${input.kind === "agent" ? "Honor this access and your bounded task." : "Leadership shell access is not sandboxed. Lead means inspect and coordinate; direct implementation requires the existing Lead++ decision and writer lease. The mission access ceiling does not itself grant write ownership."}`,
+	);
+	parts.push(
+		"# Verification\nKeep test and migration databases disposable and isolated from shared development or production data unless that exact mutation is authorized. A command that fails inside a pipeline is a failed check; preserve its exit status and inspect errors. State what you actually ran and distinguish scratch checks from live results.",
+	);
 	// Charters reach leader and lead contexts only.
 	if (input.kind !== "agent" && input.charter !== undefined) {
 		parts.push(`# Charter\n${input.charter.text}`);
 	}
 	for (const skill of input.skills ?? []) {
-		parts.push(`# Skill: ${skill.name}\n${skill.text}`);
+		parts.push(
+			`# Skill: ${skill.name}\n${skill.path ? `Source: ${skill.path}. Resolve relative paths from its directory.\n` : ""}${skill.text}`,
+		);
 	}
 	if (input.mission !== undefined) {
 		parts.push(missionBrief(input.mission));

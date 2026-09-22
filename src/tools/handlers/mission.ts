@@ -2,6 +2,7 @@
 // The Node wires the ports in T5.9 (06 supplies worktrees and leases, 03 the
 // sessions, T5.8 the skills); tests stub them. Everything validated before
 // anything is spawned, so a refusal leaves no sessions behind.
+
 import { ulid } from "../../core/ids.ts";
 import { pickName } from "../../core/names.ts";
 import { nowIso } from "../../core/time.ts";
@@ -15,6 +16,8 @@ import type {
 	Workspace,
 	WorkspaceId,
 } from "../../core/types.ts";
+import type { Effort, RoutingDecision } from "../../routing/types.ts";
+import { resolveMission } from "../mission-reference.ts";
 import type { ToolContext, ToolDeps, ToolHandlers, ToolResult } from "../router.ts";
 import type { AgentParams, AgentSpec, LeadSpec, MissionParams } from "../schemas.ts";
 
@@ -29,6 +32,7 @@ export interface SessionLaunch {
 	access: Access;
 	provider: string;
 	model: string;
+	fallbackModels?: string[];
 	skills: string[];
 	canSpawn: boolean;
 	name: string;
@@ -40,6 +44,19 @@ export interface MissionPorts {
 	missions: { save(mission: Mission): Promise<void> };
 	sessions: {
 		pi?: boolean;
+		routeModel?(input: {
+			workspaceId: WorkspaceId;
+			provider: string;
+			model?: string;
+			task: string;
+			objective: string;
+			effort?: Effort;
+		}): Promise<{ provider: string; model: string; routing?: RoutingDecision } | undefined>;
+		selectModel?(input: {
+			workspaceId: WorkspaceId;
+			provider: string;
+			model: string;
+		}): Promise<{ provider: string; model: string }>;
 		// Two steps, in this order: the session exists, then the Agent record
 		// is on file, then the context prompt goes out. A fast agent's first
 		// `tools/call` has to find its own record, and the first prompt is
@@ -108,12 +125,29 @@ async function launchAgent(
 		access: Access;
 		provider: string;
 		model: string;
+		fallbackModels?: string[];
 		skills: string[];
 		canSpawn: boolean;
 		taken: Set<string>;
+		routing?: RoutingDecision;
 	},
 	onReserved?: (agent: Agent) => Promise<void>,
 ): Promise<Agent> {
+	if (ctx.deps.sessions.selectModel !== undefined) {
+		const provider = input.provider;
+		const selected = await ctx.deps.sessions.selectModel({ workspaceId: workspace.id, provider, model: input.model });
+		const fallbackModels: string[] = [];
+		for (const model of input.fallbackModels ?? []) {
+			fallbackModels.push(
+				(await ctx.deps.sessions.selectModel({ workspaceId: workspace.id, provider, model })).model,
+			);
+		}
+		input = {
+			...input,
+			...selected,
+			fallbackModels,
+		};
+	}
 	const id = ulid();
 	const sessionId = ulid();
 	const name = pickName(input.taken, id);
@@ -128,12 +162,15 @@ async function launchAgent(
 		access: input.access,
 		provider: input.provider,
 		model: input.model,
+		fallbackModels: input.fallbackModels ?? [],
 		skills: input.skills,
 		canSpawn: input.canSpawn,
 		name,
 		worktreePath: mission.worktree?.path,
 	};
 	const agent: Agent = {
+		requestedModel: input.model,
+		routing: input.routing,
 		id,
 		missionId: mission.id,
 		workspaceId: mission.workspaceId,
@@ -142,6 +179,7 @@ async function launchAgent(
 		access: input.access,
 		provider: input.provider,
 		model: input.model,
+		fallbackModels: input.fallbackModels ?? [],
 		skills: input.skills,
 		sessionId,
 		canSpawn: input.canSpawn,
@@ -162,7 +200,7 @@ async function launchAgent(
 			live = created.sessionId === sessionId ? reserved : { ...reserved, sessionId: created.sessionId };
 			if (live.sessionId !== reserved.sessionId) await ctx.deps.store.putAgent(live);
 			await ctx.deps.sessions.brief({ ...launch, sessionId: live.sessionId });
-			return live;
+			return ctx.deps.store.getAgent(live.id) ?? live;
 		} catch (error) {
 			await ctx.deps.sessions.close(live.sessionId).catch(() => undefined);
 			const failed = { ...live, state: "failed" as const, endedAt: nowIso(), outcome: String(error) };
@@ -196,7 +234,7 @@ async function createMission(ctx: MissionToolContext, params: MissionParams): Pr
 		return notFound(`no such workspace: ${ctx.actor.workspaceId}`);
 	}
 	if (params.continues !== undefined) {
-		const prev = ctx.deps.store.getMission(params.continues);
+		const prev = resolveMission(ctx, params.continues);
 		if (prev === undefined || prev.workspaceId !== workspace.id) {
 			return notFound(`no such mission: ${params.continues}`);
 		}
@@ -218,6 +256,39 @@ async function createMission(ctx: MissionToolContext, params: MissionParams): Pr
 		return notFound(`no leader for workspace: ${workspace.id}`);
 	}
 
+	// Resolve once before side effects. The launch path only validates the resolved ID.
+	const resolved = new Map<LeadSpec | AgentSpec, { provider: string; model: string; routing?: RoutingDecision }>();
+	if (ctx.deps.sessions.routeModel) {
+		for (const spec of [...(params.lead === "self" ? [] : [params.lead]), ...(params.agents ?? [])]) {
+			const selection = await ctx.deps.sessions.routeModel({
+				workspaceId: workspace.id,
+				provider: spec.provider ?? leader.provider,
+				model: spec.model,
+				task: spec.task,
+				objective: params.objective,
+				effort: spec.effort,
+			});
+			if (selection) resolved.set(spec, selection);
+		}
+	}
+	// Validate the entire staffing plan before creating a worktree or mission.
+	if (ctx.deps.sessions.selectModel) {
+		const specs = [...(params.lead === "self" ? [] : [params.lead]), ...(params.agents ?? [])];
+		for (const spec of specs) {
+			await ctx.deps.sessions.selectModel({
+				workspaceId: workspace.id,
+				provider: resolved.get(spec)?.provider ?? spec.provider ?? leader.provider,
+				model: resolved.get(spec)?.model ?? spec.model ?? leader.model,
+			});
+			for (const model of spec.fallbackModels ?? []) {
+				await ctx.deps.sessions.selectModel({
+					workspaceId: workspace.id,
+					provider: resolved.get(spec)?.provider ?? spec.provider ?? leader.provider,
+					model,
+				});
+			}
+		}
+	}
 	const number = await ctx.deps.numbers.allocateNumber(workspace.id);
 	const createdAt = nowIso();
 	let mission: Mission = {
@@ -233,7 +304,7 @@ async function createMission(ctx: MissionToolContext, params: MissionParams): Pr
 		access: params.access,
 		state: "running",
 		createdAt,
-		continuesMissionId: params.continues,
+		continuesMissionId: params.continues === undefined ? undefined : resolveMission(ctx, params.continues)?.id,
 	};
 	if (workspace.kind === "git") {
 		mission = await ctx.deps.worktrees.prepare(mission, workspace);
@@ -280,8 +351,10 @@ async function createMission(ctx: MissionToolContext, params: MissionParams): Pr
 				// Mission leads begin in Lead. The mission's write allowance is a
 				// ceiling; it does not grant effective writer access until Lead++.
 				access: "readOnly",
-				provider: params.lead.provider ?? leader.provider,
-				model: params.lead.model ?? leader.model,
+				provider: resolved.get(params.lead)?.provider ?? params.lead.provider ?? leader.provider,
+				model: resolved.get(params.lead)?.model ?? params.lead.model ?? leader.model,
+				routing: resolved.get(params.lead)?.routing,
+				fallbackModels: params.lead.fallbackModels,
 				skills: params.lead.skills ?? [],
 				canSpawn: true,
 				taken,
@@ -302,8 +375,10 @@ async function createMission(ctx: MissionToolContext, params: MissionParams): Pr
 			{
 				task: spec.task,
 				access: spec.access,
-				provider: spec.provider ?? leader.provider,
-				model: spec.model ?? leader.model,
+				provider: resolved.get(spec)?.provider ?? spec.provider ?? leader.provider,
+				model: resolved.get(spec)?.model ?? spec.model ?? leader.model,
+				routing: resolved.get(spec)?.routing,
+				fallbackModels: spec.fallbackModels,
 				skills: spec.skills ?? [],
 				canSpawn: false,
 				taken,
@@ -334,8 +409,15 @@ async function createMission(ctx: MissionToolContext, params: MissionParams): Pr
 		ok: true,
 		data: {
 			number: mission.number,
-			id: mission.id,
+			missionId: mission.number,
+			id: mission.id, // Legacy callers; new tools use the workspace mission number.
 			worktree: mission.worktree?.path ?? null,
+			agents: launched.map((agent) => ({
+				id: agent.id,
+				name: agent.name,
+				model: agent.model,
+				routing: agent.routing,
+			})),
 			...(queued ? { queued: true as const } : {}),
 		},
 	};
@@ -345,23 +427,16 @@ async function createAgentUnlocked(ctx: MissionToolContext, params: AgentParams)
 	if (ctx.actor.kind !== "lead" && ctx.actor.kind !== "leader") {
 		return { ok: false, code: "notAuthorised", message: "only a lead or the leader adds agents" };
 	}
-	let missionId = params.missionId;
-	if (missionId === undefined) {
-		if (ctx.actor.kind === "lead") {
-			missionId = ctx.actor.missionId;
-		} else {
-			missionId = ctx.deps.store.getLeader(ctx.actor.workspaceId)?.activeMissionId;
-		}
+	const mission = resolveMission(ctx, params.missionId);
+	if (mission === undefined) {
+		return params.missionId === undefined
+			? refused(
+					"No active mission. Use neta_mission with a lead task to create and start a new delegation, or pass an existing mission number as missionId.",
+				)
+			: notFound(`no such mission in this workspace: ${params.missionId}`);
 	}
-	if (missionId === undefined) {
-		return refused("no mission: pass missionId");
-	}
-	if (ctx.actor.kind === "lead" && missionId !== ctx.actor.missionId) {
+	if (ctx.actor.kind === "lead" && mission.id !== ctx.actor.missionId) {
 		return refused("a lead adds agents to its own mission only");
-	}
-	const mission = ctx.deps.store.getMission(missionId);
-	if (mission === undefined || mission.workspaceId !== ctx.actor.workspaceId) {
-		return notFound(`no such mission: ${missionId}`);
 	}
 	if (mission.state === "closed") {
 		return refused("the mission is closed");
@@ -387,28 +462,42 @@ async function createAgentUnlocked(ctx: MissionToolContext, params: AgentParams)
 	if (workspace === undefined) {
 		return notFound(`no workspace for mission: ${mission.id}`);
 	}
+	const selection = await ctx.deps.sessions.routeModel?.({
+		workspaceId: workspace.id,
+		provider: params.provider ?? caller?.provider ?? "unknown",
+		model: params.model,
+		task: params.task,
+		objective: mission.objective,
+		effort: params.effort,
+	});
 	const spawned = await launchAgent(ctx, mission, workspace, {
 		task: params.task,
 		access: params.access,
-		provider: params.provider ?? caller?.provider ?? "unknown",
-		model: params.model ?? caller?.model ?? "unknown",
+		provider: selection?.provider ?? params.provider ?? caller?.provider ?? "unknown",
+		model: selection?.model ?? params.model ?? caller?.model ?? "unknown",
+		routing: selection?.routing,
+		fallbackModels: params.fallbackModels,
 		skills: params.skills ?? [],
 		canSpawn: false,
 		taken,
 	});
 	await ctx.deps.missions.save({ ...mission, agentIds: [...mission.agentIds, spawned.id] });
 	await announceSpawn(ctx, spawned);
-	return { ok: true, data: { agentId: spawned.id, name: spawned.name, missionId: mission.id } };
+	return {
+		ok: true,
+		data: {
+			agentId: spawned.id,
+			name: spawned.name,
+			missionId: mission.number,
+			model: spawned.model,
+			routing: spawned.routing,
+		},
+	};
 }
 
 const agentMutations = new Map<string, Promise<void>>();
 async function createAgent(ctx: MissionToolContext, params: AgentParams): Promise<ToolResult> {
-	const key =
-		params.missionId ??
-		(ctx.actor.kind === "lead"
-			? ctx.actor.missionId
-			: ctx.deps.store.getLeader(ctx.actor.workspaceId)?.activeMissionId) ??
-		ctx.actor.workspaceId;
+	const key = resolveMission(ctx, params.missionId)?.id ?? ctx.actor.workspaceId;
 	const previous = agentMutations.get(key) ?? Promise.resolve();
 	let release = (): void => undefined;
 	const current = new Promise<void>((done) => {

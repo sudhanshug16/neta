@@ -18,31 +18,16 @@ permissions:
   contents: write
 
 jobs:
-  app:
-    runs-on: macos-15
+  release:
+    runs-on: ubuntu-latest
     steps:
-      - run: sudo xcode-select -s /Applications/Xcode_26.app
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag || github.ref_name }}
       - name: Resolve tag
         run: echo "TAG=${{ inputs.tag || github.ref_name }}" >> "$GITHUB_ENV"
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.3.14
-      - run: bun install --frozen-lockfile
-      - name: Build app bundle
-        run: |
-          APP="$(bash apps/macos/scripts/build-app.sh)"
-          echo "APP=$APP" >> "$GITHUB_ENV"
-      - name: Zip app bundle
-        run: ditto -c -k --keepParent "$APP" "NetaDesktop-$TAG.zip"
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "$TAG" --verify-tag --generate-notes --title "Neta $TAG" || gh release view "$TAG" >/dev/null
-      - name: Upload app zip
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "$TAG" "NetaDesktop-$TAG.zip" --clobber

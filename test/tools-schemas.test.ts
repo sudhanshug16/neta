@@ -25,9 +25,10 @@ const CASES: SchemaCase[] = [
 		wrongType: { task: "x", access: "everything" },
 	},
 	{
-		name: "neta_wait",
-		valid: { missionId: ID, timeoutMs: 5000 },
-		wrongType: { timeoutMs: 5 },
+		name: "neta_model",
+		valid: { missionId: 4, change: "up" },
+		missing: { agentId: "Cove" },
+		wrongType: { agentId: "Cove", effort: 2.5 },
 	},
 	{
 		name: "neta_send",
@@ -167,12 +168,12 @@ describe("tool schemas", () => {
 });
 
 describe("actor tool sets", () => {
-	test("agents see exactly progress and done", () => {
+	test("agents see reporting, history and their own model adjustment", () => {
 		expect(
 			toolsFor("agent")
 				.map((tool) => tool.name)
 				.sort(),
-		).toEqual(["neta_done", "neta_history", "neta_progress"]);
+		).toEqual(["neta_done", "neta_history", "neta_model", "neta_progress"]);
 	});
 
 	test("leads see everything but mission, close and pin", () => {
@@ -189,4 +190,49 @@ describe("actor tool sets", () => {
 		expect(names).not.toContain("neta_progress");
 		expect(names).not.toContain("neta_done");
 	});
+});
+
+test("task difficulty accepts only integer effort levels 1 through 5 independently of model override", () => {
+	for (const effort of [1, 2, 3, 4, 5]) {
+		expect(validate("neta_agent", { task: "check", access: "readOnly", effort }).ok).toBe(true);
+		expect(
+			validate("neta_mission", {
+				name: "check",
+				objective: "check",
+				access: "readOnly",
+				lead: { task: "confirm", effort },
+			}).ok,
+		).toBe(true);
+	}
+	for (const effort of [0, 6, 1.5, "high", null])
+		expect(validate("neta_agent", { task: "check", access: "readOnly", effort }).ok).toBe(false);
+	expect(validate("neta_agent", { task: "check", access: "readOnly", model: "openai/luna" }).ok).toBe(true);
+});
+
+test("model adjustments require exactly one bounded effort or direction", () => {
+	for (const params of [{ missionId: 4, effort: 3 }, { agentId: "Cove", change: "down" }, { change: "up" }])
+		expect(validate("neta_model", params).ok).toBe(true);
+	for (const params of [{ effort: 3, change: "up" }, {}, { effort: 6 }, { effort: 0 }, { change: "sideways" }])
+		expect(validate("neta_model", params).ok).toBe(false);
+});
+
+test("public mission numbers and lead-local references work without guessing internal IDs", () => {
+	for (const missionId of [12, ID]) {
+		expect(validate("neta_agent", { missionId, task: "check", access: "readOnly", effort: 1 }).ok).toBe(true);
+		expect(validate("neta_ready", { missionId, summary: "checked" }).ok).toBe(true);
+		expect(validate("neta_close", { missionId, disposition: "completed", reason: "checked" }).ok).toBe(true);
+	}
+	for (const missionId of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, "12"]) {
+		expect(validate("neta_ready", { missionId, summary: "checked" }).ok).toBe(false);
+	}
+	for (const name of ["neta_agent", "neta_ready", "neta_scope"]) {
+		expect(toolsFor("leader").find((tool) => tool.name === name)?.inputSchema.required).toContain("missionId");
+		expect(toolsFor("lead").find((tool) => tool.name === name)?.inputSchema.required).not.toContain("missionId");
+	}
+	expect(validate("neta_ready", { summary: "checked" }).ok).toBe(true);
+});
+
+test("delegation accepts detailed briefs while keeping bounded payloads", () => {
+	expect(validate("neta_agent", { task: "x".repeat(16000), access: "readOnly", missionId: ID }).ok).toBe(true);
+	expect(validate("neta_agent", { task: "x".repeat(16001), access: "readOnly", missionId: ID }).ok).toBe(false);
 });

@@ -54,7 +54,7 @@ export function reminder(input: ReminderInput): string {
 		);
 	}
 	if (running.length > 0) {
-		lines.push(`[neta] running: ${cap(running.map((mission) => `#${mission.number} ${mission.name}`))}`);
+		lines.push(`[neta] open: ${cap(running.map((mission) => `#${mission.number} ${mission.name}`))}`);
 	}
 	if (input.modeLine !== undefined && input.modeLine !== "") {
 		lines.push(input.modeLine);

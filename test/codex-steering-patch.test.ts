@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,7 +7,10 @@ import { join } from "node:path";
 test("the bundled Codex adapter preserves promptRequired through the idle race", () => {
 	const directory = mkdtempSync(join(tmpdir(), "neta-codex-steer-"));
 	const installed = join(import.meta.dir, "../node_modules/@agentclientprotocol/codex-acp/dist/index.js");
-	let source = readFileSync(installed, "utf8");
+	execFileSync("bun", ["run", "build"], { cwd: join(import.meta.dir, ".."), stdio: "pipe" });
+	const staged = join(import.meta.dir, "../dist/codex-acp.mjs");
+	expect(readFileSync(staged, "utf8")).toBe(readFileSync(installed, "utf8"));
+	let source = readFileSync(staged, "utf8");
 	source = source.replace(
 		"} else {\n  startAcpServer();\n}\nfunction startAcpServer()",
 		"}\nfunction startAcpServer()",

@@ -42,7 +42,6 @@ const LEADER_TOOLS = [
 	"neta_scope",
 	"neta_send",
 	"neta_status",
-	"neta_wait",
 ];
 
 let dir = "";
@@ -287,7 +286,6 @@ test("session tool wiring and end-to-end mission creation", async () => {
 			failed: () => Promise.resolve(),
 			cancel: (id: string) => acp.cancel(id),
 			prompt: (id: string, text: string) => acp.prompt(id, text).then(() => undefined),
-			wait: () => Promise.resolve({ changed: [] as Agent[], timedOut: true }),
 		},
 		worktrees: {
 			prepare: async (mission: Mission) => mission,

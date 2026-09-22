@@ -3,7 +3,7 @@
 // row: empty-dir status, the detached lifecycle, open idempotence, the `~`
 // and `/` refusals, and the double stop.
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { detachSpawn } from "../src/cli/commands/node.ts";
@@ -139,3 +139,36 @@ describe("open refusals", () => {
 		});
 	});
 });
+
+test("detached start does not mistake a recycled descriptor PID for a live Node", async () => {
+	const harness = await startHarness();
+	try {
+		await writeFile(
+			join(harness.dir, "node.json"),
+			JSON.stringify({
+				socket: join(harness.dir, "node.sock"),
+				token: "fixture-stale-token",
+				pid: process.pid,
+				protocolVersion: PROTOCOL_VERSION,
+				startedAt: new Date(0).toISOString(),
+				instanceId: "abandoned-instance",
+			}),
+		);
+		await writeFile(
+			join(harness.dir, "node.lock"),
+			JSON.stringify({ pid: process.pid, instanceId: "abandoned-instance" }),
+		);
+		const started = await harness.run(["node", "start", "--detach"]);
+		expect(started.code).toBe(0);
+		const descriptor = JSON.parse(await readFile(join(harness.dir, "node.json"), "utf8"));
+		expect(descriptor.pid).not.toBe(process.pid);
+		expect(descriptor.instanceId).not.toBe("abandoned-instance");
+		const stopped = await harness.run(["node", "stop"]);
+		expect(stopped.code).toBe(0);
+	} finally {
+		// The harness only kills its own real Node, never the sentinel PID.
+		const raw = await readFile(join(harness.dir, "node.json"), "utf8").catch(() => undefined);
+		if (raw && JSON.parse(raw).pid === process.pid) await rm(join(harness.dir, "node.json"));
+		await harness.stop();
+	}
+}, 15_000);

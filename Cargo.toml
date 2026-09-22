@@ -1,0 +1,17 @@
+[workspace]
+members = ["apps/rmux", "crates/neta-client", "crates/neta-protocol", "crates/neta-terminal"]
+exclude = ["vendor/rmux"]
+resolver = "2"
+
+[workspace.dependencies]
+crossterm = "=0.28.1"
+futures-util = "=0.3.31"
+libc = "=0.2.189"
+ratatui = "=0.29.0"
+ratatui-rmux = { path = "vendor/rmux/crates/ratatui-rmux", version = "=0.10.0" }
+rmux-sdk = { path = "vendor/rmux/crates/rmux-sdk", version = "=0.10.0", default-features = false }
+serde = "=1.0.219"
+serde_json = "=1.0.140"
+sha2 = "=0.10.9"
+tokio = "=1.48.0"
+base64 = "=0.22.1"

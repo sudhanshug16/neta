@@ -8,7 +8,8 @@
 // returns the `version` of the first `package.json` named `@intervene/neta`,
 // so it works both from `src/` and from the bundled `dist/main.js`.
 // Anywhere else it reports `"0.0.0-dev"` instead of throwing.
-import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -52,7 +53,21 @@ export function netaVersion(): string {
 	return cached;
 }
 
-/** Identity of the exact bundled runtime, independent of the package version. */
+const runtimeBuild = (() => {
+	if (typeof NETA_BUILD_ID === "string" && NETA_BUILD_ID.length > 0) return NETA_BUILD_ID;
+	const file = fileURLToPath(import.meta.url);
+	const hash = createHash("sha256");
+	if (file.endsWith(".ts")) {
+		const root = dirname(file);
+		for (const relative of readdirSync(root, { recursive: true }).filter((name) => /\.(ts|md|json)$/.test(String(name))).map(String).sort()) {
+			hash.update(relative);
+			hash.update(readFileSync(join(root, relative)));
+		}
+	} else hash.update(readFileSync(file));
+	return hash.digest("hex");
+})();
+
+/** Identity captured at process startup, independent of the package version. */
 export function netaBuildId(): string | undefined {
-	return typeof NETA_BUILD_ID === "string" && NETA_BUILD_ID.length > 0 ? NETA_BUILD_ID : undefined;
+	return runtimeBuild;
 }

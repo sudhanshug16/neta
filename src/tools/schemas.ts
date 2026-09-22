@@ -1,14 +1,18 @@
 // One module owning every tool's name, description, schema and callers.
 // Each `inputSchema` stands alone ($defs expanded, no $refs); `validate` is
 // hand-written, no dependency, covering every keyword the schemas use.
-import type { Access, DecisionRecord } from "../core/types.ts";
+
+import type { Access, DecisionRecord, Disposition } from "../core/types.ts";
+import type { Effort } from "../routing/types.ts";
+
+export type MissionRef = number | string;
 
 export type ActorKind = "leader" | "lead" | "agent";
 
 export type ToolName =
 	| "neta_mission"
 	| "neta_agent"
-	| "neta_wait"
+	| "neta_model"
 	| "neta_send"
 	| "neta_scope"
 	| "neta_ready"
@@ -25,6 +29,8 @@ export interface LeadSpec {
 	task: string;
 	provider?: string;
 	model?: string;
+	effort?: Effort;
+	fallbackModels?: string[];
 	skills?: string[];
 }
 
@@ -33,6 +39,8 @@ export interface AgentSpec {
 	access: Access;
 	provider?: string;
 	model?: string;
+	effort?: Effort;
+	fallbackModels?: string[];
 	skills?: string[];
 }
 
@@ -42,22 +50,18 @@ export interface MissionParams {
 	access: Access;
 	lead: "self" | LeadSpec;
 	agents?: AgentSpec[];
-	continues?: string;
+	continues?: MissionRef;
 }
 
 export interface AgentParams {
 	task: string;
 	access: Access;
-	missionId?: string;
+	missionId?: MissionRef;
 	provider?: string;
 	model?: string;
+	effort?: Effort;
+	fallbackModels?: string[];
 	skills?: string[];
-}
-
-export interface WaitParams {
-	missionId?: string;
-	agentIds?: string[];
-	timeoutMs?: number;
 }
 
 export interface SendParams {
@@ -65,26 +69,33 @@ export interface SendParams {
 	text: string;
 }
 
+export interface ModelParams {
+	missionId?: MissionRef;
+	agentId?: string;
+	effort?: Effort;
+	change?: "up" | "down";
+}
+
 export interface ScopeParams {
-	missionId: string;
+	missionId?: MissionRef;
 	text: string;
 }
 
 export interface ReadyParams {
-	missionId: string;
+	missionId?: MissionRef;
 	summary: string;
 }
 
 export interface CloseParams {
-	missionId: string;
+	missionId: MissionRef;
 	evidence?: string;
-	disposition: "merged" | "abandoned";
+	disposition: Disposition;
 	reason: string;
 }
 
 export interface ModeParams {
 	mode: "lead" | "leadPlus";
-	record?: DecisionRecord;
+	record?: Omit<DecisionRecord, "missionId"> & { missionId: MissionRef };
 }
 
 export interface PinParams {
@@ -105,6 +116,7 @@ export interface ProgressParams {
 
 export interface AskParams {
 	question: string;
+	missionId?: MissionRef;
 }
 
 export interface DoneParams {
@@ -114,7 +126,7 @@ export interface DoneParams {
 export interface ToolParams {
 	neta_mission: MissionParams;
 	neta_agent: AgentParams;
-	neta_wait: WaitParams;
+	neta_model: ModelParams;
 	neta_send: SendParams;
 	neta_scope: ScopeParams;
 	neta_ready: ReadyParams;
@@ -129,6 +141,7 @@ export interface ToolParams {
 }
 
 export interface JsonSchema {
+	description?: string;
 	type?: string;
 	const?: unknown;
 	enum?: unknown[];
@@ -155,19 +168,67 @@ export interface ToolDef {
 const ULID: JsonSchema = { type: "string", pattern: "^[0-9A-HJKMNP-TV-Z]{26}$" };
 const ACCESS: JsonSchema = { type: "string", enum: ["readOnly", "readWrite"] };
 const SKILLS: JsonSchema = { type: "array", maxItems: 8, items: { type: "string", minLength: 1 } };
-const TASK: JsonSchema = { type: "string", minLength: 1, maxLength: 400 };
+const FALLBACK_MODELS: JsonSchema = {
+	type: "array",
+	maxItems: 8,
+	items: { type: "string", minLength: 1, maxLength: 200 },
+	description:
+		"Ordered exact connected model IDs permitted if the requested model fails before execution. Omit or use [] to prohibit substitution. Match the user's cost and capability requirements.",
+};
+const EFFORT: JsonSchema = {
+	type: "integer",
+	minimum: 1,
+	maximum: 5,
+	description:
+		"Required when auto-routing: task difficulty 1 confirmation/lookup, 2 bounded investigation, 3 implementation, 4 difficult debugging/design, 5 exceptional reasoning. This is not provider reasoning effort. Required unless model is explicitly selected; omission never inherits the parent model in OpenCode.",
+};
+const MISSION_REF: JsonSchema = {
+	description:
+		"Workspace mission number, for example 12. Legacy internal IDs are accepted for compatibility. A mission lead may omit this to target its own mission.",
+	oneOf: [{ type: "integer", minimum: 1, maximum: Number.MAX_SAFE_INTEGER }, ULID],
+};
+const TASK: JsonSchema = {
+	type: "string",
+	minLength: 1,
+	maxLength: 16000,
+	description:
+		"Task instructions, up to 16000 characters. Include concrete scope and acceptance criteria; shared requirements belong in the mission objective.",
+};
 const NAME: JsonSchema = { type: "string", minLength: 1, maxLength: 60 };
 const LEAD_SPEC: JsonSchema = {
 	type: "object",
 	additionalProperties: false,
 	required: ["task"],
-	properties: { task: TASK, provider: { type: "string" }, model: { type: "string" }, skills: SKILLS },
+	properties: {
+		task: TASK,
+		provider: { type: "string" },
+		model: {
+			type: "string",
+			description:
+				"Exact connected model ID from neta_status.modelCatalog. Omit to let Neta choose using task effort (1–5). Supply only for an explicit model override; it bypasses automatic routing.",
+		},
+		effort: EFFORT,
+		fallbackModels: FALLBACK_MODELS,
+		skills: SKILLS,
+	},
 };
 const AGENT_SPEC: JsonSchema = {
 	type: "object",
 	additionalProperties: false,
 	required: ["task", "access"],
-	properties: { task: TASK, access: ACCESS, provider: { type: "string" }, model: { type: "string" }, skills: SKILLS },
+	properties: {
+		task: TASK,
+		access: ACCESS,
+		provider: { type: "string" },
+		model: {
+			type: "string",
+			description:
+				"Exact connected model ID from neta_status.modelCatalog. Omit to let Neta choose using task effort (1–5). Supply only for an explicit model override; it bypasses automatic routing.",
+		},
+		effort: EFFORT,
+		fallbackModels: FALLBACK_MODELS,
+		skills: SKILLS,
+	},
 };
 const DECISION_RECORD: JsonSchema = {
 	type: "object",
@@ -185,7 +246,7 @@ const DECISION_RECORD: JsonSchema = {
 	properties: {
 		objective: { type: "string" },
 		whyLeadInsufficient: { type: "string" },
-		missionId: ULID,
+		missionId: MISSION_REF,
 		worktreePath: { type: "string" },
 		mutationKind: { type: "string" },
 		estimatedFiles: { type: "integer" },
@@ -206,18 +267,19 @@ export const TOOLS: readonly ToolDef[] = [
 			required: ["name", "objective", "access", "lead"],
 			properties: {
 				name: NAME,
-				objective: { type: "string", minLength: 1, maxLength: 2000 },
+				objective: { type: "string", minLength: 1, maxLength: 32000 },
 				access: ACCESS,
 				lead: { oneOf: [{ const: "self" }, LEAD_SPEC] },
 				agents: { type: "array", maxItems: 8, items: AGENT_SPEC },
-				continues: ULID,
+				continues: MISSION_REF,
 			},
 		},
 		actors: ["leader"],
 	},
 	{
 		name: "neta_agent",
-		description: "add an agent",
+		description:
+			"Add a worker to an existing mission. Workspace leaders pass its mission number; mission leads default to their own mission. For a new delegation, use neta_mission with a lead task instead.",
 		inputSchema: {
 			type: "object",
 			additionalProperties: false,
@@ -225,31 +287,59 @@ export const TOOLS: readonly ToolDef[] = [
 			properties: {
 				task: TASK,
 				access: ACCESS,
-				missionId: ULID,
+				missionId: MISSION_REF,
 				provider: { type: "string" },
-				model: { type: "string" },
+				model: {
+					type: "string",
+					description:
+						"Exact connected model ID from neta_status.modelCatalog. Omit to let Neta choose using task effort (1–5). Supply only for an explicit model override; it bypasses automatic routing.",
+				},
+				effort: EFFORT,
+				fallbackModels: FALLBACK_MODELS,
 				skills: SKILLS,
 			},
 		},
 		actors: ["leader", "lead"],
 	},
 	{
-		name: "neta_wait",
-		description: "block until an agent finishes, fails or asks",
+		name: "neta_model",
+		description:
+			"Adjust an existing mission lead or worker's intelligence in the same conversation. Set task effort 1–5 or move one level up/down using Neta routing. Use only when the user requests a model/effort change; never as an automatic workaround for routing failure. missionId targets that mission's lead; agentId accepts an exact ID or unique name. Mission leads can adjust their own mission only. Ordinary agents can adjust only themselves and must omit missionId and agentId. Does not start, restart, or cancel work.",
 		inputSchema: {
 			type: "object",
 			additionalProperties: false,
 			properties: {
-				missionId: ULID,
-				agentIds: { type: "array", maxItems: 32, items: ULID },
-				timeoutMs: { type: "integer", minimum: 1000, maximum: 1800000 },
+				missionId: MISSION_REF,
+				agentId: {
+					type: "string",
+					minLength: 1,
+					description:
+						"Exact agent ID or unique name, such as Cove. Omit to target the mission lead, or yourself when you are an ordinary agent.",
+				},
+				effort: {
+					type: "integer",
+					minimum: 1,
+					maximum: 5,
+					description:
+						"New task difficulty, independent of provider reasoning settings. Use this when no previous effort is recorded.",
+				},
+				change: {
+					type: "string",
+					enum: ["up", "down"],
+					description: "Change the recorded effort by one level; bounded at 1 and 5.",
+				},
 			},
+			oneOf: [
+				{ type: "object", required: ["effort"] },
+				{ type: "object", required: ["change"] },
+			],
 		},
-		actors: ["leader", "lead"],
+		actors: ["leader", "lead", "agent"],
 	},
 	{
 		name: "neta_send",
-		description: "answer or redirect an agent",
+		description:
+			"Save a follow-up in an agent inbox. Busy or queued agents retain it until they can receive it; this never interrupts a turn. Returns messageId and delivery status.",
 		inputSchema: {
 			type: "object",
 			additionalProperties: false,
@@ -264,33 +354,40 @@ export const TOOLS: readonly ToolDef[] = [
 		inputSchema: {
 			type: "object",
 			additionalProperties: false,
-			required: ["missionId", "text"],
-			properties: { missionId: ULID, text: { type: "string", minLength: 1, maxLength: 1000 } },
+			required: ["text"],
+			properties: { missionId: MISSION_REF, text: { type: "string", minLength: 1, maxLength: 1000 } },
 		},
 		actors: ["leader", "lead"],
 	},
 	{
 		name: "neta_ready",
-		description: "hand over, ready to close",
+		description:
+			"Report successful mission completion and hand off to the workspace leader. Mission leads may omit missionId; this never merges or closes the mission.",
 		inputSchema: {
 			type: "object",
 			additionalProperties: false,
-			required: ["missionId", "summary"],
-			properties: { missionId: ULID, summary: { type: "string", minLength: 1, maxLength: 2000 } },
+			required: ["summary"],
+			properties: { missionId: MISSION_REF, summary: { type: "string", minLength: 1, maxLength: 2000 } },
 		},
 		actors: ["leader", "lead"],
 	},
 	{
 		name: "neta_close",
-		description: "close it as merged or abandoned",
+		description:
+			"Close and archive a mission: completed for successful work without a merge; merged requires commit evidence; abandoned explicitly discards the work. Completed still refuses dirty or unmerged worktrees.",
 		inputSchema: {
 			type: "object",
 			additionalProperties: false,
 			required: ["missionId", "disposition", "reason"],
 			properties: {
-				missionId: ULID,
-				evidence: { type: "string", maxLength: 1000 },
-				disposition: { type: "string", enum: ["merged", "abandoned"] },
+				missionId: MISSION_REF,
+				evidence: {
+					type: "string",
+					maxLength: 1000,
+					description:
+						"Required for merged; for a Git mission name the commit already integrated into the base branch.",
+				},
+				disposition: { type: "string", enum: ["merged", "completed", "abandoned"] },
 				reason: { type: "string", minLength: 1, maxLength: 1000 },
 			},
 		},
@@ -350,12 +447,13 @@ export const TOOLS: readonly ToolDef[] = [
 	},
 	{
 		name: "neta_ask",
-		description: "ask the user",
+		description:
+			"ask the user about a mission; the workspace leader can target a delegated mission by its numeric ID",
 		inputSchema: {
 			type: "object",
 			additionalProperties: false,
 			required: ["question"],
-			properties: { question: { type: "string", minLength: 1, maxLength: 1000 } },
+			properties: { question: { type: "string", minLength: 1, maxLength: 1000 }, missionId: MISSION_REF },
 		},
 		actors: ["leader", "lead"],
 	},
@@ -373,7 +471,13 @@ export const TOOLS: readonly ToolDef[] = [
 ];
 
 export function toolsFor(kind: ActorKind): ToolDef[] {
-	return TOOLS.filter((tool) => tool.actors.includes(kind));
+	return TOOLS.filter((tool) => tool.actors.includes(kind)).map((tool) => {
+		if (kind !== "leader" || !["neta_agent", "neta_ready", "neta_scope"].includes(tool.name)) return tool;
+		return {
+			...tool,
+			inputSchema: { ...tool.inputSchema, required: [...(tool.inputSchema.required ?? []), "missionId"] },
+		};
+	});
 }
 
 function deepEqual(a: unknown, b: unknown): boolean {

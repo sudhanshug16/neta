@@ -68,27 +68,19 @@ interface Fixture {
 	events: EventKind[];
 	calls: string[];
 	sessions: CoordinationPorts["sessions"];
-	settle(id: string, state: AgentState): void;
+	missions: { save(mission: Mission): Promise<void> };
 }
 
-const SETTLED: readonly AgentState[] = ["blocked", "completed", "failed", "archived"];
-
 function fixture(): Fixture {
+	let currentMission = mission();
+	const missions = {
+		save: async (value: Mission) => {
+			currentMission = value;
+		},
+	};
 	const agents = new Map<string, Agent>();
 	const events: EventKind[] = [];
 	const calls: string[] = [];
-	const waiters: Array<{
-		missionId: string;
-		agentIds?: string[];
-		resolve(changed: Agent[]): void;
-	}> = [];
-
-	function watched(missionId: string, agentIds?: string[]): Agent[] {
-		return [...agents.values()].filter(
-			(a) => a.missionId === missionId && (agentIds === undefined || agentIds.includes(a.id)),
-		);
-	}
-
 	const sessions: CoordinationPorts["sessions"] = {
 		cancel: async (sessionId) => {
 			calls.push(`cancel:${sessionId}`);
@@ -96,37 +88,17 @@ function fixture(): Fixture {
 		prompt: async (sessionId, text) => {
 			calls.push(`prompt:${sessionId}:${text}`);
 		},
-		wait: async (input) => {
-			const settled = watched(input.missionId, input.agentIds).filter((a) => SETTLED.includes(a.state));
-			if (settled.length > 0) {
-				return { changed: settled, timedOut: false };
-			}
-			return new Promise((resolve) => {
-				const timer = setTimeout(() => {
-					const index = waiters.findIndex((w) => w.resolve === done);
-					if (index >= 0) {
-						waiters.splice(index, 1);
-					}
-					resolve({ changed: [], timedOut: true });
-				}, input.timeoutMs);
-				const done = (changed: Agent[]): void => {
-					clearTimeout(timer);
-					resolve({ changed, timedOut: false });
-				};
-				waiters.push({ missionId: input.missionId, agentIds: input.agentIds, resolve: done });
-			});
-		},
 	};
 
 	const store: NodeStore = {
 		machine: () => ({ id: "m", name: "test", createdAt: new Date(0).toISOString() }),
 		listWorkspaces: () => [],
 		listLeaders: () => [LEADER],
-		listMissions: () => [mission()],
+		listMissions: () => [currentMission],
 		listAgents: (missionId) => [...agents.values()].filter((a) => a.missionId === missionId),
 		getWorkspace: () => undefined,
 		getLeader: () => LEADER,
-		getMission: (id) => (id === MISSION ? mission() : undefined),
+		getMission: (id) => (id === MISSION ? currentMission : undefined),
 		getAgent: (id) => agents.get(id),
 		putWorkspace: () => Promise.resolve(),
 		putAgent: async (agent) => {
@@ -148,99 +120,38 @@ function fixture(): Fixture {
 		events,
 		calls,
 		sessions,
-		settle(id, state) {
-			const agent = agents.get(id);
-			if (agent === undefined) {
-				throw new Error(`no such agent: ${id}`);
-			}
-			agents.set(id, { ...agent, state });
-			for (let i = waiters.length - 1; i >= 0; i--) {
-				const waiter = waiters[i];
-				if (waiter === undefined) {
-					continue;
-				}
-				const changed = watched(waiter.missionId, waiter.agentIds).filter((a) => SETTLED.includes(a.state));
-				if (changed.length > 0) {
-					waiters.splice(i, 1);
-					waiter.resolve(changed);
-				}
-			}
-		},
+		missions,
 	};
 }
 
 function ctx(f: Fixture, actor: Actor): CoordinationToolContext {
-	return { actor, deps: { store: f.store, sessions: f.sessions } };
+	return { actor, deps: { store: f.store, sessions: f.sessions, missions: f.missions } };
 }
 
 function leadActor(agent: Agent): Actor {
 	return { kind: "lead", workspaceId: WORKSPACE, missionId: MISSION, agentId: agent.id, sessionId: agent.sessionId };
 }
 
-describe("neta_wait", () => {
-	test("returns immediately for an already blocked agent", async () => {
-		const f = fixture();
-		const blocked = makeAgent(ulid(), "blocked", { pendingQuestion: "which key?" });
-		f.agents.set(blocked.id, blocked);
-		const actor = leadActor(makeAgent(ulid(), "running"));
-		const result = await coordinationHandlers.neta_wait(ctx(f, actor), { missionId: MISSION });
-		expect(result.ok).toBe(true);
-		if (result.ok) {
-			expect(result.data.timedOut).toBe(false);
-			expect((result.data.changed as Agent[]).map((a) => a.id)).toEqual([blocked.id]);
-		}
-	});
-
-	test("returns when a fake-agent session finishes", async () => {
-		const f = fixture();
-		const worker = makeAgent(ulid(), "running");
-		f.agents.set(worker.id, worker);
-		const actor = leadActor(makeAgent(ulid(), "running"));
-		const waited = coordinationHandlers.neta_wait(ctx(f, actor), { missionId: MISSION, timeoutMs: 5000 });
-		f.settle(worker.id, "completed");
-		const result = await waited;
-		expect(result.ok).toBe(true);
-		if (result.ok) {
-			expect(result.data.timedOut).toBe(false);
-			expect((result.data.changed as Agent[]).map((a) => a.id)).toEqual([worker.id]);
-		}
-	});
-
-	test("times out with timedOut: true and no error", async () => {
-		const f = fixture();
-		f.agents.set(ulid(), makeAgent(ulid(), "running"));
-		const actor = leadActor(makeAgent(ulid(), "running"));
-		const result = await coordinationHandlers.neta_wait(ctx(f, actor), { missionId: MISSION, timeoutMs: 20 });
-		expect(result).toEqual({ ok: true, data: { changed: [], timedOut: true } });
-	});
-});
-
 describe("neta_send", () => {
-	test("to a blocked agent clears pendingQuestion and emits mission.unblocked", async () => {
-		const f = fixture();
-		const blocked = makeAgent(ulid(), "blocked", { pendingQuestion: "which key?" });
-		f.agents.set(blocked.id, blocked);
-		const actor = leadActor(makeAgent(ulid(), "running"));
-		const result = await coordinationHandlers.neta_send(ctx(f, actor), { agentId: blocked.id, text: "staging" });
-		expect(result).toEqual({ ok: true, data: { agentId: blocked.id, delivered: "answered" } });
-		expect(f.agents.get(blocked.id)?.pendingQuestion).toBeUndefined();
-		expect(f.agents.get(blocked.id)?.state).toBe("running");
-		expect(f.events).toEqual(["mission.unblocked"]);
-		expect(f.calls).toEqual([`prompt:${blocked.sessionId}:staging`]);
-	});
+	test.each(["running", "idle", "completed"] as const)(
+		"self-send from %s refuses before touching the session",
+		async (state) => {
+			const f = fixture();
+			const self = makeAgent(ulid(), state, { canSpawn: true, name: "Britt" });
+			f.agents.set(self.id, self);
+			const result = await coordinationHandlers.neta_send(ctx(f, leadActor(self)), {
+				agentId: self.id,
+				text: "Continue the implementation",
+			});
+			expect(result).toMatchObject({ ok: false, code: "refused" });
+			if (!result.ok) expect(result.message).toContain(`You are Britt (${self.id})`);
+			expect(f.calls).toEqual([]);
+			expect(f.events).toEqual([]);
+			expect(f.agents.get(self.id)).toEqual(self);
+		},
+	);
 
-	test("to a running agent cancels before prompting", async () => {
-		const f = fixture();
-		const worker = makeAgent(ulid(), "running");
-		f.agents.set(worker.id, worker);
-		const actor = leadActor(makeAgent(ulid(), "running"));
-		const result = await coordinationHandlers.neta_send(ctx(f, actor), { agentId: worker.id, text: "pivot" });
-		expect(result).toEqual({ ok: true, data: { agentId: worker.id, delivered: "resteered" } });
-		expect(f.calls).toEqual([`cancel:${worker.sessionId}`, `prompt:${worker.sessionId}:pivot`]);
-		expect(f.events).toEqual([]);
-	});
-
-	test("to a finished agent is refused", async () => {
+	test("completed follow-up requires a runtime resume port", async () => {
 		const f = fixture();
 		const done = makeAgent(ulid(), "completed");
 		f.agents.set(done.id, done);
@@ -296,4 +207,55 @@ describe("neta_done", () => {
 		expect(f.agents.get(worker.id)?.outcome).toBe("ported");
 		expect(f.events).toEqual(["agent.finished"]);
 	});
+});
+
+test("the workspace leader can ask for a delegated mission without activeMissionId", async () => {
+	const f = fixture();
+	const lead = makeAgent(ulid(), "idle", { canSpawn: true });
+	f.agents.set(lead.id, lead);
+	await f.missions.save({ ...mission(), lead: { kind: "agent", agentId: lead.id } });
+	f.store.getLeader = () => ({ ...LEADER, activeMissionId: undefined });
+	const actor: Actor = { kind: "leader", workspaceId: WORKSPACE, sessionId: LEADER.sessionId };
+	const result = await coordinationHandlers.neta_ask(ctx(f, actor), {
+		missionId: 1,
+		question: "Apply to production?",
+	});
+	expect(result).toEqual({ ok: true, data: { missionId: 1 } });
+	expect(f.agents.get(lead.id)?.pendingQuestion).toBe("Apply to production?");
+	expect(f.agents.get(lead.id)?.state).toBe("blocked");
+});
+test("asking about an invalid or another mission cannot redirect a lead's question", async () => {
+	const f = fixture();
+	const lead = makeAgent(ulid(), "running", { canSpawn: true });
+	f.agents.set(lead.id, lead);
+	expect((await coordinationHandlers.neta_ask(ctx(f, leadActor(lead)), { missionId: 99, question: "ship?" })).ok).toBe(
+		false,
+	);
+	expect(f.agents.get(lead.id)?.state).toBe("running");
+});
+test("durable follow-ups return receipts, deduplicate retries, and never cancel busy recipients", async () => {
+	const f = fixture();
+	const worker = makeAgent(ulid(), "running");
+	f.agents.set(worker.id, worker);
+	const ids: string[] = [];
+	f.sessions.send = async (agent, text, sourceId) => {
+		ids.push(sourceId);
+		return {
+			id: sourceId,
+			sessionId: agent.sessionId,
+			createdAt: new Date(0).toISOString(),
+			text,
+			attachments: [],
+			status: "queued",
+		};
+	};
+	const context = ctx(f, leadActor(makeAgent(ulid(), "running")));
+	const results = await Promise.all(
+		[1, 2].map(() => coordinationHandlers.neta_send(context, { agentId: worker.id, text: "Review the edge cases" })),
+	);
+	expect(ids[0]).toBe(ids[1]);
+	expect(ids[0]).toStartWith("followup:");
+	expect(results[0]).toMatchObject({ ok: true, data: { status: "queued", messageId: ids[0] } });
+	expect(f.calls).toEqual([]);
+	expect(f.agents.get(worker.id)?.state).toBe("running");
 });

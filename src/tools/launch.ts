@@ -8,6 +8,7 @@ import { type McpServerSpec, netaMcpServer } from "../acp/mcp.ts";
 import { coordinationHandlers } from "./handlers/coordination.ts";
 import { lifecycleHandlers } from "./handlers/lifecycle.ts";
 import { missionHandlers } from "./handlers/mission.ts";
+import { modelHandlers } from "./handlers/model.ts";
 import type { ToolHandlers } from "./router.ts";
 
 export function mcpServerFor(actorId: string, token: string, socketPath: string): McpServerSpec {
@@ -15,5 +16,5 @@ export function mcpServerFor(actorId: string, token: string, socketPath: string)
 }
 
 export function toolHandlers(): ToolHandlers {
-	return { ...missionHandlers, ...coordinationHandlers, ...lifecycleHandlers };
+	return { ...missionHandlers, ...modelHandlers, ...coordinationHandlers, ...lifecycleHandlers };
 }

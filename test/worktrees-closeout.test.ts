@@ -1,13 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { writeFile } from "node:fs/promises";
+import { rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ulid } from "../src/core/ids.ts";
 import type { AgentId, EventKind, Mission, MissionId } from "../src/core/types.ts";
 import { type CloseoutDeps, closeMission } from "../src/worktrees/closeout.ts";
-import type { RemoveInput, RemoveResult, WorktreeDriver } from "../src/worktrees/driver.ts";
+import { type RemoveInput, type RemoveResult, type WorktreeDriver, WorktrunkDriver } from "../src/worktrees/driver.ts";
 import { isIntegrated, runGit } from "../src/worktrees/integration.ts";
 import { LeaseManager, type LeaseStore } from "../src/worktrees/leases.ts";
-import { makeRepo } from "./helpers/git-repo.ts";
+import { fakeWtEnv, makeRepo } from "./helpers/git-repo.ts";
 
 const NOW = "2026-01-02T00:00:00.000Z";
 
@@ -119,6 +119,7 @@ describe("mission closeout", () => {
 		expect(f.closed).toHaveLength(1);
 		expect(f.removes).toHaveLength(1);
 		expect(f.removes[0]?.abandon).not.toBe(true);
+		expect(f.removes[0]?.evidenceCommit).toBe("abc1234");
 		// Every lease freed, including BASE_LEASE.
 		expect(await f.leases.holder("w", "base")).toBeUndefined();
 		for (const agentId of start.agentIds) {
@@ -253,3 +254,108 @@ describe("mission closeout", () => {
 		}
 	});
 });
+
+for (const scenario of [
+	"fresh evidence",
+	"recorded integration",
+	"extra branch work",
+	"dirty worktree",
+	"unrelated evidence",
+] as const) {
+	test(`squash closeout through Worktrunk: ${scenario}`, async () => {
+		const previousWt = process.env.NETA_WT_BIN;
+		process.env.NETA_WT_BIN = process.env.NETA_TEST_WT_BIN ?? fakeWtEnv().NETA_WT_BIN;
+		const repo = await makeRepo();
+		let worktreePath: string | undefined;
+		try {
+			const driver = new WorktrunkDriver();
+			const worktree = await driver.create({ repoRoot: repo.root, number: 14, slug: "squash", base: "main" });
+			worktreePath = worktree.path;
+			for (const text of ["first", "second"]) {
+				await writeFile(join(worktree.path, "work.txt"), `${text}\n`);
+				expect((await runGit(["add", "work.txt"], worktree.path)).code).toBe(0);
+				expect((await runGit(["commit", "-m", text], worktree.path)).code).toBe(0);
+			}
+			const unrelated = (await runGit(["rev-parse", "main"], repo.root)).stdout.trim();
+			expect((await runGit(["merge", "--squash", worktree.branch], repo.root)).code).toBe(0);
+			expect((await runGit(["commit", "-m", "squash mission"], repo.root)).code).toBe(0);
+			const squash = (await runGit(["rev-parse", "main"], repo.root)).stdout.trim();
+			if (scenario === "dirty worktree" || scenario === "extra branch work") {
+				await writeFile(join(worktree.path, "draft.txt"), "keep this work\n");
+				if (scenario === "extra branch work") {
+					expect((await runGit(["add", "draft.txt"], worktree.path)).code).toBe(0);
+					expect((await runGit(["commit", "-m", "not integrated"], worktree.path)).code).toBe(0);
+				}
+			}
+			const start = mission(
+				worktree,
+				scenario === "fresh evidence" || scenario === "unrelated evidence"
+					? {}
+					: {
+							integration: { mergedAt: NOW, commit: squash, base: "main" },
+						},
+			);
+			const f = fixture();
+			const result = await closeMission(
+				{
+					mission: start,
+					disposition: "merged",
+					reason: "PR merged",
+					evidence: scenario === "unrelated evidence" ? unrelated : squash,
+				},
+				{ ...f.deps, driver },
+			);
+			if (scenario === "fresh evidence" || scenario === "recorded integration") {
+				expect(result.ok).toBe(true);
+				expect(result.mission.state).toBe("closed");
+				expect(result.mission.integration?.commit).toBe(squash);
+				expect(result.mission.worktree).toBeUndefined();
+				expect(f.closed).toHaveLength(1);
+				await expect(stat(worktree.path)).rejects.toThrow();
+				expect((await runGit(["rev-parse", "--verify", worktree.branch], repo.root)).code).not.toBe(0);
+			} else {
+				expect(result.ok).toBe(false);
+				expect(result.mission.state).toBe("running");
+				expect(result.mission.worktree).toEqual(worktree);
+				expect(f.closed).toHaveLength(0);
+				await expect(stat(worktree.path)).resolves.toBeDefined();
+				expect((await runGit(["rev-parse", "--verify", worktree.branch], repo.root)).code).toBe(0);
+			}
+		} finally {
+			if (previousWt === undefined) delete process.env.NETA_WT_BIN;
+			else process.env.NETA_WT_BIN = previousWt;
+			if (worktreePath !== undefined) await rm(worktreePath, { recursive: true, force: true });
+			await repo.cleanup();
+		}
+	});
+}
+
+test("completed inspection closes cleanly without invented merge evidence or force removal", async () => {
+	const f = fixture();
+	const start = mission({ provider: "worktrunk", path: "/wt-1", branch: "mission/check", base: "main" });
+	const result = await closeMission(
+		{ mission: start, disposition: "completed", reason: "Response verified" },
+		{
+			...f.deps,
+			isIntegrated: async () => {
+				throw new Error("no merge evidence needed");
+			},
+		},
+	);
+	expect(result.ok).toBe(true);
+	expect(result.mission).toMatchObject({ state: "closed", disposition: "completed" });
+	expect(result.mission.integration).toBeUndefined();
+	expect(f.removes[0]?.abandon).toBe(false);
+});
+
+for (const refusal of ["dirty", "unmerged"] as const) {
+	test(`completed keeps a ${refusal} worktree open`, async () => {
+		const f = fixture(async () => ({ ok: false, refusal, reason: `worktree is ${refusal}` }));
+		const start = mission({ provider: "worktrunk", path: "/wt-1", branch: "mission/check", base: "main" });
+		const result = await closeMission({ mission: start, disposition: "completed", reason: "checked" }, f.deps);
+		expect(result.ok).toBe(false);
+		expect(result.mission.worktree).toEqual(start.worktree);
+		expect(result.mission.state).toBe("running");
+		expect(f.closed).toHaveLength(0);
+	});
+}

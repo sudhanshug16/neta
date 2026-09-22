@@ -153,7 +153,7 @@ describe("neta_scope", () => {
 		const id = onlyMission(f).id;
 		await lifecycleHandlers.neta_scope(ctx(f), { missionId: id, text: "first" });
 		const result = await lifecycleHandlers.neta_scope(ctx(f), { missionId: id, text: "second" });
-		expect(result).toEqual({ ok: true, data: { missionId: id } });
+		expect(result).toEqual({ ok: true, data: { missionId: 1 } });
 		const updated = onlyMission(f);
 		expect(updated.objective).toBe("original objective");
 		expect(updated.changes.map((c) => c.text)).toEqual(["first", "second"]);
@@ -166,7 +166,7 @@ describe("neta_ready", () => {
 		const f = fixture();
 		const id = onlyMission(f).id;
 		const result = await lifecycleHandlers.neta_ready(ctx(f), { missionId: id, summary: "all done" });
-		expect(result).toEqual({ ok: true, data: { missionId: id, state: "readyToClose" } });
+		expect(result).toEqual({ ok: true, data: { missionId: 1, state: "readyToClose" } });
 		expect(onlyMission(f).attention).toBe("all done");
 		expect(f.events).toEqual(["mission.readyToClose"]);
 	});
@@ -194,7 +194,7 @@ describe("neta_close", () => {
 			evidence: "abc1234",
 			reason: "done",
 		});
-		expect(result).toEqual({ ok: true, data: { missionId: id, disposition: "merged" } });
+		expect(result).toEqual({ ok: true, data: { missionId: 1, disposition: "merged" } });
 		expect(onlyMission(f).state).toBe("closed");
 		expect(f.events).toEqual(["mission.closed"]);
 	});
@@ -211,7 +211,7 @@ describe("neta_close", () => {
 		expect(onlyMission(f).state).toBe("closed");
 	});
 
-	test("closing twice is refused", async () => {
+	test("repeating the same close is idempotent but a different disposition is refused", async () => {
 		const f = fixture();
 		const id = onlyMission(f).id;
 		await lifecycleHandlers.neta_close(ctx(f), { missionId: id, disposition: "abandoned", reason: "x" });
@@ -220,7 +220,11 @@ describe("neta_close", () => {
 			disposition: "abandoned",
 			reason: "x",
 		});
-		expect(again).toEqual({ ok: false, code: "refused", message: "the mission is already closed" });
+		expect(again).toEqual({ ok: true, data: { missionId: 1, disposition: "abandoned", alreadyClosed: true } });
+		expect(f.events).toEqual(["mission.closed"]);
+		expect(
+			await lifecycleHandlers.neta_close(ctx(f), { missionId: 1, disposition: "completed", reason: "x" }),
+		).toMatchObject({ ok: false, code: "refused" });
 	});
 
 	test("a lead closing at all is refused", async () => {
@@ -267,10 +271,29 @@ describe("neta_pin and neta_status", () => {
 		expect(result).toEqual({
 			ok: true,
 			data: {
+				self: { role: "leader", actorId: LEADER.sessionId, name: LEADER.name },
 				missions: [
-					{ number: 1, name: "mission 1", state: "blocked", attention: "staging key", agents: 0 },
-					{ number: 2, name: "mission 2", state: "running", agents: 0 },
+					{
+						number: 1,
+						missionId: 1,
+						name: "mission 1",
+						state: "blocked",
+						attention: "staging key",
+						agents: 0,
+						executingAgents: 0,
+						queuedAgents: 0,
+					},
+					{
+						number: 2,
+						missionId: 2,
+						name: "mission 2",
+						state: "running",
+						agents: 0,
+						executingAgents: 0,
+						queuedAgents: 0,
+					},
 				],
+				agentDetails: [],
 				mode: "lead",
 				modeActiveMs: 12000,
 			},
@@ -306,4 +329,181 @@ describe("neta_mode", () => {
 		expect(result).toEqual({ ok: true, data: denial });
 		expect(f.modes).toEqual([{ subject: { kind: "leader", workspaceId: WORKSPACE }, mode: "leadPlus" }]);
 	});
+});
+
+test("status exposes connected model choices for deliberate staffing", async () => {
+	const f = fixture();
+	f.ports.modelCatalog = async () => [{ provider: "opencode", id: "openai/small", name: "Small" }];
+	const result = await lifecycleHandlers.neta_status(ctx(f), {});
+	expect(result).toMatchObject({ ok: true, data: { modelCatalog: [{ id: "openai/small" }] } });
+});
+
+test("status exposes actual and routed model separately with effort and warnings", async () => {
+	const f = fixture();
+	const agent: Agent = {
+		id: "worker",
+		missionId: onlyMission(f).id,
+		workspaceId: WORKSPACE,
+		name: "Test",
+		task: "check",
+		access: "readOnly",
+		provider: "opencode",
+		model: "openai/actual",
+		requestedModel: "openai/luna",
+		skills: [],
+		sessionId: "session",
+		canSpawn: false,
+		state: "running",
+		startedAt: new Date(0).toISOString(),
+		routing: {
+			effort: 1,
+			method: "fixed",
+			selectedModel: "openai/luna",
+			candidates: ["openai/luna"],
+			reason: "Configured effort 1",
+			warnings: ["Reference price only"],
+		},
+	};
+	f.store.listAgents = () => [agent];
+	const result = await lifecycleHandlers.neta_status(ctx(f), {});
+	expect(result.ok).toBe(true);
+	if (result.ok)
+		expect(result.data.agentDetails).toEqual([
+			{
+				agentId: "worker",
+				role: "agent",
+				isSelf: false,
+				name: "Test",
+				mission: 1,
+				state: "running",
+				model: "openai/actual",
+				requestedModel: "openai/luna",
+				routing: {
+					effort: 1,
+					method: "fixed",
+					selectedModel: "openai/luna",
+					reason: "Configured effort 1",
+					warnings: ["Reference price only"],
+				},
+			},
+		]);
+});
+
+test("status distinguishes the caller from workers and open missions from executing agents", async () => {
+	const f = fixture();
+	const m = onlyMission(f);
+	const lead: Agent = {
+		id: "britt",
+		name: "Britt",
+		sessionId: "britt-session",
+		missionId: m.id,
+		workspaceId: WORKSPACE,
+		task: "fix",
+		access: "readOnly",
+		provider: "fake",
+		model: "small",
+		skills: [],
+		canSpawn: true,
+		state: "idle",
+		startedAt: new Date(0).toISOString(),
+	};
+	f.store.listAgents = () => [lead];
+	f.store.getAgent = (id) => (id === lead.id ? lead : undefined);
+	const actor: Actor = {
+		kind: "lead",
+		workspaceId: WORKSPACE,
+		missionId: m.id,
+		agentId: lead.id,
+		sessionId: lead.sessionId,
+	};
+	const result = await lifecycleHandlers.neta_status(ctx(f, actor), {});
+	expect(result).toMatchObject({
+		ok: true,
+		data: {
+			self: { role: "lead", actorId: "britt", name: "Britt" },
+			missions: [{ missionId: 1, state: "running", executingAgents: 0, queuedAgents: 0 }],
+			agentDetails: [{ agentId: "britt", role: "lead", isSelf: true, state: "idle" }],
+		},
+	});
+	lead.state = "running";
+	expect(await lifecycleHandlers.neta_status(ctx(f, actor), {})).toMatchObject({
+		ok: true,
+		data: { missions: [{ executingAgents: 1 }] },
+	});
+});
+
+test("mission numbers resolve only inside the caller's workspace, including legacy IDs", async () => {
+	const own = mission(12, "running");
+	const foreign = mission(12, "running", { workspaceId: "elsewhere" });
+	const f = fixture({ seed: [foreign, own] });
+	expect(await lifecycleHandlers.neta_scope(ctx(f), { missionId: 12, text: "local" })).toEqual({
+		ok: true,
+		data: { missionId: 12 },
+	});
+	expect(f.missions.get(own.id)?.changes).toHaveLength(1);
+	expect(f.missions.get(foreign.id)?.changes).toHaveLength(0);
+	expect(await lifecycleHandlers.neta_ready(ctx(f), { missionId: foreign.id, summary: "no" })).toMatchObject({
+		ok: false,
+		code: "notFound",
+	});
+});
+
+test("mission lead can hand off without an ID; active workers prevent premature completion", async () => {
+	const f = fixture();
+	const m = onlyMission(f);
+	const lead: Agent = {
+		id: "lead",
+		missionId: m.id,
+		workspaceId: WORKSPACE,
+		sessionId: "lead-session",
+		name: "Lead",
+		task: "check",
+		provider: "fake",
+		model: "small",
+		access: "readOnly",
+		skills: [],
+		canSpawn: true,
+		state: "running",
+		startedAt: new Date(0).toISOString(),
+	};
+	const agents = new Map([
+		[lead.id, lead],
+		["worker", { ...lead, id: "worker", canSpawn: false }],
+	]);
+	f.missions.set(m.id, { ...m, lead: { kind: "agent", agentId: lead.id }, agentIds: [...agents.keys()] });
+	f.store.getAgent = (id) => agents.get(id);
+	f.store.listAgents = () => [...agents.values()];
+	f.store.putAgent = async (agent) => {
+		agents.set(agent.id, agent);
+	};
+	const released: string[] = [];
+	f.ports.sessions = {
+		release: async (agent) => {
+			released.push(agent.id);
+		},
+	};
+	const actor: Actor = {
+		kind: "lead",
+		workspaceId: WORKSPACE,
+		missionId: m.id,
+		agentId: lead.id,
+		sessionId: lead.sessionId,
+	};
+	expect(await lifecycleHandlers.neta_ready(ctx(f, actor), { summary: "done" })).toMatchObject({
+		ok: false,
+		code: "refused",
+	});
+	expect(
+		await lifecycleHandlers.neta_close(ctx(f), { missionId: m.number, disposition: "completed", reason: "done" }),
+	).toMatchObject({ ok: false, code: "refused" });
+	agents.set("worker", { ...lead, id: "worker", canSpawn: false, state: "completed" });
+	expect(await lifecycleHandlers.neta_ready(ctx(f, actor), { summary: "checked" })).toEqual({
+		ok: true,
+		data: { missionId: m.number, state: "readyToClose" },
+	});
+	expect(agents.get(lead.id)).toMatchObject({ state: "completed", outcome: "checked" });
+	expect(released).toEqual([lead.id]);
+	expect(
+		await lifecycleHandlers.neta_close(ctx(f), { missionId: m.number, disposition: "completed", reason: "checked" }),
+	).toMatchObject({ ok: true, data: { disposition: "completed" } });
 });

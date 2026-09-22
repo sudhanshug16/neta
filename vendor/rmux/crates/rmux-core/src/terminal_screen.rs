@@ -1,0 +1,188 @@
+//! Public live-terminal screen facade.
+//!
+//! This module exposes the server-facing screen wrapper while keeping the
+//! parser implementation inside the crate-private `terminal` module.
+
+use rmux_proto::TerminalSize;
+
+use crate::input::OscColourSlot;
+use crate::screen::Screen;
+use crate::terminal::TerminalParser;
+use crate::terminal_passthrough::TerminalPassthrough;
+use crate::utf8::Utf8Config;
+
+/// Live terminal screen fed by rmux-core's private parser boundary.
+///
+/// `TerminalScreen` is the public core facade that server code uses to feed
+/// raw PTY bytes and inspect structured screen cells. The parser itself stays
+/// hidden behind the crate-private terminal module, so SDK/protocol code can
+/// depend on screen-cell semantics without coupling to parser internals.
+pub struct TerminalScreen {
+    parser: TerminalParser,
+}
+
+impl TerminalScreen {
+    /// Builds a fresh terminal screen with the given geometry and scrollback
+    /// limit.
+    #[must_use]
+    pub fn new(size: TerminalSize, history_limit: usize) -> Self {
+        Self {
+            parser: TerminalParser::new(size, history_limit),
+        }
+    }
+
+    /// Returns a borrow of the structured screen grid.
+    #[must_use]
+    pub fn screen(&self) -> &Screen {
+        self.parser.screen()
+    }
+
+    /// Returns a mutable borrow of the structured screen grid.
+    pub fn screen_mut(&mut self) -> &mut Screen {
+        self.parser.screen_mut()
+    }
+
+    /// Returns whether plain printable output can bypass structured rendering
+    /// without losing parser or screen semantics.
+    #[must_use]
+    pub fn plain_output_forwarding_safe(&self) -> bool {
+        self.parser.plain_output_forwarding_safe()
+    }
+
+    /// Updates the tmux-style UTF-8 width and combining configuration.
+    pub fn set_utf8_config(&mut self, config: Utf8Config) {
+        self.parser.set_utf8_config(config);
+    }
+
+    /// Enables or disables DEC alternate-screen entry for subsequent output.
+    pub fn set_alternate_screen_enabled(&mut self, enabled: bool) {
+        self.parser.set_alternate_screen_enabled(enabled);
+    }
+
+    /// Enables or disables title changes requested by pane output.
+    pub fn set_title_rename_enabled(&mut self, enabled: bool) {
+        self.parser.set_title_rename_enabled(enabled);
+    }
+
+    /// Updates the tmux `input-buffer-size` parser limit.
+    pub fn set_input_buffer_limit(&mut self, limit: usize) {
+        self.parser.set_input_buffer_limit(limit);
+    }
+
+    /// Resizes the screen and resets the scroll region.
+    pub fn resize(&mut self, size: TerminalSize) {
+        self.parser.resize(size);
+    }
+
+    /// Feeds raw PTY output bytes through the private parser into the screen.
+    pub fn feed(&mut self, bytes: &[u8]) {
+        self.parser.feed(bytes);
+    }
+
+    /// Returns and clears whether the latest feeds used terminal-parser state
+    /// that an ANSI recovery keyframe cannot reconstruct.
+    ///
+    /// Callers publishing raw continuation bytes must replace that
+    /// continuation with an authoritative post-dispatch keyframe.
+    #[must_use]
+    pub fn take_recovery_rebase_required(&mut self) -> bool {
+        self.parser.take_recovery_rebase_required()
+    }
+
+    /// Returns and drains terminal replies generated while parsing PTY output.
+    pub fn take_replies(&mut self) -> Vec<u8> {
+        self.parser.take_replies()
+    }
+
+    /// Returns any bytes still buffered inside an incomplete parser state.
+    #[must_use]
+    pub fn pending_bytes(&self) -> Vec<u8> {
+        self.parser.pending_bytes()
+    }
+
+    /// Borrows bytes buffered inside an incomplete parser state.
+    #[must_use]
+    pub fn pending_bytes_ref(&self) -> &[u8] {
+        self.parser.pending_bytes_ref()
+    }
+
+    /// Clones renderer state, including bounded scrollback and saved buffers.
+    #[must_use]
+    pub fn clone_recovery_screen(&self) -> Screen {
+        self.parser.clone_recovery_screen()
+    }
+
+    /// Returns ANSI restoring the parser's active rendition and character sets.
+    #[must_use]
+    pub fn active_cell_state_ansi(&self) -> Vec<u8> {
+        self.parser.active_cell_state_ansi()
+    }
+
+    /// Returns bounded ANSI for the active rendition and whether metadata was
+    /// represented completely.
+    #[must_use]
+    pub fn active_cell_state_ansi_bounded(&self, max_hyperlink_bytes: usize) -> (Vec<u8>, bool) {
+        self.parser
+            .active_cell_state_ansi_bounded(max_hyperlink_bytes)
+    }
+
+    /// Returns ANSI restoring the rendition saved by DECSC/SCP.
+    #[must_use]
+    pub fn saved_cell_state_ansi(&self) -> Vec<u8> {
+        self.parser.saved_cell_state_ansi()
+    }
+
+    /// Returns bounded ANSI for the saved rendition and whether metadata was
+    /// represented completely.
+    #[must_use]
+    pub fn saved_cell_state_ansi_bounded(&self, max_hyperlink_bytes: usize) -> (Vec<u8>, bool) {
+        self.parser
+            .saved_cell_state_ansi_bounded(max_hyperlink_bytes)
+    }
+
+    /// Returns the cursor and origin mode saved by DECSC/SCP.
+    #[must_use]
+    pub fn saved_cursor_state(&self) -> (u32, u32, bool) {
+        self.parser.saved_cursor_state()
+    }
+
+    /// Returns ANSI restoring parser-owned state that has a faithful terminal
+    /// representation, such as application-defined dynamic colours.
+    #[must_use]
+    pub fn recovery_parser_state_ansi(&self) -> Vec<u8> {
+        self.parser.recovery_parser_state_ansi()
+    }
+
+    /// Returns an application-defined OSC 10/11/12 colour.
+    #[must_use]
+    pub fn dynamic_colour(&self, slot: OscColourSlot) -> Option<&str> {
+        self.parser.dynamic_colour(slot)
+    }
+
+    /// Returns whether the parser ground timeout is currently armed.
+    #[must_use]
+    pub fn ground_timer_active(&self) -> bool {
+        self.parser.ground_timer_active()
+    }
+
+    /// Notifies the parser that its ground timeout has expired.
+    pub fn ground_timer_expired(&mut self) {
+        self.parser.ground_timer_expired();
+    }
+
+    /// Returns and drains passthrough events generated while parsing PTY output.
+    pub fn take_terminal_passthrough(&mut self) -> Vec<TerminalPassthrough> {
+        self.parser.take_terminal_passthrough()
+    }
+
+    /// Returns and drains passthrough events dropped by parser safety limits.
+    pub fn take_terminal_passthrough_dropped_count(&mut self) -> u64 {
+        self.parser.take_terminal_passthrough_dropped_count()
+    }
+
+    /// Replaces the hidden parser with a fresh ground-state instance while
+    /// preserving the current screen grid.
+    pub fn reset_parser(&mut self) {
+        self.parser.reset_parser();
+    }
+}

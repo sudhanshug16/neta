@@ -200,22 +200,28 @@ if (command === "remove") {
 	if (status.porcelain.trim() !== "" && !force) {
 		fail(`Cannot remove worktree: ${branch} has uncommitted changes`);
 	}
+	// Removal may be invoked from the worktree being removed. Keep subsequent
+	// git commands anchored in the primary worktree, as real Worktrunk does.
+	const primary = listWorktrees()[0].path;
+	// Model Worktrunk's exact-tree squash detection for the closeout fixture.
+	const treesMatch =
+		git(primary, ["rev-parse", `${branch}^{tree}`]).trim() === git(primary, ["rev-parse", "main^{tree}"]).trim();
 	try {
 		const args = ["worktree", "remove"];
 		if (force) {
 			args.push("--force");
 		}
 		args.push(entry.path);
-		git(repoRoot, args);
-		if (rest.includes("-D")) {
+		git(primary, args);
+		if (rest.includes("-D") || treesMatch) {
 			try {
-				git(repoRoot, ["branch", "-D", branch]);
+				git(primary, ["branch", "-D", branch]);
 			} catch {
 				// The branch may already be gone.
 			}
 		} else {
 			try {
-				git(repoRoot, ["branch", "-d", branch]);
+				git(primary, ["branch", "-d", branch]);
 			} catch {
 				// An unmerged branch stays without -D.
 			}
@@ -225,7 +231,7 @@ if (command === "remove") {
 	}
 	let branchOutcome = "deleted";
 	try {
-		git(repoRoot, ["rev-parse", "--verify", branch]);
+		git(primary, ["rev-parse", "--verify", branch]);
 		branchOutcome = "retained_unmerged";
 	} catch {
 		branchOutcome = "deleted";

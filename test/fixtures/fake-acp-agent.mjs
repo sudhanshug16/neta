@@ -43,7 +43,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 
@@ -68,6 +68,8 @@ const launchMcp = process.argv.includes("--launch-mcp");
 const uuidSession = process.argv.includes("--uuid-session");
 const promptMarkerIndex = process.argv.indexOf("--prompt-marker");
 const promptMarker = promptMarkerIndex === -1 ? undefined : process.argv[promptMarkerIndex + 1];
+const promptCaptureIndex = process.argv.indexOf("--prompt-capture");
+const promptCapture = promptCaptureIndex === -1 ? undefined : process.argv[promptCaptureIndex + 1];
 const barrierFileIndex = process.argv.indexOf("--barrier-file");
 const barrierFile = barrierFileIndex === -1 ? undefined : process.argv[barrierFileIndex + 1];
 const barrierReadyFileIndex = process.argv.indexOf("--barrier-ready-file");
@@ -80,6 +82,7 @@ const stored =
 		? JSON.parse(readFileSync(sessionStore, "utf-8"))
 		: { counter: 0, sessions: {} };
 const sessions = new Set(Object.keys(stored.sessions));
+const ownedSessions = new Set();
 const activePrompts = new Map();
 const pendingSteers = new Map();
 let counter = 0;
@@ -220,7 +223,11 @@ process.on("exit", () => {
 });
 
 function persist() {
-	if (sessionStore) writeFileSync(sessionStore, JSON.stringify(stored), "utf-8");
+	if (!sessionStore) return;
+	const latest = existsSync(sessionStore) ? JSON.parse(readFileSync(sessionStore, "utf-8")) : { counter: 0, sessions: {} };
+	for (const id of ownedSessions) latest.sessions[id] = stored.sessions[id];
+	latest.counter = Math.max(latest.counter, stored.counter);
+	writeFileSync(sessionStore, JSON.stringify(latest), "utf-8");
 }
 
 /** The configOptions wire shape, with the selected model and thought level. */
@@ -268,6 +275,10 @@ function configOptions(current, thoughtLevel = "medium", mode = "ask") {
 			options: [
 				{ value: "fixture-default", name: "Fixture Default" },
 				{ value: "fixture-fast", name: "Fixture Fast" },
+				...(process.argv.includes("--opencode-models") ? [
+					{ value: "openai/gpt-5.6-luna", name: "Luna fixture" },
+					{ value: "openai/gpt-6-astra", name: "Astra fixture" },
+				] : []),
 				{ value: "gpt-5.6-luna", name: "GPT 5.6 Luna" },
 				{ value: "gpt-5.6-terra", name: "GPT 5.6 Terra" },
 				{ value: "gpt-5.6-sol", name: "GPT 5.6 Sol" },
@@ -319,6 +330,7 @@ async function runPrompt(params, cx, signal) {
 	if (promptMarker) writeFileSync(promptMarker, "prompted\n", "utf-8");
 	const sessionId = params.sessionId;
 	const text = params.prompt.map((block) => (block.type === "text" ? block.text : "")).join("");
+	if (promptCapture) appendFileSync(promptCapture, `${JSON.stringify(text)}\n`, "utf8");
 	const attachmentKinds = params.prompt.filter((block) => block.type !== "text").map((block) => block.type);
 	const saved = stored.sessions[sessionId];
 	if (saved) {
@@ -369,7 +381,12 @@ async function runPrompt(params, cx, signal) {
 		return { stopReason: "end_turn" };
 	}
 
-	if (text.includes("EDIT")) {
+	if (text.includes("EDIT") || text.includes("SHELL") || text.includes("PERMISSION_")) {
+		const kind = text.includes("PERMISSION_")
+			? text.split("PERMISSION_")[1].trim().toLowerCase()
+			: text.includes("SHELL")
+				? "execute"
+				: "edit";
 		const toolCallId = `call_${++counter}`;
 		await cx.notify(acp.methods.client.session.update, {
 			sessionId,
@@ -383,7 +400,7 @@ async function runPrompt(params, cx, signal) {
 		});
 		const response = await cx.request(acp.methods.client.session.requestPermission, {
 			sessionId,
-			toolCall: { toolCallId, title: "Edit config.json", kind: "edit", status: "pending" },
+			toolCall: { toolCallId, title: "Check tool permission", kind, status: "pending" },
 			options: [
 				{ kind: "allow_once", name: "Allow", optionId: "allow" },
 				{ kind: "reject_once", name: "Reject", optionId: "reject" },
@@ -455,7 +472,6 @@ async function runPrompt(params, cx, signal) {
 	if (text.includes("MCP_E2E_READY")) {
 		const current = missionState();
 		if (!current.missionId) throw new Error("MCP_E2E has no mission id");
-		await callNetaTool("neta_wait", { missionId: current.missionId, timeoutMs: 1000 });
 		await callNetaTool("neta_ready", { missionId: current.missionId, summary: "Checkout behavior verified" });
 		saveMissionState({ ...missionState(), stage: "ready" });
 		await say(cx, sessionId, "ready to close");
@@ -660,6 +676,11 @@ async function runPrompt(params, cx, signal) {
 		return { stopReason: "end_turn" };
 	}
 
+	if (text.includes("COPY_MULTILINE")) {
+		await say(cx, sessionId, "copy α\ncopy β");
+		return { stopReason: "end_turn" };
+	}
+
 	if (text.includes("SUBSTANTIVE_HANDOFF")) {
 		await say(cx, sessionId, "Substantive report: audited the control path, found the race, and verified the fix.");
 		return { stopReason: "end_turn" };
@@ -694,11 +715,13 @@ acp.agent({ name: "fake-acp-agent" })
 	.onRequest("session/new", (ctx) => {
 		mcpServers = ctx.params.mcpServers ?? [];
 		launchMcpServers(mcpServers);
+		if (sessionStore && existsSync(sessionStore)) stored.counter = Math.max(stored.counter, JSON.parse(readFileSync(sessionStore, "utf-8")).counter);
 		const nextSession = ++stored.counter;
 		const sessionId = uuidSession
 			? `00000000-0000-4000-8000-${String(nextSession).padStart(12, "0")}`
 			: `s${nextSession}`;
 		sessions.add(sessionId);
+		ownedSessions.add(sessionId);
 		stored.sessions[sessionId] = {
 			cwd: ctx.params.cwd,
 			mcpServers,
@@ -729,6 +752,7 @@ acp.agent({ name: "fake-acp-agent" })
 	})
 	.onRequest(acp.methods.agent.session.resume, (ctx) => {
 		if (rejectResume) throw new Error("fixture rejected resume");
+		ownedSessions.add(ctx.params.sessionId);
 		const saved = stored.sessions[ctx.params.sessionId];
 		if (!saved) throw new Error(`unknown session ${ctx.params.sessionId}`);
 		if (saved.cwd !== ctx.params.cwd && !allowResumeCwdChange) throw new Error("resume cwd mismatch");
@@ -753,6 +777,11 @@ acp.agent({ name: "fake-acp-agent" })
 		if (failSetConfig) throw new Error("fixture setConfig failure");
 		const selected = selectedConfig.get(ctx.params.sessionId);
 		if (!selected) throw new Error("config options are not supported");
+		if (ctx.params.configId === "neta_refresh_models") {
+			const options = configOptions(selected.model, selected.thoughtLevel, selected.mode);
+			options.find((option) => option.id === "model").options.push({ value: "xai/new-model", name: "New connected model" });
+			return { configOptions: options };
+		}
 		if (ctx.params.configId === "model") selected.model = ctx.params.value;
 		if (ctx.params.configId === "thought-level") selected.thoughtLevel = ctx.params.value;
 		if (ctx.params.configId === "mode") selected.mode = ctx.params.value;
@@ -767,7 +796,20 @@ acp.agent({ name: "fake-acp-agent" })
 	})
 	.onRequest("session/set_model", { parse: (params) => params }, (ctx) => {
 		if (useConfigOptions || claudeShaped) throw new Error("legacy set_model is not supported");
+		const saved = stored.sessions[ctx.params.sessionId];
+		if (!saved) throw new Error(`unknown session ${ctx.params.sessionId}`);
+		if (!["test-model", "legacy-other"].includes(ctx.params.modelId)) throw new Error("legacy model is not advertised");
 		selectedLegacyModel = ctx.params.modelId;
+		saved.model = ctx.params.modelId;
+		persist();
+		return {};
+	})
+	.onRequest("session/set_mode", { parse: (params) => params }, (ctx) => {
+		const saved = stored.sessions[ctx.params.sessionId];
+		if (!saved || ctx.params.modeId !== "test-mode") throw new Error("legacy mode is not advertised");
+		saved.mode = ctx.params.modeId;
+		selectedConfig.set(ctx.params.sessionId, { model: saved.model, thoughtLevel: saved.thoughtLevel, mode: saved.mode });
+		persist();
 		return {};
 	})
 	.onRequest("authenticate", () => ({}))

@@ -1,0 +1,6 @@
+cargo-zigbuild==0.23.0 \
+    --hash=sha256:3a2e021435a5e3c8b3a70bfc490580a3af6952185aa5ffb722b005d1fbe000c9 \
+    --hash=sha256:d984af93da7a230606452ef5f6df47e6a081b12dcead8a3e8e5ff024728c94f0
+ziglang==0.15.2 \
+    --hash=sha256:806316453d1ede7174ed3fefb8e5348154629089c3bb5fe812dfd0e172fac130 \
+    --hash=sha256:edc0aa60ec964a4cf462d40f68d7de242ddf37fd9a80f2afaee6397059463230

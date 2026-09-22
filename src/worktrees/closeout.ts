@@ -51,7 +51,10 @@ export async function closeMission(i: CloseMissionInput, d: CloseoutDeps): Promi
 			}
 			mission = confirmed.mission;
 		} else if (i.reason.trim() === "") {
-			return refuse(mission, "abandoned needs a reason");
+			return refuse(mission, `${i.disposition} needs a reason`);
+		}
+		if (i.disposition === "completed" && mission.integration !== undefined) {
+			return refuse(mission, "integrated work must close as merged");
 		}
 		if (mission.worktree !== undefined) {
 			// Any in-repo path anchors git and `wt`; only creation needs the
@@ -61,6 +64,7 @@ export async function closeMission(i: CloseMissionInput, d: CloseoutDeps): Promi
 				path: mission.worktree.path,
 				branch: mission.worktree.branch,
 				base: mission.worktree.base,
+				...(mission.integration === undefined ? {} : { evidenceCommit: mission.integration.commit }),
 				abandon: i.disposition === "abandoned",
 			});
 			if (!removed.ok) {
@@ -112,12 +116,20 @@ async function confirmMerged(
 	}
 	let result: IntegrationResult;
 	try {
-		result = await d.isIntegrated({ repoRoot: mission.worktree.path, branch: commit, base: mission.worktree.base });
+		result = await d.isIntegrated({
+			repoRoot: mission.worktree.path,
+			branch: mission.worktree.branch,
+			base: mission.worktree.base,
+			evidenceCommit: commit,
+		});
 	} catch {
 		return { ok: false, attention: `could not confirm ${commit} against ${mission.worktree.base}` };
 	}
 	if (!result.merged) {
-		return { ok: false, attention: `evidence ${commit} is not merged into ${mission.worktree.base}` };
+		return {
+			ok: false,
+			attention: `branch ${mission.worktree.branch} is not merged into ${mission.worktree.base} by evidence ${commit}`,
+		};
 	}
 	return {
 		ok: true,

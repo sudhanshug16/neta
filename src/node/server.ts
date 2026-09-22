@@ -10,6 +10,7 @@ import type {
 	AgentId,
 	Block,
 	Event,
+	InboxMessage,
 	Leader,
 	Machine,
 	Mission,
@@ -20,6 +21,8 @@ import type {
 	Workspace,
 	WorkspaceId,
 } from "../core/types.ts";
+import type { OpenCodeAttachment } from "../opencode/attachment.ts";
+import type { OpenCodeExecutionContract } from "../opencode/contract.ts";
 import type { PiTerminalManager } from "../pi/manager.ts";
 import type { GlanceResult } from "../store/glance.ts";
 import {
@@ -38,6 +41,7 @@ import {
 	rpcError,
 	type TurnNotification,
 } from "./protocol.ts";
+import type { RuntimeAdmission } from "./runtime-admission.ts";
 
 export interface NodeStore {
 	machine(): Machine;
@@ -71,6 +75,7 @@ export interface NodeStore {
 // under. `actorId` names that actor when it is not the session itself: an
 // agent's session is minted under its `agentId`, per 05.
 export interface SessionRequest {
+	deferInbox?: boolean; // A queued worker receives its initial brief before saved follow-ups.
 	sessionId?: SessionId;
 	workspaceId: WorkspaceId;
 	cwd: string;
@@ -80,9 +85,13 @@ export interface SessionRequest {
 	unsandboxed?: boolean;
 	netaTools: boolean;
 	actorId?: string;
+	fallbackModels?: string[];
 }
 
 export interface NodeAcp {
+	hasActiveWork?(): boolean;
+	nativeAttachment?(id: SessionId): OpenCodeAttachment | undefined;
+	ensureNativeAttachment?(id: SessionId): Promise<OpenCodeAttachment | undefined>;
 	prepareExternalActor?(sessionId: SessionId, actorId?: string): string;
 	createSession(o: SessionRequest): Promise<{ sessionId: SessionId; provider: string; model: string }>;
 	// A live session for one already on record: the same one when it is still
@@ -102,11 +111,22 @@ export interface NodeAcp {
 		id: SessionId,
 		text: string,
 		attachments: PromptAttachment[],
-		provenance: { readerDirected: boolean },
-	): Promise<import("../core/types.ts").InboxMessage>;
-	listInbox?(id: SessionId): Promise<import("../core/types.ts").InboxMessage[]>;
+		provenance: { readerDirected: boolean; sourceId?: string; sourceHash?: string },
+	): Promise<InboxMessage>;
+	listInbox?(id: SessionId): Promise<InboxMessage[]>;
+	runtimeDiagnostics?(id: SessionId): Promise<{
+		attached?: boolean;
+		bindingGeneration?: string;
+		turnId?: string;
+		model?: string;
+		provider?: string;
+		contract?: OpenCodeExecutionContract;
+	}>;
 	capabilities?(id: SessionId): { image: boolean; embeddedContext: boolean };
 	setModel(id: SessionId, model: string): Promise<void>;
+	setNativeAgent?(id: SessionId, agent: string): Promise<void>;
+	setNativeVariant?(id: SessionId, variant?: string): Promise<void>;
+	setPendingHandoff?(id: SessionId, handoff: string): Promise<void>;
 	switchProvider?(
 		id: SessionId,
 		provider: string,
@@ -150,6 +170,7 @@ export interface Connection {
 }
 
 export interface NodeContext {
+	runtimeAdmission?: RuntimeAdmission;
 	store: NodeStore;
 	acp: NodeAcp;
 	hub: Hub;
@@ -358,12 +379,22 @@ export async function createServer(o: {
 		}
 		const params = frame.params;
 		void (async (): Promise<void> => {
+			let leave: (() => void) | undefined;
 			try {
+				// Unknown future operations default to mutation admission. Read and
+				// control calls stay usable while the service is draining.
+				const passive =
+					/^(runtime\.(capabilities|upgrade\.(prepare|commit|cancel))|node\.stop|snapshot|workspace\.list|missions\.(list|get)|events\.list|providers\.list|models\.list|tools\.list|conversation\.(tail|untail|inbox|capabilities|cancel)|glance\.(list|source)|diagnostics\.(read|files)|terminal\.(resize|detach))$/.test(
+						method,
+					);
+				if (!passive) leave = ctx.runtimeAdmission?.enter();
 				replyOk(socket, id, await handler(ctx, params, conn));
 			} catch (error) {
 				// A NodeError keeps its own code; anything else is -32603
 				// with no stack in `data`.
 				writeLine(socket, rpcError(id, error));
+			} finally {
+				leave?.();
 			}
 		})();
 	}

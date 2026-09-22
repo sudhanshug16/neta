@@ -323,16 +323,18 @@ Steps: `neta_wait` subscribes to agent state changes for the mission or the
 listed ids, returns at once if one is already terminal or blocked, else blocks
 to `timeoutMs` (default 600000) and returns `timedOut: true` with the current
 records, never an error; `neta_send` answers a blocked agent by resolving its
-pending question, and steers a running one by cancelling the turn, waiting for
-the cancellation boundary, then prompting the same session (03);
+pending question after admission. Follow-ups are durably queued before admission,
+return a message ID/status, and never cancel a running recipient. Retry identity,
+restart recovery, and writer admission belong to the runtime;
 `neta_progress` writes `activity`; `neta_ask` sets `pendingQuestion`, moves the
 actor to `blocked`, emits `mission.blocked`; `neta_done` records `outcome`,
 moves to `completed`, emits `agent.finished`, leaving a lead's mission open.
 Tests: `neta_wait` returns immediately for an already blocked agent, when a
 fake-agent session finishes, and on timeout with `timedOut: true` and no error;
 `neta_send` to a blocked agent clears `pendingQuestion` and emits
-`mission.unblocked`, and to a running one cancels before prompting (assert the
-order against the fake agent); `neta_done` twice is refused.
+`mission.unblocked`; sends to running actors queue without cancellation. Verify
+concurrent sends, retry deduplication, restart-visible messages, and failed writer
+admission against the fake agent; `neta_done` twice is refused.
 Commit: `feat(tools): waiting, steering and reporting tools`
 
 ### T5.7 mission lifecycle tools

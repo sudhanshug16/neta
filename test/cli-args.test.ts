@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { main, parse } from "../src/cli/main.ts";
 import { netaVersion } from "../src/version.ts";
 
@@ -16,6 +20,17 @@ function usageOf(argv: string[]): string {
 }
 
 describe("cli command table", () => {
+	test("native TUI supports workspace and machine selection with explicit legacy fallback", () => {
+		expect(commandOf(["tui", "/project", "--host", "remote", "--migrate"])).toEqual({
+			name: "tui",
+			args: ["/project"],
+			flags: { host: "remote", migrate: true },
+		});
+		expect(commandOf(["tui", "--legacy"])).toEqual({ name: "tui", args: [], flags: { legacy: true } });
+		expect(commandOf(["chat"])).toEqual({ name: "attach", args: [], flags: { legacy: true } });
+		expect(usageOf(["tui", "--legacy", "--migrate"])).toContain("legacy");
+		expect(usageOf(["tui", "--demo", "/project"])).toContain("legacy");
+	});
 	test("bare neta attaches", () => {
 		expect(commandOf([])).toEqual({ name: "attach", args: [], flags: {} });
 	});
@@ -120,6 +135,11 @@ describe("cli command table", () => {
 	test("version", () => {
 		expect(commandOf(["version"])).toEqual({ name: "version", args: [], flags: {} });
 	});
+
+	test("rmux", () => {
+		expect(commandOf(["rmux"])).toEqual({ name: "rmux", args: [], flags: {} });
+		expect(usageOf(["rmux", "extra"])).toContain("takes no arguments");
+	});
 });
 
 describe("cli durations", () => {
@@ -208,5 +228,41 @@ describe("cli version", () => {
 		}
 		expect(code).toBe(1);
 		expect(writes.join("")).toContain("neta: unknown command");
+	});
+});
+
+describe("cli bundle entrypoint", () => {
+	test("a renamed Node bundle runs, while an import from main.js stays inert", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "neta-cli-entrypoint-"));
+		try {
+			const bundle = join(dir, "renamed-entry.mjs");
+			const result = await Bun.build({
+				entrypoints: [new URL("../src/cli/main.ts", import.meta.url).pathname],
+				target: "node",
+				format: "esm",
+				outdir: dir,
+			});
+			expect(result.success).toBe(true);
+			renameSync(join(dir, "main.js"), bundle);
+
+			const direct = spawnSync("node", [bundle, "version"], { encoding: "utf8" });
+			expect(direct.status).toBe(0);
+			expect(direct.stdout).toMatch(/^\S+\n$/);
+			expect(direct.stderr).toBe("");
+
+			const help = spawnSync("node", [bundle, "--help"], { encoding: "utf8" });
+			expect(help.status).toBe(1);
+			expect(help.stdout).toBe("");
+			expect(help.stderr).toContain("usage: neta");
+
+			const runner = join(dir, "main.js");
+			writeFileSync(runner, `import ${JSON.stringify(pathToFileURL(bundle).href)};\n`);
+			const imported = spawnSync("node", [runner, "version"], { encoding: "utf8" });
+			expect(imported.status).toBe(0);
+			expect(imported.stdout).toBe("");
+			expect(imported.stderr).toBe("");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });

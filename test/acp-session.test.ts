@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { UnknownModelError } from "../src/acp/models.ts";
 import type { SessionEvent } from "../src/acp/session.ts";
 import { ResumeFailedError, startSession, TurnInProgressError } from "../src/acp/session.ts";
 import type { ProviderSettings } from "../src/acp/settings.ts";
@@ -25,19 +26,22 @@ async function start(
 	extraArgs: string[] = [],
 	opts?: {
 		access?: Access;
+		provider?: string;
 		unsandboxed?: boolean;
 		unsandboxedMode?: string;
 		model?: string;
 		mcpServers?: { name: string; command: string; args: string[]; env: { name: string; value: string }[] }[];
 		steeringSafe?: boolean;
+		forbiddenModels?: string[];
 	},
 ) {
 	return startSession({
 		settings: {
 			...settingsFor(extraArgs),
-			providers: { fake: { ...provider(extraArgs), unsandboxedMode: opts?.unsandboxedMode } },
+			providers: { [opts?.provider ?? "fake"]: { ...provider(extraArgs), unsandboxedMode: opts?.unsandboxedMode } },
+			forbiddenModels: opts?.forbiddenModels ?? [],
 		},
-		provider: "fake",
+		provider: opts?.provider ?? "fake",
 		access: opts?.access ?? "readWrite",
 		unsandboxed: opts?.unsandboxed,
 		cwd: mkdtempSync(join(tmpdir(), "neta-acp-")),
@@ -83,6 +87,66 @@ async function promptAndDrain(session: Awaited<ReturnType<typeof start>>, text: 
 }
 
 describe("acp session", () => {
+	test("an empty requested model keeps the provider-advertised default", async () => {
+		const legacy = await start([], { model: "" });
+		try {
+			expect(legacy.model).toBe("test-model");
+		} finally {
+			await legacy.close();
+		}
+
+		const configured = await start(["--config-options"], { model: "" });
+		try {
+			expect(configured.model).toBe("fixture-default");
+		} finally {
+			await configured.close();
+		}
+	});
+
+	test("an explicit unknown model still fails instead of becoming a default request", async () => {
+		await expect(start([], { model: "not-advertised" })).rejects.toThrow(UnknownModelError);
+	});
+
+	test("legacy model selection sends the active vendor session id", async () => {
+		const session = await start([], { model: "" });
+		try {
+			expect(session.vendorSessionId).not.toBe("");
+			await session.setModel("legacy-other");
+			expect(session.model).toBe("legacy-other");
+		} finally {
+			await session.close();
+		}
+	});
+
+	test("a forbidden advertised default follows the existing safe fallback policy", async () => {
+		const session = await start(["--claude-fable-default"], {
+			model: "",
+			forbiddenModels: ["claude-fable-5"],
+		});
+		try {
+			expect(session.model).toBe("haiku");
+		} finally {
+			await session.close();
+		}
+	});
+
+	test("legacy advertised modes use session/set_mode and reject unadvertised modes", async () => {
+		const session = await start([], { unsandboxed: true, unsandboxedMode: "test-mode" });
+		try {
+			const events = await promptAndDrain(session, "REPORT_SANDBOX_POLICY");
+			const text = events
+				.filter((event) => event.type === "block" && event.block.kind === "text")
+				.map((event) => (event as { block: { text: string } }).block.text)
+				.join("");
+			expect(text).toContain("mode:test-mode");
+		} finally {
+			await session.close();
+		}
+		await expect(start([], { unsandboxed: true, unsandboxedMode: "missing-mode" })).rejects.toThrow(
+			"does not advertise unsandboxed mode missing-mode",
+		);
+	});
+
 	test("leaders select the adapter-advertised unrestricted mode and keep it across relaunch", async () => {
 		for (const mode of ["agent-full-access", "bypassPermissions"]) {
 			const storeFile = join(mkdtempSync(join(tmpdir(), "neta-acp-policy-")), "sessions.json");
@@ -246,11 +310,42 @@ describe("acp session", () => {
 		try {
 			const config = await promptAndDrain(session, "CONFIG_UPDATE");
 			expect(config.filter((e) => e.type === "block" && e.block.kind === "status").length).toBeGreaterThan(0);
-			expect(config.find((e) => e.type === "model")).toEqual({ type: "model", model: "fixture-fast" });
+			expect(config.find((e) => e.type === "model")).toEqual({
+				type: "model",
+				model: "fixture-fast",
+				bindingGeneration: session.bindingGeneration,
+			});
 			expect(session.model).toBe("fixture-fast");
 			expect(session.listModels().map((model) => model.id)).toContain("fixture-fast");
 			const mode = await promptAndDrain(session, "MODE_UPDATE");
-			expect(mode.find((e) => e.type === "mode")).toEqual({ type: "mode", modeId: "plan" });
+			expect(mode.find((e) => e.type === "mode")).toEqual({
+				type: "mode",
+				modeId: "plan",
+				bindingGeneration: session.bindingGeneration,
+			});
+		} finally {
+			await session.close();
+		}
+	});
+
+	test("OpenCode read-only workers can inspect external files and execute shell but cannot edit", async () => {
+		const session = await start([], { provider: "opencode", access: "readOnly" });
+		try {
+			for (const [prompt, outcome] of [
+				["SHELL", "allow"],
+				["PERMISSION_READ", "allow"],
+				["PERMISSION_SEARCH", "allow"],
+				["PERMISSION_FETCH", "allow"],
+				["PERMISSION_OTHER", "reject"],
+				["EDIT", "reject"],
+			] as const) {
+				const events = await promptAndDrain(session, prompt);
+				expect(
+					events.some(
+						(e) => e.type === "block" && e.block.kind === "text" && e.block.text === `permission=${outcome}`,
+					),
+				).toBe(true);
+			}
 		} finally {
 			await session.close();
 		}
@@ -386,4 +481,64 @@ describe("acp session", () => {
 			await session.close();
 		}
 	});
+});
+
+test("runtime bindings stamp turns and launch context identity with constrained fallback", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "neta-acp-binding-"));
+	const captured = join(cwd, "context-env.json");
+	const wrapper = join(cwd, "agent.mjs");
+	writeFileSync(
+		wrapper,
+		`import {writeFileSync} from "node:fs";
+import ${JSON.stringify(FIXTURE)};
+writeFileSync(${JSON.stringify(captured)}, JSON.stringify({ actorId:process.env.NETA_SYSTEM_CONTEXT_ACTOR_ID, sessionId:process.env.NETA_SYSTEM_CONTEXT_SESSION_ID, generation:process.env.NETA_SYSTEM_CONTEXT_GENERATION, fallback:process.env.NETA_FALLBACK_MODELS }));`,
+	);
+	const options = {
+		settings: {
+			providers: { fake: { ...provider(), args: [wrapper, "--session-store", join(cwd, "sessions.json")] } },
+			leader: { provider: "fake" },
+			forbiddenModels: [],
+		},
+		provider: "fake",
+		access: "readWrite" as const,
+		cwd,
+		actorId: "actor-1",
+		bindingGeneration: "runtime-1",
+		fallbackModels: ["test/small"],
+	};
+	const session = await startSession(options);
+	try {
+		expect(JSON.parse(readFileSync(captured, "utf8"))).toEqual({
+			actorId: "actor-1",
+			sessionId: session.sessionId,
+			generation: "runtime-1",
+			fallback: '["test/small"]',
+		});
+		const first = await promptAndDrain(session, "first");
+		expect(first.find((event) => event.type === "turn")?.bindingGeneration).toBe("runtime-1");
+		const opened = first.find((event) => event.type === "turn");
+		if (opened?.type === "turn") expect(opened.turn.bindingGeneration).toBe("runtime-1");
+		await session.relaunch("readOnly");
+		expect(session.bindingGeneration).not.toBe("runtime-1");
+		expect(JSON.parse(readFileSync(captured, "utf8")).generation).toBe(session.bindingGeneration);
+		const next = await promptAndDrain(session, "second");
+		expect(next.every((event) => event.bindingGeneration === session.bindingGeneration)).toBe(true);
+	} finally {
+		await session.close();
+	}
+});
+
+test("model catalog refresh updates available models without changing the session or selected model", async () => {
+	const session = await start(["--config-options"], { model: "" });
+	try {
+		const id = session.vendorSessionId;
+		const model = session.model;
+		expect(session.listModels().map((item) => item.id)).not.toContain("xai/new-model");
+		await session.setConfigOption("neta_refresh_models", "");
+		expect(session.listModels().map((item) => item.id)).toContain("xai/new-model");
+		expect(session.vendorSessionId).toBe(id);
+		expect(session.model).toBe(model);
+	} finally {
+		await session.close();
+	}
 });

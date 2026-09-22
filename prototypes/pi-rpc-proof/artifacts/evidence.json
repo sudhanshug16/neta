@@ -1,0 +1,23 @@
+{
+  "result": "PASS",
+  "piVersion": "0.85.0",
+  "checks": {
+    "incrementalPtyStream": true,
+    "exactSteeringReachedModel": true,
+    "hostToolExecution": true,
+    "rpcEventMappingAndConfirm": true,
+    "restartHistory": true,
+    "clientHasNoModelAuthOrToolMarker": true
+  },
+  "hostCwd": "/private/tmp/neta-pi-components-t1kAhf/host",
+  "clientCwd": "/private/tmp/neta-pi-components-t1kAhf/client",
+  "hostConfig": "/private/tmp/neta-pi-components-t1kAhf/host-config",
+  "clientConfig": "/private/tmp/neta-pi-components-t1kAhf/client-config",
+  "session": "/private/tmp/neta-pi-components-t1kAhf/sessions/2026-09-10T08-34-28-849Z_01a08a74-3d71-7331-9776-52f4ab2ed36e.jsonl",
+  "limitations": [
+    "Component composition, not unmodified InteractiveMode",
+    "Internal component imports pinned to Pi 0.85.0",
+    "Local pipes, no SSH",
+    "No custom extension renderer parity"
+  ]
+}

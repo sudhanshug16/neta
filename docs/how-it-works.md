@@ -2,9 +2,41 @@
 
 One long-lived process, the Node, owns every workspace, leader, mission,
 agent, ACP session, worktree record, event, and stored conversation on a
-machine. The terminal command, the desktop app, and the per-session tool
+machine. The terminal client and the per-session tool
 proxy all speak to that Node and own nothing themselves. Direction lives
 in [MANIFESTO.md](../MANIFESTO.md); install and build in [README.md](../README.md).
+
+## Native terminal client
+
+The development terminal client is the Neta OpenCode V2 fork (2.0.3). Its OpenTUI/SolidJS
+shell adds machine/workspace navigation and agent tabs around native OpenCode
+chat. The Node starts one OpenCode process per actor and controls its native
+session through ACP. An authenticated, per-view HTTP gateway lets the renderer
+read that same session while routing sends and cancellation through the Node.
+Closing the gateway leaves the runtime alive. This is native OpenCode execution,
+not a Codex CLI renderer. See [the integration contract](opencode.md) for setup,
+reset, compatibility and validation boundaries. Toad remains an explicit rollback
+client; the Claude SDK migration is deferred.
+
+Startup restores the last workspace and selected actor. The client starts a missing
+Node and compares the running Node's build identity with its own; an idle service
+updates automatically, while live turns defer the update. Opening an actor restores
+its saved provider session without sending its assignment again. If the saved tab
+is queued or cannot resume (including a removed mission worktree), startup opens
+the workspace leader with a visible explanation and retains the tab and history.
+Explicit navigation to that unavailable tab reports the error without changing views.
+
+## Delegation model routing
+
+OpenCode children use task difficulty (`effort: 1–5`) and the selected routing
+policy rather than inheriting the workspace leader's model. `routing.json`
+chooses either five fixed connected models or required Jev classification with
+PublicAI and models.dev metadata. Explicit model choices bypass classification.
+The whole staffing plan resolves before a mission or worktree is created, and
+queued agents retain that resolved model and decision. On a user request,
+`neta_model` reroutes a mission lead or worker at a higher or lower task effort
+without replacing its session or transcript. See
+[model routing](model-routing.md) for configuration, failure behavior and tests.
 
 ## The process tree
 
@@ -18,10 +50,6 @@ neta-node                           one per machine, long-lived
     |     starts the Node on demand, attaches to a leader,
     |     lists missions and events, sets access state, stops the Node
     |
-    +-- NetaDesktop                desktop client (apps/macos/)
-    |     renders the spine, the mission bar, the navigator, and chat
-    |     from the same socket; it never owns a session
-    |
     +-- neta mcp --actor <id>      stdio proxy (src/tools/proxy.ts),
           one per ACP session that needs tools; the provider launches
           it, and every tool call travels to the Node over the socket
@@ -29,7 +57,7 @@ neta-node                           one per machine, long-lived
 
 The tree starts in `src/node/lifecycle.ts`, which adapts `src/store/` and
 `src/acp/` to the ports in `src/node/server.ts`. No client imports those
-stores: the CLI formats only, the desktop renders only, the proxy forwards
+stores: the terminal renders only and the proxy forwards
 only. Authority sits in exactly one place, so two clients attached at once
 always read the same state.
 
@@ -58,6 +86,13 @@ notification reaches only connections that currently tail its session,
 so a dead window silently unsubscribes and a reopened window
 resubscribes by tailing again. No presence record survives a disconnect;
 the Node never treats a silent client as work to finish.
+
+The Node also broadcasts `conversation.ended` metadata to connected clients,
+including those viewing another conversation. The Neta TUI uses this signal
+for workspace-leader and mission-leader terminal notifications, deduplicated by
+session and turn. It does not include transcript text in the notification.
+Notifications respect OpenCode's attention settings and require an attached TUI;
+terminal and operating-system notification permissions still apply.
 
 When a tool proxy ends, the proxy process exits and leaves no residue. It
 keeps no state of its own (`src/tools/proxy.ts`): it authenticates each
@@ -143,7 +178,8 @@ reconnects and snapshots (`src/node/server.ts`).
 
 There is no "changes since revision" exchange, by design. One
 `snapshot` call returns a complete `SnapshotResult` — machine,
-workspaces, leaders, open missions plus closed ones inside the window,
+workspaces, leaders, open missions plus closed ones inside the window or
+among the newest eight per workspace,
 the visible agents, per-mission completed counts, the recent events,
 and the attention set — and the client atomically replaces its whole
 cache with it (`src/node/snapshot.ts`, `src/node/protocol.ts`). Live
@@ -230,9 +266,10 @@ need a person: blocked, failed, ready to close, and merged but not
 closed, newest first (`src/core/state.ts`, `src/node/snapshot.ts`).
 
 Closing is a deliberate act with evidence. Closeout demands a
-disposition, `merged` or `abandoned` (`src/core/types.ts`); a merge
+disposition, `completed`, `merged`, or `abandoned` (`src/core/types.ts`); a merge
 closeout demands integration evidence confirmed against the base, and
-an abandon closeout demands a non-empty reason
+completed checks need no merge evidence but retain clean/unmerged-worktree
+checks, and an abandon closeout demands a non-empty reason
 (`src/worktrees/closeout.ts`). Pinning a mission (`mission.pin`)
 appends a `user.pinned` event and changes no mission field
 (`src/node/handlers-registry.ts`).
@@ -241,8 +278,12 @@ A closed mission never leaves the registry. Compaction rewrites the
 snapshot from every mission including closed ones and only then
 empties the delta log, so close is a state change, not a deletion
 (`src/store/mission-registry.ts`). Snapshots include closed missions
-inside the window and report `hasOlder` when closed missions exist
-outside it; on the canvas a closed mission stays anchored at its start
+inside the window and always retain the newest eight missions per workspace,
+even after a long idle period. They report `hasOlder` when other closed
+missions are omitted. The TUI shows those eight in start-time order alongside
+all active missions; closing one marks it archived without hiding it. The
+Archive control reveals older history without duplicating the recent rows.
+On the canvas a closed mission stays anchored at its start
 position, marked archived, opening read-only
 (`src/node/snapshot.ts`, [MANIFESTO.md](../MANIFESTO.md)).
 
@@ -252,7 +293,7 @@ Agents do the work inside a mission. An agent record carries its
 mission, its ACP conversation id, its provider and model, its access
 (read-only or read-write), its task, and its state
 (`src/core/types.ts`). The states are `starting`, `running`,
-`blocked`, `failed`, `completed`, `interrupted`, and `archived`
+`idle`, `blocked`, `failed`, `completed`, `interrupted`, and `archived`
 (`src/core/types.ts`). A mission lead creates agents beneath itself;
 an ordinary agent creates nothing further, so the tree stays three
 levels deep and cannot grow without bound
@@ -314,7 +355,11 @@ check resolves the branch tip and the base tip through plain Git and
 tests ancestry with `merge-base --is-ancestor`; on the first positive
 result the mission records its integration evidence and emits
 `mission.merged` exactly once (`src/worktrees/integration.ts`,
-`src/worktrees/index.ts`). A refused removal — dirty tree, unmerged
+`src/worktrees/index.ts`). Closeout also accepts a squash commit on the base
+when its full change matches the mission branch's change exactly, including
+file contents and modes. The driver rechecks this evidence against the current
+branch before removal; a stored merge result cannot discard later branch work.
+These checks do not fetch or change the base checkout. A refused removal — dirty tree, unmerged
 branch without an explicit abandon — leaves the mission open with its
 worktree intact and its attention set to the refusal reason
 (`src/worktrees/closeout.ts`).
@@ -329,6 +374,21 @@ write authority ([MANIFESTO.md](../MANIFESTO.md), `src/modes/switch.ts`).
 Both workspace and mission leaders select the provider's advertised
 unrestricted ACP mode in either leadership mode. Ordinary agents keep the
 provider sandbox implied by their assigned access.
+
+OpenCode read-only agents may read, search, fetch, and run shell commands,
+including reading downloaded evidence outside the worktree. Neta still denies
+edit requests and unknown permission kinds for these agents. Permission denials
+are reported as policy-neutral denials rather than attributed to the user.
+Delegated skills resolve from project and user `.neta`, `.agents`, `.claude`, and
+`.opencode` skill directories, plus user `.config/opencode/skills`; project
+definitions take precedence. Both flat Markdown and `name/SKILL.md` work.
+
+When a Neta Code Mode batch fails, already admitted calls settle before its error
+is returned, and the response includes each call's result. A successful agent
+launch remains visible even when another launch fails validation. Explicit
+cancellation and timeouts still interrupt; interrupted outcomes must be checked
+in current state before retrying. Agents are instructed to use `Promise.allSettled`
+and inspect each independent launch result.
 
 The workspace leader's mode lives on its leader record as `mode`,
 `modeSince`, and `modeActiveMs`; each mission lead's mode lives as a
@@ -392,7 +452,7 @@ events, reads and sets access state, and stops the Node. Only `neta`
 with no command and `neta open` start a Node; `neta node status`
 reports without starting anything, and `neta node stop` is the single
 operation that stops one (`src/cli/commands/node.ts`). The terminal
-chat opens the same exact ACP session the desktop shows, so both
+chat opens the same exact ACP session as other attached clients, so all
 views see each other's turns (`src/cli/chat.ts`). The CLI owns no
 sessions, no store, and no ACP runtime — every command is a protocol
 call plus formatting. Setting `lead++` from the CLI is always the
@@ -400,18 +460,9 @@ manual path, a person's own choice with no decision record; records
 belong to the leader's own tool requests, never to a client
 (`src/cli/commands/leader.ts`).
 
-The desktop app is a SwiftUI canvas over the same Node state
-(`apps/macos/`). It renders the spine with its missions, the mission
-bar with the workspace leader and every open mission that needs a
-person, the auto-hiding navigator, and the chat surface holding the
-selected agent's ACP conversation
-([MANIFESTO.md](../MANIFESTO.md)). It keeps a bounded read cache for
-offline reading — canvas structure, bounded per-conversation message
-excerpts — while the Node keeps authoritative history; on reconnect
-one snapshot replaces the cached canvas before the UI reports the
-machine as live ([MANIFESTO.md](../MANIFESTO.md)). The desktop never
-owns a session: every control operates through the Node-owned session
-it displays.
+The native Swift/macOS app has been retired. The OpenCode/OpenTUI shell is the
+supported interactive client; the Node protocol remains shared with command-line
+controls. There is no native app build, Swift test suite, or app-bundle release.
 
 The `neta mcp --actor <id>` proxy is a stdio MCP server the provider
 launches inside the agent session (`src/tools/proxy.ts`,
@@ -432,8 +483,50 @@ non-empty default can be shown.
 `conversation.reset` replaces the selected owner session atomically with a
 fresh provider and vendor conversation. It keeps provider, model, access,
 leader sandbox policy, MCP actor authority, and current role/mission brief. The
-brief is attached once to the first new user prompt; no old transcript or
+brief is supplied as refreshed system context for native OpenCode, and attached
+once to the first new user prompt for other providers; no old transcript or
 provider handoff is included. The owner record is durably rebound before the
 old session is retired, and a candidate launch or rebind failure leaves the old
 chat usable. Old conversation files remain stored. Queued and archived agents
 cannot be reset.
+
+When an ACP actor ends a turn, the runtime sends an automatic report to its parent: workers to their mission lead, mission leads to the workspace leader (self-led mission workers go directly to the workspace leader). The report includes the actual model and final transcript excerpt. It uses the durable inbox to wake an idle parent or queue behind active work. Unacknowledged deliveries persist on the actor and retry; duplicate turn reports are suppressed. A normal turn ending without explicit completion marks the actor idle and resumable; cancellation marks it interrupted. Neither marks the mission complete. A mission lead calls `neta_ready` without an ID to record its own completed handoff; the workspace leader uses the public mission number to close it. Successful checks close as `completed`, merges require commit evidence, and abandonment is reserved for intentionally discarded work. Repeating the same close is idempotent. Closed missions and archived actors do not wake parents. Model fallback updates the stored actor model and conversation metadata.
+
+Workspace leader activity follows runtime turns too: running from turn start,
+including thinking before the first response, idle after completion or cancellation,
+and failed after a provider error. State changes reach every attached client.
+Late events from previous turns or bindings cannot stop a newer execution. A Node
+restart clears stale running indicators before serving its first snapshot.
+
+Automatic reports include a runtime snapshot of the other agents in that mission,
+separate from the agent's own summary. An idle lead with no executing or queued
+agents is explicitly reported as unfinished idle work. The parent must continue
+that work or state a real blocker; an agent's claim that a worker is running is
+not execution evidence. `neta_status` identifies the caller and each agent's role,
+and reports executing/queued counts separately from the mission lifecycle state.
+`neta_send` refuses a self-target before touching any session.
+
+
+Provider errors mark an actor failed, separately from user cancellation. The
+snapshot and `neta_status` derive mission attention from actor failures and
+pending questions. A workspace leader can use `neta_ask` with the public mission
+number even when the work is delegated rather than its own active mission.
+
+`neta_send` persists a follow-up before admission and returns its message ID and
+inbox status. Busy actors receive it at a turn boundary without cancellation.
+Identical retries within the sender's turn reuse the same receipt. Queued writers
+retain messages without bypassing the lease. Completed or failed actors resume
+their exact conversation after writer admission; failed admission leaves the
+message queued and emits a recovery error. Closed missions require explicit
+continuation. Restart recovery resumes saved queued follow-ups.
+
+Interrupted or failed ordinary writers release ownership only after their session
+has closed. The next queued writer then starts. Restart recovery respects lease
+queue order. Parent reports distinguish pending inbox delivery from provider
+acceptance; uncertain receipts remain visible in `/delivery` and are not blindly
+replayed. A provider transport failure does not justify automatic replay after
+output or possible tool side effects.
+
+Delegation supports task instructions up to 16,000 characters and shared mission
+objectives up to 32,000. `/routing` includes sanitized routing failures; classifier
+validation identifies the failed constraint without logging raw responses.

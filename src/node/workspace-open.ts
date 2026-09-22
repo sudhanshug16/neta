@@ -12,6 +12,7 @@
 import { execFile } from "node:child_process";
 import { realpath, stat } from "node:fs/promises";
 import { basename } from "node:path";
+import { providerErrorMessage, redactProviderText } from "../acp/errors.ts";
 import { loadSettings, providerFor } from "../acp/settings.ts";
 import { ulid } from "../core/ids.ts";
 import { pickName } from "../core/names.ts";
@@ -19,7 +20,7 @@ import { nowIso } from "../core/time.ts";
 import type { Leader, Workspace, WorkspaceKind } from "../core/types.ts";
 import { canonicalRemote, workspaceIdFor } from "../core/workspace-id.ts";
 import { createFileLeaseStore, LeaseManager, leaseKeyFor } from "../worktrees/index.ts";
-import { asString, parseParams } from "./handlers-registry.ts";
+import { asOptionalString, asString, parseParams } from "./handlers-registry.ts";
 import { netaDir } from "./lockfile.ts";
 import { NodeError } from "./protocol.ts";
 import type { NodeContext, NodeHandlers } from "./server.ts";
@@ -113,10 +114,19 @@ function storedName(leader: Leader): string {
 	return typeof raw === "string" ? raw.trim() : "";
 }
 
-async function createLeader(ctx: NodeContext, workspaceId: string, machineId: string, cwd: string): Promise<Leader> {
+async function createLeader(
+	ctx: NodeContext,
+	workspaceId: string,
+	machineId: string,
+	cwd: string,
+	preferredProvider?: string,
+): Promise<Leader> {
 	const { settings } = loadSettings({ netaDir: netaDir(), workspaceRoot: cwd });
-	const providerName = ctx.pi === undefined ? settings.leader.provider : "pi";
-	const model = settings.leader.model ?? settings.providers[providerName]?.defaultModel ?? "";
+	const providerName = preferredProvider ?? (ctx.pi === undefined ? settings.leader.provider : "pi");
+	const model =
+		(preferredProvider === undefined ? settings.leader.model : undefined) ??
+		settings.providers[providerName]?.defaultModel ??
+		"";
 	const name = leaderName(ctx, workspaceId, cwd);
 	// The leader is an actor: 03 mints its token under the session id it is
 	// about to create and builds the `neta` MCP entry from it, so nothing
@@ -135,7 +145,7 @@ async function createLeader(ctx: NodeContext, workspaceId: string, machineId: st
 		state: "failed",
 	};
 	let leader = candidate;
-	if (ctx.pi !== undefined) {
+	if (ctx.pi !== undefined && providerName === "pi") {
 		ctx.acp.prepareExternalActor?.(sessionId);
 		leader = { ...candidate, state: "idle" };
 		await ctx.store.putLeader(leader);
@@ -161,11 +171,12 @@ async function createLeader(ctx: NodeContext, workspaceId: string, machineId: st
 			model: created.model,
 			state: "idle",
 		};
-	} catch {
+	} catch (error) {
 		// Opening a project and starting its provider are separate durable
 		// outcomes. Keep a failed leader beside the already-saved workspace so
 		// the desktop can select it immediately and offer provider recovery;
 		// reopening the workspace retries it through `reviveLeader`.
+		leader = { ...candidate, startupError: redactProviderText(providerErrorMessage(error)).slice(0, 8000) };
 	}
 	await ctx.store.putLeader(leader);
 	ctx.hub.broadcast("state", { kind: "leader", record: leader });
@@ -219,7 +230,7 @@ async function reviveLeader(ctx: NodeContext, leader: Leader, workspace: Workspa
 			unsandboxed: true,
 			netaTools: true,
 		});
-	} catch {
+	} catch (error) {
 		// The provider is gone from settings, or will not start: the
 		// workspace still opens, and the mute leader says so on the next
 		// prompt rather than failing the open.
@@ -229,6 +240,13 @@ async function reviveLeader(ctx: NodeContext, leader: Leader, workspace: Workspa
 			await ctx.store.putLeader(effective);
 			ctx.hub.broadcast("state", { kind: "leader", record: effective });
 		}
+		effective = {
+			...effective,
+			state: "failed",
+			startupError: redactProviderText(providerErrorMessage(error)).slice(0, 8000),
+		};
+		await ctx.store.putLeader(effective);
+		ctx.hub.broadcast("state", { kind: "leader", record: effective });
 		return effective;
 	}
 	if (live.sessionId === effective.sessionId && live.model === effective.model && effective.state !== "failed") {
@@ -240,6 +258,7 @@ async function reviveLeader(ctx: NodeContext, leader: Leader, workspace: Workspa
 		provider: live.provider,
 		model: live.model,
 		state: "idle",
+		startupError: undefined,
 	};
 	await ctx.store.putLeader(updated);
 	ctx.hub.broadcast("state", { kind: "leader", record: updated });
@@ -267,7 +286,11 @@ async function withWorkspaceLock<T>(id: string, run: () => Promise<T>): Promise<
 	}
 }
 
-export async function openWorkspace(ctx: NodeContext, path: string): Promise<{ workspace: Workspace; leader: Leader }> {
+export async function openWorkspace(
+	ctx: NodeContext,
+	path: string,
+	preferredProvider?: string,
+): Promise<{ workspace: Workspace; leader: Leader }> {
 	const detected = await detectWorkspace(path);
 	const id = workspaceIdFor({ kind: detected.kind, remote: detected.remote, path: detected.root });
 	return withWorkspaceLock(id, async () => {
@@ -289,7 +312,7 @@ export async function openWorkspace(ctx: NodeContext, path: string): Promise<{ w
 		}
 		let leader = ctx.store.getLeader(id);
 		if (leader === undefined) {
-			leader = await createLeader(ctx, id, machineId, detected.root);
+			leader = await createLeader(ctx, id, machineId, detected.root, preferredProvider);
 		} else {
 			if (storedName(leader) === "") {
 				// Backfill on read: a record from before the field existed keeps
@@ -307,7 +330,7 @@ export async function openWorkspace(ctx: NodeContext, path: string): Promise<{ w
 
 export const workspaceHandlers: NodeHandlers = {
 	"workspace.open": (ctx, params) => {
-		const parsed = parseParams({ path: asString }, params);
-		return openWorkspace(ctx, parsed.path);
+		const parsed = parseParams({ path: asString, provider: asOptionalString }, params);
+		return openWorkspace(ctx, parsed.path, parsed.provider);
 	},
 };

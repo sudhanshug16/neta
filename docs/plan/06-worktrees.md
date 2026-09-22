@@ -105,7 +105,8 @@ Writes: `src/worktrees/integration.ts`, `test/worktrees-integration.test.ts`.
 Contract:
 ```ts
 export function runGit(argv: readonly string[], cwd: string): Promise<WtRun>;
-export interface IntegrationQuery { repoRoot: string; branch: string; base: string }
+export interface IntegrationQuery { repoRoot: string; branch: string; base: string;
+  evidenceCommit?: string }
 export interface IntegrationResult { merged: boolean; base: string;
   commit?: string; baseCommit?: string }
 export function isIntegrated(q: IntegrationQuery): Promise<IntegrationResult>;
@@ -116,13 +117,20 @@ deleted branch is not an error at closeout. 2. Resolve the base tip, preferring
 `origin/<base>` when it exists and is strictly ahead of local `<base>`, so a
 lagging checkout cannot hide a merge. 3. `merge-base --is-ancestor <branchTip>
 <baseTip>` exiting 0 means merged: `commit` is the branch tip (the SHA evidence
-names), `baseCommit` the base tip. 4. `branch` accepts a raw SHA, so evidence is
-confirmed by passing it there. 5. Never write: no fetch, no checkout.
+names), `baseCommit` the base tip. 4. `branch` also accepts a raw SHA. With
+`evidenceCommit`, confirm that commit is on the base and contains the actual
+branch by ancestry or an exact squash match. For a squash, compare the full
+branch change from its common ancestor with the evidence parent against the
+evidence commit's change. Paths, modes and blob IDs must match; patch-id alone
+is insufficient because it ignores whitespace. 5. Never write: no fetch, no
+checkout.
 Tests: `test/worktrees-integration.test.ts` on a real temp repo — a fresh branch
 with a commit is not integrated; after a real `git merge` into `main` it is and
-`commit` equals the branch tip; a squash-merge of the same content is **not**
-merged by ancestry (documented limitation); an unknown branch gives
-`merged:false`; a raw SHA works as `branch`.
+`commit` equals the branch tip; a squash merge requires its evidence commit;
+later base changes and a lagging local base remain supported. Unrelated
+evidence and extra branch changes (including whitespace, binary content and
+file modes) refuse. An unknown branch gives `merged:false`; a raw SHA works
+as `branch`.
 Done when: `bun run check` and `bun test` pass.
 Commit: `feat(worktrees): merge detection`
 
@@ -137,7 +145,7 @@ export interface WorktreeEntry { branch?: string; path: string; commit: string;
   isMain: boolean; isCurrent: boolean; dirty: boolean }
 export type Refusal = "dirty" | "unmerged" | "checkedOut" | "failed";
 export interface RemoveInput { repoRoot: string; path: string; branch: string;
-  base: string; force?: boolean; abandon?: boolean }
+  base: string; evidenceCommit?: string; force?: boolean; abandon?: boolean }
 export type RemoveResult = { ok: true; branchOutcome: string; path: string }
                          | { ok: false; refusal: Refusal; reason: string };
 export interface WorktreeDriver {
@@ -163,7 +171,9 @@ row, else `git symbolic-ref --short HEAD`, memoised per `repoRoot`, cleared by
 or `list`, or under another branch. 5. `remove` pre-checks before shelling out —
 dirty per `list`, or `isIntegrated` false, with `abandon !== true` — and returns
 refusal `dirty` or `unmerged` without running `wt`, so a check never destroys
-anything. 6. Otherwise `remove <branch> --foreground -y --format=json`, adding
+anything. The stored integration commit is passed as `evidenceCommit` and
+rechecked against the current branch, so stale evidence cannot discard new
+work. 6. Otherwise `remove <branch> --foreground -y --format=json`, adding
 `--force -D` when `abandon` and `--force` when `force`; a non-zero exit is
 `failed` with the first stderr line, and on exit 0 `deleted`, `deferred` or
 `not_attempted` is `ok:true`, `retained_checked_out` is `checkedOut`, any other

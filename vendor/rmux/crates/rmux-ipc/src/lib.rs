@@ -1,0 +1,53 @@
+#![deny(missing_docs)]
+
+//! Local IPC boundary for RMUX.
+//!
+//! This crate owns endpoint naming and local transport handles. It deliberately
+//! transports bytes only; the RMUX request/response protocol stays in
+//! `rmux-proto`.
+
+mod endpoint;
+mod listener;
+#[cfg(unix)]
+mod managed_socket_unix;
+mod stream;
+#[cfg(any(windows, test))]
+mod windows_endpoint_components;
+#[cfg(windows)]
+mod windows_endpoint_directory;
+#[cfg(windows)]
+mod windows_endpoint_legacy;
+#[cfg(windows)]
+mod windows_endpoint_naming;
+#[cfg(windows)]
+mod windows_endpoint_record;
+#[cfg(windows)]
+mod windows_endpoint_reservation;
+#[cfg(windows)]
+mod windows_endpoint_security;
+#[cfg(windows)]
+mod windows_endpoint_state;
+#[cfg(windows)]
+mod windows_mutex;
+#[cfg(windows)]
+mod windows_process_stamp;
+
+pub use endpoint::{
+    default_endpoint, endpoint_for_label, resolve_endpoint, resolve_tmux_compatible_endpoint,
+    LocalEndpoint,
+};
+pub use listener::LocalListener;
+pub use stream::{
+    connect_blocking, is_peer_disconnect, wait_for_peer_close, BlockingLocalStream, LocalStream,
+    PeerIdentity,
+};
+#[cfg(windows)]
+pub use stream::{connect_windows_pipe, WindowsPipeClient};
+#[cfg(windows)]
+pub use windows_endpoint_reservation::ManagedEndpointStartReservation;
+#[cfg(windows)]
+pub use windows_endpoint_state::{legacy_shutdown_endpoint, reserve_managed_endpoint_start};
+#[cfg(windows)]
+pub use windows_mutex::{
+    acquire_named_mutex, NamedMutexAcquire, NamedMutexError, NamedMutexGuard, MAX_NAMED_MUTEX_LEN,
+};

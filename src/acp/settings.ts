@@ -1,6 +1,8 @@
 import { accessSync, constants, readFileSync, statSync } from "node:fs";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
-import { delimiter, isAbsolute, join, resolve } from "node:path";
+import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Access } from "../core/types.ts";
 
 export interface ProviderSettings {
@@ -13,6 +15,13 @@ export interface ProviderSettings {
 	defaultModel: string;
 	unsandboxedMode?: string;
 	disabled?: boolean;
+	// Internal launch metadata. Settings files cannot set this field; Neta sets
+	// it when it replaces the shipped npx tuple with an ACP executable.
+	codexAcp?: boolean;
+	// Internal launch metadata for Neta's bundled Claude ACP dependency.
+	claudeAcp?: boolean;
+	// Internal ownership marker for a launcher that spawns its ACP child.
+	processGroup?: boolean;
 }
 
 export interface Settings {
@@ -69,6 +78,31 @@ export const DEFAULT_SETTINGS: Settings = {
 	leader: { provider: "claude" },
 	forbiddenModels: [],
 };
+
+const CODEX_ACP_PACKAGE = "@agentclientprotocol/codex-acp";
+const CODEX_ACP_VERSION = "1.10.0";
+const CODEX_ACP_NPX_ARGS = ["-y", `${CODEX_ACP_PACKAGE}@${CODEX_ACP_VERSION}`];
+const CLAUDE_ACP_PACKAGE = "@agentclientprotocol/claude-agent-acp";
+const CLAUDE_ACP_VERSION = "0.74.0";
+const CLAUDE_ACP_NPX_ARGS = ["-y", `${CLAUDE_ACP_PACKAGE}@${CLAUDE_ACP_VERSION}`];
+const OPENCODE_PACKAGE = "opencode-ai";
+const OPENCODE_VERSION = "1.2.26";
+const OPENCODE_ACP_ARGS = ["acp"];
+const requireFromNeta = createRequire(import.meta.url);
+
+export function stagedCodexAcpProvider(
+	provider: ProviderSettings,
+	entry = join(dirname(fileURLToPath(import.meta.url)), "codex-acp.mjs"),
+): ProviderSettings | undefined {
+	if (!isDefaultCodexLaunch(provider)) return undefined;
+	try {
+		accessSync(entry, constants.R_OK);
+		if (!statSync(entry).isFile()) return undefined;
+		return { ...provider, command: process.execPath, args: [entry], codexAcp: true };
+	} catch {
+		return undefined;
+	}
+}
 
 function copyEnv(env: Record<string, string> | undefined): Record<string, string> | undefined {
 	return env === undefined ? undefined : { ...env };
@@ -328,10 +362,122 @@ export function launchArgs(p: ProviderSettings, access: Access): string[] {
 
 export function launchEnvironment(p: ProviderSettings, access: Access): Record<string, string> {
 	const environment = { ...p.env };
-	if (p.args.some((arg) => arg.includes("@agentclientprotocol/codex-acp@"))) {
+	if (p.env?.NETA_MANAGED_OPENCODE === "1") environment.NETA_NATIVE_ACCESS = access;
+	if (p.codexAcp === true || p.args.some((arg) => arg.includes("@agentclientprotocol/codex-acp@"))) {
 		environment.INITIAL_AGENT_MODE = access === "readOnly" ? "read-only" : "agent";
 	}
 	return environment;
+}
+
+function isDefaultCodexLaunch(provider: ProviderSettings): boolean {
+	return (
+		provider.command === "npx" &&
+		provider.args.length === CODEX_ACP_NPX_ARGS.length &&
+		provider.args.every((arg, index) => arg === CODEX_ACP_NPX_ARGS[index])
+	);
+}
+
+function isDefaultClaudeLaunch(provider: ProviderSettings): boolean {
+	return (
+		provider.command === "npx" &&
+		provider.args.length === CLAUDE_ACP_NPX_ARGS.length &&
+		provider.args.every((arg, index) => arg === CLAUDE_ACP_NPX_ARGS[index])
+	);
+}
+
+function isDefaultOpenCodeLaunch(provider: ProviderSettings): boolean {
+	return (
+		provider.command === "opencode" &&
+		provider.args.length === OPENCODE_ACP_ARGS.length &&
+		provider.args.every((arg, index) => arg === OPENCODE_ACP_ARGS[index])
+	);
+}
+
+// The resolver is deliberately rooted at this module, never at the workspace
+// cwd. A production install may omit this development dependency, in which
+// case callers retain the npx fallback.
+export function installedCodexAcpProvider(
+	provider: ProviderSettings,
+	resolvePackageJson: (request: string) => string = requireFromNeta.resolve,
+): ProviderSettings | undefined {
+	if (!isDefaultCodexLaunch(provider)) return undefined;
+	try {
+		const packageJson = resolvePackageJson(`${CODEX_ACP_PACKAGE}/package.json`);
+		const manifest: unknown = JSON.parse(readFileSync(packageJson, "utf8"));
+		if (typeof manifest !== "object" || manifest === null || Array.isArray(manifest)) return undefined;
+		const record = manifest as Record<string, unknown>;
+		const bin = record.bin;
+		const bins =
+			typeof bin === "object" && bin !== null && !Array.isArray(bin) ? (bin as Record<string, unknown>) : undefined;
+		const entry =
+			typeof bin === "string" ? bin : typeof bins?.["codex-acp"] === "string" ? bins["codex-acp"] : undefined;
+		if (record.version !== CODEX_ACP_VERSION || entry === undefined) return undefined;
+		const command = resolve(dirname(packageJson), entry);
+		accessSync(command, constants.X_OK);
+		if (!statSync(command).isFile()) return undefined;
+		return { ...provider, command, args: [], codexAcp: true };
+	} catch {
+		return undefined;
+	}
+}
+
+// Resolve from this module so a workspace cannot substitute its own adapter.
+// Claude's published entry is JavaScript and may be readable without an
+// executable bit, so launch it explicitly through the current Node runtime.
+export function installedClaudeAcpProvider(
+	provider: ProviderSettings,
+	resolvePackageJson: (request: string) => string = requireFromNeta.resolve,
+): ProviderSettings | undefined {
+	if (!isDefaultClaudeLaunch(provider)) return undefined;
+	try {
+		const packageJson = resolvePackageJson(`${CLAUDE_ACP_PACKAGE}/package.json`);
+		const manifest: unknown = JSON.parse(readFileSync(packageJson, "utf8"));
+		if (typeof manifest !== "object" || manifest === null || Array.isArray(manifest)) return undefined;
+		const record = manifest as Record<string, unknown>;
+		const bin = record.bin;
+		const bins =
+			typeof bin === "object" && bin !== null && !Array.isArray(bin) ? (bin as Record<string, unknown>) : undefined;
+		const entry =
+			typeof bin === "string"
+				? bin
+				: typeof bins?.["claude-agent-acp"] === "string"
+					? bins["claude-agent-acp"]
+					: undefined;
+		if (record.version !== CLAUDE_ACP_VERSION || entry === undefined) return undefined;
+		const command = resolve(dirname(packageJson), entry);
+		accessSync(command, constants.R_OK);
+		if (!statSync(command).isFile()) return undefined;
+		return { ...provider, command: process.execPath, args: [command], claudeAcp: true };
+	} catch {
+		return undefined;
+	}
+}
+
+// OpenCode publishes a CommonJS launcher which finds its platform-native
+// optional dependency. Resolve that launcher from Neta, then run it through
+// Node so neither a workspace nor PATH chooses the executable.
+export function installedOpenCodeAcpProvider(
+	provider: ProviderSettings,
+	resolvePackageJson: (request: string) => string = requireFromNeta.resolve,
+): ProviderSettings | undefined {
+	if (!isDefaultOpenCodeLaunch(provider)) return undefined;
+	try {
+		const packageJson = resolvePackageJson(`${OPENCODE_PACKAGE}/package.json`);
+		const manifest: unknown = JSON.parse(readFileSync(packageJson, "utf8"));
+		if (typeof manifest !== "object" || manifest === null || Array.isArray(manifest)) return undefined;
+		const record = manifest as Record<string, unknown>;
+		const bin = record.bin;
+		const bins =
+			typeof bin === "object" && bin !== null && !Array.isArray(bin) ? (bin as Record<string, unknown>) : undefined;
+		const entry = typeof bin === "string" ? bin : typeof bins?.opencode === "string" ? bins.opencode : undefined;
+		if (record.version !== OPENCODE_VERSION || entry === undefined) return undefined;
+		const command = resolve(dirname(packageJson), entry);
+		accessSync(command, constants.R_OK);
+		if (!statSync(command).isFile()) return undefined;
+		return { ...provider, command: process.execPath, args: [command, ...OPENCODE_ACP_ARGS], processGroup: true };
+	} catch {
+		return undefined;
+	}
 }
 
 export function isForbiddenModel(s: Settings, model: string): boolean {

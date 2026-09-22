@@ -75,7 +75,11 @@ async function startStub(seen: { list: unknown[]; call: unknown[] }): Promise<st
 		},
 		"tools.call": (_ctx, params) => {
 			seen.call.push(params);
-			return Promise.resolve({ content: [{ type: "text", text: "called" }], isError: false });
+			return Promise.resolve({
+				content: [{ type: "text", text: "called" }],
+				isError: false,
+				structuredContent: { missions: [{ number: 25 }] },
+			});
 		},
 	};
 	const { close } = await createServer({
@@ -191,7 +195,11 @@ describe("stdio MCP proxy", () => {
 		const h = harness();
 		h.send("tools/call", { name: "neta_mission", arguments: { name: "x" } }, 1);
 		const answered = await h.response(1);
-		expect(answered.result).toEqual({ content: [{ type: "text", text: "called" }], isError: false });
+		expect(answered.result).toEqual({
+			content: [{ type: "text", text: "called" }],
+			isError: false,
+			structuredContent: { missions: [{ number: 25 }] },
+		});
 		expect(seen.call).toEqual([
 			{ name: "neta_mission", arguments: { name: "x" }, actorId: ACTOR, token: ACTOR_TOKEN },
 		]);

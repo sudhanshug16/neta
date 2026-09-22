@@ -1,0 +1,7 @@
+* text=auto eol=lf
+
+# PTY transcript bytes are runtime payload, not source text.
+target/release-artifacts/**/logs/*.log -text -diff
+target/release-artifacts/**/logs/*.out -text -diff
+
+# Manual Windows console captures preserve terminal spacing.

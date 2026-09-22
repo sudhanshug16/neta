@@ -41,19 +41,30 @@
 		"access": "public"
 	},
 	"scripts": {
-		"build": "bun build src/cli/main.ts --target=node --outdir=dist --sourcemap=linked && chmod +x dist/main.js",
+		"setup:opencode": "bun scripts/setup-opencode.ts",
+		"build:opencode": "bun scripts/build-opencode.ts",
+		"test:opencode": "bun test test/opencode-gateway.test.ts test/opencode-native.test.ts test/opencode-v2-native.test.ts",
+		"build": "bun build src/cli/main.ts --target=node --outdir=dist --sourcemap=linked && chmod +x dist/main.js && bash scripts/stage-codex-acp.sh && bun scripts/stage-toad.ts",
+		"build:tui": "bash scripts/build-tui-runtime.sh",
 		"clean": "rm -rf dist",
 		"typecheck": "tsc --noEmit",
 		"check": "biome check --write --error-on-warnings . && bun run typecheck",
 		"test": "bun test",
 		"smoke": "bash scripts/smoke.sh",
-		"prepublishOnly": "bun run clean && bun run check && bun test && bun run build"
+		"prepublishOnly": "bun run check && bun test && bun run build && bash scripts/verify-tui-runtime.sh && bun run verify:opencode",
+		"export:opencode": "bun scripts/export-opencode.ts",
+		"verify:opencode": "bun scripts/verify-opencode.ts --all",
+		"test:conformance": "bun scripts/conformance.ts"
 	},
 	"dependencies": {
+		"@agentclientprotocol/claude-agent-acp": "0.74.0",
 		"@agentclientprotocol/sdk": "1.4.0",
+		"@openai/codex": "0.153.4",
 		"@anthropic-ai/claude-agent-sdk": "0.3.257",
 		"@earendil-works/pi-coding-agent": "0.85.0",
+		"@earendil-works/pi-tui": "0.85.0",
 		"node-pty": "1.1.0",
+		"opencode-ai": "1.2.26",
 		"pi-claude-bridge": "0.7.0"
 	},
 	"devDependencies": {

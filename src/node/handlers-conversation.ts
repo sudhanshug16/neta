@@ -4,9 +4,12 @@
 // Port cursors are decimal block seqs, minted by the store and passed back
 // verbatim; the adapter in `lifecycle.ts` honors the same convention.
 
+import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import type { Block, PromptAttachment, Turn } from "../core/types.ts";
+import { startOpenCodeGateway } from "../opencode/gateway.ts";
 import { composeContext, loadCharter, loadSkills } from "../tools/context.ts";
+import { netaBuildId } from "../version.ts";
 import { asOptionalNumber, asOptionalString, asString, parseParams } from "./handlers-registry.ts";
 import { NodeError } from "./protocol.ts";
 import type { NodeContext, NodeHandlers } from "./server.ts";
@@ -72,7 +75,7 @@ function asProviderError(error: unknown): NodeError {
 	return new NodeError("PROVIDER_ERROR", error instanceof Error ? error.message : String(error));
 }
 
-function resetBrief(ctx: NodeContext, sessionId: string): string {
+export function sessionSystemContext(ctx: Pick<NodeContext, "store">, sessionId: string): string {
 	const leader = ctx.store.listLeaders().find((one) => one.sessionId === sessionId);
 	const agent = ctx.store.listAgents().find((one) => one.sessionId === sessionId);
 	if (leader === undefined && agent === undefined)
@@ -91,11 +94,72 @@ function resetBrief(ctx: NodeContext, sessionId: string): string {
 	const charter = kind === "agent" ? undefined : loadCharter(root, homedir());
 	return composeContext({
 		kind,
+		self: { id: agent?.id ?? sessionId, name: agent?.name ?? leader?.name ?? "Workspace leader" },
+		access: agent?.access ?? (leader?.mode === "leadPlus" ? "readWrite" : "readOnly"),
 		...(charter === undefined ? {} : { charter }),
 		skills: skills.skills,
 		...(mission === undefined ? {} : { mission }),
 		...(agent === undefined ? {} : { task: agent.task }),
 	});
+}
+
+// Restoring a tab must not prompt the actor or create a replacement conversation.
+const restoringNative = new Map<string, Promise<void>>();
+export async function restoreNativeOwner(ctx: NodeContext, sessionId: string): Promise<void> {
+	const pending = restoringNative.get(sessionId);
+	if (pending) return pending;
+	const restore = (async () => {
+		try {
+			if (ctx.acp.nativeAttachment?.(sessionId)) return;
+		} catch (error) {
+			if (!(error instanceof NodeError) || error.symbol !== "NOT_FOUND") throw error;
+		}
+		const leader = ctx.store.listLeaders().find((item) => item.sessionId === sessionId);
+		const agent = ctx.store.listAgents().find((item) => item.sessionId === sessionId);
+		const owner = agent ?? leader;
+		if (!owner)
+			throw new NodeError("NOT_FOUND", "This saved conversation no longer has an owner. Open the workspace leader.");
+		if (agent?.state === "queued") throw new NodeError("BUSY", `${agent.name} is queued and has not started yet.`);
+		const workspace = ctx.store.getWorkspace(owner.workspaceId);
+		const root = workspace?.roots.find((item) => item.machineId === ctx.store.machine().id)?.path;
+		if (!root) throw new NodeError("NOT_FOUND", "The conversation's workspace is unavailable on this machine.");
+		const missionId = agent?.missionId ?? leader?.activeMissionId;
+		const mission = missionId ? ctx.store.getMission(missionId) : undefined;
+		const cwd = agent
+			? (mission?.worktree?.path ?? root)
+			: leader?.mode === "leadPlus"
+				? (mission?.worktree?.path ?? root)
+				: root;
+		if (cwd === mission?.worktree?.path) {
+			const directory = await stat(cwd).catch((error: unknown) => {
+				if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined;
+				throw error;
+			});
+			if (!directory?.isDirectory())
+				throw new NodeError(
+					"NOT_FOUND",
+					`${owner.name}'s worktree is no longer available: ${cwd}. Its saved conversation has been retained.`,
+				);
+		}
+		await ctx.acp.ensureSession({
+			sessionId,
+			workspaceId: owner.workspaceId,
+			cwd,
+			provider: owner.provider,
+			model: owner.model,
+			access: agent?.access ?? (leader?.mode === "leadPlus" ? "readWrite" : "readOnly"),
+			unsandboxed: !agent || agent.canSpawn,
+			netaTools: true,
+			actorId: agent?.id,
+			allowFresh: false,
+		});
+	})();
+	restoringNative.set(sessionId, restore);
+	try {
+		await restore;
+	} finally {
+		if (restoringNative.get(sessionId) === restore) restoringNative.delete(sessionId);
+	}
 }
 
 export async function prepareHandoffForSession(ctx: Pick<NodeContext, "store">, sessionId: string): Promise<string> {
@@ -215,8 +279,8 @@ interface Window {
 	nextCursor?: string;
 }
 
-// The window is `collected.blocks[start, end)`; prevCursor is the offset
-// before its first block (null at the start of history) and nextCursor
+// The window is `collected.blocks[start, end)`; prevCursor identifies the
+// block immediately before its first block (null at the start of history) and nextCursor
 // resumes a forward tail right after its last block, absent at the end.
 function assembleWindow(collected: Collected, start: number, end: number): Window {
 	const windowBlocks = collected.blocks.slice(start, end);
@@ -231,6 +295,84 @@ function assembleWindow(collected: Collected, start: number, end: number): Windo
 }
 
 export const conversationHandlers: NodeHandlers = {
+	"runtime.capabilities": async (ctx) => ({
+		runtimeBuild: netaBuildId(),
+		...(ctx.runtimeAdmission ? { instanceId: ctx.runtimeAdmission.instanceId, runtimeUpgrade: 1 } : {}),
+		activeSessionIds: [...ctx.store.listLeaders(), ...ctx.store.listAgents()]
+			.filter((actor) => ctx.acp.isTurnActive?.(actor.sessionId))
+			.map((actor) => actor.sessionId),
+		nativeOpenCode: 1,
+		nativeOpenCodeVersions: [1, 2],
+		nativeOpenCodeRevision: 9,
+	}),
+	"conversation.native": async (ctx, params, conn) => {
+		const parsed = parseParams({ sessionId: asString }, params);
+		const leader = ctx.store.listLeaders().find((one) => one.sessionId === parsed.sessionId);
+		if (leader?.state === "failed" && leader.startupError) throw new NodeError("PROVIDER_ERROR", leader.startupError);
+		await restoreNativeOwner(ctx, parsed.sessionId);
+		const attachment = ctx.acp.ensureNativeAttachment
+			? await ctx.acp.ensureNativeAttachment(parsed.sessionId)
+			: ctx.acp.nativeAttachment?.(parsed.sessionId);
+		if (attachment === undefined)
+			throw new NodeError(
+				"PROVIDER_ERROR",
+				"This conversation uses a legacy runtime. Start an OpenCode conversation to use native chat.",
+			);
+		const send = conversationHandlers["conversation.prompt"];
+		const cancel = conversationHandlers["conversation.cancel"];
+		const setModel = conversationHandlers["conversation.setModel"];
+		if (!send || !cancel || !setModel)
+			throw new NodeError("INTERNAL", "Native conversation handlers are unavailable");
+		const gateway = await startOpenCodeGateway({
+			attachment,
+			isCurrent: () => {
+				try {
+					return ctx.acp.nativeAttachment?.(parsed.sessionId)?.url === attachment.url;
+				} catch {
+					return false;
+				}
+			},
+			configure: async (input) => {
+				if (input.model) {
+					const model = input.model;
+					const current =
+						ctx.store.listLeaders().find((one) => one.sessionId === parsed.sessionId) ??
+						ctx.store.listAgents().find((one) => one.sessionId === parsed.sessionId);
+					if (current?.model !== model) await setModel(ctx, { sessionId: parsed.sessionId, model }, conn);
+				}
+				if (input.model) await ctx.acp.setNativeVariant?.(parsed.sessionId, input.variant);
+				if (input.agent) await ctx.acp.setNativeAgent?.(parsed.sessionId, input.agent);
+			},
+			prompt: async (input) => {
+				if (attachment.apiVersion !== 2) {
+					if (input.model) {
+						const model = input.model;
+						const current =
+							ctx.store.listLeaders().find((one) => one.sessionId === parsed.sessionId) ??
+							ctx.store.listAgents().find((one) => one.sessionId === parsed.sessionId);
+						if (current?.model !== model) await setModel(ctx, { sessionId: parsed.sessionId, model }, conn);
+					}
+					await ctx.acp.setNativeVariant?.(parsed.sessionId, input.variant);
+					if (input.agent) await ctx.acp.setNativeAgent?.(parsed.sessionId, input.agent);
+				}
+				return send(
+					ctx,
+					{
+						...parsed,
+						text: input.text,
+						attachments: input.attachments,
+						messageId: input.messageId,
+						messageHash: input.messageHash,
+					},
+					conn,
+				);
+			},
+			cancel: () => cancel(ctx, parsed, conn),
+		});
+		conn.onClose?.(() => gateway.close());
+		const { close: _close, ...native } = gateway;
+		return { ...native, netaSessionId: parsed.sessionId, integrationVersion: attachment.apiVersion === 2 ? 2 : 1 };
+	},
 	"conversation.tail": async (ctx, params, conn) => {
 		const parsed = parseParams(
 			{
@@ -273,7 +415,7 @@ export const conversationHandlers: NodeHandlers = {
 			const end =
 				cursorSeq === undefined
 					? collected.blocks.length
-					: collected.blocks.findIndex((block) => block.seq >= cursorSeq);
+					: collected.blocks.findIndex((block) => block.seq > cursorSeq);
 			const stop = end < 0 ? collected.blocks.length : end;
 			const window = assembleWindow(collected, Math.max(0, stop - take), stop);
 			conn.tailed.add(parsed.sessionId);
@@ -293,7 +435,16 @@ export const conversationHandlers: NodeHandlers = {
 	},
 
 	"conversation.prompt": async (ctx, params, conn) => {
-		const parsed = parseParams({ sessionId: asString, text: asString, attachments: asAttachments }, params);
+		const parsed = parseParams(
+			{
+				sessionId: asString,
+				text: asString,
+				attachments: asAttachments,
+				messageId: asOptionalString,
+				messageHash: asOptionalString,
+			},
+			params,
+		);
 		const attachments = parsed.attachments ?? [];
 		if (parsed.text.trim() === "" && attachments.length === 0)
 			throw new NodeError("INVALID_PARAMS", "prompt needs text or an attachment");
@@ -306,6 +457,7 @@ export const conversationHandlers: NodeHandlers = {
 			if (ctx.acp.send !== undefined) {
 				const message = await ctx.acp.send(parsed.sessionId, parsed.text, attachments, {
 					readerDirected: conn.client === "desktop" || conn.client === "cli",
+					...(parsed.messageId ? { sourceId: `user:${parsed.messageId}`, sourceHash: parsed.messageHash } : {}),
 				});
 				return {
 					messageId: message.id,
@@ -385,6 +537,50 @@ export const conversationHandlers: NodeHandlers = {
 		if (agent !== undefined && (agent.state === "queued" || agent.state === "archived")) {
 			throw new NodeError("INVALID_PARAMS", `cannot switch provider for ${agent.state} agent`);
 		}
+		const leader = ctx.store.listLeaders().find((one) => one.sessionId === parsed.sessionId);
+		if (leader?.provider === "pi" && parsed.provider === "pi") {
+			return {
+				sessionId: leader.sessionId,
+				provider: leader.provider,
+				model: leader.model,
+				contextReset: false as const,
+			};
+		}
+		if (leader?.provider === "pi" && parsed.provider !== "pi" && ctx.pi !== undefined) {
+			const workspace = ctx.store.getWorkspace(leader.workspaceId);
+			const cwd = workspace?.roots.find((root) => root.machineId === ctx.store.machine().id)?.path;
+			if (workspace === undefined || cwd === undefined)
+				throw new NodeError("NOT_FOUND", "Pi leader has no workspace root on this machine");
+			const target = ctx.acp
+				.listProviders?.({ sessionId: parsed.sessionId })
+				.find((one) => one.id === parsed.provider);
+			if (target === undefined || !target.available)
+				throw new NodeError(
+					"PROVIDER_ERROR",
+					target?.unavailableReason ?? `provider ${parsed.provider} is unavailable`,
+				);
+			const selected = await ctx.acp.createSession({
+				sessionId: parsed.sessionId,
+				workspaceId: leader.workspaceId,
+				cwd,
+				provider: parsed.provider,
+				model: parsed.model ?? target.defaultModel,
+				access: leader.mode === "leadPlus" ? "readWrite" : "readOnly",
+				unsandboxed: true,
+				netaTools: true,
+			});
+			try {
+				await ctx.acp.setPendingHandoff?.(parsed.sessionId, parsed.handoff ?? "");
+				const updated = { ...leader, ...selected, state: "idle" as const };
+				await ctx.store.putLeader(updated);
+				ctx.hub.broadcast("state", { kind: "leader", record: updated });
+			} catch (error) {
+				await ctx.acp.close(parsed.sessionId).catch(() => undefined);
+				throw error;
+			}
+			ctx.pi.closeSession(parsed.sessionId);
+			return { ...selected, contextReset: true as const };
+		}
 		if (ctx.acp.switchProvider === undefined)
 			throw new NodeError("PROVIDER_ERROR", "provider switching is unavailable");
 		let switchAttempted = false;
@@ -463,7 +659,7 @@ export const conversationHandlers: NodeHandlers = {
 			const leader = ctx.store.listLeaders().find((one) => one.sessionId === parsed.sessionId);
 			const selected = await ctx.acp.resetSession(
 				parsed.sessionId,
-				resetBrief(ctx, parsed.sessionId),
+				sessionSystemContext(ctx, parsed.sessionId),
 				async (next) => {
 					if (leader !== undefined) {
 						const updated = { ...leader, sessionId: next.sessionId, provider: next.provider, model: next.model };
@@ -496,5 +692,8 @@ export const conversationHandlers: NodeHandlers = {
 export function wireTurnStream(ctx: NodeContext): void {
 	ctx.acp.onTurn((notification) => {
 		ctx.hub.toTail(notification.sessionId, notification);
+		// Completion metadata must reach clients viewing another conversation too.
+		if (notification.turn?.endedAt)
+			ctx.hub.broadcast("conversation.ended", { sessionId: notification.sessionId, turn: notification.turn });
 	});
 }

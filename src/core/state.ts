@@ -12,16 +12,19 @@ export function deriveMissionState(
 	agents: Agent[],
 	integration?: Mission["integration"],
 ): MissionState {
-	if (mission.closedAt !== undefined) {
+	if (mission.state === "closed" || mission.closedAt !== undefined) {
 		return "closed";
 	}
-	if ((integration ?? mission.integration) !== undefined) {
+	if (mission.state === "mergedNotClosed" || (integration ?? mission.integration) !== undefined) {
 		return "mergedNotClosed";
 	}
-	if (agents.some((a) => a.state === "failed") && !agents.some((a) => a.state === "running")) {
+	if (
+		mission.state === "failed" ||
+		(agents.some((a) => a.state === "failed") && !agents.some((a) => a.state === "running"))
+	) {
 		return "failed";
 	}
-	if (agents.some((a) => a.state === "blocked" || a.pendingQuestion !== undefined)) {
+	if (mission.state === "blocked" || agents.some((a) => a.state === "blocked" || a.pendingQuestion !== undefined)) {
 		return "blocked";
 	}
 	if (mission.state === "readyToClose" || allDone(mission, agents)) {
@@ -46,11 +49,12 @@ function allDone(mission: Mission, agents: Agent[]): boolean {
 
 const AGENT_TRANSITIONS: Record<AgentState, readonly AgentState[]> = {
 	queued: ["starting", "archived"],
-	starting: ["running", "failed", "interrupted"],
-	running: ["blocked", "failed", "completed", "interrupted"],
+	idle: ["running", "blocked", "completed", "failed", "interrupted", "archived"],
+	starting: ["running", "idle", "failed", "interrupted"],
+	running: ["idle", "blocked", "failed", "completed", "interrupted"],
 	blocked: ["running", "failed", "interrupted", "archived"],
-	failed: ["archived"],
-	completed: ["archived"],
+	failed: ["idle", "archived"],
+	completed: ["idle", "archived"],
 	interrupted: ["running", "archived"],
 	archived: [],
 };

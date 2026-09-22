@@ -2,6 +2,7 @@ import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ulid } from "../core/ids.ts";
+import { recordTerminalTelemetry } from "../diagnostics/telemetry.ts";
 export interface TerminalChunk {
 	generation: string;
 	seq: number;
@@ -61,6 +62,8 @@ export function createPiTerminalManager(o: {
 }): PiTerminalManager {
 	const sessions = new Map<string, Live>();
 	const starting = new Map<string, Promise<Live>>();
+	const record = (event: string, fields: Record<string, string | number | undefined>) =>
+		recordTerminalTelemetry(o.dataDir, event, fields);
 	const request = <T>(live: Live, method: string, params: object): Promise<T> =>
 		new Promise((resolve, reject) => {
 			const id = ++live.next;
@@ -102,6 +105,7 @@ export function createPiTerminalManager(o: {
 		const live: Live = { child, next: 0, pending: new Map(), listeners: new Map(), buffer: "" };
 		sessions.set(sessionId, live);
 		const fail = (error: Error) => {
+			record("terminal.error", { sessionId, byteCount: Buffer.byteLength(error.message) });
 			if (sessions.get(sessionId) === live) sessions.delete(sessionId);
 			for (const pending of live.pending.values()) {
 				clearTimeout(pending.timer);
@@ -149,9 +153,16 @@ export function createPiTerminalManager(o: {
 						else pending.resolve(m.result);
 					}
 					live.pending.delete(m.id);
-				} else if (m.event === "output")
+				} else if (m.event === "output") {
+					record("terminal.output", {
+						sessionId,
+						generation: m.chunk?.generation,
+						seq: m.chunk?.seq,
+						byteCount: m.chunk === undefined ? 0 : Buffer.from(m.chunk.dataBase64, "base64").byteLength,
+					});
 					for (const emit of live.listeners.values()) emit("terminal.output", { sessionId, ...m.chunk });
-				else if (m.event === "state") {
+				} else if (m.event === "state") {
+					record("terminal.exit", { sessionId, generation: m.generation, byteCount: m.exitCode });
 					for (const emit of live.listeners.values())
 						emit("terminal.state", {
 							sessionId,
@@ -190,6 +201,7 @@ export function createPiTerminalManager(o: {
 			),
 		);
 		try {
+			record("terminal.start", { sessionId, cols, rows });
 			await request(live, "start", {
 				command: o.piCommand ?? o.nodeCommand ?? "node",
 				args,
@@ -232,6 +244,7 @@ export function createPiTerminalManager(o: {
 			live.listeners.set(attachmentId, emit);
 			live.owner = attachmentId;
 			live.ownerConnection = connectionId;
+			record("terminal.attach", { sessionId: sid, cols, rows });
 			// A Pi lead starts before a desktop view exists, at the bootstrap
 			// 80x24 size. Resize the retained PTY to the attaching emulator before
 			// taking replay so Pi's fullscreen redraw is ordered into that replay.
@@ -245,12 +258,15 @@ export function createPiTerminalManager(o: {
 			return { sessionId: sid, attachmentId, ...state };
 		},
 		input: async (sid, aid, connectionId, dataBase64) => {
+			record("terminal.input", { sessionId: sid, byteCount: Buffer.from(dataBase64, "base64").byteLength });
 			await request(owned(sid, aid, connectionId), "input", { dataBase64 });
 		},
 		resize: async (sid, aid, connectionId, cols, rows) => {
+			record("terminal.resize", { sessionId: sid, cols, rows });
 			await request(owned(sid, aid, connectionId), "resize", { cols, rows });
 		},
 		detach: (sid, aid, connectionId) => {
+			record("terminal.detach", { sessionId: sid });
 			const live = owned(sid, aid, connectionId);
 			live.listeners.delete(aid);
 			live.owner = undefined;

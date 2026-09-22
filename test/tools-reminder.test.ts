@@ -31,7 +31,7 @@ describe("reminder", () => {
 			],
 		});
 		expect(text).toBe(
-			"[neta] needs you: #14 payments retry — blocked: staging key · #9 mission 9 — ready to close\n[neta] running: #16 lens port · #15 mission 15",
+			"[neta] needs you: #14 payments retry — blocked: staging key · #9 mission 9 — ready to close\n[neta] open: #16 lens port · #15 mission 15",
 		);
 	});
 
@@ -63,7 +63,7 @@ describe("reminder", () => {
 		expect(reminder({ missions: [] })).toBe("");
 		expect(reminder({ missions: [], modeLine: "" })).toBe("");
 		expect(reminder({ missions: [mission(1, "running")], modeLine: "[neta] Lead++ 12m active" })).toBe(
-			"[neta] running: #1 mission 1\n[neta] Lead++ 12m active",
+			"[neta] open: #1 mission 1\n[neta] Lead++ 12m active",
 		);
 	});
 });
@@ -71,8 +71,6 @@ describe("reminder", () => {
 describe("preamble", () => {
 	test("it adds the heading and nothing else", () => {
 		expect(preamble({ missions: [] })).toBe("");
-		expect(preamble({ missions: [mission(1, "running")] })).toBe(
-			"Current mission state:\n[neta] running: #1 mission 1",
-		);
+		expect(preamble({ missions: [mission(1, "running")] })).toBe("Current mission state:\n[neta] open: #1 mission 1");
 	});
 });

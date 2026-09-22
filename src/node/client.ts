@@ -17,7 +17,7 @@ import {
 	PROTOCOL_VERSION,
 } from "./protocol.ts";
 
-export type NodeEvent = "event" | "state" | "turn" | "node";
+export type NodeEvent = "event" | "state" | "turn" | "conversation.ended" | "node";
 
 export interface NodeClient {
 	request<T>(method: string, params?: unknown): Promise<T>;
@@ -171,8 +171,9 @@ async function tryConnect(
 		failAll(new Error("the node connection closed"));
 		closedResolve();
 	});
-	socket.on("data", (chunk: Buffer) => {
-		buffer += chunk.toString("utf8");
+	socket.setEncoding("utf8");
+	socket.on("data", (chunk: string) => {
+		buffer += chunk;
 		let messages: unknown[];
 		try {
 			const decoded = decodeLines(buffer);

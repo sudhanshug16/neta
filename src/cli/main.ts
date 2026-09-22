@@ -1,5 +1,10 @@
 #!/usr/bin/env node
-import { basename } from "node:path";
+import { realpathSync } from "node:fs";
+import { basename, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { openCodeCommand } from "../opencode/launcher.ts";
+import { rmuxCommand } from "../rmux/bridge.ts";
+import { toadCommand } from "../toad/launcher.ts";
 // The `neta` command entry: argument parsing, dispatch and exit codes (08).
 // Every command is a thin client of the Node over its socket; this module owns
 // the command line shape only. Later tasks fill in the handlers behind the
@@ -25,6 +30,8 @@ export type Command = {
 		| "models"
 		| "model"
 		| "mcp"
+		| "rmux"
+		| "tui"
 		| "version";
 	sub?: string;
 	args: string[];
@@ -39,6 +46,7 @@ const COUNT_RE = /^[1-9][0-9]*$/;
 const COMMAND_TABLE = `usage: neta [command] [options]
 
   neta                                   attach to the workspace leader's conversation
+  neta chat                              use the plain terminal conversation client
   neta node start [--detach]             run the Node
   neta node stop                         stop the Node
   neta node status [--json]              report Node status without starting anything
@@ -50,6 +58,9 @@ const COMMAND_TABLE = `usage: neta [command] [options]
   neta models [--json]                   providers and their models
   neta model <id>                        set the model of the attached conversation
   neta mcp --actor <id> --token <t>      stdio MCP server for one ACP session
+  neta tui [path] [--migrate] [--host id]  open native OpenCode chat and the Neta spine
+  neta tui --legacy [--demo]              open the retired Toad client
+  neta rmux                              open the Neta rmux terminal workspace
   neta version                            print the version from package.json
 
 <dur> is <n>[mhdw], e.g. 90m, 3d. --json is accepted only where listed above.`;
@@ -133,6 +144,18 @@ function parseOpen(tokens: string[]): Command | Usage {
 	if ("usage" in split) return split;
 	if (split.args.length > 1) return { usage: "neta open takes at most one path" };
 	return { name: "open", args: split.args, flags: {} };
+}
+
+function parseTui(tokens: string[]): Command | Usage {
+	const split = splitFlags(tokens, {
+		booleans: ["legacy", "demo", "migrate"],
+		values: { host: (value) => value.length > 0 },
+	});
+	if ("usage" in split) return split;
+	if (split.args.length > 1) return { usage: "neta tui takes at most one workspace path" };
+	if ((split.flags.legacy || split.flags.demo) && (split.flags.migrate || split.flags.host || split.args.length))
+		return { usage: "legacy Toad mode does not support native migration or a workspace path" };
+	return { name: "tui", ...split };
 }
 
 function parseMissions(tokens: string[]): Command | Usage {
@@ -235,6 +258,15 @@ export function parse(argv: string[]): Command | Usage {
 			return parseModel(rest);
 		case "mcp":
 			return parseMcp(rest);
+		case "tui":
+			return parseTui(rest);
+		case "chat":
+			return rest.length
+				? { usage: "neta chat takes no arguments" }
+				: { name: "attach", args: [], flags: { legacy: true } };
+		case "rmux":
+			if (rest.length > 0) return { usage: "neta rmux takes no arguments" };
+			return { name: "rmux", args: [], flags: {} };
 		case "version":
 		case "--version":
 			if (rest.length > 0) return { usage: "neta version takes no arguments" };
@@ -284,7 +316,8 @@ async function withClient(fn: (client: NodeClient) => Promise<number>): Promise<
 }
 
 const handlers: Record<Command["name"], (cmd: Command) => number | Promise<number>> = {
-	attach: attachCommand,
+	attach: (cmd) =>
+		process.stdin.isTTY && process.stdout.isTTY && cmd.flags.legacy !== true ? openCodeCommand() : attachCommand(),
 	node: (cmd) => nodeCommand(cmd.sub ?? "", cmd.flags),
 	open: (cmd) => openCommand(cmd.args[0]),
 	missions: (cmd) => withClient((client) => missionsCommand(client, cmd.flags)),
@@ -294,6 +327,15 @@ const handlers: Record<Command["name"], (cmd: Command) => number | Promise<numbe
 	models: (cmd) => withClient((client) => modelsCommand(client, cmd.flags)),
 	model: (cmd) => withClient((client) => modelCommand(client, cmd.args[0] as string)),
 	mcp: (cmd) => mcpCommand(cmd.flags),
+	rmux: rmuxCommand,
+	tui: (cmd) =>
+		cmd.flags.legacy === true || cmd.flags.demo === true
+			? toadCommand(cmd.flags.demo === true)
+			: openCodeCommand(
+					cmd.args[0],
+					cmd.flags.migrate === true,
+					typeof cmd.flags.host === "string" ? cmd.flags.host : undefined,
+				),
 	version: printVersion,
 };
 
@@ -306,13 +348,22 @@ export async function main(argv: string[]): Promise<number> {
 	return handlers[parsed.name](parsed);
 }
 
-// Auto-run when executed as the program: `node dist/main.js` (argv[1] is
-// the bundle), the installed `neta` bin symlink (argv[1] is the link), or
-// the compiled single-file exe (its argv hides the exe path, but execPath
-// is the exe itself). Importing this module — tests, bundlers — never runs
-// it: then argv[1] is the runner or a test file and execPath is bun/node.
-const invoked = basename(process.argv[1] ?? "");
-const launcher = basename(process.execPath ?? "");
-if (invoked === "main.js" || invoked === "neta" || launcher === "neta") {
+// A Node bundle can have any filename. Compare the actual module with argv[1]
+// instead of admitting a basename: an imported bundle must stay inert even if
+// its importing runner happens to be named main.js. The compiled executable
+// has no useful script path, so it remains identified by its executable name.
+function isEntrypoint(): boolean {
+	if (process.versions.bun !== undefined && import.meta.main) return true;
+	const script = process.argv[1];
+	if (script === undefined || script === "") return basename(process.execPath) === "neta";
+	const modulePath = fileURLToPath(import.meta.url);
+	try {
+		return realpathSync(script) === realpathSync(modulePath);
+	} catch {
+		return resolve(script) === modulePath;
+	}
+}
+
+if (isEntrypoint()) {
 	void main(process.argv.slice(2)).then((code) => process.exit(code));
 }

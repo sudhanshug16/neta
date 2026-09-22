@@ -1,0 +1,7 @@
+<svg width="340" height="52" viewBox="0 0 340 52" fill="none" xmlns="http://www.w3.org/2000/svg">
+<style>
+:root { --toc-fg:#24292f; --toc-link:#0969da; --toc-bullet:#59636e; --toc-muted:#57606a; --toc-rule:#d0d7de; }
+@media (prefers-color-scheme: dark) { :root { --toc-fg:#f0f6fc; --toc-link:#4493f8; --toc-bullet:#9198a1; --toc-muted:#8b949e; --toc-rule:#30363d; } }
+</style>
+<line x1="18" y1="26" x2="322" y2="26" stroke="var(--toc-rule)" stroke-width="1"/>
+</svg>

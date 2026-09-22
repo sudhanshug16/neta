@@ -134,8 +134,15 @@ export function detachSpawn(execPath: string, script: string | undefined): Detac
 async function startDetached(): Promise<number> {
 	const existing = await liveDescriptor();
 	if (existing !== undefined) {
-		process.stdout.write(`started  pid ${existing.pid}  ${existing.socket}\n`);
-		return 0;
+		try {
+			const probe = await NodeClient.connect({ protocolVersion: existing.protocolVersion, timeoutMs: 1000 });
+			probe.close();
+			process.stdout.write(`started  pid ${existing.pid}  ${existing.socket}\n`);
+			return 0;
+		} catch {
+			// A recycled PID is not a live Node. The lifetime lock below, not
+			// this descriptor, decides whether a replacement may start.
+		}
 	}
 	const socketError = socketPathError(join(netaDir(), "node.sock"));
 	if (socketError !== undefined) {

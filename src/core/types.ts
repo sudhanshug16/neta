@@ -1,3 +1,4 @@
+import type { RoutingDecision } from "../routing/types.ts";
 export type Ulid = string; // 26 chars, Crockford base32
 export type MachineId = Ulid;
 export type WorkspaceId = string; // see workspace identity below
@@ -40,12 +41,15 @@ export interface Leader {
 	modeActiveMs: number; // active connected time in leadPlus
 	activeMissionId?: MissionId; // mission the leader works in directly
 	state: "idle" | "running" | "failed";
+	currentTurnId?: TurnId;
+	bindingGeneration?: string;
+	startupError?: string;
 }
 
 export type Access = "readOnly" | "readWrite";
 
 export type MissionState = "running" | "blocked" | "failed" | "readyToClose" | "mergedNotClosed" | "closed";
-export type Disposition = "merged" | "abandoned";
+export type Disposition = "merged" | "completed" | "abandoned";
 
 export interface MissionChange {
 	// append-only accepted scope change
@@ -85,6 +89,7 @@ export interface Mission {
 
 export type AgentState =
 	| "queued"
+	| "idle"
 	| "starting"
 	| "running"
 	| "blocked"
@@ -106,6 +111,15 @@ export interface Agent {
 	sessionId: SessionId;
 	canSpawn: boolean; // true only for mission leads
 	state: AgentState;
+	currentTurnId?: TurnId;
+	bindingGeneration?: string;
+	requestedModel?: string;
+	routing?: RoutingDecision;
+	fallbackModels?: string[];
+	deliveryStatus?: "pending" | "accepted" | "uncertain" | "failed";
+	deliveryError?: string;
+	lastReportedTurnId?: TurnId;
+	pendingParentTurn?: Turn;
 	stateBefore?: AgentState; // set when interrupted
 	activity?: { text: string; at: IsoTime };
 	pendingQuestion?: string;
@@ -139,6 +153,8 @@ export type EventKind =
 	| "agent.spawned"
 	| "agent.finished"
 	| "agent.archived"
+	| "agent.modelChanged"
+	| "routing.failed"
 	| "leader.modeChanged"
 	| "leader.modeReminder"
 	| "base.integrated"
@@ -170,6 +186,9 @@ export interface PromptAttachment {
 }
 export type InboxMessageStatus = "queued" | "delivering" | "delivered" | "uncertain" | "discarded";
 export interface InboxMessage {
+	sourceId?: string;
+	sourceHash?: string;
+	readerDirected?: boolean;
 	id: Ulid;
 	sessionId: SessionId;
 	createdAt: IsoTime;
@@ -195,5 +214,8 @@ export interface Turn {
 	endedAt?: IsoTime;
 	role: Role; // who opened the turn
 	cancelled?: boolean;
+	failed?: boolean;
 	readerDirected?: boolean;
+	model?: string;
+	bindingGeneration?: string;
 }

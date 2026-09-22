@@ -31,6 +31,7 @@ export interface RemoveInput {
 	path: string;
 	branch: string;
 	base: string;
+	evidenceCommit?: string;
 	force?: boolean;
 	abandon?: boolean;
 }
@@ -198,7 +199,12 @@ export class WorktrunkDriver implements WorktreeDriver {
 			if (entry?.dirty) {
 				return { ok: false, refusal: "dirty", reason: `worktree ${input.branch} has uncommitted changes` };
 			}
-			const integrated = await isIntegrated({ repoRoot: input.repoRoot, branch: input.branch, base: input.base });
+			const integrated = await isIntegrated({
+				repoRoot: input.repoRoot,
+				branch: input.branch,
+				base: input.base,
+				evidenceCommit: input.evidenceCommit,
+			});
 			if (!integrated.merged) {
 				return {
 					ok: false,

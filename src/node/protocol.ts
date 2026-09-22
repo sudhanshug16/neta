@@ -413,6 +413,8 @@ export interface StateNotification {
 }
 
 export interface TurnNotification {
+	bindingGeneration?: string;
+	model?: string;
 	sessionId: SessionId;
 	turn?: Turn;
 	block?: Block;

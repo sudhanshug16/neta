@@ -4,6 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	DEFAULT_SETTINGS,
+	installedClaudeAcpProvider,
+	installedCodexAcpProvider,
+	installedOpenCodeAcpProvider,
 	isForbiddenModel,
 	launchArgs,
 	launchEnvironment,
@@ -12,6 +15,7 @@ import {
 	providerCommandAvailable,
 	providerFor,
 	providerPath,
+	stagedCodexAcpProvider,
 	UnknownProviderError,
 } from "../src/acp/settings.ts";
 
@@ -129,6 +133,118 @@ describe("provider settings", () => {
 		expect(launchEnvironment(codex, "readOnly").INITIAL_AGENT_MODE).toBe("read-only");
 		expect(launchEnvironment(codex, "readWrite").INITIAL_AGENT_MODE).toBe("agent");
 		expect(launchArgs(providerFor(settings, "claude"), "readOnly")).toEqual(settings.providers.claude?.args);
+	});
+
+	test("uses only a matching Codex ACP installation resolved from Neta", () => {
+		const root = mkdtempSync(join(tmpdir(), "neta-codex-acp-"));
+		const packageJson = join(root, "package.json");
+		const adapter = join(root, "bin", "codex-acp");
+		mkdirSync(join(root, "bin"));
+		writeFileSync(adapter, "#!/bin/sh\n");
+		chmodSync(adapter, 0o755);
+		writeFileSync(packageJson, JSON.stringify({ version: "1.10.0", bin: { "codex-acp": "bin/codex-acp" } }));
+		const defaultCodex = providerFor(DEFAULT_SETTINGS, "codex");
+		const installed = installedCodexAcpProvider(
+			{ ...defaultCodex, env: { CODEX_PATH: "/custom/codex" } },
+			() => packageJson,
+		);
+		if (installed === undefined) throw new Error("matching Codex ACP installation was not resolved");
+		expect(installed).toMatchObject({ command: adapter, args: [], codexAcp: true });
+		expect(installed.env).toEqual({ CODEX_PATH: "/custom/codex" });
+		expect(launchEnvironment(installed, "readOnly").INITIAL_AGENT_MODE).toBe("read-only");
+		expect(launchEnvironment(installed, "readWrite").INITIAL_AGENT_MODE).toBe("agent");
+	});
+
+	test("uses only a matching Claude ACP installation resolved from Neta through Node", () => {
+		const root = mkdtempSync(join(tmpdir(), "neta-claude-acp-"));
+		const packageJson = join(root, "package.json");
+		const adapter = join(root, "dist", "index.js");
+		mkdirSync(join(root, "dist"));
+		writeFileSync(adapter, "export {};\n");
+		writeFileSync(packageJson, JSON.stringify({ version: "0.74.0", bin: { "claude-agent-acp": "dist/index.js" } }));
+		const defaultClaude = providerFor(DEFAULT_SETTINGS, "claude");
+		const installed = installedClaudeAcpProvider(
+			{ ...defaultClaude, env: { ANTHROPIC_API_KEY: "test-key" } },
+			() => packageJson,
+		);
+		if (installed === undefined) throw new Error("matching Claude ACP installation was not resolved");
+		expect(installed).toMatchObject({ command: process.execPath, args: [adapter], claudeAcp: true });
+		expect(installed.env).toEqual({ ANTHROPIC_API_KEY: "test-key" });
+	});
+
+	test("prefers a staged Codex adapter for the default tuple without npx", () => {
+		const root = mkdtempSync(join(tmpdir(), "neta-codex-stage-"));
+		const entry = join(root, "codex-acp.mjs");
+		writeFileSync(entry, "export {};\n");
+		const staged = stagedCodexAcpProvider(providerFor(DEFAULT_SETTINGS, "codex"), entry);
+		if (staged === undefined) throw new Error("staged Codex adapter was not resolved");
+		expect(staged).toMatchObject({ command: process.execPath, args: [entry], codexAcp: true });
+		expect(launchEnvironment(staged, "readOnly").INITIAL_AGENT_MODE).toBe("read-only");
+		expect(
+			stagedCodexAcpProvider({ ...providerFor(DEFAULT_SETTINGS, "codex"), args: ["acp"] }, entry),
+		).toBeUndefined();
+	});
+
+	test("keeps npx for missing or mismatched Codex ACP and all custom launch tuples", () => {
+		const root = mkdtempSync(join(tmpdir(), "neta-codex-acp-"));
+		const packageJson = join(root, "package.json");
+		writeFileSync(packageJson, JSON.stringify({ version: "1.9.0", bin: { "codex-acp": "bin/codex-acp" } }));
+		const defaultCodex = providerFor(DEFAULT_SETTINGS, "codex");
+		expect(installedCodexAcpProvider(defaultCodex, () => packageJson)).toBeUndefined();
+		expect(
+			installedCodexAcpProvider(defaultCodex, () => {
+				throw new Error("missing");
+			}),
+		).toBeUndefined();
+		const custom = { ...defaultCodex, command: "custom-codex", args: ["acp"], env: { CODEX_PATH: "/custom/codex" } };
+		expect(installedCodexAcpProvider(custom, () => packageJson)).toBeUndefined();
+	});
+
+	test("keeps npx for missing or mismatched Claude ACP and all custom launch tuples", () => {
+		const root = mkdtempSync(join(tmpdir(), "neta-claude-acp-"));
+		const packageJson = join(root, "package.json");
+		writeFileSync(packageJson, JSON.stringify({ version: "0.73.0", bin: { "claude-agent-acp": "dist/index.js" } }));
+		const defaultClaude = providerFor(DEFAULT_SETTINGS, "claude");
+		expect(installedClaudeAcpProvider(defaultClaude, () => packageJson)).toBeUndefined();
+		expect(
+			installedClaudeAcpProvider(defaultClaude, () => {
+				throw new Error("missing");
+			}),
+		).toBeUndefined();
+		expect(installedClaudeAcpProvider({ ...defaultClaude, args: ["agent"] }, () => packageJson)).toBeUndefined();
+	});
+
+	test("uses only a matching OpenCode installation resolved from Neta through Node", () => {
+		const root = mkdtempSync(join(tmpdir(), "neta-opencode-"));
+		const packageJson = join(root, "package.json");
+		const launcher = join(root, "bin", "opencode");
+		mkdirSync(join(root, "bin"));
+		writeFileSync(launcher, "module.exports = {};\n");
+		const defaultOpenCode = providerFor(DEFAULT_SETTINGS, "opencode");
+		writeFileSync(packageJson, JSON.stringify({ version: "1.2.26", bin: { opencode: "bin/opencode" } }));
+		const installed = installedOpenCodeAcpProvider(
+			{ ...defaultOpenCode, env: { OPENCODE_BIN_PATH: "/custom/opencode" } },
+			() => packageJson,
+		);
+		if (installed === undefined) throw new Error("matching OpenCode installation was not resolved");
+		expect(installed).toMatchObject({ command: process.execPath, args: [launcher, "acp"] });
+		expect(installed.env).toEqual({ OPENCODE_BIN_PATH: "/custom/opencode" });
+	});
+
+	test("keeps the external OpenCode command for missing, mismatched, and custom launch tuples", () => {
+		const root = mkdtempSync(join(tmpdir(), "neta-opencode-"));
+		const packageJson = join(root, "package.json");
+		writeFileSync(packageJson, JSON.stringify({ version: "1.2.25", bin: { opencode: "bin/opencode" } }));
+		const defaultOpenCode = providerFor(DEFAULT_SETTINGS, "opencode");
+		expect(installedOpenCodeAcpProvider(defaultOpenCode, () => packageJson)).toBeUndefined();
+		expect(
+			installedOpenCodeAcpProvider(defaultOpenCode, () => {
+				throw new Error("missing");
+			}),
+		).toBeUndefined();
+		expect(
+			installedOpenCodeAcpProvider({ ...defaultOpenCode, command: "/custom/opencode" }, () => packageJson),
+		).toBeUndefined();
 	});
 
 	test("isForbiddenModel is exact-match", () => {

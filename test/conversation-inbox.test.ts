@@ -54,3 +54,23 @@ describe("conversation inbox", () => {
 		expect((await reopened.list("s"))[0]?.status).toBe("uncertain");
 	});
 });
+
+test("automatic report identity and provenance survive restart and receipt compaction", async () => {
+	dir = await mkdtemp(join(tmpdir(), "neta-inbox-"));
+	process.env.NETA_DIR = dir;
+	const store = openConversationInboxStore();
+	const source = { readerDirected: false, sourceId: "actor/turn" };
+	const first = await store.enqueue("s", "report", [], source);
+	await store.markDelivered("s", first.id, "parent-turn");
+	for (let index = 0; index < 105; index++) {
+		const item = await store.enqueue("s", String(index), []);
+		await store.markDelivered("s", item.id, `turn-${index}`);
+	}
+	const reopened = openConversationInboxStore();
+	const again = await reopened.enqueue("s", "report", [], source);
+	expect(again.id).toBe(first.id);
+	expect(again.status).toBe("delivered");
+	expect(again.readerDirected).toBe(false);
+	for (let index = 0; index < 20; index++) await store.enqueue("s", `queued${index}`, []);
+	expect((await store.enqueue("s", "report", [], source)).id).toBe(first.id);
+});

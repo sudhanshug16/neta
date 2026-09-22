@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadSettings } from "../src/acp/settings.ts";
+import { systemContextPath } from "../src/acp/system-context.ts";
 import { ulid } from "../src/core/ids.ts";
-import type { Agent, AgentState, Event, Mission, MissionState, Workspace } from "../src/core/types.ts";
+import type { Agent, AgentState, Event, Leader, Mission, MissionState, Workspace } from "../src/core/types.ts";
 import { connectNode, type NodeClient, startNode } from "../src/node/index.ts";
 import {
 	adaptAcp,
@@ -157,6 +158,36 @@ function runningWorld(): StubWorld {
 }
 
 describe("markInterrupted", () => {
+	test("a restart clears persisted running leader activity but preserves startup failures", async () => {
+		const store = stubStore(runningWorld());
+		const leader: Leader = {
+			workspaceId: "w1",
+			machineId: MACHINE.id,
+			name: "Mace",
+			sessionId: "session",
+			provider: "fake",
+			model: "test-model",
+			mode: "lead",
+			modeSince: MACHINE.createdAt,
+			modeActiveMs: 0,
+			state: "running",
+			currentTurnId: "turn",
+			bindingGeneration: "old-runtime",
+		};
+		const leaders = new Map<string, Leader>([
+			["w1", leader],
+			["w2", { ...leader, workspaceId: "w2", state: "failed", startupError: "sign-in expired" }],
+		]);
+		store.listLeaders = () => [...leaders.values()];
+		store.putLeader = async (next) => {
+			leaders.set(next.workspaceId, next);
+		};
+		await markInterrupted(store);
+		expect(leaders.get("w1")).toMatchObject({ state: "idle", sessionId: "session" });
+		expect(leaders.get("w1")?.currentTurnId).toBeUndefined();
+		expect(leaders.get("w1")?.bindingGeneration).toBeUndefined();
+		expect(leaders.get("w2")).toMatchObject({ state: "failed", startupError: "sign-in expired" });
+	});
 	test("Glance freezes agent identity while the session record still exists", () => {
 		const world = runningWorld();
 		const store = stubStore(world);
@@ -303,6 +334,7 @@ describe("allHandlers", () => {
 				"conversation.cancel",
 				"conversation.capabilities",
 				"conversation.inbox",
+				"conversation.native",
 				"conversation.prompt",
 				"conversation.reset",
 				"conversation.prepareHandoff",
@@ -310,6 +342,12 @@ describe("allHandlers", () => {
 				"conversation.setModel",
 				"conversation.tail",
 				"conversation.untail",
+				"diagnostics.cleanup",
+				"diagnostics.files",
+				"diagnostics.prepare",
+				"diagnostics.read",
+				"diagnostics.record",
+				"diagnostics.runtime",
 				"events.list",
 				"glance.complete",
 				"glance.list",
@@ -322,6 +360,15 @@ describe("allHandlers", () => {
 				"models.list",
 				"providers.list",
 				"node.stop",
+				"runtime.capabilities",
+				"routing.logs",
+				"routing.auth.status",
+				"routing.auth.save",
+				"routing.preferences.list",
+				"routing.preferences.save",
+				"runtime.upgrade.prepare",
+				"runtime.upgrade.commit",
+				"runtime.upgrade.cancel",
 				"snapshot",
 				"terminal.attach",
 				"terminal.detach",
@@ -474,6 +521,66 @@ describe("startNode on an unusable NETA_DIR", () => {
 });
 
 describe("adaptAcp against the fake provider", () => {
+	test("lists resolved adapters and session-relative custom commands accurately", async () => {
+		const workspace = await mkdtemp(join(tmpdir(), "neta-provider-workspace-"));
+		const relative = join(workspace, "relative-acp");
+		await writeFile(relative, "#!/bin/sh\n");
+		await chmod(relative, 0o755);
+		const configured = loadSettings({ netaDir: dir }).settings;
+		configured.providers.fake = { command: process.execPath, args: [FIXTURE], resume: true, defaultModel: "" };
+		configured.providers.relative = { command: "./relative-acp", args: [], resume: true, defaultModel: "" };
+		configured.providers.missing = { command: "missing-custom-acp", args: [], resume: true, defaultModel: "" };
+		const acp = adaptAcp(configured, undefined, () => configured);
+		try {
+			const noSessionClaude = acp.listProviders?.().find((provider) => provider.id === "claude");
+			expect(noSessionClaude).toMatchObject({ available: true });
+			expect(noSessionClaude?.note).toBeUndefined();
+			const created = await acp.createSession({
+				workspaceId: "w1",
+				cwd: workspace,
+				provider: "fake",
+				model: "",
+				access: "readOnly",
+				netaTools: false,
+			});
+			const providers = acp.listProviders?.({ sessionId: created.sessionId });
+			expect(providers?.find((provider) => provider.id === "relative")).toMatchObject({ available: true });
+			expect(providers?.find((provider) => provider.id === "missing")).toMatchObject({
+				available: false,
+				unavailableReason: "Command not found: missing-custom-acp",
+			});
+		} finally {
+			await acp.closeAll();
+			await rm(workspace, { recursive: true, force: true });
+		}
+	});
+
+	test("a blank model records the provider-advertised model in conversation metadata", async () => {
+		const configured = loadSettings({ netaDir: dir }).settings;
+		configured.providers.fake = { command: process.execPath, args: [FIXTURE], resume: true, defaultModel: "" };
+		configured.leader.provider = "fake";
+		const real = await openStore();
+		const acp = adaptAcp(configured, real.conversations);
+		try {
+			const created = await acp.createSession({
+				workspaceId: "w1",
+				cwd: dir,
+				provider: "fake",
+				model: "",
+				access: "readOnly",
+				netaTools: false,
+			});
+			expect(created.model).toBe("test-model");
+			expect(await real.conversations.meta(created.sessionId)).toMatchObject({
+				sessionId: created.sessionId,
+				provider: "fake",
+				model: "test-model",
+			});
+		} finally {
+			await acp.closeAll();
+		}
+	});
+
 	test("durable prompts drain FIFO after an instant turn and a missing session does not spin", async () => {
 		await writeFile(
 			join(dir, "settings.json"),
@@ -833,7 +940,7 @@ describe("adaptAcp against the fake provider", () => {
 				leader: { provider: "fake" },
 			}),
 		);
-		const captured: Array<{ id: string; cancelled?: boolean }> = [];
+		const captured: Array<{ id: string; cancelled?: boolean; failed?: boolean }> = [];
 		let recoveryCalls = 0;
 		const conversationStore = (await openStore()).conversations;
 		const acp = adaptAcp(
@@ -841,7 +948,7 @@ describe("adaptAcp against the fake provider", () => {
 			conversationStore,
 			undefined,
 			async (_session, turn) => {
-				captured.push({ id: turn.id, cancelled: turn.cancelled });
+				captured.push({ id: turn.id, cancelled: turn.cancelled, failed: turn.failed });
 			},
 			async () => {
 				recoveryCalls += 1;
@@ -868,7 +975,7 @@ describe("adaptAcp against the fake provider", () => {
 			expect(seen.some((item) => item.turn?.id === interrupted && item.turn.endedAt)).toBe(true);
 			while (Date.now() < deadline && !captured.some((item) => item.id === interrupted))
 				await new Promise((done) => setTimeout(done, 10));
-			expect(captured.find((item) => item.id === interrupted)?.cancelled).toBe(true);
+			expect(captured.find((item) => item.id === interrupted)?.failed).toBe(true);
 			await new Promise((done) => setTimeout(done, 100));
 
 			const recovered = await acp.prompt(created.sessionId, "after provider exit");
@@ -903,4 +1010,209 @@ describe("adaptAcp against the fake provider", () => {
 			await acp.closeAll();
 		}
 	});
+});
+
+test("OpenCode main-agent system context is refreshed separately from user input", async () => {
+	const configured = loadSettings({ netaDir: dir }).settings;
+	configured.providers.opencode = { command: process.execPath, args: [FIXTURE], resume: true, defaultModel: "" };
+	let instruction = "You are the workspace leader. Charter A.";
+	const acp = adaptAcp(
+		configured,
+		undefined,
+		() => configured,
+		undefined,
+		undefined,
+		undefined,
+		() => instruction,
+	);
+	try {
+		const created = await acp.createSession({
+			workspaceId: "w1",
+			cwd: dir,
+			provider: "opencode",
+			model: "",
+			access: "readOnly",
+			netaTools: false,
+		});
+		await acp.prompt(created.sessionId, "hello");
+		expect(JSON.parse(readFileSync(systemContextPath(created.sessionId), "utf8")).text).toBe(instruction);
+		for (let attempt = 0; attempt < 100 && acp.isTurnActive?.(created.sessionId); attempt++)
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		instruction = "You are the workspace leader. Charter B.";
+		await acp.prompt(created.sessionId, "next");
+		expect(JSON.parse(readFileSync(systemContextPath(created.sessionId), "utf8")).text).toBe(instruction);
+	} finally {
+		await acp.closeAll();
+	}
+});
+
+test("shared cold restore serializes mixed ensure callers without a second provider binding", async () => {
+	const configured = loadSettings({ netaDir: dir }).settings;
+	configured.providers.fake = {
+		command: process.execPath,
+		args: [FIXTURE, "--session-store", join(dir, "provider.json")],
+		resume: true,
+		defaultModel: "test-model",
+	};
+	const real = await openStore();
+	const first = adaptAcp(configured, real.conversations);
+	const request = {
+		workspaceId: "w1",
+		cwd: dir,
+		provider: "fake",
+		model: "test-model",
+		access: "readOnly" as const,
+		netaTools: true,
+		actorId: "fixture-owner",
+	};
+	const created = await first.createSession(request);
+	await first.closeAll();
+	let metaReads = 0;
+	let unblock!: () => void;
+	let entered!: () => void;
+	const barrier = new Promise<void>((resolve) => {
+		unblock = resolve;
+	});
+	const observed = new Promise<void>((resolve) => {
+		entered = resolve;
+	});
+	const conversations: ConversationStore = {
+		...real.conversations,
+		meta: async (id) => {
+			metaReads++;
+			entered();
+			await barrier;
+			return real.conversations.meta(id);
+		},
+	};
+	const restored = adaptAcp(configured, conversations);
+	try {
+		const one = restored.ensureSession({ ...request, sessionId: created.sessionId, allowFresh: false });
+		await observed;
+		const two = restored.ensureSession({ ...request, sessionId: created.sessionId, allowFresh: false });
+		const three = restored.ensureSession({ ...request, sessionId: created.sessionId, allowFresh: false });
+		unblock();
+		const selected = await Promise.all([one, two, three]);
+		expect(selected.every((item) => item.sessionId === created.sessionId)).toBe(true);
+		expect(metaReads).toBe(1);
+		expect(restored.actorToken(created.sessionId)).toBeDefined();
+		expect((await real.conversations.tail({ sessionId: created.sessionId, limit: 10 })).blocks).toHaveLength(0);
+	} finally {
+		unblock();
+		await restored.closeAll();
+		await real.close();
+	}
+});
+
+test("a resume queued behind reset cannot resurrect the retired conversation", async () => {
+	const configured = loadSettings({ netaDir: dir }).settings;
+	configured.providers.fake = {
+		command: process.execPath,
+		args: [FIXTURE, "--session-store", join(dir, "provider.json")],
+		resume: true,
+		defaultModel: "test-model",
+	};
+	const real = await openStore();
+	const acp = adaptAcp(configured, real.conversations);
+	const request = {
+		workspaceId: "w1",
+		cwd: dir,
+		provider: "fake",
+		model: "test-model",
+		access: "readOnly" as const,
+		netaTools: true,
+	};
+	let release!: () => void;
+	let entered!: () => void;
+	const barrier = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	const observed = new Promise<void>((resolve) => {
+		entered = resolve;
+	});
+	try {
+		const created = await acp.createSession(request);
+		const reset = acp.resetSession(created.sessionId, "standing instructions", async () => {
+			entered();
+			await barrier;
+		});
+		await observed;
+		const stale = acp
+			.ensureSession({ ...request, sessionId: created.sessionId, allowFresh: false })
+			.catch((error: unknown) => error);
+		release();
+		const fresh = await reset;
+		expect(await stale).toBeInstanceOf(Error);
+		expect(acp.actorToken(created.sessionId)).toBeUndefined();
+		expect(acp.actorToken(fresh.sessionId)).toBeDefined();
+		expect(fresh.sessionId).not.toBe(created.sessionId);
+	} finally {
+		release();
+		await acp.closeAll();
+		await real.close();
+	}
+});
+
+test("conditional upgrade checks actual admission and refuses late work on the real socket", async () => {
+	const world = runningWorld();
+	let release!: () => void;
+	let entered!: () => void;
+	let blocked = true;
+	const barrier = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	const observed = new Promise<void>((resolve) => {
+		entered = resolve;
+	});
+	const acp = {
+		...stubAcp(world),
+		hasActiveWork: () => false,
+		prompt: async () => {
+			if (blocked) {
+				entered();
+				await barrier;
+			}
+			return "fixture-turn";
+		},
+	};
+	const node = await startNode({ store: stubStore(world), acp });
+	const client = await connectNode();
+	try {
+		const caps = await client.request<{ instanceId: string; runtimeUpgrade: number }>("runtime.capabilities");
+		expect(node.descriptor.instanceId).toBe(caps.instanceId);
+		expect(caps.runtimeUpgrade).toBe(1);
+		const work = client.request("conversation.prompt", { sessionId: "fixture", text: "work" });
+		await observed;
+		expect(await client.request("runtime.upgrade.prepare", { instanceId: caps.instanceId })).toMatchObject({
+			prepared: false,
+			reason: "active-work",
+		});
+		blocked = false;
+		release();
+		await work;
+		const prepared = await client.request<{ prepared: boolean; token: string }>("runtime.upgrade.prepare", {
+			instanceId: caps.instanceId,
+		});
+		expect(prepared.prepared).toBe(true);
+		await expect(client.request("conversation.prompt", { sessionId: "fixture", text: "late work" })).rejects.toThrow(
+			"request was not started",
+		);
+		expect(
+			await client.request<{ stopping: boolean }>("runtime.upgrade.commit", {
+				instanceId: "superseded",
+				token: prepared.token,
+			}),
+		).toEqual({ stopping: false });
+		await client.request("runtime.upgrade.cancel", { instanceId: caps.instanceId, token: prepared.token });
+		expect(
+			await client.request<{ turnId: string }>("conversation.prompt", {
+				sessionId: "fixture",
+				text: "after cancel",
+			}),
+		).toEqual({ turnId: "fixture-turn" });
+	} finally {
+		release();
+		await client.close();
+		await node.stop();
+	}
 });

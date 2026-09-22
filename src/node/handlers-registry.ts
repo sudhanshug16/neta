@@ -254,6 +254,35 @@ export const registryHandlers: NodeHandlers = {
 		return { leader: updated };
 	},
 
+	"runtime.upgrade.prepare": async (ctx, params) => {
+		const { instanceId } = parseParams({ instanceId: asString, desiredBuild: asOptionalString }, params);
+		if (!ctx.runtimeAdmission) throw new NodeError("METHOD_NOT_FOUND", "Conditional upgrade is unavailable.");
+		const active =
+			ctx.acp.hasActiveWork?.() ??
+			[...ctx.store.listLeaders(), ...ctx.store.listAgents()].some((actor) =>
+				ctx.acp.isTurnActive?.(actor.sessionId),
+			);
+		return ctx.runtimeAdmission.prepare(instanceId, active);
+	},
+	"runtime.upgrade.cancel": async (ctx, params) => {
+		const { instanceId, token } = parseParams({ instanceId: asString, token: asString }, params);
+		ctx.runtimeAdmission?.cancel(instanceId, token);
+		return { cancelled: true };
+	},
+	"runtime.upgrade.commit": async (ctx, params) => {
+		const { instanceId, token } = parseParams({ instanceId: asString, token: asString }, params);
+		const active =
+			ctx.acp.hasActiveWork?.() ??
+			[...ctx.store.listLeaders(), ...ctx.store.listAgents()].some((actor) =>
+				ctx.acp.isTurnActive?.(actor.sessionId),
+			);
+		const stopping = ctx.runtimeAdmission?.commit(instanceId, token, active) ?? false;
+		if (stopping)
+			setTimeout(() => {
+				void ctx.stop().catch(() => undefined);
+			}, 0);
+		return { stopping };
+	},
 	"node.stop": (ctx) => {
 		// The server sends the reply when this resolves, so stop only after:
 		// a macrotask runs strictly after the reply write. Stopping here

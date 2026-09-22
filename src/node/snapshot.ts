@@ -1,15 +1,16 @@
 // The one payload that replaces a client's cache. Pure selection over the
 // `NodeStore`/`NodeAcp` ports: missions (every open one plus closed ones
-// inside the window), agents (all live ones plus the 8 most recently ended
+// inside the window or among the 8 newest per workspace), agents (all live ones plus the 8 most recently ended
 // completed per mission), the last 200 events per workspace, and the
 // attention inbox newest first.
-import { needsPerson } from "../core/state.ts";
+import { deriveMissionState, needsPerson } from "../core/state.ts";
 import { nowIso } from "../core/time.ts";
 import type { Agent, Leader, Mission, MissionId, Workspace, WorkspaceId } from "../core/types.ts";
 import { NodeError, PROTOCOL_VERSION, type SnapshotResult } from "./protocol.ts";
 import type { NodeContext, NodeHandlers } from "./server.ts";
 
 export const DEFAULT_WINDOW_DAYS = 14;
+export const RECENT_MISSIONS_PER_WORKSPACE = 8;
 export const COMPLETED_PER_MISSION = 8;
 export const EVENTS_PER_WORKSPACE = 200;
 
@@ -22,11 +23,24 @@ export async function buildSnapshot(
 	const windowDays = params.windowDays ?? DEFAULT_WINDOW_DAYS;
 	const cutoff = new Date(Date.now() - windowDays * MS_PER_DAY).toISOString();
 	const missions = ctx.store.listMissions(params.workspaceId);
+	const recent = new Set<MissionId>();
+	const counts = new Map<WorkspaceId, number>();
+	for (const mission of [...missions].sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.number - a.number)) {
+		const count = counts.get(mission.workspaceId) ?? 0;
+		if (count >= RECENT_MISSIONS_PER_WORKSPACE) continue;
+		recent.add(mission.id);
+		counts.set(mission.workspaceId, count + 1);
+	}
 	const selected: Mission[] = [];
 	let hasOlder = false;
 	for (const mission of missions) {
-		if (mission.state !== "closed" || mission.closedAt === undefined || mission.closedAt >= cutoff) {
-			selected.push(mission);
+		if (
+			mission.state !== "closed" ||
+			mission.closedAt === undefined ||
+			mission.closedAt >= cutoff ||
+			recent.has(mission.id)
+		) {
+			selected.push({ ...mission, state: deriveMissionState(mission, ctx.store.listAgents(mission.id)) });
 		} else {
 			hasOlder = true;
 		}
@@ -56,7 +70,16 @@ export async function buildSnapshot(
 		if (completed.length > 0) {
 			completedCounts[mission.id] = completed.length;
 			completed.sort((a, b) => (b.endedAt ?? "").localeCompare(a.endedAt ?? ""));
-			agents.push(...completed.slice(0, COMPLETED_PER_MISSION));
+			const unsettled = completed.filter(
+				(agent) =>
+					agent.deliveryStatus === "pending" ||
+					agent.deliveryStatus === "uncertain" ||
+					agent.deliveryStatus === "failed",
+			);
+			agents.push(
+				...unsettled,
+				...completed.filter((agent) => !unsettled.includes(agent)).slice(0, COMPLETED_PER_MISSION),
+			);
 		}
 	}
 	const events: SnapshotResult["events"] = [];

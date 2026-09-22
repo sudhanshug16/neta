@@ -21,6 +21,12 @@ npm install -g @intervene/neta
 
 One bundled file, no runtime dependencies. Neta needs Node 22+.
 
+## Native terminal migration
+
+The development TUI now uses our OpenCode fork with OpenTUI and SolidJS.
+See [setup, controls and validation](docs/opencode.md). Claude SDK integration
+is deferred. This development migration is not an npm release.
+
 ## Documentation
 
 - [MANIFESTO.md](MANIFESTO.md) — the product: workspaces, leaders, missions,
@@ -39,13 +45,9 @@ bun run check       # biome + tsc --noEmit
 bun run build       # dist/main.js — one file, targets Node
 ```
 
-The macOS app lives in `apps/macos` (Swift 6, Swift Package Manager):
-
-```
-cd apps/macos
-swift build
-swift test
-```
+The supported interactive client is the OpenCode/OpenTUI terminal. The native
+Swift/macOS app has been removed; it is no longer built, tested, or released.
+See [model routing](docs/model-routing.md) for Jev or fixed effort-based models.
 
 To release, bump `version` in `package.json` and push to `main`. CI publishes
 that version to npm if the registry does not already have it. The CLI reads

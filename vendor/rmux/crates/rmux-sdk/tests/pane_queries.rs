@@ -1,0 +1,1107 @@
+#![cfg(unix)]
+
+mod common;
+
+use std::error::Error;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::OnceLock;
+use std::time::Duration;
+
+use rmux_proto::{
+    encode_frame, ClearHistoryRequest, FrameDecoder, HasSessionRequest, KillPaneRequest,
+    LinkWindowRequest, ListPanesRequest, NewWindowRequest, PaneTarget, Request,
+    ResizeWindowRequest, Response, SendKeysRequest, WindowTarget,
+};
+use rmux_sdk::{
+    EnsureSession, PaneCloseOutcome, PaneProcessState, PaneRef, PaneRespawnOptions, PaneSnapshot,
+    PaneStateEvent, PaneStateEventsOptions, ProcessSpec, RmuxBuilder, RmuxError, SessionName,
+    TerminalSizeSpec,
+};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::UnixStream;
+use tokio::time::Instant;
+
+type TestResult<T = ()> = Result<T, Box<dyn Error>>;
+
+static LIVE_DAEMON_LOCK: common::unix_smoke::LiveDaemonLock =
+    common::unix_smoke::LiveDaemonLock::new();
+static UNIQUE_ID: AtomicUsize = AtomicUsize::new(0);
+
+#[tokio::test]
+async fn pane_id_info_and_snapshot_resolve_through_daemon_for_live_and_stale_slots() -> TestResult {
+    let _lock = LIVE_DAEMON_LOCK.lock().await;
+    let harness = Harness::start("pane-basic").await?;
+    let rmux = harness.rmux();
+    let alpha = session_name("sdkpanealpha");
+    let session = EnsureSession::named(alpha.clone())
+        .create_only()
+        .ensure(&rmux)
+        .await?;
+
+    let pane = session.pane(0, 0);
+    assert_eq!(pane.target(), &PaneRef::new(alpha.clone(), 0, 0));
+
+    let pane_id = pane.id().await?.expect("live pane is listed");
+    assert!(pane.exists().await?);
+    let raw_id = raw_first_pane_id(harness.socket_path(), alpha.clone(), 0).await?;
+    assert_eq!(pane_id.to_string(), raw_id);
+
+    let info = pane.info().await?;
+    assert_eq!(info.sessions.len(), 1);
+    assert_eq!(info.windows.len(), 1);
+    assert_eq!(info.panes.len(), 1);
+    assert_eq!(info.panes[0].id, pane_id);
+    assert_eq!(info.panes[0].window_id, info.windows[0].id);
+    assert_eq!(info.panes[0].session_id, info.sessions[0].id);
+    assert_eq!(info.panes[0].index, 0);
+    assert!(matches!(
+        info.panes[0].process,
+        PaneProcessState::Running { .. } | PaneProcessState::Unknown
+    ));
+    assert!(info.panes[0].exit_state.is_none());
+    assert_ne!(info.panes[0].revision, 0);
+    assert!(info.panes[0].size.cols > 0);
+    assert!(info.panes[0].size.rows > 0);
+
+    let snapshot = pane.snapshot().await?;
+    assert!(snapshot.is_row_major_shape());
+    assert_eq!(snapshot.cols, info.panes[0].size.cols);
+    assert_eq!(snapshot.rows, info.panes[0].size.rows);
+    assert_ne!(snapshot.revision, 0);
+
+    let stale = session.pane(99, 0);
+    assert_eq!(stale.id().await?, None);
+    assert!(!stale.exists().await?);
+    let stale_info = stale.info().await?;
+    assert_eq!(stale_info.sessions.len(), 1);
+    assert!(stale_info.windows.is_empty());
+    assert!(stale_info.panes.is_empty());
+    let stale_snapshot = stale.snapshot().await?;
+    assert_eq!(stale_snapshot, PaneSnapshot::default());
+    assert_eq!(stale_snapshot.revision, 0);
+    assert!(
+        stale.foreground_state_with_revision().await?.is_none(),
+        "a stale slot must not fall back to a raw protocol slot for foreground state"
+    );
+    let stale_events_error = match stale.state_events(PaneStateEventsOptions::default()).await {
+        Ok(_) => return Err("a stale slot unexpectedly opened a pane-state stream".into()),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            &stale_events_error,
+            RmuxError::Protocol {
+                source: rmux_proto::RmuxError::InvalidTarget { .. },
+                ..
+            }
+        ),
+        "a stale slot must fail closed before subscribing: {stale_events_error}"
+    );
+
+    let stale_pane_in_window = session.pane(0, 99);
+    assert_eq!(stale_pane_in_window.id().await?, None);
+    let stale_pane_info = stale_pane_in_window.info().await?;
+    assert_eq!(stale_pane_info.sessions.len(), 1);
+    assert_eq!(stale_pane_info.windows.len(), 1);
+    assert!(stale_pane_info.panes.is_empty());
+    assert_eq!(
+        stale_pane_in_window.snapshot().await?,
+        PaneSnapshot::default()
+    );
+
+    let unknown_session_pane = rmux
+        .pane(PaneRef::new(session_name("sdknotthere"), 0, 0))
+        .await?;
+    assert_eq!(unknown_session_pane.id().await?, None);
+    let unknown_info = unknown_session_pane.info().await?;
+    assert!(unknown_info.sessions.is_empty());
+    assert!(unknown_info.windows.is_empty());
+    assert!(unknown_info.panes.is_empty());
+    assert_eq!(
+        unknown_session_pane.snapshot().await?,
+        PaneSnapshot::default()
+    );
+
+    harness.finish().await
+}
+
+#[tokio::test]
+async fn pane_snapshot_revision_changes_after_output_resize_clear_and_exit() -> TestResult {
+    let _lock = LIVE_DAEMON_LOCK.lock().await;
+    let harness = Harness::start("pane-revisions").await?;
+    let rmux = harness.rmux();
+    let alpha = session_name("sdkpanerev");
+    let session = EnsureSession::named(alpha.clone())
+        .create_only()
+        .ensure(&rmux)
+        .await?;
+    raw_new_window(harness.socket_path(), alpha.clone(), 99).await?;
+    let pane = session.pane(0, 0);
+    let pane_id = pane.id().await?.expect("live pane");
+
+    let baseline = pane.snapshot().await?;
+    assert_ne!(baseline.revision, 0);
+
+    let marker = "rmux_sdk_pane_rev_marker_alpha";
+    raw_send_keys(
+        harness.socket_path(),
+        PaneTarget::with_window(alpha.clone(), 0, 0),
+        vec![format!("printf '{marker}\\n'"), "Enter".to_owned()],
+    )
+    .await?;
+    let after_output = wait_for_revision_change(&pane, baseline.revision, marker).await?;
+    assert_ne!(after_output.revision, baseline.revision);
+    assert!(after_output.visible_text().contains(marker));
+
+    let resized_size = (after_output.cols.saturating_add(4), after_output.rows);
+    raw_resize_window(
+        harness.socket_path(),
+        WindowTarget::with_window(alpha.clone(), 0),
+        resized_size.0,
+        resized_size.1,
+    )
+    .await?;
+    let after_resize = wait_for_pane_dimensions(&pane, resized_size).await?;
+    assert_eq!(after_resize.cols, resized_size.0);
+    assert_eq!(after_resize.rows, resized_size.1);
+    assert_ne!(after_resize.revision, after_output.revision);
+
+    let history_lines = usize::from(after_resize.rows).saturating_add(8);
+    let history_markers = (0..history_lines)
+        .map(|index| format!("rmux_sdk_pane_rev_history_{index}"))
+        .collect::<Vec<_>>();
+    let history_tail = history_markers
+        .last()
+        .expect("history marker list is non-empty")
+        .clone();
+    raw_send_keys(
+        harness.socket_path(),
+        PaneTarget::with_window(alpha.clone(), 0, 0),
+        vec![
+            format!("printf '{}\\n'", history_markers.join("\\n")),
+            "Enter".to_owned(),
+        ],
+    )
+    .await?;
+    let after_history =
+        wait_for_revision_change(&pane, after_resize.revision, &history_tail).await?;
+    assert!(
+        after_history.visible_text().contains(&history_tail),
+        "history tail must be visible before clear-history"
+    );
+
+    raw_clear_history(
+        harness.socket_path(),
+        PaneTarget::with_window(alpha.clone(), 0, 0),
+    )
+    .await?;
+    let after_clear = wait_for_revision_change(&pane, after_history.revision, "").await?;
+    assert_ne!(after_clear.revision, after_history.revision);
+
+    raw_kill_pane(
+        harness.socket_path(),
+        PaneTarget::with_window(alpha.clone(), 0, 0),
+    )
+    .await?;
+    let after_exit = wait_for_pane_unlisted(&pane).await?;
+    assert_eq!(after_exit, PaneSnapshot::default());
+    assert_eq!(after_exit.revision, 0);
+    assert_ne!(after_exit.revision, after_clear.revision);
+
+    let exit_info = pane.info().await?;
+    assert_eq!(exit_info.sessions.len(), 1);
+    assert!(exit_info.panes.is_empty());
+
+    raw_new_window(harness.socket_path(), alpha.clone(), 0).await?;
+    let revived = wait_for_pane_listed(&pane).await?;
+    assert_ne!(
+        revived, pane_id,
+        "a recycled (session, window, pane) slot must expose a fresh %N pane id"
+    );
+    let revived_snapshot = pane.snapshot().await?;
+    assert_ne!(revived_snapshot.revision, 0);
+    assert_ne!(
+        revived_snapshot.revision, after_exit.revision,
+        "a freshly revived pane must not collide with the prior unlisted-revision sentinel"
+    );
+
+    harness.finish().await
+}
+
+#[tokio::test]
+async fn pane_id_resolves_to_same_identity_through_linked_window_views() -> TestResult {
+    let _lock = LIVE_DAEMON_LOCK.lock().await;
+    let harness = Harness::start("pane-linked").await?;
+    let rmux = harness.rmux();
+
+    let owner = session_name("sdkpanelinkown");
+    let viewer = session_name("sdkpanelinkview");
+    let owner_session = EnsureSession::named(owner.clone())
+        .create_only()
+        .ensure(&rmux)
+        .await?;
+    EnsureSession::named(viewer.clone())
+        .create_only()
+        .ensure(&rmux)
+        .await?;
+    raw_link_window(harness.socket_path(), owner.clone(), 0, viewer.clone(), 1).await?;
+
+    let owner_pane = owner_session.pane(0, 0);
+    let owner_id = owner_pane.id().await?.expect("owner pane is listed");
+
+    let viewer_pane = rmux.pane(PaneRef::new(viewer.clone(), 1, 0)).await?;
+    let viewer_id = viewer_pane
+        .id()
+        .await?
+        .expect("linked viewer pane is listed");
+
+    assert_eq!(
+        owner_id, viewer_id,
+        "linked windows must expose the same %N pane identity through every session"
+    );
+
+    let owner_info = owner_pane.info().await?;
+    let viewer_info = viewer_pane.info().await?;
+    assert_eq!(owner_info.panes.len(), 1);
+    assert_eq!(viewer_info.panes.len(), 1);
+    assert_eq!(owner_info.panes[0].id, viewer_info.panes[0].id);
+    assert_eq!(
+        owner_info.panes[0].window_id,
+        viewer_info.panes[0].window_id
+    );
+    assert_ne!(
+        owner_info.panes[0].session_id, viewer_info.panes[0].session_id,
+        "the two views are owned by distinct sessions"
+    );
+
+    let owner_by_id = owner_session.pane_by_id(owner_id).await?;
+    let viewer_by_id = rmux.pane_by_id(viewer.clone(), owner_id).await?;
+    assert_eq!(
+        owner_by_id.target().session_name,
+        owner,
+        "the original linked-window view must win by-id resolution"
+    );
+    assert_eq!(
+        viewer_by_id.target().session_name,
+        viewer,
+        "an explicitly preferred alias must win before deterministic fallback sessions"
+    );
+    assert_eq!(
+        owner_by_id.snapshot().await?,
+        viewer_by_id.snapshot().await?
+    );
+
+    harness.finish().await
+}
+
+#[tokio::test]
+async fn pane_id_resolves_to_same_identity_through_grouped_session_views() -> TestResult {
+    let _lock = LIVE_DAEMON_LOCK.lock().await;
+    let harness = Harness::start("pane-grouped").await?;
+    let rmux = harness.rmux();
+
+    let primary = session_name("sdkpanegrouppri");
+    let mirror = session_name("sdkpanegroupmir");
+    let primary_session = EnsureSession::named(primary.clone())
+        .create_only()
+        .ensure(&rmux)
+        .await?;
+    raw_new_window(harness.socket_path(), primary.clone(), 1).await?;
+    EnsureSession::named(mirror.clone())
+        .create_only()
+        .group_target(primary.clone())
+        .ensure(&rmux)
+        .await?;
+
+    let primary_pane = primary_session.pane(1, 0);
+    let primary_id = primary_pane.id().await?.expect("primary pane is listed");
+
+    let mirror_pane = rmux.pane(PaneRef::new(mirror.clone(), 1, 0)).await?;
+    let mirror_id = mirror_pane
+        .id()
+        .await?
+        .expect("grouped mirror pane is listed");
+
+    assert_eq!(
+        primary_id, mirror_id,
+        "grouped sessions must expose the same %N pane identity through every member"
+    );
+
+    let primary_info = primary_pane.info().await?;
+    let mirror_info = mirror_pane.info().await?;
+    assert_eq!(primary_info.panes.len(), 1);
+    assert_eq!(mirror_info.panes.len(), 1);
+    assert_eq!(primary_info.panes[0].id, mirror_info.panes[0].id);
+    assert_eq!(
+        primary_info.panes[0].window_id,
+        mirror_info.panes[0].window_id
+    );
+
+    harness.finish().await
+}
+
+async fn wait_for_revision_change(
+    pane: &rmux_sdk::Pane,
+    previous_revision: u64,
+    text_marker: &str,
+) -> TestResult<PaneSnapshot> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let snapshot = pane.snapshot().await?;
+        let text_ok = text_marker.is_empty() || snapshot.visible_text().contains(text_marker);
+        if snapshot.revision != previous_revision && text_ok {
+            return Ok(snapshot);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "pane revision did not change from {previous_revision} within deadline"
+            )
+            .into());
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+async fn wait_for_pane_dimensions(
+    pane: &rmux_sdk::Pane,
+    expected: (u16, u16),
+) -> TestResult<PaneSnapshot> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let snapshot = pane.snapshot().await?;
+        if snapshot.cols == expected.0 && snapshot.rows == expected.1 {
+            return Ok(snapshot);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "pane dimensions did not reach {expected:?} (got {}x{})",
+                snapshot.cols, snapshot.rows
+            )
+            .into());
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+async fn wait_for_pane_unlisted(pane: &rmux_sdk::Pane) -> TestResult<PaneSnapshot> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if pane.id().await?.is_none() {
+            return Ok(pane.snapshot().await?);
+        }
+        if Instant::now() >= deadline {
+            return Err("pane remained listed after kill".into());
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+async fn wait_for_pane_listed(pane: &rmux_sdk::Pane) -> TestResult<rmux_sdk::PaneId> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(id) = pane.id().await? {
+            return Ok(id);
+        }
+        if Instant::now() >= deadline {
+            return Err("pane was not listed within deadline".into());
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn session_name(value: &str) -> SessionName {
+    SessionName::new(value).expect("valid session name")
+}
+
+async fn raw_first_pane_id(
+    socket_path: &Path,
+    target: SessionName,
+    window_index: u32,
+) -> TestResult<String> {
+    match framed_request(
+        socket_path,
+        Request::ListPanes(Box::new(ListPanesRequest {
+            target,
+            target_window_index: Some(window_index),
+            format: Some("#{pane_id}".to_owned()),
+            filter: None,
+            sort_order: None,
+            reversed: false,
+        })),
+    )
+    .await?
+    {
+        Response::ListPanes(response) => {
+            let stdout = String::from_utf8_lossy(response.output.stdout()).to_string();
+            stdout
+                .lines()
+                .next()
+                .map(str::to_owned)
+                .ok_or_else(|| "list-panes returned no rows".into())
+        }
+        response => Err(format!("unexpected list-panes response: {response:?}").into()),
+    }
+}
+
+async fn raw_send_keys(socket_path: &Path, target: PaneTarget, keys: Vec<String>) -> TestResult {
+    match framed_request(
+        socket_path,
+        Request::SendKeys(SendKeysRequest { target, keys }),
+    )
+    .await?
+    {
+        Response::SendKeys(_) => Ok(()),
+        response => Err(format!("unexpected send-keys response: {response:?}").into()),
+    }
+}
+
+async fn raw_resize_window(
+    socket_path: &Path,
+    target: WindowTarget,
+    width: u16,
+    height: u16,
+) -> TestResult {
+    match framed_request(
+        socket_path,
+        Request::ResizeWindow(ResizeWindowRequest {
+            target,
+            width: Some(width),
+            height: Some(height),
+            adjustment: None,
+        }),
+    )
+    .await?
+    {
+        Response::ResizeWindow(_) => Ok(()),
+        response => Err(format!("unexpected resize-window response: {response:?}").into()),
+    }
+}
+
+async fn raw_clear_history(socket_path: &Path, target: PaneTarget) -> TestResult {
+    match framed_request(
+        socket_path,
+        Request::ClearHistory(ClearHistoryRequest {
+            target,
+            reset_hyperlinks: false,
+        }),
+    )
+    .await?
+    {
+        Response::ClearHistory(_) => Ok(()),
+        response => Err(format!("unexpected clear-history response: {response:?}").into()),
+    }
+}
+
+async fn raw_kill_pane(socket_path: &Path, target: PaneTarget) -> TestResult {
+    match framed_request(
+        socket_path,
+        Request::KillPane(KillPaneRequest {
+            target,
+            kill_all_except: false,
+        }),
+    )
+    .await?
+    {
+        Response::KillPane(_) => Ok(()),
+        response => Err(format!("unexpected kill-pane response: {response:?}").into()),
+    }
+}
+
+async fn raw_new_window(socket_path: &Path, target: SessionName, index: u32) -> TestResult {
+    match framed_request(
+        socket_path,
+        Request::NewWindow(Box::new(NewWindowRequest {
+            target: target.clone(),
+            name: None,
+            detached: true,
+            environment: None,
+            command: None,
+            process_command: None,
+            start_directory: None,
+            target_window_index: Some(index),
+            insert_at_target: false,
+        })),
+    )
+    .await?
+    {
+        Response::NewWindow(response) => {
+            assert_eq!(response.target, WindowTarget::with_window(target, index));
+            Ok(())
+        }
+        response => Err(format!("unexpected new-window response: {response:?}").into()),
+    }
+}
+
+async fn raw_link_window(
+    socket_path: &Path,
+    source_session: SessionName,
+    source_index: u32,
+    target_session: SessionName,
+    target_index: u32,
+) -> TestResult {
+    match framed_request(
+        socket_path,
+        Request::LinkWindow(LinkWindowRequest {
+            source: WindowTarget::with_window(source_session, source_index),
+            target: WindowTarget::with_window(target_session.clone(), target_index),
+            after: false,
+            before: false,
+            kill_destination: false,
+            detached: true,
+        }),
+    )
+    .await?
+    {
+        Response::LinkWindow(response) => {
+            assert_eq!(
+                response.target,
+                WindowTarget::with_window(target_session, target_index)
+            );
+            Ok(())
+        }
+        response => Err(format!("unexpected link-window response: {response:?}").into()),
+    }
+}
+
+async fn framed_request(socket_path: &Path, request: Request) -> TestResult<Response> {
+    let mut stream = UnixStream::connect(socket_path).await?;
+    let frame = encode_frame(&request)?;
+    stream.write_all(&frame).await?;
+    read_response(&mut stream).await
+}
+
+async fn read_response(stream: &mut UnixStream) -> TestResult<Response> {
+    let mut decoder = FrameDecoder::new();
+    let mut read_buffer = [0_u8; 8192];
+
+    loop {
+        if let Some(response) = decoder.next_frame::<Response>()? {
+            return Ok(response);
+        }
+
+        let bytes_read = stream.read(&mut read_buffer).await?;
+        if bytes_read == 0 {
+            return Err("connection closed before response frame".into());
+        }
+        decoder.push_bytes(&read_buffer[..bytes_read]);
+    }
+}
+
+struct Harness {
+    _root: TestRoot,
+    socket_path: PathBuf,
+    child: Option<Child>,
+}
+
+impl Harness {
+    async fn start(label: &str) -> TestResult<Self> {
+        let root = TestRoot::new(label);
+        let socket_path = root.path().join("daemon.sock");
+        let mut child = Command::new(rmux_binary()?)
+            .arg("--__internal-daemon")
+            .arg(&socket_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        wait_for_daemon_ready(&socket_path, &mut child).await?;
+
+        Ok(Self {
+            _root: root,
+            socket_path,
+            child: Some(child),
+        })
+    }
+
+    fn socket_path(&self) -> &Path {
+        &self.socket_path
+    }
+
+    fn rmux(&self) -> rmux_sdk::Rmux {
+        RmuxBuilder::new().unix_socket(&self.socket_path).build()
+    }
+
+    async fn finish(self) -> TestResult {
+        let shutdown = self.rmux().shutdown().await;
+        wait_for_child_exit(self, "server did not exit during cleanup").await?;
+        if let Err(error) = shutdown {
+            let rendered = error.to_string();
+            assert!(
+                rendered.contains("connect to rmux daemon")
+                    || rendered.contains("rmux daemon closed the transport")
+                    || rendered.contains("rmux transport actor is closed")
+                    || rendered.contains("Connection reset by peer"),
+                "unexpected cleanup shutdown error: {rendered}"
+            );
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Harness {
+    fn drop(&mut self) {
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.kill();
+        }
+    }
+}
+
+async fn wait_for_child_exit(mut harness: Harness, timeout_message: &'static str) -> TestResult {
+    let mut child = harness.child.take().expect("harness owns daemon child");
+    let deadline = Instant::now() + Duration::from_secs(60);
+
+    loop {
+        if let Some(status) = child.try_wait()? {
+            assert!(status.success(), "daemon exited with status {status}");
+            return Ok(());
+        }
+
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            return Err(timeout_message.into());
+        }
+
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+async fn wait_for_daemon_ready(socket_path: &Path, child: &mut Child) -> TestResult {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let probe = session_name("sdkprobe");
+
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Err(format!("daemon exited before accepting RPC: {status}").into());
+        }
+
+        if matches!(
+            framed_request(
+                socket_path,
+                Request::HasSession(HasSessionRequest {
+                    target: probe.clone()
+                })
+            )
+            .await,
+            Ok(Response::HasSession(_))
+        ) {
+            return Ok(());
+        }
+
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "daemon at '{}' did not accept RPC before timeout",
+                socket_path.display()
+            )
+            .into());
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+fn rmux_binary() -> TestResult<&'static Path> {
+    static RMUX_BINARY: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+    match RMUX_BINARY.get_or_init(|| resolve_rmux_binary().map_err(|error| error.to_string())) {
+        Ok(path) => Ok(path.as_path()),
+        Err(error) => Err(std::io::Error::other(error.clone()).into()),
+    }
+}
+
+fn resolve_rmux_binary() -> TestResult<PathBuf> {
+    if let Some(path) = option_env!("CARGO_BIN_EXE_rmux") {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
+
+    let target_dir = target_dir()?;
+    let candidate = target_dir.join("debug").join("rmux");
+    let status =
+        std::process::Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+            .arg("build")
+            .arg("--bin")
+            .arg("rmux")
+            .arg("--locked")
+            .arg("--manifest-path")
+            .arg(workspace_root().join("Cargo.toml"))
+            .env("CARGO_TARGET_DIR", &target_dir)
+            .status()?;
+    if !status.success() {
+        return Err(format!("failed to build rmux binary for daemon tests: {status}").into());
+    }
+    if !candidate.is_file() {
+        return Err(format!(
+            "rmux daemon build succeeded but '{}' was not created",
+            candidate.display()
+        )
+        .into());
+    }
+
+    Ok(candidate)
+}
+
+fn target_dir() -> TestResult<PathBuf> {
+    if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
+        return Ok(PathBuf::from(target_dir));
+    }
+
+    let current = std::env::current_exe()?;
+    current
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "test executable is not under a target directory".into())
+}
+
+fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("rmux-sdk manifest lives under crates/rmux-sdk")
+        .to_path_buf()
+}
+
+struct TestRoot {
+    path: PathBuf,
+}
+
+impl TestRoot {
+    fn new(label: &str) -> Self {
+        let unique_id = UNIQUE_ID.fetch_add(1, Ordering::Relaxed);
+        let path = PathBuf::from("/tmp").join(format!(
+            "rmux-sdk-pane-{}-{}-{unique_id}",
+            compact_label(label),
+            std::process::id()
+        ));
+        Self { path }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TestRoot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+fn compact_label(label: &str) -> String {
+    let compact = label
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .take(16)
+        .collect::<String>();
+    if compact.is_empty() {
+        "x".to_owned()
+    } else {
+        compact
+    }
+}
+
+#[tokio::test]
+async fn issue_94_reporter_flow_slot_snapshot_sees_live_content() -> TestResult {
+    // Exact reporter flow from issue #94: CreateOrReuse detached session with
+    // an explicit size, working directory, and a shell that produces output;
+    // then a fresh session handle and an index-based pane handle. The slot
+    // snapshot must expose the live pane like by-id resolution does, not the
+    // stale-slot default.
+    let _lock = LIVE_DAEMON_LOCK.lock().await;
+    let harness = Harness::start("issue94-reporter-flow").await?;
+    let rmux = harness.rmux();
+    let name = session_name("sdkissue94");
+    EnsureSession::named(name.clone())
+        .policy(rmux_sdk::EnsureSessionPolicy::CreateOrReuse)
+        .detached(true)
+        .size(rmux_sdk::TerminalSizeSpec::new(500, 50))
+        .working_directory("/tmp")
+        .shell("printf 'ISSUE94_CONTENT\\n'; exec sh")
+        .ensure(&rmux)
+        .await?;
+
+    let session = rmux.session(name.clone()).await?;
+    let by_id = rmux.find_panes().session(name.clone()).one().await?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let snap = by_id.snapshot().await?;
+        if snap.visible_text().contains("ISSUE94_CONTENT") {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err("pane never showed ISSUE94_CONTENT via by-id".into());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let slot_pane = session.pane(0, 0);
+    assert!(
+        slot_pane.exists().await?,
+        "slot handle (0, 0) must resolve the live pane"
+    );
+    let snap = slot_pane.snapshot().await?;
+    assert!(
+        snap.revision >= 1,
+        "slot snapshot must be live, got revision {}",
+        snap.revision
+    );
+    assert!(
+        snap.visible_text().contains("ISSUE94_CONTENT"),
+        "slot snapshot must expose the live content"
+    );
+
+    harness.finish().await
+}
+
+#[tokio::test]
+async fn issue_94_slot_handles_resolve_visible_indexes_under_base_index_one() -> TestResult {
+    // Recon companion for issue #94: with base-index 1 and pane-base-index 1,
+    // the user-facing slot coordinates are the visible ones — session.pane(1, 1)
+    // must resolve the live pane and session.pane(0, 0) must not exist.
+    let _lock = LIVE_DAEMON_LOCK.lock().await;
+    let harness = Harness::start("issue94-base-index-one").await?;
+    let rmux = harness.rmux();
+    for (name, value, scope) in [
+        (
+            "base-index",
+            "1",
+            rmux_proto::OptionScopeSelector::SessionGlobal,
+        ),
+        (
+            "pane-base-index",
+            "1",
+            rmux_proto::OptionScopeSelector::WindowGlobal,
+        ),
+    ] {
+        match framed_request(
+            harness.socket_path(),
+            Request::SetOptionByName(Box::new(rmux_proto::SetOptionByNameRequest {
+                scope,
+                name: (*name).to_owned(),
+                value: Some((*value).to_owned()),
+                mode: rmux_proto::SetOptionMode::Replace,
+                only_if_unset: false,
+                unset: false,
+                unset_pane_overrides: false,
+                format: false,
+                format_target: None,
+            })),
+        )
+        .await?
+        {
+            Response::SetOptionByName(_) => {}
+            response => return Err(format!("set {name} failed: {response:?}").into()),
+        }
+    }
+
+    let name = session_name("sdkissue94base");
+    EnsureSession::named(name.clone())
+        .create_only()
+        .ensure(&rmux)
+        .await?;
+    let session = rmux.session(name.clone()).await?;
+
+    let visible = session.pane(1, 1);
+    assert!(
+        visible.exists().await?,
+        "visible slot (1, 1) must resolve under base-index 1"
+    );
+    let mutation = visible.set_option("remain-on-exit", "on").await?;
+    assert_eq!(mutation.pane_id, visible.id().await?.expect("pane id"));
+    assert_eq!(
+        visible.option("remain-on-exit").await?.as_deref(),
+        Some("on")
+    );
+    visible.unset_option("remain-on-exit").await?;
+
+    let snap = visible.snapshot().await?;
+    assert!(
+        snap.revision >= 1,
+        "visible slot snapshot must be live, got revision {}",
+        snap.revision
+    );
+    let info = visible.info().await?;
+    assert_eq!(
+        info.panes.len(),
+        1,
+        "visible slot info must retain pane details"
+    );
+    assert_eq!(
+        info.panes[0].index, 1,
+        "pane info exposes the visible index"
+    );
+
+    visible.set_title("sdk-visible-slot").await?;
+    assert_eq!(visible.title().await?.as_deref(), Some("sdk-visible-slot"));
+    visible
+        .resize(TerminalSizeSpec::new(snap.cols, snap.rows))
+        .await?;
+
+    let capture = visible.capture_pane().await?;
+    assert!(
+        capture.buffer_name.is_none(),
+        "printing capture must not allocate a buffer"
+    );
+    let output = visible.output_stream().await?;
+    drop(output);
+
+    let marker = "SDK_VISIBLE_SLOT_WAIT";
+    let armed = visible.wait_for_next(marker.as_bytes()).await?;
+    visible.send_text(format!("printf '{marker}\\n'\n")).await?;
+    armed.await?;
+
+    let respawned = visible
+        .respawn(PaneRespawnOptions {
+            kill: true,
+            start_directory: None,
+            process: ProcessSpec {
+                command: Some(vec!["cat >/dev/null".to_owned()]),
+                process_command: None,
+                environment: None,
+            },
+            keep_alive_on_exit: Some(true),
+        })
+        .await?;
+    assert_eq!(
+        respawned,
+        visible.target().clone(),
+        "respawn must return public visible coordinates"
+    );
+    let foreground = visible.foreground_state_with_revision().await?;
+    assert!(
+        foreground.is_some(),
+        "visible slot foreground query must resolve through its stable pane id"
+    );
+    let mut events = visible
+        .state_events(PaneStateEventsOptions::default())
+        .await?;
+    let initial = tokio::time::timeout(Duration::from_secs(5), events.next()).await??;
+    assert!(
+        matches!(initial, Some(PaneStateEvent::Snapshot { .. })),
+        "visible slot state-events stream must open with a snapshot: {initial:?}"
+    );
+
+    let raw = session.pane(0, 0);
+    assert!(
+        !raw.exists().await?,
+        "raw slot (0, 0) must not exist under base-index 1"
+    );
+    assert!(
+        raw.foreground_state_with_revision().await?.is_none(),
+        "an invisible raw slot must not address the live base-index-adjusted pane"
+    );
+    let raw_events_error =
+        match raw.state_events(PaneStateEventsOptions::default()).await {
+            Ok(_) => return Err(
+                "an invisible raw slot unexpectedly opened a pane-state stream under base-index 1"
+                    .into(),
+            ),
+            Err(error) => error,
+        };
+    assert!(
+        matches!(
+            &raw_events_error,
+            RmuxError::Protocol {
+                source: rmux_proto::RmuxError::InvalidTarget { .. },
+                ..
+            }
+        ),
+        "an invisible raw slot must fail closed before subscribing: {raw_events_error}"
+    );
+
+    raw_new_window(harness.socket_path(), name, 2).await?;
+    let close_target = visible.target().clone();
+    assert_eq!(
+        visible.close().await?,
+        PaneCloseOutcome::Closed {
+            target: close_target,
+            window_destroyed: true,
+        },
+        "close must resolve the visible slot identity without killing another pane"
+    );
+
+    harness.finish().await
+}
+
+#[tokio::test]
+async fn issue_85_foreground_change_reaches_the_event_stream_end_to_end() -> TestResult {
+    // Issue #85: a foreground process launched inside the pane's shell must
+    // surface as a ForegroundChanged event on the state_events stream and
+    // agree with the revision-carrying snapshot query, end to end across the
+    // daemon transport. (Unix-only flow: the probe reads the pty foreground
+    // process group; the Windows twin in pane_foreground_events_windows.rs
+    // pins that platform's root-process contract.)
+    let _lock = LIVE_DAEMON_LOCK.lock().await;
+    let harness = Harness::start("pane-fg-events").await?;
+    let rmux = harness.rmux();
+    let alpha = session_name("sdkfgevents");
+    let session = EnsureSession::named(alpha.clone())
+        .create_only()
+        .ensure(&rmux)
+        .await?;
+    let pane = session.pane(0, 0);
+
+    let mut stream = pane
+        .state_events(PaneStateEventsOptions {
+            include_foreground: true,
+            ..PaneStateEventsOptions::default()
+        })
+        .await?;
+    let first = tokio::time::timeout(Duration::from_secs(30), stream.next())
+        .await
+        .map_err(|_| "timed out waiting for the initial pane-state snapshot")??;
+    assert!(
+        matches!(first, Some(PaneStateEvent::Snapshot { .. })),
+        "stream must open with a snapshot: {first:?}"
+    );
+
+    pane.send_text("sleep 120\n").await?;
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let observed_revision = loop {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or("timed out waiting for a sleep ForegroundChanged event")?;
+        let event = tokio::time::timeout(remaining, stream.next())
+            .await
+            .map_err(|_| "timed out waiting for a sleep ForegroundChanged event")??
+            .ok_or("pane state stream ended before the foreground changed")?;
+        if let PaneStateEvent::ForegroundChanged {
+            revision,
+            new_state,
+            ..
+        } = event
+        {
+            if new_state
+                .command
+                .clone()
+                .unwrap_or_default()
+                .contains("sleep")
+            {
+                break revision;
+            }
+        }
+    };
+    assert!(
+        observed_revision > 0,
+        "foreground revision must be positive"
+    );
+
+    let (pane_id, query_revision, state) = pane
+        .foreground_state_with_revision()
+        .await?
+        .ok_or("live pane must report a foreground snapshot")?;
+    assert_eq!(Some(pane_id), pane.id().await?, "stable pane id matches");
+    assert!(
+        query_revision >= observed_revision,
+        "query revision {query_revision} must not precede the event revision {observed_revision}"
+    );
+    assert!(
+        state.command.clone().unwrap_or_default().contains("sleep"),
+        "queried foreground should still be sleep: {state:?}"
+    );
+
+    harness.finish().await
+}

@@ -30,7 +30,7 @@ export interface SpawnOptions {
 	access: Access;
 	cwd: string;
 	handlers: ClientHandlers;
-	env?: Record<string, string>;
+	env?: Record<string, string | undefined>;
 }
 
 export interface ProviderProcess {
@@ -51,6 +51,9 @@ export function spawnProvider(o: SpawnOptions): Promise<ProviderProcess> {
 		try {
 			child = spawn(o.provider.command, launchArgs(o.provider, o.access), {
 				cwd: o.cwd,
+				// Only Neta-owned launcher wrappers opt into their own POSIX group.
+				// Never detach an arbitrary configured provider into a new group.
+				detached: o.provider.processGroup === true && process.platform !== "win32",
 				env: {
 					...process.env,
 					PATH: providerPath(o.provider),
@@ -84,14 +87,48 @@ export function spawnProvider(o: SpawnOptions): Promise<ProviderProcess> {
 			}
 		};
 		child.on("exit", (code, signal) => finish(code, signal));
+		const pid = child.pid;
+		const ownsProcessGroup = o.provider.processGroup === true && process.platform !== "win32" && pid !== undefined;
+		const signal = (signalName: NodeJS.Signals): void => {
+			try {
+				if (ownsProcessGroup) process.kill(-(pid as number), signalName);
+				else child.kill(signalName);
+			} catch {
+				// The process or group may already be gone.
+			}
+		};
+		const groupAlive = (): boolean => {
+			if (!ownsProcessGroup) return exitInfo === undefined;
+			try {
+				process.kill(-(pid as number), 0);
+				return true;
+			} catch {
+				return false;
+			}
+		};
+		const wait = (ms: number): Promise<void> => new Promise((done) => setTimeout(done, ms));
+		const stopOwnedGroup = async (): Promise<void> => {
+			signal("SIGTERM");
+			if (!ownsProcessGroup) {
+				const done = await new Promise<ExitInfo | "wait">((done) => {
+					const timeout = setTimeout(() => done("wait"), KILL_GRACE_MS);
+					void exited.then((info) => {
+						clearTimeout(timeout);
+						done(info);
+					});
+				});
+				if (done === "wait" && exitInfo === undefined) signal("SIGKILL");
+				return;
+			}
+			const deadline = Date.now() + KILL_GRACE_MS;
+			while (groupAlive() && Date.now() < deadline) await wait(25);
+			if (groupAlive()) signal("SIGKILL");
+		};
+
 		child.on("error", (error) => {
 			if (exitInfo === undefined && settled === false) {
 				settled = true;
-				try {
-					child.kill("SIGKILL");
-				} catch {
-					// Already gone; the error below carries the cause.
-				}
+				signal("SIGKILL");
 				const tail = stderr === "" ? "" : `: ${stderr}`;
 				reject(new Error(`failed to spawn ${o.provider.command}: ${error.message}${tail}`));
 				finish(null, null);
@@ -108,7 +145,6 @@ export function spawnProvider(o: SpawnOptions): Promise<ProviderProcess> {
 			reject(new Error(`failed to spawn ${o.provider.command}: stdio unavailable`));
 			return;
 		}
-		const pid = child.pid;
 		if (pid === undefined) {
 			settled = true;
 			reject(new Error(`failed to spawn ${o.provider.command}: no pid`));
@@ -142,32 +178,14 @@ export function spawnProvider(o: SpawnOptions): Promise<ProviderProcess> {
 						exited,
 						stderrTail: () => stderr,
 						kill: () => {
-							if (exitInfo !== undefined) {
-								return Promise.resolve(exitInfo);
-							}
-							if (killPromise === undefined) {
-								killPromise = (async (): Promise<ExitInfo> => {
-									try {
-										child.kill("SIGTERM");
-									} catch {
-										// Already gone; `exited` still resolves.
-									}
-									const done = await Promise.race([
-										exited,
-										new Promise<"wait">((done) => setTimeout(() => done("wait"), KILL_GRACE_MS)),
-									]);
-									if (done === "wait" && exitInfo === undefined) {
-										try {
-											child.kill("SIGKILL");
-										} catch {
-											// Already gone.
-										}
-									}
-									const info = await exited;
-									connection.close();
-									return info;
-								})();
-							}
+							if (killPromise !== undefined) return killPromise;
+							if (exitInfo !== undefined && !ownsProcessGroup) return Promise.resolve(exitInfo);
+							killPromise = (async (): Promise<ExitInfo> => {
+								await stopOwnedGroup();
+								const info = await exited;
+								connection.close();
+								return info;
+							})();
 							return killPromise;
 						},
 					});
@@ -177,11 +195,7 @@ export function spawnProvider(o: SpawnOptions): Promise<ProviderProcess> {
 						return;
 					}
 					settled = true;
-					try {
-						child.kill("SIGKILL");
-					} catch {
-						// Already gone.
-					}
+					signal("SIGKILL");
 					const tail = stderr === "" ? "" : `: ${stderr}`;
 					reject(new Error(`initialize failed for ${o.provider.command}: ${String(error)}${tail}`));
 				},

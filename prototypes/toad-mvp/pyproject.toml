@@ -1,0 +1,7 @@
+[project]
+name = "neta-toad-mvp"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = [
+  "batrachian-toad @ git+https://github.com/batrachianai/toad.git@dd4f90e8b3700c3de80ad4b0eaa488ad0105e2c1",
+]

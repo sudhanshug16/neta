@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { ulid } from "../src/core/ids.ts";
-import type { Block, SessionId, Turn } from "../src/core/types.ts";
-import { conversationHandlers, wireTurnStream } from "../src/node/handlers-conversation.ts";
+import type { Agent, Mission, Block, Leader, SessionId, Turn, Workspace } from "../src/core/types.ts";
+import { conversationHandlers, restoreNativeOwner, wireTurnStream } from "../src/node/handlers-conversation.ts";
 import { NodeError, type TurnNotification } from "../src/node/protocol.ts";
 import type { Connection, NodeAcp, NodeContext, NodeStore } from "../src/node/server.ts";
 
@@ -254,22 +254,33 @@ describe("conversation.tail", () => {
 			prevCursor: string | null;
 			nextCursor?: string;
 		};
-		expect(mid.blocks.map((b) => b.seq)).toEqual([4, 5, 6]);
-		expect(mid.prevCursor).toBe("3");
-		expect(mid.nextCursor).toBe("6");
+		expect(mid.blocks.map((b) => b.seq)).toEqual([5, 6, 7]);
+		expect(mid.prevCursor).toBe("4");
+		expect(mid.nextCursor).toBe("7");
 		const first = (await call(ctx, conn, "conversation.tail", {
 			sessionId: SC,
 			limit: 3,
 			direction: "backward",
-			cursor: "3",
+			cursor: "4",
 		})) as {
 			blocks: Block[];
 			prevCursor: string | null;
 			nextCursor?: string;
 		};
-		expect(first.blocks.map((b) => b.seq)).toEqual([1, 2]);
-		expect(first.prevCursor).toBeNull();
-		expect(first.nextCursor).toBe("2");
+		expect(first.blocks.map((b) => b.seq)).toEqual([2, 3, 4]);
+		expect(first.prevCursor).toBe("1");
+		expect(first.nextCursor).toBe("4");
+		const oldest = (await call(ctx, conn, "conversation.tail", {
+			sessionId: SC,
+			limit: 3,
+			direction: "backward",
+			cursor: "1",
+		})) as { blocks: Block[]; prevCursor: string | null };
+		expect(oldest.blocks.map((block) => block.seq)).toEqual([1]);
+		expect(oldest.prevCursor).toBeNull();
+		expect([...oldest.blocks, ...first.blocks, ...mid.blocks, ...last.blocks].map((block) => block.seq)).toEqual([
+			1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+		]);
 	});
 
 	test("a turnId tail starts at that turn, unknown turns give NOT_FOUND", async () => {
@@ -294,6 +305,81 @@ describe("conversation.tail", () => {
 		expect(thrown).toBeInstanceOf(NodeError);
 		expect((thrown as NodeError).symbol).toBe("NOT_FOUND");
 	});
+});
+
+test("a healthy native Pi leader transitions to ACP in place and remains promptable", async () => {
+	const leader: Leader = {
+		workspaceId: "folder:test", machineId: "machine-test", name: "Test Leader", sessionId: SA,
+		provider: "pi", model: "pi-model", mode: "lead", modeSince: "2026-02-01T00:00:00.000Z",
+		modeActiveMs: 0, state: "idle",
+	};
+	const workspace: Workspace = {
+		id: "folder:test", kind: "folder", name: "test",
+		roots: [{ machineId: "machine-test", path: "/tmp/test-workspace" }],
+		createdAt: "2026-02-01T00:00:00.000Z",
+	};
+	let saved = leader;
+	const created: unknown[] = [];
+	const handoffs: string[] = [];
+	let closed = "";
+	const captured: { onTurn?: (n: TurnNotification) => void } = {};
+	const ctx = testCtx(captured, [testConn()]);
+	const base = stubAcp(captured);
+	ctx.store = {
+		...stubStore(),
+		machine: () => ({ id: "machine-test", name: "test", createdAt: "2026-02-01T00:00:00.000Z" }),
+		listLeaders: () => [saved],
+		getWorkspace: () => workspace,
+		putLeader: async (next) => { saved = next; },
+	};
+	ctx.acp = {
+		...base,
+		listProviders: () => [{ id: "codex", label: "Codex", defaultModel: "codex-model", available: true }],
+		createSession: async (request) => {
+			created.push(request);
+			return { sessionId: request.sessionId ?? SA, provider: request.provider, model: request.model };
+		},
+		setPendingHandoff: async (_sessionId, handoff) => { handoffs.push(handoff); },
+		switchProvider: async () => { throw new Error("native Pi must not use ACP switchProvider"); },
+	};
+	ctx.pi = { closeSession: (sessionId) => { closed = sessionId; } } as NonNullable<NodeContext["pi"]>;
+	const conn = testConn();
+	expect(await call(ctx, conn, "conversation.setProvider", { sessionId: SA, provider: "pi" })).toEqual({
+		sessionId: SA, provider: "pi", model: "pi-model", contextReset: false,
+	});
+	const switched = await call(ctx, conn, "conversation.setProvider", { sessionId: SA, provider: "codex", handoff: "NATIVE HANDOFF" });
+	expect(switched).toEqual({ sessionId: SA, provider: "codex", model: "codex-model", contextReset: true });
+	expect(created).toHaveLength(1);
+	expect(handoffs).toEqual(["NATIVE HANDOFF"]);
+	expect((created[0] as { workspaceId: string; cwd: string }).workspaceId).toBe("folder:test");
+	expect((created[0] as { cwd: string }).cwd).toBe("/tmp/test-workspace");
+	expect(closed).toBe(SA);
+	expect(saved.provider).toBe("codex");
+	expect(saved.sessionId).toBe(SA);
+	await call(ctx, conn, "conversation.prompt", { sessionId: SA, text: "after transition" });
+	expect(acpCalls.at(-1)?.op).toBe("prompt");
+});
+
+test("a failed native Pi to ACP transition leaves the Pi leader usable", async () => {
+	const leader: Leader = {
+		workspaceId: "folder:failed", machineId: "machine-failed", name: "Test Leader", sessionId: SB,
+		provider: "pi", model: "pi-model", mode: "lead", modeSince: "2026-02-01T00:00:00.000Z",
+		modeActiveMs: 0, state: "idle",
+	};
+	const ctx = testCtx({}, [testConn()]);
+	ctx.store = {
+		...stubStore(),
+		machine: () => ({ id: "machine-failed", name: "test", createdAt: "2026-02-01T00:00:00.000Z" }),
+		listLeaders: () => [leader],
+		getWorkspace: () => ({ id: "folder:failed", kind: "folder", name: "failed", roots: [{ machineId: "machine-failed", path: "/tmp/failed" }], createdAt: "2026-02-01T00:00:00.000Z" }),
+	};
+	const base = stubAcp({});
+	ctx.acp = { ...base, listProviders: () => [{ id: "codex", label: "Codex", defaultModel: "codex", available: true }], createSession: async () => { throw new Error("fake ACP unavailable"); } };
+	let closed = false;
+	ctx.pi = { closeSession: () => { closed = true; } } as unknown as NonNullable<NodeContext["pi"]>;
+	await expect(call(ctx, testConn(), "conversation.setProvider", { sessionId: SB, provider: "codex" })).rejects.toThrow("fake ACP unavailable");
+	expect(closed).toBe(false);
+	expect(leader.provider).toBe("pi");
 });
 
 describe("turn subscriptions", () => {
@@ -404,4 +490,74 @@ describe("prompt, cancel, setModel and models.list", () => {
 		});
 		expect(acpCalls.map((c) => c.op)).toEqual(["cancel", "setModel", "listModels"]);
 	});
+});
+
+
+test("leader reset only rebinds the chat and keeps missions and worker sessions", async () => {
+  const ctx = testCtx({}, []);
+  const at = "2026-02-01T00:00:00.000Z";
+  let leader: Leader = { workspaceId: "w", machineId: "m", name: "Leader", sessionId: SA, provider: "opencode", model: "model", mode: "lead", modeSince: at, modeActiveMs: 0, state: "idle" };
+  const mission: Mission = { id: "mission", workspaceId: "w", machineId: "m", number: 1, name: "Existing mission", objective: "Keep working", changes: [], lead: {kind: "agent", agentId: "worker"}, agentIds: ["worker"], access: "readOnly", state: "running", createdAt: at };
+  const worker: Agent = {id: "worker", missionId: mission.id, workspaceId: "w", name: "Worker", task: "Keep working", access: "readOnly", provider: "opencode", model: "model", skills: [], sessionId: SB, canSpawn: true, state: "running", startedAt: at};
+  const before = JSON.stringify({mission, worker});
+  ctx.store = { ...ctx.store,
+    machine: () => ({id: "m", name: "Machine", createdAt: at}),
+    getWorkspace: () => ({id: "w", kind: "folder", name: "Workspace", roots: [{machineId: "m", path: "/tmp/neta-reset-contract"}], createdAt: at}),
+    listLeaders: () => [leader], listAgents: () => [worker], listMissions: () => [mission],
+    getMission: () => mission,
+    putLeader: async (next) => {leader = next},
+    putAgent: async () => {throw new Error("reset must not modify worker records")},
+  };
+  ctx.acp.resetSession = async (id, brief, rebind) => {
+    expect(id).toBe(SA);
+    expect(brief).not.toContain("Old chat marker");
+    const next = {sessionId: SC, provider: "opencode", model: "model"};
+    await rebind(next);
+    return next;
+  };
+  ctx.store.tailConversation = async () => {throw new Error("reset must not copy old transcript")};
+  await call(ctx, testConn(), "conversation.reset", {sessionId: SA});
+  expect(leader.sessionId).toBe(SC);
+  expect(leader.name).toBe("Leader");
+  expect(JSON.stringify({mission, worker})).toBe(before);
+});
+
+test("a saved mission-leader tab resumes its exact session without prompting", async () => {
+ const ctx = testCtx({}, [testConn()]);
+ const agent: Agent = { id: "saved-agent", sessionId: SA, workspaceId: "w", missionId: "m", name: "Tarn", task: "inspect", provider: "opencode", model: "google/flash", access: "readOnly", canSpawn: true, skills: [], state: "interrupted", startedAt: "2026-02-01T00:00:00.000Z" };
+ ctx.store = { ...stubStore(),
+  machine: () => ({ id: "host", name: "host", createdAt: agent.startedAt }),
+  listAgents: () => [agent],
+  getWorkspace: () => ({ id: "w", name: "project", kind: "folder", roots: [{ machineId: "host", path: "/project" }], createdAt: agent.startedAt }),
+  getMission: () => ({ id: "m", number: 1, workspaceId: "w", machineId: "host", name: "Review", objective: "inspect", changes: [], agentIds: [agent.id], lead: { kind: "agent", agentId: agent.id }, access: "readOnly", state: "running", createdAt: agent.startedAt }),
+ };
+ const requests: Parameters<NodeAcp["ensureSession"]>[0][] = [];
+ ctx.acp = { ...stubAcp({}),
+  nativeAttachment: () => { throw new NodeError("NOT_FOUND", `no such session: ${SA}`); },
+  ensureSession: async (request) => { requests.push(request); return { sessionId: SA, provider: "opencode", model: agent.model }; },
+  prompt: async () => { throw new Error("opening a tab must not prompt"); },
+ };
+ await Promise.all([restoreNativeOwner(ctx, SA), restoreNativeOwner(ctx, SA)]);
+ expect(requests).toHaveLength(1);
+ expect(requests[0]).toMatchObject({ sessionId: SA, actorId: agent.id, allowFresh: false, cwd: "/project", unsandboxed: true });
+ expect(agent.state).toBe("interrupted");
+ ctx.acp.ensureSession = async () => { throw new Error("provider cannot resume"); };
+ await expect(restoreNativeOwner(ctx, SA)).rejects.toThrow("provider cannot resume");
+});
+
+
+test("a removed mission worktree is reported before launching its saved session", async () => {
+ const ctx = testCtx({}, []);
+ const at = "2026-02-01T00:00:00.000Z";
+ const path = `/tmp/neta-removed-${ulid()}`;
+ ctx.store = { ...stubStore(),
+  machine: () => ({ id: "host", name: "host", createdAt: at }),
+  listAgents: () => [{ id: "saved", sessionId: SA, workspaceId: "w", missionId: "m", name: "Tarn", task: "inspect", provider: "opencode", model: "model", access: "readOnly", canSpawn: true, skills: [], state: "interrupted", startedAt: at }],
+  getWorkspace: () => ({ id: "w", name: "project", kind: "folder", roots: [{ machineId: "host", path: "/project" }], createdAt: at }),
+  getMission: () => ({ id: "m", number: 1, workspaceId: "w", machineId: "host", name: "Review", objective: "inspect", changes: [], agentIds: ["saved"], lead: { kind: "agent", agentId: "saved" }, access: "readOnly", state: "running", createdAt: at, worktree: { path, branch: "review", base: "main", provider: "worktrunk" } }),
+ };
+ let launches = 0;
+ ctx.acp = { ...stubAcp({}), nativeAttachment: () => { throw new NodeError("NOT_FOUND", "not live"); }, ensureSession: async () => { launches++; throw new Error("must not launch") } };
+ await expect(restoreNativeOwner(ctx, SA)).rejects.toThrow("worktree is no longer available");
+ expect(launches).toBe(0);
 });

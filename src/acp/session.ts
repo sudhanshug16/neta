@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type {
 	ContentBlock,
 	RequestPermissionResponse,
@@ -8,11 +9,14 @@ import type {
 import { ulid } from "../core/ids.ts";
 import { nowIso } from "../core/time.ts";
 import type { Access, Block, PromptAttachment, SessionId, Turn, TurnId } from "../core/types.ts";
+import { type OpenCodeAttachment, openCodeEndpoint } from "../opencode/attachment.ts";
 import { type BlockDraft, blocksFromUpdate, canCoalesce, signalFromUpdate } from "./blocks.ts";
+import { providerFailureDetails } from "./errors.ts";
 import type { McpServerSpec } from "./mcp.ts";
 import { type ModelOption, type ModelState, modelStateFrom, planModel } from "./models.ts";
 import { type ExitInfo, type ProviderProcess, spawnProvider } from "./process.ts";
 import { providerFor, type Settings } from "./settings.ts";
+import { systemContextPath } from "./system-context.ts";
 
 export interface StartOptions {
 	settings: Settings;
@@ -25,24 +29,31 @@ export interface StartOptions {
 	resumeVendorSessionId?: string;
 	sessionId?: SessionId;
 	steeringSafe?: boolean;
+	actorId?: string;
+	bindingGeneration?: string;
+	fallbackModels?: readonly string[];
 }
 
-export type SessionEvent =
+export type SessionEvent = (
 	| { type: "turn"; turn: Turn }
 	| { type: "block"; block: Block }
 	| { type: "turnEnd"; turnId: TurnId; stopReason: string; cancelled: boolean }
 	| { type: "model"; model: string }
 	| { type: "mode"; modeId: string }
-	| { type: "interrupted"; turnId?: TurnId; exit: ExitInfo };
+	| { type: "interrupted"; turnId?: TurnId; exit: ExitInfo }
+) & { bindingGeneration?: string };
 
 export interface AcpSession {
+	readonly nativeAttachment?: OpenCodeAttachment;
 	readonly sessionId: SessionId;
+	readonly bindingGeneration: string;
 	readonly vendorSessionId: string;
 	readonly provider: string;
 	readonly cwd: string;
 	readonly access: Access;
 	readonly unsandboxed: boolean;
 	readonly model: string;
+	readonly fallbackModels?: readonly string[];
 	readonly openTurnId?: TurnId;
 	readonly configOptions: readonly SessionConfigOption[];
 	readonly promptCapabilities: { image: boolean; embeddedContext: boolean };
@@ -79,8 +90,11 @@ export class TurnInProgressError extends Error {
 export class ResumeFailedError extends Error {
 	readonly vendorSessionId: string;
 
-	constructor(vendorSessionId: string) {
-		super(`resume failed for vendor session: ${vendorSessionId}`);
+	constructor(vendorSessionId: string, cause?: unknown) {
+		super(
+			`resume failed for vendor session: ${vendorSessionId}${cause instanceof Error ? `: ${cause.message}` : ""}`,
+			{ cause },
+		);
 		this.name = "ResumeFailedError";
 		this.vendorSessionId = vendorSessionId;
 	}
@@ -102,12 +116,14 @@ async function startInner(opts: StartOptions): Promise<AcpSession> {
 	const provider = providerFor(opts.settings, opts.provider);
 	const sessionId = opts.sessionId ?? ulid();
 	const mcpServers = opts.mcpServers ?? [];
+	let bindingGeneration = opts.bindingGeneration ?? randomUUID();
 
 	let proc: ProviderProcess | undefined;
 	let access = opts.access;
 	let model = "";
 	let modelState: ModelState = { source: "none", options: [] };
 	let configOptions: SessionConfigOption[] = [];
+	let legacyModeIds: string[] = [];
 	let promptCapabilities = { image: false, embeddedContext: false };
 	let steeringSupported = false;
 	let openTurnId: TurnId | undefined;
@@ -123,7 +139,8 @@ async function startInner(opts: StartOptions): Promise<AcpSession> {
 	const takers: Array<(result: IteratorResult<SessionEvent>) => void> = [];
 	let streamEnded = false;
 
-	function push(event: SessionEvent): void {
+	function push(input: SessionEvent): void {
+		const event: SessionEvent = { ...input, bindingGeneration: input.bindingGeneration ?? bindingGeneration };
 		if (streamEnded) {
 			return;
 		}
@@ -216,9 +233,16 @@ async function startInner(opts: StartOptions): Promise<AcpSession> {
 		}
 	}
 
-	function permissionFor(options: Array<{ kind: string; optionId: string }>): RequestPermissionResponse {
+	function permissionFor(
+		options: Array<{ kind: string; optionId: string }>,
+		kind?: string,
+	): RequestPermissionResponse {
 		const kinds =
-			opts.unsandboxed === true || access === "readWrite" ? ["allow_once", "allow_always"] : ["reject_once"];
+			opts.unsandboxed === true ||
+			access === "readWrite" ||
+			(opts.provider === "opencode" && ["execute", "read", "search", "fetch"].includes(kind ?? ""))
+				? ["allow_once", "allow_always"]
+				: ["reject_once"];
 		for (const kind of kinds) {
 			const found = options.find((option) => option.kind === kind);
 			if (found !== undefined) {
@@ -249,13 +273,24 @@ async function startInner(opts: StartOptions): Promise<AcpSession> {
 	}
 
 	async function launch(resumeId: string | undefined): Promise<{ vendor: string; response: unknown }> {
+		const launchGeneration = bindingGeneration;
 		const next = await spawnProvider({
 			provider,
+			env: {
+				NETA_NATIVE_LEADER: opts.unsandboxed === true ? "1" : "0",
+				NETA_SYSTEM_CONTEXT_FILE: systemContextPath(sessionId),
+				NETA_SYSTEM_CONTEXT_ACTOR_ID: opts.actorId ?? sessionId,
+				NETA_SYSTEM_CONTEXT_SESSION_ID: sessionId,
+				NETA_SYSTEM_CONTEXT_GENERATION: bindingGeneration,
+				NETA_FALLBACK_MODELS: opts.fallbackModels === undefined ? undefined : JSON.stringify(opts.fallbackModels),
+			},
 			access,
 			cwd: opts.cwd,
 			handlers: {
-				onSessionUpdate: onUpdate,
-				requestPermission: async (p) => permissionFor(p.options ?? []),
+				onSessionUpdate: (notification) => {
+					if (bindingGeneration === launchGeneration) onUpdate(notification);
+				},
+				requestPermission: async (p) => permissionFor(p.options ?? [], p.toolCall.kind ?? undefined),
 			},
 		});
 		promptCapabilities = {
@@ -273,9 +308,9 @@ async function startInner(opts: StartOptions): Promise<AcpSession> {
 					cwd: opts.cwd,
 					mcpServers,
 				});
-			} catch {
+			} catch (error) {
 				await next.kill();
-				throw new ResumeFailedError(resumeId);
+				throw new ResumeFailedError(resumeId, error);
 			}
 			vendor = resumeId;
 		} else {
@@ -295,6 +330,13 @@ async function startInner(opts: StartOptions): Promise<AcpSession> {
 			Array.isArray((response as { configOptions?: unknown }).configOptions)
 		) {
 			configOptions = (response as { configOptions: SessionConfigOption[] }).configOptions;
+		}
+		const modes =
+			typeof response === "object" && response !== null
+				? (response as { modes?: { availableModes?: Array<{ id?: unknown }> } }).modes
+				: undefined;
+		if (Array.isArray(modes?.availableModes)) {
+			legacyModeIds = modes.availableModes.flatMap((mode) => (typeof mode.id === "string" ? [mode.id] : []));
 		}
 	}
 
@@ -331,6 +373,7 @@ async function startInner(opts: StartOptions): Promise<AcpSession> {
 				}
 			} else {
 				await proc.connection.agent.request("session/set_model", {
+					sessionId: vendorSessionId,
 					modelId: plan.call.params.modelId,
 				});
 			}
@@ -351,6 +394,10 @@ async function startInner(opts: StartOptions): Promise<AcpSession> {
 		const advertised = mode?.options.some((option) =>
 			"value" in option ? option.value === wanted : option.options.some((nested) => nested.value === wanted),
 		);
+		if (mode === undefined && legacyModeIds.includes(wanted)) {
+			await proc.connection.agent.request("session/set_mode", { sessionId: vendorSessionId, modeId: wanted });
+			return;
+		}
 		if (mode === undefined || advertised !== true) {
 			throw new Error(`provider ${opts.provider} does not advertise unsandboxed mode ${wanted}`);
 		}
@@ -369,13 +416,25 @@ async function startInner(opts: StartOptions): Promise<AcpSession> {
 	vendorSessionId = first.vendor;
 	absorbResponse(first.response);
 	await applySandboxPolicy();
-	const wanted = opts.model ?? (provider.defaultModel === "" ? undefined : provider.defaultModel);
+	// An empty model is the durable representation of “use this provider's
+	// default”. Treat it exactly as an omitted request: a configured provider
+	// default wins, otherwise retain the model the provider advertised in
+	// session/new. A non-empty request remains an explicit selection.
+	const requested = opts.model === "" ? undefined : opts.model;
+	const wanted = requested ?? (provider.defaultModel === "" ? undefined : provider.defaultModel);
 	await applyModelPlan(wanted);
 	if (model === "" && wanted !== undefined) {
 		model = wanted;
 	}
 
 	const session: AcpSession = {
+		get nativeAttachment() {
+			const endpoint = openCodeEndpoint(proc?.initialize._meta);
+			return endpoint === undefined ? undefined : { ...endpoint, sessionId: vendorSessionId, directory: opts.cwd };
+		},
+		get bindingGeneration() {
+			return bindingGeneration;
+		},
 		get sessionId() {
 			return sessionId;
 		},
@@ -393,6 +452,9 @@ async function startInner(opts: StartOptions): Promise<AcpSession> {
 		},
 		get unsandboxed() {
 			return opts.unsandboxed === true;
+		},
+		get fallbackModels() {
+			return opts.fallbackModels;
 		},
 		get model() {
 			return model;
@@ -418,7 +480,7 @@ async function startInner(opts: StartOptions): Promise<AcpSession> {
 				throw new TurnInProgressError(openTurnId);
 			}
 			const turnId = ulid();
-			const turn: Turn = { id: turnId, sessionId, startedAt: nowIso(), role: "user" };
+			const turn: Turn = { id: turnId, sessionId, startedAt: nowIso(), role: "user", bindingGeneration };
 			openTurnId = turnId;
 			last = undefined;
 			keyed = new Map();
@@ -442,7 +504,7 @@ async function startInner(opts: StartOptions): Promise<AcpSession> {
 					emitBlock({
 						role: "agent",
 						kind: "status",
-						text: error instanceof Error ? error.message : String(error),
+						text: providerFailureDetails(error, current.stderrTail()),
 					});
 					push({ type: "turnEnd", turnId, stopReason: "error", cancelled: false });
 					clearTurn();
@@ -552,6 +614,7 @@ async function startInner(opts: StartOptions): Promise<AcpSession> {
 			})) as { configOptions?: SessionConfigOption[] | null };
 			if (response.configOptions !== undefined && response.configOptions !== null) {
 				configOptions = response.configOptions;
+				modelState = modelStateFrom({ configOptions });
 			}
 			if (configId === modelState.configId && typeof value === "string") {
 				model = value;
@@ -580,6 +643,7 @@ async function startInner(opts: StartOptions): Promise<AcpSession> {
 				}
 			}
 			access = nextAccess;
+			bindingGeneration = randomUUID();
 			const relaunched = await launch(vendorSessionId);
 			vendorSessionId = relaunched.vendor;
 			absorbResponse(relaunched.response);
@@ -588,6 +652,19 @@ async function startInner(opts: StartOptions): Promise<AcpSession> {
 
 		close: async (): Promise<void> => {
 			if (closed) {
+				// A process-group launcher may exit while its native ACP child is
+				// still alive. Its exit watch has already ended the session stream,
+				// but explicit owner close must still reap that group.
+				if (provider.processGroup === true && proc !== undefined) {
+					const current = proc;
+					proc = undefined;
+					await current.kill().catch(() => undefined);
+					try {
+						current.connection.close();
+					} catch {
+						// Already closed.
+					}
+				}
 				return;
 			}
 			closed = true;

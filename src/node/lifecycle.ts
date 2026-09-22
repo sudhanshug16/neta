@@ -26,11 +26,20 @@ import { createHash } from "node:crypto";
 import { accessSync, constants, statSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { closeAll, SessionTable } from "../acp/lifecycle.ts";
+import { SessionTable } from "../acp/lifecycle.ts";
 import { type McpServerSpec, netaMcpServer } from "../acp/mcp.ts";
 import type { AcpSession, SessionEvent } from "../acp/session.ts";
 import { SessionClosedError, startSession } from "../acp/session.ts";
-import { loadSettings, providerCommandAvailable, type Settings } from "../acp/settings.ts";
+import {
+	installedClaudeAcpProvider,
+	installedCodexAcpProvider,
+	installedOpenCodeAcpProvider,
+	loadSettings,
+	providerCommandAvailable,
+	type Settings,
+	stagedCodexAcpProvider,
+} from "../acp/settings.ts";
+import { writeSystemContext } from "../acp/system-context.ts";
 import { ulid } from "../core/ids.ts";
 import { nowIso } from "../core/time.ts";
 import type {
@@ -49,6 +58,8 @@ import type {
 	TurnId,
 	WorkspaceId,
 } from "../core/types.ts";
+import { nativeEndpointReady } from "../opencode/attachment.ts";
+import { managedOpenCodeProvider } from "../opencode/runtime.ts";
 import { createPiTerminalManager } from "../pi/manager.ts";
 import type { ConversationStore } from "../store/conversations.ts";
 import { createMutex, readJson, writeJsonAtomic } from "../store/files.ts";
@@ -57,9 +68,16 @@ import { decodeWorkspaceId, paths, socketPathError } from "../store/paths.ts";
 import { createTokenTable, type TokenTable } from "../tools/router.ts";
 import { netaBuildId, netaVersion } from "../version.ts";
 import { createFileLeaseStore, LeaseManager } from "../worktrees/leases.ts";
-import { conversationHandlers, prepareHandoffForSession, wireTurnStream } from "./handlers-conversation.ts";
+import {
+	conversationHandlers,
+	prepareHandoffForSession,
+	sessionSystemContext,
+	wireTurnStream,
+} from "./handlers-conversation.ts";
+import { diagnosticsHandlers } from "./handlers-diagnostics.ts";
 import { glanceHandlers } from "./handlers-glance.ts";
 import { registryHandlers } from "./handlers-registry.ts";
+import { routingHandlers } from "./handlers-routing.ts";
 import { terminalHandlers } from "./handlers-terminal.ts";
 import { toolMount } from "./handlers-tools.ts";
 import {
@@ -72,7 +90,9 @@ import {
 	writeDescriptor,
 } from "./lockfile.ts";
 import { type ConversationTailResult, NodeError, PROTOCOL_VERSION, type TurnNotification } from "./protocol.ts";
+import { RuntimeAdmission } from "./runtime-admission.ts";
 import { createServer, type Hub, type NodeAcp, type NodeContext, type NodeHandlers, type NodeStore } from "./server.ts";
+import { SessionLifecycle } from "./session-lifecycle.ts";
 import { snapshotHandlers } from "./snapshot.ts";
 import { workspaceHandlers } from "./workspace-open.ts";
 
@@ -361,7 +381,7 @@ export interface AdaptedAcp extends NodeAcp {
 		id: SessionId,
 		text: string,
 		attachments: PromptAttachment[],
-		provenance: { readerDirected: boolean },
+		provenance: { readerDirected: boolean; sourceId?: string; sourceHash?: string },
 	): Promise<InboxMessage>;
 	switchProvider(
 		id: SessionId,
@@ -405,6 +425,8 @@ interface PumpState {
 // every session starts with a conversation meta record, so `conversation.tail`
 // succeeds (possibly empty) and subscribes the caller for the live `turn`
 // stream; without it (stubbed tests) session creation touches no store.
+class SuppressedInboxError extends Error {}
+
 export function adaptAcp(
 	settings: Settings,
 	conversations?: ConversationStore,
@@ -412,10 +434,28 @@ export function adaptAcp(
 	onReaderTurn: (sessionId: SessionId, turn: Turn, blocks: Block[]) => Promise<void> = () => Promise.resolve(),
 	recoveryHandoff?: (sessionId: SessionId) => Promise<string>,
 	inboxStore?: Store["inbox"],
+	systemContext?: (sessionId: string) => string,
+	durableTurn?: (notification: TurnNotification) => Promise<void>,
+	runtimeAdmission?: RuntimeAdmission,
+	inboxGuard?: (message: InboxMessage) => Promise<boolean>,
 ): AdaptedAcp {
+	const sessionLifecycle = new SessionLifecycle();
+	let closing = false;
+	let pumpOperations = 0;
+	const pumpPromises = new Map<AcpSession, Promise<void>>();
+	const guarded = async <T>(id: string, operation: () => Promise<T>): Promise<T> => {
+		if (closing) throw new NodeError("BUSY", "Neta is stopping; reconnect before retrying.");
+		const leave = runtimeAdmission?.enter();
+		try {
+			return await sessionLifecycle.run(id, operation);
+		} finally {
+			leave?.();
+		}
+	};
 	const table = new SessionTable({ settings, cwd: process.cwd(), access: "readOnly" });
 	const listeners = new Set<(notification: TurnNotification) => void>();
 	const drains = new Set<SessionId>();
+	const wakeTimers = new Map<SessionId, ReturnType<typeof setTimeout>>();
 	const minted = new Map<SessionId, string>();
 	// The actor id each live session's token was minted under: an agent's
 	// `agentId` per 05, the leader's own session id otherwise. `close` has to
@@ -446,9 +486,10 @@ export function adaptAcp(
 			readerDirected: boolean;
 			recoveryNotice?: string;
 			messageId?: string;
+			messageIds?: string[];
 		}
 	>();
-	const inboxPromptIds = new Map<SessionId, string>();
+	const inboxPromptIds = new Map<SessionId, string[]>();
 	let adapted: AdaptedAcp;
 	const switching = new Set<SessionId>();
 
@@ -468,17 +509,31 @@ export function adaptAcp(
 	}
 
 	async function drain(sessionId: SessionId): Promise<void> {
-		if (inboxStore === undefined || drains.has(sessionId) || switching.has(sessionId)) return;
+		if (
+			inboxStore === undefined ||
+			drains.has(sessionId) ||
+			switching.has(sessionId) ||
+			wakeTimers.has(sessionId) ||
+			closing
+		)
+			return;
 		drains.add(sessionId);
 		try {
 			for (;;) {
 				if (switching.has(sessionId)) return;
 				const session = table.get(sessionId)?.session;
 				if (session === undefined) return;
-				const next = (await inboxStore.list(sessionId)).find((item) => item.status === "queued");
-				if (switching.has(sessionId) || table.get(sessionId)?.session !== session) return;
+				const queued = (await inboxStore.list(sessionId)).filter((item) => item.status === "queued");
+				const next = queued[0];
+				if (switching.has(sessionId) || wakeTimers.has(sessionId) || table.get(sessionId)?.session !== session)
+					return;
 				if (next === undefined) return;
+				if (inboxGuard && !(await inboxGuard(next))) {
+					await publishInbox(await inboxStore.markDiscarded(sessionId, next.id));
+					continue;
+				}
 				if (session.openTurnId !== undefined) {
+					if (next.readerDirected === false) return;
 					if (!session.steeringSupported) return;
 					const targetTurnId = session.openTurnId;
 					const delivering = await inboxStore.markDelivering(sessionId, next.id);
@@ -508,20 +563,45 @@ export function adaptAcp(
 					}
 					continue;
 				}
-				const delivering = await inboxStore.markDelivering(sessionId, next.id);
-				await publishInbox(delivering);
+				const batch: InboxMessage[] = [];
+				for (const item of queued) {
+					if (
+						batch.length &&
+						(next.readerDirected !== false || !next.sourceId || item.readerDirected !== false || !item.sourceId)
+					)
+						break;
+					if (inboxGuard && !(await inboxGuard(item))) break;
+					batch.push(item);
+				}
+				if (!batch.length) continue;
+				const ids = batch.map((item) => item.id);
+				for (const message of await inboxStore.markMany(sessionId, ids, "delivering")) await publishInbox(message);
 				try {
 					if (switching.has(sessionId) || table.get(sessionId)?.session !== session) {
-						await publishInbox(await inboxStore.markQueued(sessionId, next.id));
+						for (const message of await inboxStore.markMany(sessionId, ids, "queued"))
+							await publishInbox(message);
 						return;
 					}
-					inboxPromptIds.set(sessionId, next.id);
-					const turnId = await adapted.prompt(sessionId, next.text, next.attachments, { readerDirected: true });
-					const delivered = await inboxStore.markDelivered(sessionId, next.id, turnId);
-					await publishInbox(delivered);
-				} catch {
-					const uncertain = await inboxStore.markUncertain(sessionId, next.id);
-					await publishInbox(uncertain);
+					inboxPromptIds.set(sessionId, ids);
+					const turnId = await adapted.prompt(
+						sessionId,
+						batch.map((item) => item.text).join("\n\n---\n\n"),
+						batch.flatMap((item) => item.attachments),
+						{ readerDirected: next.readerDirected ?? !next.text.startsWith("[Neta automatic report:") },
+					);
+					for (const message of await inboxStore.markMany(sessionId, ids, "delivered", turnId))
+						await publishInbox(message);
+				} catch (error) {
+					for (const message of await inboxStore.markMany(
+						sessionId,
+						ids,
+						error instanceof SuppressedInboxError
+							? "discarded"
+							: error instanceof Error && error.name === "TurnInProgressError"
+								? "queued"
+								: "uncertain",
+					))
+						await publishInbox(message);
 				} finally {
 					inboxPromptIds.delete(sessionId);
 				}
@@ -531,7 +611,14 @@ export function adaptAcp(
 			drains.delete(sessionId);
 			const pending = (await inboxStore.list(sessionId)).some((item) => item.status === "queued");
 			const current = table.get(sessionId)?.session;
-			if (pending && !switching.has(sessionId) && current !== undefined && current.openTurnId === undefined)
+			if (
+				pending &&
+				!closing &&
+				!wakeTimers.has(sessionId) &&
+				!switching.has(sessionId) &&
+				current !== undefined &&
+				current.openTurnId === undefined
+			)
 				queueMicrotask(() => {
 					void drain(sessionId);
 				});
@@ -586,17 +673,25 @@ export function adaptAcp(
 	// One closed Turn for the notification and for the file: the desktop and
 	// the terminal both end their turn on `endedAt`, so the end of a turn is
 	// never a bare ping.
-	async function closeTurn(sessionId: SessionId, state: PumpState, turnId: TurnId, cancelled: boolean): Promise<void> {
+	async function closeTurn(
+		sessionId: SessionId,
+		state: PumpState,
+		turnId: TurnId,
+		cancelled: boolean,
+		failed = false,
+	): Promise<void> {
 		await flush(sessionId, state);
 		const open = state.open;
 		const closed: Turn = {
 			...(open?.id === turnId ? open : { id: turnId, sessionId, startedAt: nowIso(), role: "user" }),
 			endedAt: nowIso(),
 			...(cancelled ? { cancelled: true } : {}),
+			...(failed ? { failed: true } : {}),
 		};
 		state.open = undefined;
+		await durableTurn?.({ sessionId, bindingGeneration: closed.bindingGeneration, turn: closed });
 		await writeTurn(closed);
-		emit({ sessionId, turn: closed });
+		emit({ sessionId, bindingGeneration: closed.bindingGeneration, turn: closed });
 		const readerBlocks = [...(state.readerText?.values() ?? [])].sort((a, b) => a.seq - b.seq);
 		state.readerText = undefined;
 		if (closed.readerDirected === true && readerBlocks.length > 0) {
@@ -608,7 +703,8 @@ export function adaptAcp(
 		}
 	}
 
-	async function handle(sessionId: SessionId, state: PumpState, event: SessionEvent): Promise<void> {
+	async function handle(session: AcpSession, state: PumpState, event: SessionEvent): Promise<void> {
+		const sessionId = session.sessionId;
 		if (event.type === "turn") {
 			// Claimed before any await. The desktop and the terminal are both
 			// attached to the same session by design, so a second
@@ -619,11 +715,17 @@ export function adaptAcp(
 			const prompt = prompts.get(sessionId);
 			prompts.delete(sessionId);
 			await flush(sessionId, state);
-			const opened = prompt?.readerDirected === true ? { ...event.turn, readerDirected: true } : event.turn;
+			const opened: Turn = {
+				...event.turn,
+				model: session.model,
+				bindingGeneration: event.turn.bindingGeneration ?? session.bindingGeneration,
+				...(prompt?.readerDirected === true ? { readerDirected: true } : {}),
+			};
 			state.open = opened;
 			state.readerText = opened.readerDirected === true ? new Map() : undefined;
+			await durableTurn?.({ sessionId, bindingGeneration: opened.bindingGeneration, turn: opened });
 			await writeTurn(opened);
-			emit({ sessionId, turn: opened });
+			emit({ sessionId, bindingGeneration: opened.bindingGeneration, turn: opened });
 			if (prompt === undefined) {
 				return;
 			}
@@ -635,7 +737,14 @@ export function adaptAcp(
 					role: "user",
 					kind: "text",
 					text: prompt.text,
-					...(prompt.messageId === undefined ? {} : { data: { messageId: prompt.messageId } }),
+					...(prompt.messageId === undefined
+						? {}
+						: {
+								data: {
+									messageId: prompt.messageId,
+									messageIds: JSON.stringify(prompt.messageIds ?? [prompt.messageId]),
+								},
+							}),
 				});
 			}
 			for (const attachment of prompt.attachments) {
@@ -686,7 +795,7 @@ export function adaptAcp(
 			return;
 		}
 		if (event.type === "turnEnd") {
-			await closeTurn(sessionId, state, event.turnId, event.cancelled || event.stopReason === "error");
+			await closeTurn(sessionId, state, event.turnId, event.cancelled, event.stopReason === "error");
 			return;
 		}
 		if (event.type === "interrupted") {
@@ -698,7 +807,13 @@ export function adaptAcp(
 			emit({ sessionId });
 			return;
 		}
-		// A model or mode change is a bare ping: something changed, re-tail
+		if (event.type === "model") {
+			if (state.open) state.open = { ...state.open, model: event.model };
+			await conversations?.setMeta(sessionId, { model: event.model });
+			emit({ sessionId, bindingGeneration: session.bindingGeneration, model: event.model });
+			return;
+		}
+		// A mode change is a bare ping: something changed, re-tail
 		// for the current state.
 		emit({ sessionId });
 	}
@@ -708,14 +823,23 @@ export function adaptAcp(
 			const state: PumpState = { base: await baseSeqOf(session.sessionId), injected: 0, lastSeq: 0 };
 			try {
 				for await (const event of session.events()) {
-					await handle(session.sessionId, state, event);
+					if (event.bindingGeneration && event.bindingGeneration !== session.bindingGeneration) continue;
+					if (table.get(session.sessionId)?.session !== session) break;
+					pumpOperations++;
+					try {
+						await handle(session, state, event);
+					} finally {
+						pumpOperations--;
+					}
 				}
 			} catch {
 				// The iterator threw: the session is done.
 			}
-			await flush(session.sessionId, state);
+			if (table.get(session.sessionId)?.session === session) await flush(session.sessionId, state);
 		};
-		void run();
+		const operation = run();
+		pumpPromises.set(session, operation);
+		void operation.finally(() => pumpPromises.delete(session)).catch(() => undefined);
 	}
 
 	function live(sessionId: SessionId): AcpSession {
@@ -743,6 +867,7 @@ export function adaptAcp(
 		provider: string,
 		netaTools: boolean,
 		reconcileInbox = true,
+		deferInbox = false,
 	): Promise<void> {
 		if (conversations !== undefined) {
 			await conversations.create({
@@ -750,6 +875,8 @@ export function adaptAcp(
 				provider: session.provider,
 				model: session.model,
 				vendorSessionId: session.vendorSessionId,
+				bindingGeneration: session.bindingGeneration,
+				fallbackModels: session.fallbackModels === undefined ? undefined : [...session.fallbackModels],
 				createdAt: nowIso(),
 			});
 			// A resumed or re-created session gets a new vendor id, and the
@@ -759,6 +886,8 @@ export function adaptAcp(
 					provider: session.provider,
 					model: session.model,
 					vendorSessionId: session.vendorSessionId,
+					bindingGeneration: session.bindingGeneration,
+					fallbackModels: session.fallbackModels === undefined ? undefined : [...session.fallbackModels],
 				})
 				.catch(() => undefined);
 		}
@@ -768,20 +897,23 @@ export function adaptAcp(
 			void (async () => {
 				for (const item of await inboxStore.list(session.sessionId)) {
 					if (item.status !== "delivering") continue;
-					const evidence = (
-						await conversations?.tail({ sessionId: session.sessionId, limit: 500 }).catch(() => undefined)
-					)?.blocks.find((block) => block.data?.messageId === item.id);
-					if (evidence !== undefined)
-						await publishInbox(await inboxStore.markDelivered(session.sessionId, item.id, evidence.turnId));
-					else await publishInbox(await inboxStore.markUncertain(session.sessionId, item.id));
+					// A local user block proves intent, not provider admission. Do not
+					// turn a crashed delivery into a false acknowledgment or replay.
+					await publishInbox(await inboxStore.markUncertain(session.sessionId, item.id));
 				}
-				await drain(session.sessionId);
+				if (!deferInbox) await drain(session.sessionId);
 			})();
 		}
 	}
 
-	function launchSettings(cwd: string, provider: string): { settings: Settings; steeringSafe: boolean } {
-		let effectiveSettings = settingsForCwd(cwd);
+	function launchSettings(
+		cwd: string,
+		provider: string,
+		settingsAtCwd: Settings = settingsForCwd(cwd),
+	): { settings: Settings; steeringSafe: boolean } {
+		let effectiveSettings = settingsAtCwd;
+		let stagedCodex = false;
+		let installedClaude = false;
 		const configured = effectiveSettings.providers[provider];
 		let bundledCodex = false;
 		if (
@@ -804,6 +936,7 @@ export function adaptAcp(
 							...configured,
 							command: adapter,
 							args: [],
+							codexAcp: true,
 							env: {
 								...configured.env,
 								...(configured.env?.CODEX_PATH === undefined ? { CODEX_PATH: codex } : {}),
@@ -812,13 +945,54 @@ export function adaptAcp(
 					},
 				};
 			} catch {
-				/* Standalone CLI safely keeps the unpatched adapter. */
+				// Desktop resources are absent for standalone launches.
+			}
+		}
+		if (!bundledCodex && provider === "codex" && configured !== undefined) {
+			const staged = stagedCodexAcpProvider(configured);
+			stagedCodex = staged !== undefined;
+			const installed = staged ?? installedCodexAcpProvider(configured);
+			if (installed !== undefined) {
+				effectiveSettings = {
+					...effectiveSettings,
+					providers: { ...effectiveSettings.providers, codex: installed },
+				};
+			}
+		}
+		if (provider === "claude" && configured !== undefined) {
+			const installed = installedClaudeAcpProvider(configured);
+			installedClaude = installed !== undefined;
+			if (installed !== undefined) {
+				effectiveSettings = {
+					...effectiveSettings,
+					providers: { ...effectiveSettings.providers, claude: installed },
+				};
+			}
+		}
+		if (provider === "opencode" && configured !== undefined) {
+			const installed = managedOpenCodeProvider(configured, cwd) ?? installedOpenCodeAcpProvider(configured);
+			if (installed !== undefined) {
+				effectiveSettings = {
+					...effectiveSettings,
+					providers: {
+						...effectiveSettings.providers,
+						opencode: {
+							...installed,
+							env: {
+								...installed.env,
+								NETA_OPENCODE_FORBIDDEN_MODELS: JSON.stringify(effectiveSettings.forbiddenModels),
+							},
+						},
+					},
+				};
 			}
 		}
 		return {
 			settings: effectiveSettings,
 			steeringSafe:
 				bundledCodex ||
+				stagedCodex ||
+				installedClaude ||
 				(provider === "claude" &&
 					configured?.command === "npx" &&
 					configured.args.join("\u0000") ===
@@ -827,6 +1001,7 @@ export function adaptAcp(
 	}
 
 	async function start(o: {
+		deferInbox?: boolean;
 		sessionId: SessionId;
 		workspaceId: WorkspaceId;
 		cwd: string;
@@ -837,6 +1012,7 @@ export function adaptAcp(
 		netaTools: boolean;
 		actorId?: string;
 		resumeVendorSessionId?: string;
+		fallbackModels?: string[];
 	}): Promise<{ sessionId: SessionId; provider: string; model: string }> {
 		// 05: the actor is the leader's session, or an agent's `agentId`. The
 		// token is minted under whichever this is, so the proxy's `--actor`
@@ -856,7 +1032,9 @@ export function adaptAcp(
 				unsandboxed: o.unsandboxed,
 				cwd: o.cwd,
 				model: o.model,
+				fallbackModels: o.fallbackModels,
 				mcpServers: netaServers(o.netaTools, actorId, token),
+				actorId,
 				sessionId: o.sessionId,
 				steeringSafe: launch.steeringSafe,
 				...(o.resumeVendorSessionId === undefined ? {} : { resumeVendorSessionId: o.resumeVendorSessionId }),
@@ -865,28 +1043,29 @@ export function adaptAcp(
 			tokens.revoke(actorId);
 			throw error;
 		}
-		await register(session, o.provider, o.netaTools);
+		await register(session, o.provider, o.netaTools, true, o.deferInbox);
 		actors.set(session.sessionId, actorId);
 		return { sessionId: session.sessionId, provider: session.provider, model: session.model };
 	}
 
-	// Free one live session: its token first, so a proxy that outlives the
-	// process cannot keep calling tools as an agent that is gone.
+	// Revoke tools immediately, but retain the binding until its queued final
+	// events have flushed and durable completion recording has finished.
 	async function closeSession(id: SessionId): Promise<void> {
 		tokens.revoke(actors.get(id) ?? id);
+		const record = table.get(id);
+		if (record !== undefined) {
+			try {
+				await record.session.close();
+			} catch {
+				// Already gone. The owned session close ends its event stream.
+			}
+			await pumpPromises.get(record.session);
+			pumpPromises.delete(record.session);
+			if (table.get(id)?.session !== record.session) return;
+			table.delete(id);
+		}
 		actors.delete(id);
 		prompts.delete(id);
-		const record = table.get(id);
-		if (record === undefined) {
-			// Nothing live: archiving after a restart closes these.
-			return;
-		}
-		table.delete(id);
-		try {
-			await record.session.close();
-		} catch {
-			// Already gone.
-		}
 	}
 
 	adapted = {
@@ -897,10 +1076,7 @@ export function adaptAcp(
 		},
 		send: async (id, text, attachments, _provenance) => {
 			if (inboxStore === undefined) {
-				const turnId = await (async () => {
-					const session = live(id);
-					return session.prompt(text, attachments);
-				})();
+				const turnId = await adapted.prompt(id, text, attachments, _provenance);
 				return {
 					id: turnId,
 					sessionId: id,
@@ -912,8 +1088,20 @@ export function adaptAcp(
 					turnId,
 				};
 			}
-			const item = await inboxStore.enqueue(id, text, attachments);
-			await publishInbox(item);
+			if (_provenance.readerDirected === false && _provenance.sourceId && !wakeTimers.has(id)) {
+				const timer = setTimeout(() => {
+					wakeTimers.delete(id);
+					void drain(id);
+				}, 100);
+				timer.unref();
+				wakeTimers.set(id, timer);
+			}
+			const item = await sessionLifecycle.run(id, async () => {
+				const queued = await inboxStore.enqueue(id, text, attachments, _provenance);
+				await publishInbox(queued);
+				return queued;
+			});
+			if (_provenance.readerDirected === false && _provenance.sourceId) return item;
 			await drain(id);
 			return (await inboxStore.list(id)).find((candidate) => candidate.id === item.id) ?? item;
 		},
@@ -943,7 +1131,10 @@ export function adaptAcp(
 					// and the next Node restart resumes against an id the
 					// provider no longer knows.
 					await conversations
-						?.setMeta(o.sessionId, { vendorSessionId: record.session.vendorSessionId })
+						?.setMeta(o.sessionId, {
+							vendorSessionId: record.session.vendorSessionId,
+							bindingGeneration: record.session.bindingGeneration,
+						})
 						.catch(() => undefined);
 					return { sessionId: o.sessionId, provider: record.provider, model: record.session.model };
 				} catch {
@@ -956,10 +1147,20 @@ export function adaptAcp(
 			}
 			const meta = conversations === undefined ? undefined : await conversations.meta(o.sessionId);
 			const vendor = meta?.vendorSessionId;
-			if (vendor !== undefined && vendor !== "" && settings.providers[o.provider]?.resume === true) {
+			let resumeError: unknown;
+			if (
+				vendor !== undefined &&
+				vendor !== "" &&
+				launchSettings(o.cwd, o.provider).settings.providers[o.provider]?.resume === true
+			) {
 				try {
-					return await start({ ...o, resumeVendorSessionId: vendor });
-				} catch {
+					return await start({
+						...o,
+						fallbackModels: o.fallbackModels ?? meta?.fallbackModels,
+						resumeVendorSessionId: vendor,
+					});
+				} catch (error) {
+					resumeError = error;
 					// The vendor forgot the session (or refuses resume): a
 					// fresh one below, under a new id, is still a leader the
 					// person can talk to. `start` has already revoked the
@@ -967,7 +1168,10 @@ export function adaptAcp(
 				}
 			}
 			if (o.allowFresh === false) {
-				throw new NodeError("PROVIDER_ERROR", `session ${o.sessionId} cannot be resumed`);
+				throw new NodeError(
+					"PROVIDER_ERROR",
+					`Could not restore saved conversation ${o.sessionId}: ${resumeError instanceof Error ? resumeError.message : "no resumable provider session is recorded"}`,
+				);
 			}
 			const pendingInbox =
 				inboxStore === undefined
@@ -977,11 +1181,25 @@ export function adaptAcp(
 						);
 			// Keep the Neta identity when durable messages still point at it. A
 			// session with no inbox keeps the established fresh-identity recovery.
-			return start({ ...o, sessionId: pendingInbox.length > 0 ? o.sessionId : ulid() });
+			return start({
+				...o,
+				fallbackModels: o.fallbackModels ?? meta?.fallbackModels,
+				sessionId: pendingInbox.length > 0 ? o.sessionId : ulid(),
+			});
 		},
 		prompt: async (id, text, attachments = [], provenance = { readerDirected: false }) => {
 			if (switching.has(id)) throw new NodeError("BUSY", "provider switch is in progress");
 			const session = live(id);
+			if (session.provider === "opencode" && systemContext) {
+				const actorId = actors.get(id) ?? id;
+				await writeSystemContext({
+					sessionId: id,
+					actorId,
+					bindingGeneration: session.bindingGeneration,
+					role: actorId === id ? "leader" : session.unsandboxed ? "lead" : "agent",
+					text: systemContext(id),
+				});
+			}
 			// Set before the turn opens: `prompt` pushes the turn event
 			// synchronously, and the pump reads it a microtask later. An
 			// entry the pump has not consumed belongs to another client's
@@ -995,11 +1213,14 @@ export function adaptAcp(
 				readerDirected: boolean;
 				recoveryNotice?: string;
 				messageId?: string;
+				messageIds?: string[];
 			} = {
 				text,
 				attachments,
 				readerDirected: provenance.readerDirected,
-				...(inboxPromptIds.get(id) === undefined ? {} : { messageId: inboxPromptIds.get(id) }),
+				...(inboxPromptIds.get(id) === undefined
+					? {}
+					: { messageId: inboxPromptIds.get(id)?.[0], messageIds: inboxPromptIds.get(id) }),
 			};
 			prompts.set(id, claimed);
 			let ownsRecoverySwitch = false;
@@ -1007,11 +1228,24 @@ export function adaptAcp(
 				const meta = conversations === undefined ? undefined : await conversations.meta(id);
 				const pendingHandoff = meta?.pendingHandoff?.trim();
 				const pendingBrief = meta?.pendingBrief?.trim();
-				const prefix = pendingHandoff === undefined || pendingHandoff === "" ? pendingBrief : pendingHandoff;
+				const prefix =
+					pendingHandoff === undefined || pendingHandoff === ""
+						? session.provider === "opencode"
+							? undefined
+							: pendingBrief
+						: pendingHandoff;
 				let delivered =
 					prefix === undefined || prefix === "" ? text : `${prefix}\n\n---\n\n## Current user message\n\n${text}`;
 				let turnId: TurnId;
 				try {
+					if (inboxStore && claimed.messageIds) {
+						const messages = await inboxStore.list(id);
+						for (const messageId of claimed.messageIds) {
+							const message = messages.find((item) => item.id === messageId);
+							if (!message || message.status !== "delivering" || (inboxGuard && !(await inboxGuard(message))))
+								throw new SuppressedInboxError("Runtime result no longer belongs to this active conversation");
+						}
+					}
 					turnId = await session.prompt(delivered, attachments);
 				} catch (error) {
 					if (!(error instanceof SessionClosedError)) throw error;
@@ -1036,7 +1270,9 @@ export function adaptAcp(
 						unsandboxed: session.unsandboxed,
 						cwd: session.cwd,
 						model: session.model,
+						fallbackModels: session.fallbackModels,
 						mcpServers: netaServers(record.netaTools === true, actorId, token),
+						actorId,
 						sessionId: id,
 					};
 					const meta = conversations === undefined ? undefined : await conversations.meta(id);
@@ -1061,6 +1297,15 @@ export function adaptAcp(
 						}
 					}
 					await register(relaunched, record.provider, record.netaTools === true, false);
+					if (relaunched.provider === "opencode" && systemContext) {
+						await writeSystemContext({
+							sessionId: id,
+							actorId,
+							bindingGeneration: relaunched.bindingGeneration,
+							role: actorId === id ? "leader" : relaunched.unsandboxed ? "lead" : "agent",
+							text: systemContext(id),
+						});
+					}
 					turnId = relaunched.prompt(delivered, attachments);
 				}
 				if (pendingHandoff !== undefined && pendingHandoff !== "") {
@@ -1079,12 +1324,81 @@ export function adaptAcp(
 				if (ownsRecoverySwitch) releaseSwitch(id);
 			}
 		},
+		runtimeDiagnostics: async (id) => {
+			const record = table.get(id);
+			if (record)
+				return {
+					attached: true,
+					bindingGeneration: record.session.bindingGeneration,
+					turnId: record.session.openTurnId,
+					model: record.session.model,
+					provider: record.provider,
+					contract: record.session.nativeAttachment?.contract,
+				};
+			const meta = await conversations?.meta(id);
+			return {
+				attached: false,
+				bindingGeneration: meta?.bindingGeneration,
+				model: meta?.model,
+				provider: meta?.provider,
+			};
+		},
 		capabilities: (id) => live(id).promptCapabilities,
+		nativeAttachment: (id) => live(id).nativeAttachment,
+		ensureNativeAttachment: async (id) => {
+			const session = live(id);
+			const attachment = session.nativeAttachment;
+			if (!attachment) return attachment;
+			if (await nativeEndpointReady(attachment)) {
+				if (attachment.apiVersion === 2) await session.setConfigOption("neta_refresh_tools", "");
+				return attachment;
+			}
+			if (switching.has(id) || session.openTurnId !== undefined || prompts.has(id))
+				throw new NodeError(
+					"BUSY",
+					"Chat is reconnecting while this conversation is active. Try opening it again after the reply finishes.",
+				);
+			switching.add(id);
+			try {
+				await session.relaunch(session.access);
+				await conversations?.setMeta(id, {
+					vendorSessionId: session.vendorSessionId,
+					bindingGeneration: session.bindingGeneration,
+				});
+				const recovered = session.nativeAttachment;
+				if (!recovered || !(await nativeEndpointReady(recovered)))
+					throw new NodeError(
+						"PROVIDER_ERROR",
+						"The chat connection could not be restored. Your conversation is saved; try opening it again.",
+					);
+				if (recovered.apiVersion === 2) await session.setConfigOption("neta_refresh_tools", "");
+				return recovered;
+			} finally {
+				releaseSwitch(id);
+			}
+		},
+		setNativeVariant: async (id, variant) => {
+			const session = live(id);
+			if (!session.nativeAttachment)
+				throw new NodeError("PROVIDER_ERROR", "Native effort selection requires Neta OpenCode");
+			if (variant === undefined) await session.setConfigOption("neta_effort", "");
+			else await session.setConfigOption("effort", variant);
+		},
+		setNativeAgent: async (id, agent) => {
+			const session = live(id);
+			if (!session.nativeAttachment)
+				throw new NodeError("PROVIDER_ERROR", "Native agent selection requires Neta OpenCode");
+			if (session.configOptions.find((option) => option.id === "mode")?.currentValue !== agent)
+				await session.setConfigOption("mode", agent);
+		},
 		setModel: async (id, model) => {
 			const session = live(id);
 			await session.setModel(model);
 			if (session.model !== model) throw new NodeError("PROVIDER_ERROR", `provider did not select model ${model}`);
 			await conversations?.setMeta(id, { model: session.model }).catch(() => undefined);
+		},
+		setPendingHandoff: async (id, handoff) => {
+			await conversations?.setMeta(id, { pendingHandoff: handoff === "" ? undefined : handoff });
 		},
 		switchProvider: async (id, provider, model, handoff) => {
 			if (switching.has(id)) throw new NodeError("BUSY", "provider switch is already in progress");
@@ -1110,7 +1424,9 @@ export function adaptAcp(
 					unsandboxed: old.unsandboxed,
 					cwd: old.cwd,
 					...(model === undefined ? {} : { model }),
+					fallbackModels: old.fallbackModels,
 					mcpServers: netaServers(true, actorId, token),
+					actorId,
 					sessionId: id,
 				});
 			} catch (error) {
@@ -1130,6 +1446,7 @@ export function adaptAcp(
 					provider: candidate.provider,
 					model: candidate.model,
 					vendorSessionId: candidate.vendorSessionId,
+					bindingGeneration: candidate.bindingGeneration,
 					pendingHandoff: handoff === undefined || handoff === "" ? undefined : handoff,
 				});
 			} catch (error) {
@@ -1138,6 +1455,7 @@ export function adaptAcp(
 				throw new NodeError("PROVIDER_ERROR", `could not persist provider handoff: ${String(error)}`);
 			}
 			await old.close().catch(() => undefined);
+			await pumpPromises.get(old);
 			try {
 				if (targetAccess === "readWrite") await candidate.relaunch("readWrite");
 				await register(candidate, provider, record.netaTools === true);
@@ -1157,7 +1475,9 @@ export function adaptAcp(
 						unsandboxed: old.unsandboxed,
 						cwd: old.cwd,
 						model: old.model,
+						fallbackModels: old.fallbackModels,
 						mcpServers: netaServers(true, actorId, token),
+						actorId,
 						sessionId: id,
 					});
 					await register(restored, record.provider, record.netaTools === true);
@@ -1167,6 +1487,7 @@ export function adaptAcp(
 							provider: restored.provider,
 							model: restored.model,
 							vendorSessionId: restored.vendorSessionId,
+							bindingGeneration: restored.bindingGeneration,
 							pendingHandoff: previousMeta.pendingHandoff,
 							pendingBrief: previousMeta.pendingBrief,
 						});
@@ -1212,7 +1533,9 @@ export function adaptAcp(
 					unsandboxed: old.unsandboxed,
 					cwd: old.cwd,
 					model: old.model,
+					fallbackModels: old.fallbackModels,
 					mcpServers: netaServers(record.netaTools === true, newActor, token),
+					actorId: newActor,
 					sessionId: newId,
 				});
 			} catch (error) {
@@ -1221,26 +1544,42 @@ export function adaptAcp(
 				throw new NodeError("PROVIDER_ERROR", `could not reset provider session: ${String(error)}`);
 			}
 			try {
-				await register(candidate, record.provider, record.netaTools === true);
+				switching.add(newId);
+				await register(candidate, record.provider, record.netaTools === true, false);
 				actors.set(newId, newActor);
 				await conversations?.setMeta(newId, { pendingBrief: brief });
 				const selected = { sessionId: newId, provider: candidate.provider, model: candidate.model };
-				await rebind(selected);
 				if (inboxStore !== undefined) {
-					for (const message of await inboxStore.discardAll(id)) await publishInbox(message);
+					for (const message of await inboxStore.list(id)) {
+						if (message.status === "delivering")
+							await publishInbox(await inboxStore.markUncertain(id, message.id));
+						if (message.status === "queued" && message.readerDirected === false && message.sourceId)
+							await publishInbox(
+								await inboxStore.enqueue(newId, message.text, message.attachments, {
+									readerDirected: false,
+									sourceId: message.sourceId,
+								}),
+							);
+					}
 				}
+				await rebind(selected);
+				if (inboxStore !== undefined)
+					for (const message of await inboxStore.discardQueued(id)) await publishInbox(message);
 				if (old.openTurnId !== undefined) await old.cancel().catch(() => undefined);
+				await old.close().catch(() => undefined);
+				await pumpPromises.get(old);
 				table.delete(id);
 				actors.delete(id);
 				prompts.delete(id);
-				await old.close().catch(() => undefined);
 				if (workspaceLeader) tokens.revoke(oldActor);
 				releaseSwitch(id);
+				releaseSwitch(newId);
 				return selected;
 			} catch (error) {
 				await candidate.close().catch(() => undefined);
 				table.delete(newId);
 				actors.delete(newId);
+				releaseSwitch(newId);
 				if (workspaceLeader) tokens.revoke(newActor);
 				releaseSwitch(id);
 				throw error;
@@ -1249,17 +1588,19 @@ export function adaptAcp(
 		listProviders: (o) => {
 			const session = o?.sessionId === undefined ? undefined : table.get(o.sessionId)?.session;
 			const effectiveSettings = session === undefined ? settings : settingsForCwd(session.cwd);
+			const cwd = session?.cwd ?? process.cwd();
 			return Object.entries(effectiveSettings.providers)
 				.filter(([, provider]) => provider.disabled !== true)
 				.map(([id, provider]) => {
-					const available = providerCommandAvailable(provider);
+					const resolved = launchSettings(cwd, id, effectiveSettings).settings.providers[id] ?? provider;
+					const available = providerCommandAvailable(resolved, cwd);
 					return {
 						id,
 						label: id.charAt(0).toUpperCase() + id.slice(1),
 						defaultModel: provider.defaultModel,
 						available,
-						...(available ? {} : { unavailableReason: `Command not found: ${provider.command}` }),
-						...(provider.command === "npx" ? { note: "Adapter may download on first launch" } : {}),
+						...(available ? {} : { unavailableReason: `Command not found: ${resolved.command}` }),
+						...(resolved.command === "npx" ? { note: "Adapter may download on first launch" } : {}),
 					};
 				});
 		},
@@ -1269,13 +1610,23 @@ export function adaptAcp(
 				if (record === undefined) {
 					throw new NodeError("NOT_FOUND", `no such session: ${o.sessionId}`);
 				}
+				if (record.provider === "opencode" && record.session.nativeAttachment?.apiVersion === 2) {
+					try {
+						await record.session.setConfigOption("neta_refresh_models", "");
+					} catch {
+						throw new NodeError(
+							"PROVIDER_ERROR",
+							"Could not refresh connected OpenCode models. Retry in /routing; no cached catalog was used.",
+						);
+					}
+				}
 				const listed = record.session.listModels().map((model) => ({
 					id: model.id,
 					name: model.name,
 					provider: record.provider,
 					description: model.description,
 				}));
-				if (listed.length > 0) return listed;
+				if (listed.length > 0 || record.provider === "opencode") return listed;
 				const fallback = settingsForCwd(record.session.cwd).providers[record.provider]?.defaultModel;
 				return fallback === undefined || fallback === ""
 					? []
@@ -1299,7 +1650,11 @@ export function adaptAcp(
 					}
 				}
 			}
-			if (o.provider !== undefined && !out.some((model) => model.provider === o.provider)) {
+			if (
+				o.provider !== undefined &&
+				o.provider !== "opencode" &&
+				!out.some((model) => model.provider === o.provider)
+			) {
 				const fallback = settings.providers[o.provider]?.defaultModel;
 				if (fallback !== undefined && fallback !== "")
 					out.push({ id: fallback, name: fallback, provider: o.provider });
@@ -1314,16 +1669,85 @@ export function adaptAcp(
 			for (const id of [...minted.keys()]) {
 				tokens.revoke(id);
 			}
+			const closed = await Promise.allSettled(
+				[...table.values()].map((record) => closeSession(record.session.sessionId)),
+			);
+			await Promise.all([...pumpPromises.values()]);
+			const failure = closed.find((result) => result.status === "rejected");
+			if (failure?.status === "rejected") throw failure.reason;
 			actors.clear();
 			prompts.clear();
-			await closeAll(table);
 		},
 		onTurn: (fn) => {
 			listeners.add(fn);
 		},
+		hasActiveWork: () =>
+			pumpOperations > 0 ||
+			sessionLifecycle.pendingCount > 0 ||
+			prompts.size > 0 ||
+			[...table.values()].some((record) => record.session.openTurnId !== undefined),
 		isTurnActive: (sessionId) => table.get(sessionId)?.session.openTurnId !== undefined,
 		actorToken: (sessionId) => minted.get(actors.get(sessionId) ?? sessionId),
 		tokens,
+	};
+	const send = adapted.send;
+	if (send)
+		adapted.send = async (id, text, attachments, provenance) => {
+			if (closing) throw new NodeError("BUSY", "Neta is stopping; the message was not admitted.");
+			const leave = runtimeAdmission?.enter();
+			try {
+				return await send(id, text, attachments, provenance);
+			} finally {
+				leave?.();
+			}
+		};
+	const ensureSession = adapted.ensureSession;
+	adapted.ensureSession = (options) => guarded(options.sessionId, () => ensureSession(options));
+	const createSession = adapted.createSession;
+	adapted.createSession = (options) => {
+		const sessionId = options.sessionId ?? ulid();
+		return guarded(sessionId, () => {
+			if (table.get(sessionId)) throw new NodeError("BUSY", "A conversation already owns this session identity.");
+			return createSession({ ...options, sessionId });
+		});
+	};
+	const prompt = adapted.prompt;
+	adapted.prompt = (id, text, attachments, provenance) => guarded(id, () => prompt(id, text, attachments, provenance));
+	const ensureNativeAttachment = adapted.ensureNativeAttachment;
+	if (ensureNativeAttachment) adapted.ensureNativeAttachment = (id) => guarded(id, () => ensureNativeAttachment(id));
+	const resetSession = adapted.resetSession;
+	if (resetSession)
+		adapted.resetSession = (id, brief, rebind) =>
+			guarded(id, async () => {
+				const selected = await resetSession(id, brief, rebind);
+				sessionLifecycle.invalidate(id, true);
+				return selected;
+			});
+	const switchProvider = adapted.switchProvider;
+	if (switchProvider)
+		adapted.switchProvider = (id, provider, model, handoff) => {
+			if (prompts.has(id) || table.get(id)?.session.openTurnId !== undefined)
+				return Promise.reject(new NodeError("BUSY", "provider switch requires an idle session"));
+			return guarded(id, () => switchProvider(id, provider, model, handoff));
+		};
+	const setModel = adapted.setModel;
+	adapted.setModel = (id, model) => guarded(id, () => setModel(id, model));
+	const setNativeVariant = adapted.setNativeVariant;
+	if (setNativeVariant) adapted.setNativeVariant = (id, variant) => guarded(id, () => setNativeVariant(id, variant));
+	const setNativeAgent = adapted.setNativeAgent;
+	if (setNativeAgent) adapted.setNativeAgent = (id, agent) => guarded(id, () => setNativeAgent(id, agent));
+	adapted.close = (id) =>
+		guarded(id, async () => {
+			await closeSession(id);
+			sessionLifecycle.invalidate(id);
+		});
+	const stopAll = adapted.closeAll;
+	adapted.closeAll = async () => {
+		closing = true;
+		for (const timer of wakeTimers.values()) clearTimeout(timer);
+		wakeTimers.clear();
+		await sessionLifecycle.settled();
+		await stopAll();
 	};
 	return adapted;
 }
@@ -1333,6 +1757,12 @@ export function adaptAcp(
 // and no events are appended here: `startNode` writes one `node.restarted`
 // per affected workspace afterwards.
 export async function markInterrupted(store: NodeStore): Promise<Array<{ workspaceId: WorkspaceId; agents: number }>> {
+	// ACP turns do not survive a Node restart. Clear stale leader activity
+	// before clients can read the first snapshot, including unopened workspaces.
+	for (const leader of store.listLeaders()) {
+		if (leader.state !== "running") continue;
+		await store.putLeader({ ...leader, state: "idle", currentTurnId: undefined, bindingGeneration: undefined });
+	}
 	const counts = new Map<WorkspaceId, number>();
 	for (const mission of store.listMissions()) {
 		for (const agent of store.listAgents(mission.id)) {
@@ -1353,6 +1783,8 @@ export const allHandlers: NodeHandlers = {
 	...glanceHandlers,
 	...workspaceHandlers,
 	...terminalHandlers,
+	...diagnosticsHandlers,
+	...routingHandlers,
 };
 
 export interface Node {
@@ -1376,6 +1808,7 @@ export async function startNode(o?: { store?: NodeStore; acp?: NodeAcp }): Promi
 		throw new Error(socketError);
 	}
 	const lock: LockHandle = await acquireLock();
+	const runtimeAdmission = new RuntimeAdmission(lock.instanceId);
 	let realStore: Store | undefined;
 	try {
 		let storePort: NodeStore;
@@ -1427,6 +1860,10 @@ export async function startNode(o?: { store?: NodeStore; acp?: NodeAcp }): Promi
 				captureGlance,
 				(sessionId) => prepareHandoffForSession({ store: storePort }, sessionId),
 				realStore?.inbox,
+				(sessionId) => sessionSystemContext({ store: storePort }, sessionId),
+				(notification) => mounted?.recordTurn(notification) ?? Promise.resolve(),
+				runtimeAdmission,
+				(message) => mounted?.canDeliverInbox(message) ?? Promise.resolve(true),
 			);
 			acpPort = adaptedAcp;
 		} else {
@@ -1441,7 +1878,7 @@ export async function startNode(o?: { store?: NodeStore; acp?: NodeAcp }): Promi
 				await restartLeases.interrupt(mission.workspaceId, mission.id);
 			}
 			for (const agent of storePort.listAgents(mission.id)) {
-				if (agent.state === "starting" || agent.state === "running" || agent.state === "blocked") {
+				if (agent.state !== "queued") {
 					await restartLeases.interrupt(agent.workspaceId, agent.id);
 				}
 			}
@@ -1460,6 +1897,7 @@ export async function startNode(o?: { store?: NodeStore; acp?: NodeAcp }): Promi
 			pid: process.pid,
 			protocolVersion: PROTOCOL_VERSION,
 			runtimeBuild: netaBuildId(),
+			instanceId: lock.instanceId,
 			startedAt: nowIso(),
 		};
 		await writeDescriptor(descriptor);
@@ -1521,6 +1959,7 @@ export async function startNode(o?: { store?: NodeStore; acp?: NodeAcp }): Promi
 			if (stopping !== undefined) {
 				return stopping;
 			}
+			runtimeAdmission.stop();
 			stopping = (async (): Promise<void> => {
 				try {
 					// 07's mode ticker first: it writes through the store,
@@ -1534,7 +1973,7 @@ export async function startNode(o?: { store?: NodeStore; acp?: NodeAcp }): Promi
 					if (realStore !== undefined) {
 						await realStore.close();
 					}
-					await clearDescriptor();
+					await clearDescriptor(lock.instanceId);
 					await lock.release();
 				} finally {
 					stoppedResolve();
@@ -1546,6 +1985,7 @@ export async function startNode(o?: { store?: NodeStore; acp?: NodeAcp }): Promi
 			store: storePort,
 			acp: acpPort,
 			nodeVersion: netaVersion(),
+			runtimeAdmission,
 			stop,
 			...(pi === undefined ? {} : { pi }),
 		};
@@ -1559,6 +1999,7 @@ export async function startNode(o?: { store?: NodeStore; acp?: NodeAcp }): Promi
 						store: adapted,
 						acp: adaptedAcp,
 						settings,
+						runtimeAdmission,
 						hub: () => hub,
 						...(pi === undefined
 							? {}
@@ -1582,12 +2023,13 @@ export async function startNode(o?: { store?: NodeStore; acp?: NodeAcp }): Promi
 		const server = await createServer({ socketPath, token, handlers: { ...allHandlers, ...tools }, ctx });
 		hub = server.hub;
 		wireTurnStream({ ...ctx, hub: server.hub });
+		await mounted?.recover();
 		return { descriptor, hub: server.hub, stop, stopped };
 	} catch (error) {
 		if (realStore !== undefined) {
 			await realStore.close().catch(() => undefined);
 		}
-		await clearDescriptor().catch(() => undefined);
+		await clearDescriptor(lock.instanceId).catch(() => undefined);
 		await lock.release().catch(() => undefined);
 		throw error;
 	}

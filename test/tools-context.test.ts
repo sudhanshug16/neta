@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Mission } from "../src/core/types.ts";
@@ -122,9 +122,51 @@ describe("skill loading", () => {
 		expect(loadSkills(["nope"], root, home)).toEqual({ ok: false, missing: "nope", available: ["git", "notes"] });
 	});
 
+	test("standard project skills and symlinked user skills resolve with source paths", async () => {
+		const { root, home } = await skilled();
+		const project = join(root, ".agents", "skills", "prod-rails-runner", "SKILL.md");
+		const target = join(home, "skill-source");
+		const linked = join(home, ".agents", "skills", "agent-slack");
+		await mkdir(join(root, ".agents", "skills", "prod-rails-runner"), { recursive: true });
+		await mkdir(join(home, ".agents", "skills", "empty"), { recursive: true });
+		await mkdir(target);
+		await writeFile(project, "Use scripts/check.sh");
+		await writeFile(join(target, "SKILL.md"), "Read Slack");
+		await symlink(target, linked);
+		await writeFile(join(home, ".neta", "skills", "prod-rails-runner.md"), "user override");
+		const result = loadSkills(["prod-rails-runner", "agent-slack"], root, home);
+		expect(result).toEqual({
+			ok: true,
+			skills: [
+				{ name: "prod-rails-runner", text: "Use scripts/check.sh", path: project },
+				{ name: "agent-slack", text: "Read Slack", path: join(linked, "SKILL.md") },
+			],
+		});
+		if (result.ok) expect(composeContext({ kind: "agent", skills: result.skills })).toContain(`Source: ${project}`);
+		expect(loadSkills(["missing"], root, home)).toEqual({
+			ok: false,
+			missing: "missing",
+			available: ["agent-slack", "git", "notes", "prod-rails-runner"],
+		});
+	});
+
+	test("project Neta overrides and OpenCode config skills remain available", async () => {
+		const { root, home } = await skilled();
+		for (const dir of [
+			join(root, ".opencode", "skills", "notes"),
+			join(home, ".config", "opencode", "skills", "other"),
+		]) {
+			await mkdir(dir, { recursive: true });
+			await writeFile(join(dir, "SKILL.md"), "native skill");
+		}
+		const loaded = loadSkills(["notes", "other"], root, home);
+		expect(loaded.ok).toBe(true);
+		if (loaded.ok) expect(loaded.skills.map((skill) => skill.text)).toEqual(["workspace notes", "native skill"]);
+	});
+
 	test("a traversing name is rejected", async () => {
 		const { root, home } = await skilled();
-		for (const name of ["../evil", "a/b", ".."]) {
+		for (const name of ["../evil", "a/b", "..", "a\\b", "bad\0name"]) {
 			const result = loadSkills([name], root, home);
 			expect(result.ok).toBe(false);
 			if (!result.ok) {
@@ -146,10 +188,19 @@ describe("context composition", () => {
 	});
 
 	test("the brief keeps accepted changes in order with access and worktree", () => {
-		const text = composeContext({ kind: "lead", mission: testMission(), task: "run it" });
+		const text = composeContext({
+			kind: "lead",
+			self: { id: "britt-id", name: "Britt" },
+			mission: testMission(),
+			task: "run it",
+		});
+		expect(text).toContain("You are Britt. Your actor ID is britt-id");
+		expect(text).toContain("Do not send messages to yourself");
 		expect(text.indexOf("port the lens")).toBeLessThan(text.indexOf("first change"));
 		expect(text.indexOf("first change")).toBeLessThan(text.indexOf("second change"));
-		expect(text).toContain("readWrite");
+		expect(text).toContain("Mission access ceiling: readWrite");
+		expect(text).toContain("Assigned access: readOnly");
+		expect(text).toContain("disposable and isolated");
 		expect(text).toContain("/tmp/wt-7");
 	});
 });

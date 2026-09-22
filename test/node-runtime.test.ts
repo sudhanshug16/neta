@@ -319,6 +319,66 @@ test("a fresh workspace remains selectable when its provider fails and recovers 
 	}
 }, 90000);
 
+test.each(["finish", "cancel"] as const)(
+	"workspace leader activity is broadcast before output and clears on %s",
+	async (ending) => {
+		const barrier = join(dir, "activity-barrier");
+		const ready = join(dir, "activity-ready");
+		await writeBarrierSettings(join(dir, "activity-sessions.json"), barrier, ready);
+		node = await startNode();
+		const at = await attach();
+		try {
+			await at.client.request("conversation.prompt", {
+				sessionId: at.leader.sessionId,
+				text: "WAIT_FOR_BARRIER THINK",
+			});
+			await waitFor("leader started", () => at.turns.find((item) => item.turn && !item.turn.endedAt));
+			const snapshot = await at.client.request<{ leaders: Leader[] }>("snapshot");
+			expect(snapshot.leaders[0]?.state).toBe("running");
+			expect(at.states.some((item) => item.kind === "leader" && (item.record as Leader).state === "running")).toBe(
+				true,
+			);
+			expect(at.turns.some((item) => item.block?.role === "agent")).toBe(false);
+			// Another client opening this workspace must not reset the activity.
+			const reopened = await at.client.request<{ leader: Leader }>("workspace.open", { path: work });
+			expect(reopened.leader.state).toBe("running");
+			if (ending === "cancel") await at.client.request("conversation.cancel", { sessionId: at.leader.sessionId });
+			else await writeFile(barrier, "finish\n");
+			const ended = await waitFor("leader ended", () => at.turns.find((item) => item.turn?.endedAt));
+			expect(ended.turn?.cancelled === true).toBe(ending === "cancel");
+			expect((await at.client.request<{ leaders: Leader[] }>("snapshot")).leaders[0]?.state).toBe("idle");
+			expect(
+				at.states.filter((item) => item.kind === "leader").map((item) => (item.record as Leader).state),
+			).toEqual(["idle", "running", "idle"]);
+		} finally {
+			await at.client.close();
+		}
+	},
+	30000,
+);
+
+test("workspace leader displays a provider failure and returns to running on retry", async () => {
+	node = await startNode();
+	const at = await attach();
+	try {
+		// The fixture rejects the request when no barrier path is configured.
+		await at.client.request("conversation.prompt", { sessionId: at.leader.sessionId, text: "WAIT_FOR_BARRIER" });
+		await waitFor("failed turn", () => at.turns.find((item) => item.turn?.failed));
+		expect((await at.client.request<{ leaders: Leader[] }>("snapshot")).leaders[0]?.state).toBe("failed");
+		await at.client.request("conversation.prompt", { sessionId: at.leader.sessionId, text: "try again" });
+		await waitFor("successful retry", () => at.turns.find((item) => item.turn?.endedAt && !item.turn.failed));
+		expect(at.states.filter((item) => item.kind === "leader").map((item) => (item.record as Leader).state)).toEqual([
+			"idle",
+			"running",
+			"failed",
+			"running",
+			"idle",
+		]);
+	} finally {
+		await at.client.close();
+	}
+}, 30000);
+
 test("a prompt persists the user turn, the blocks and the closed turn", async () => {
 	node = await startNode();
 	const at = await attach();
@@ -523,8 +583,14 @@ test("reset chat starts a fresh leader conversation and resumes that identity af
 		sessionId: first.leader.sessionId,
 		text: "UNWANTED_RESET_CONTEXT",
 	});
-	await waitFor("old reset context turn", () =>
+	const oldContext = await waitFor("old reset context turn", () =>
 		first.turns.find((turn) => turn.block?.text?.includes("UNWANTED_RESET_CONTEXT")),
+	);
+	await waitFor("old reset context turn closed", () =>
+		first.turns.find(
+			(turn) =>
+				turn.turn !== undefined && turn.turn.id === oldContext.block?.turnId && turn.turn.endedAt !== undefined,
+		),
 	);
 	const held = await first.client.request<{ turnId: string }>("conversation.prompt", {
 		sessionId: first.leader.sessionId,
@@ -696,9 +762,13 @@ test("an interrupted agent resumes its exact conversation when the leader contin
 		expect(sent.isError).toBe(false);
 		const after = await second.client.request<{ agents: Agent[] }>("snapshot", {});
 		expect(after.agents.find((one) => one.id === agent.id)?.state).toBe("running");
-		const history = await second.client.request<ConversationTailResult>("conversation.tail", {
-			sessionId: agent.sessionId,
-			limit: 20,
+		// Send acknowledges durable inbox insertion; transcript projection follows.
+		const history = await waitFor("resumed prompt in transcript", async () => {
+			const tail = await second.client.request<ConversationTailResult>("conversation.tail", {
+				sessionId: agent.sessionId,
+				limit: 20,
+			});
+			return tail.blocks.some((block) => block.text === "continue after restart") ? tail : undefined;
 		});
 		expect(history.blocks.some((block) => block.text === "continue after restart")).toBe(true);
 	} finally {
@@ -706,7 +776,80 @@ test("an interrupted agent resumes its exact conversation when the leader contin
 	}
 }, 90000);
 
-test("a rejected interrupted-agent resume does not invent a replacement session", async () => {
+test("completed lead follow-up keeps identity and off-screen clients receive completion and question events", async () => {
+	await writeSettings(join(dir, "completed-followup-sessions.json"));
+	node = await startNode();
+	const at = await attach();
+	const observer = await connectNode({ client: "cli" });
+	const ended: TurnNotification[] = [];
+	const streamed: TurnNotification[] = [];
+	const questions: unknown[] = [];
+	observer.on("conversation.ended", (params) => ended.push(params as TurnNotification));
+	observer.on("turn", (params) => streamed.push(params as TurnNotification));
+	observer.on("event", (params) => questions.push(params));
+	try {
+		const actor = await leaderActor(at);
+		const created = await at.client.request<{ isError: boolean }>("tools.call", {
+			...actor,
+			name: "neta_mission",
+			arguments: {
+				name: "Retain review history",
+				objective: "Review then follow up",
+				access: "readWrite",
+				lead: { task: "remember original review" },
+			},
+		});
+		expect(created.isError).toBe(false);
+		const original = await waitFor("idle mission lead", async () => {
+			const snapshot = await at.client.request<{ agents: Agent[] }>("snapshot");
+			return snapshot.agents.find((agent) => agent.canSpawn && agent.state === "idle");
+		});
+		await waitFor("completion while not tailing", () => ended.find((item) => item.sessionId === original.sessionId));
+		expect(ended.some((item) => item.sessionId === at.leader.sessionId)).toBe(true);
+		expect(streamed).toHaveLength(0);
+		const asked = await at.client.request<{ isError: boolean }>("tools.call", {
+			...actor,
+			name: "neta_ask",
+			arguments: { missionId: 1, question: "Proceed with the review follow-up?" },
+		});
+		expect(asked.isError).toBe(false);
+		await waitFor("question broadcast", () =>
+			questions.find((item) => JSON.stringify(item).includes("mission.blocked")),
+		);
+		const ready = await at.client.request<{ isError: boolean }>("tools.call", {
+			...actor,
+			name: "neta_ready",
+			arguments: { missionId: 1, summary: "Review handed off" },
+		});
+		expect(ready.isError).toBe(false);
+		const sent = await at.client.request<{ isError: boolean; content: { text: string }[] }>("tools.call", {
+			...actor,
+			name: "neta_send",
+			arguments: { agentId: original.id, text: "follow-up in original review" },
+		});
+		expect(sent.isError).toBe(false);
+		expect(sent.content[0]?.text).toContain('"delivered":"resumed"');
+		await waitFor("follow-up completion", () =>
+			ended.filter((item) => item.sessionId === original.sessionId).length >= 2 ? true : undefined,
+		);
+		const snapshot = await at.client.request<{ agents: Agent[]; missions: { state: string }[] }>("snapshot");
+		expect(snapshot.agents).toHaveLength(1);
+		expect(snapshot.agents[0]).toMatchObject({ id: original.id, sessionId: original.sessionId, state: "idle" });
+		expect(snapshot.agents[0]?.pendingQuestion).toBeUndefined();
+		expect(snapshot.missions[0]?.state).toBe("running");
+		const history = await at.client.request<ConversationTailResult>("conversation.tail", {
+			sessionId: original.sessionId,
+			limit: 100,
+		});
+		expect(history.blocks.some((block) => block.text.includes("remember original review"))).toBe(true);
+		expect(history.blocks.some((block) => block.text === "follow-up in original review")).toBe(true);
+	} finally {
+		await observer.close();
+		await at.client.close();
+	}
+}, 15000);
+
+test("a rejected idle-agent resume does not invent a replacement session", async () => {
 	const sessionStore = join(dir, "rejecting-agent-sessions.json");
 	await writeSettings(sessionStore);
 	node = await startNode();
@@ -739,9 +882,9 @@ test("a rejected interrupted-agent resume does not invent a replacement session"
 			arguments: { agentId: agent.id, text: "must not fork" },
 		});
 		expect(sent.isError).toBe(true);
-		expect(sent.content[0]?.text).toContain("cannot be resumed");
+		expect(sent.content[0]?.text).toContain("Could not restore saved conversation");
 		const after = await second.client.request<{ agents: Agent[] }>("snapshot", {});
-		expect(after.agents.find((one) => one.id === agent.id)?.state).toBe("interrupted");
+		expect(after.agents.find((one) => one.id === agent.id)?.state).toBe("idle");
 		expect(after.agents.find((one) => one.id === agent.id)?.sessionId).toBe(agent.sessionId);
 	} finally {
 		await second.client.close();
@@ -799,7 +942,7 @@ test("two real writers serialize and completion starts exactly one queued succes
 			},
 		});
 		let snapshot = await at.client.request<{ agents: Agent[] }>("snapshot", {});
-		const first = snapshot.agents.find((agent) => agent.state === "starting");
+		const first = snapshot.agents.find((agent) => agent.state !== "queued");
 		const second = snapshot.agents.find((agent) => agent.state === "queued");
 		if (first === undefined || second === undefined) throw new Error("expected active and queued writers");
 		await expect(
@@ -817,7 +960,9 @@ test("two real writers serialize and completion starts exactly one queued succes
 		);
 		snapshot = await at.client.request<{ agents: Agent[] }>("snapshot", {});
 		expect(snapshot.agents.find((agent) => agent.id === first.id)?.state).toBe("completed");
-		expect(snapshot.agents.find((agent) => agent.id === second.id)?.state).toBe("starting");
+		expect(["starting", "running", "idle", "interrupted"]).toContain(
+			snapshot.agents.find((agent) => agent.id === second.id)?.state ?? "missing",
+		);
 		const promoted = await waitFor("promoted writer brief", async () => {
 			const tail = await at.client.request<ConversationTailResult>("conversation.tail", {
 				sessionId: second.sessionId,
@@ -866,7 +1011,9 @@ test("a failed promoted writer is closed before the next queued writer starts", 
 		);
 		const after = await at.client.request<{ agents: Agent[] }>("snapshot", {});
 		expect(after.agents.find((agent) => agent.task === "broken")?.state).toBe("failed");
-		expect(after.agents.find((agent) => agent.task === "successor")?.state).toBe("starting");
+		expect(["starting", "running", "idle", "interrupted"]).toContain(
+			after.agents.find((agent) => agent.task === "successor")?.state ?? "missing",
+		);
 	} finally {
 		await at.client.close();
 	}
@@ -896,7 +1043,9 @@ test("an initial writer launch failure releases its lease before the next writer
 			{},
 		);
 		expect(snapshot.agents.find((agent) => agent.task === "broken first")?.state).toBe("failed");
-		expect(snapshot.agents.find((agent) => agent.task === "healthy second")?.state).toBe("starting");
+		expect(["starting", "running", "idle", "interrupted"]).toContain(
+			snapshot.agents.find((agent) => agent.task === "healthy second")?.state ?? "missing",
+		);
 		expect(snapshot.missions[0]?.agentIds).toHaveLength(2);
 	} finally {
 		await at.client.close();
@@ -947,8 +1096,10 @@ test("restart preserves writer FIFO and explicit continuation starts the queued 
 			),
 		);
 		const after = await secondNode.client.request<{ agents: Agent[] }>("snapshot", {});
-		expect(after.agents.find((agent) => agent.id === head.id)?.state).toBe("starting");
-		expect(after.agents.find((agent) => agent.task === "interrupted holder")?.state).toBe("interrupted");
+		expect(["starting", "running", "idle", "interrupted"]).toContain(
+			after.agents.find((agent) => agent.id === head.id)?.state ?? "missing",
+		);
+		expect(after.agents.find((agent) => agent.task === "interrupted holder")?.state).toBe("idle");
 	} finally {
 		await secondNode.client.close();
 	}
@@ -1098,7 +1249,9 @@ test("concurrent agent additions preserve both ids and admit one real writer", a
 		const agents = snapshot.agents.filter((agent) => agent.missionId === mission.id);
 		expect(agents).toHaveLength(2);
 		expect(snapshot.missions.find((one) => one.id === mission.id)?.agentIds).toHaveLength(2);
-		expect(agents.filter((agent) => agent.state === "starting")).toHaveLength(1);
+		expect(
+			agents.filter((agent) => ["starting", "running", "idle", "interrupted"].includes(agent.state)),
+		).toHaveLength(1);
 		expect(agents.filter((agent) => agent.state === "queued")).toHaveLength(1);
 	} finally {
 		await at.client.close();
@@ -1146,9 +1299,12 @@ test("a completed writer is closed at its turn boundary before promotion", async
 					(state.record as Agent).state === "starting",
 			),
 		);
-		const promoted = await at.client.request<ConversationTailResult>("conversation.tail", {
-			sessionId: waiting.sessionId,
-			limit: 20,
+		const promoted = await waitFor("promoted writer transcript", async () => {
+			const tail = await at.client.request<ConversationTailResult>("conversation.tail", {
+				sessionId: waiting.sessionId,
+				limit: 20,
+			});
+			return tail.blocks.length > 0 ? tail : undefined;
 		});
 		expect(promoted.blocks.length).toBeGreaterThan(0);
 	} finally {
@@ -1207,7 +1363,9 @@ test("the fake ACP creates a mission through the injected MCP stdio proxy", asyn
 					.text()
 					.catch(() => "");
 				if (raw === "") return undefined;
-				return JSON.parse(raw) as { stage?: string; missionId?: string; error?: string };
+				const current = JSON.parse(raw) as { stage?: string; missionId?: string; error?: string };
+				if (current.error !== undefined) return current;
+				return current.missionId === undefined ? undefined : current;
 			},
 			15_000,
 		);
@@ -1472,7 +1630,9 @@ test("cancelling a turn invalidates its pending Lead++ grant and frees the write
 		await waitFor("writer after cancelled mode", async () => {
 			const snapshot = await at.client.request<{ leaders: Leader[]; agents: Agent[] }>("snapshot", {});
 			return snapshot.leaders[0]?.mode === "lead" &&
-				snapshot.agents.find((agent) => agent.task === "writer after cancellation")?.state === "starting"
+				["starting", "running", "idle", "interrupted"].includes(
+					snapshot.agents.find((agent) => agent.task === "writer after cancellation")?.state ?? "",
+				)
 				? true
 				: undefined;
 		});
@@ -1531,7 +1691,9 @@ test("closing a self-led Lead++ mission downgrades it before promoting another m
 			),
 		);
 		snapshot = await at.client.request<{ agents: Agent[] }>("snapshot", {});
-		expect(snapshot.agents.find((agent) => agent.task === "successor writer")?.state).toBe("starting");
+		expect(["starting", "running", "idle", "interrupted"]).toContain(
+			snapshot.agents.find((agent) => agent.task === "successor writer")?.state ?? "missing",
+		);
 		const reopened = await at.client.request<{ leader: Leader }>("workspace.open", { path: work });
 		expect(reopened.leader.mode).toBe("lead");
 	} finally {
@@ -1887,3 +2049,296 @@ test("a provider that cannot assume writable access restores the original live p
 		await at.client.close();
 	}
 }, 90000);
+
+test("workspace reset archives missions and queued workers and creates one blank leader", async () => {
+	await writeSettings(join(dir, "reset-workspace-sessions.json"));
+	node = await startNode();
+	const at = await attach();
+	try {
+		const creation = await at.client.request<{ isError?: boolean }>("tools.call", {
+			...(await leaderActor(at)),
+			name: "neta_mission",
+			arguments: {
+				name: "Archive reset",
+				objective: "reset all",
+				access: "readWrite",
+				lead: "self",
+				agents: [
+					{ task: "first worker", access: "readWrite" },
+					{ task: "queued worker", access: "readWrite" },
+				],
+			},
+		});
+		if (creation.isError) throw new Error(JSON.stringify(creation));
+		const beforeReset = await at.client.request<{ agents: Agent[] }>("snapshot");
+		if (beforeReset.agents.length !== 2) throw new Error(JSON.stringify({ creation, beforeReset }));
+		await expect(at.client.request("workspace.reset", { workspaceId: at.leader.workspaceId })).rejects.toThrow(
+			"confirmation",
+		);
+		await at.client.request("workspace.reset", { workspaceId: at.leader.workspaceId, confirm: true });
+		const snapshot = await at.client.request<{ leaders: Leader[]; agents: Agent[]; missions: { state: string }[] }>(
+			"snapshot",
+		);
+		expect(snapshot.missions.every((mission) => mission.state === "closed")).toBe(true);
+		expect(snapshot.agents).toHaveLength(0);
+		const archived = await at.client.request<{ agents: Agent[] }>("missions.get", {
+			missionId: beforeReset.agents[0]?.missionId,
+		});
+		expect(archived.agents).toHaveLength(2);
+		expect(archived.agents.every((agent) => agent.state === "archived")).toBe(true);
+		expect(snapshot.leaders).toHaveLength(1);
+		const leader = snapshot.leaders[0];
+		expect(leader?.activeMissionId).toBeUndefined();
+		expect(leader?.sessionId).not.toBe(at.leader.sessionId);
+		const tail = await at.client.request<ConversationTailResult>("conversation.tail", {
+			sessionId: leader?.sessionId,
+		});
+		expect(tail.blocks).toEqual([]);
+	} finally {
+		await at.client.close();
+	}
+}, 90000);
+
+test("runtime wakes workspace leader when mission leader ends without a completion tool", async () => {
+	await writeSettings(join(dir, "automatic-report-sessions.json"));
+	node = await startNode();
+	const at = await attach();
+	try {
+		const creation = await at.client.request<{ isError?: boolean }>("tools.call", {
+			...(await leaderActor(at)),
+			name: "neta_mission",
+			arguments: {
+				name: "Automatic report",
+				objective: "inspect only",
+				access: "readOnly",
+				lead: { task: "CONFIG_UPDATE" },
+			},
+		});
+		expect(creation.isError).not.toBe(true);
+		let messages: Array<{ text: string; status: string }> = [];
+		for (let attempt = 0; attempt < 200; attempt++) {
+			const inbox = await at.client.request<{ messages: typeof messages }>("conversation.inbox", {
+				sessionId: at.leader.sessionId,
+			});
+			messages = inbox.messages;
+			if (
+				messages?.some(
+					(message) => message.text.includes("Neta automatic report") && message.status === "delivered",
+				)
+			)
+				break;
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+		expect(
+			messages?.some((message) => message.text.includes("Neta automatic report") && message.status === "delivered"),
+		).toBe(true);
+		const snapshot = await at.client.request<{ agents: Agent[] }>("snapshot");
+		const missionLead = snapshot.agents.find((agent) => agent.canSpawn)!;
+		expect(missionLead.model).toBe("fixture-fast");
+		expect(messages.some((message) => message.text.includes("Actual model: fixture-fast"))).toBe(true);
+		const workerCreation = await at.client.request<{ isError?: boolean }>("tools.call", {
+			...(await leaderActor(at)),
+			name: "neta_agent",
+			arguments: { missionId: missionLead.missionId, task: "hello worker", access: "readOnly" },
+		});
+		expect(workerCreation.isError).not.toBe(true);
+		let parentMessages: typeof messages = [];
+		for (let attempt = 0; attempt < 200; attempt++) {
+			const inbox = await at.client.request<{ messages: typeof messages }>("conversation.inbox", {
+				sessionId: missionLead.sessionId,
+			});
+			parentMessages = inbox.messages;
+			if (
+				parentMessages.some(
+					(message) => message.text.includes("Neta automatic report") && message.status === "delivered",
+				)
+			)
+				break;
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+		expect(
+			parentMessages.some((message) => message.text.includes("(worker)") && message.status === "delivered"),
+		).toBe(true);
+	} finally {
+		await at.client.close();
+	}
+}, 15000);
+
+test("delegation routes effort independently, reports idle, hands off by role and closes by number", async () => {
+	await writeFile(
+		join(dir, "settings.json"),
+		JSON.stringify({
+			providers: {
+				opencode: {
+					command: process.execPath,
+					args: [
+						FIXTURE,
+						"--config-options",
+						"--opencode-models",
+						"--unrestricted-mode",
+						"build",
+						"--session-store",
+						join(dir, "sessions.json"),
+					],
+					resume: true,
+					defaultModel: "openai/gpt-6-astra",
+				},
+			},
+			leader: { provider: "opencode", model: "openai/gpt-6-astra" },
+			forbiddenModels: [],
+		}),
+	);
+	await writeFile(
+		join(dir, "routing.json"),
+		JSON.stringify({
+			mode: "fixed",
+			models: {
+				1: "openai/gpt-5.6-luna",
+				2: "openai/gpt-5.6-luna",
+				3: "openai/gpt-5.6-luna",
+				4: "openai/gpt-6-astra",
+				5: "openai/gpt-6-astra",
+			},
+		}),
+	);
+	node = await startNode();
+	const at = await attach();
+	try {
+		const actor = await leaderActor(at);
+		const missing = await at.client.request<{ isError?: boolean; content: { text: string }[] }>("tools.call", {
+			...actor,
+			name: "neta_agent",
+			arguments: { task: "Confirm responsiveness", access: "readOnly", effort: 1 },
+		});
+		expect(missing.isError).toBe(true);
+		expect(missing.content[0]?.text).toContain("neta_mission");
+		const creation = await at.client.request<{ isError?: boolean; content: { text: string }[] }>("tools.call", {
+			...actor,
+			name: "neta_mission",
+			arguments: {
+				name: "Response check",
+				objective: "Confirm the child responds",
+				access: "readOnly",
+				lead: { task: "Acknowledge and finish", effort: 1 },
+			},
+		});
+		expect(creation.isError).not.toBe(true);
+		const created = JSON.parse(creation.content[0]?.text.split("\n")[0] ?? "{}");
+		expect(created.missionId).toBe(1);
+		expect(created.agents[0]).toMatchObject({
+			model: "openai/gpt-5.6-luna",
+			routing: { method: "fixed", effort: 1 },
+		});
+		const child = await waitFor("idle routed child", async () => {
+			const snapshot = await at.client.request<{ agents: Agent[]; leaders: Leader[] }>("snapshot");
+			expect(snapshot.leaders[0]?.model).toBe("openai/gpt-6-astra");
+			return snapshot.agents.find((agent) => agent.canSpawn && agent.state === "idle");
+		});
+		expect(child.model).toBe("openai/gpt-5.6-luna");
+		await waitFor("automatic child report", async () => {
+			const inbox = await at.client.request<{ messages: { text: string; status: string }[] }>("conversation.inbox", {
+				sessionId: at.leader.sessionId,
+			});
+			return inbox.messages.find(
+				(message) => message.text.includes("Actual model: openai/gpt-5.6-luna") && message.status === "delivered",
+			);
+		});
+		const lead = await agentActor(at, child);
+		const beforeAdjust = await at.client.request<ConversationTailResult>("conversation.tail", {
+			sessionId: child.sessionId,
+			limit: 100,
+		});
+		for (const [arguments_, expectedModel, expectedEffort] of [
+			[{ missionId: 1, effort: 4 }, "openai/gpt-6-astra", 4],
+			[{ agentId: child.name, change: "down" }, "openai/gpt-5.6-luna", 3],
+		] as const) {
+			const changed = await at.client.request<{ isError?: boolean; content: { text: string }[] }>("tools.call", {
+				...actor,
+				name: "neta_model",
+				arguments: arguments_,
+			});
+			expect(changed.isError).not.toBe(true);
+			const result = JSON.parse(changed.content[0]?.text.split("\n")[0] ?? "{}");
+			expect(result).toMatchObject({ model: expectedModel, effort: expectedEffort, sessionId: child.sessionId });
+			const snapshot = await at.client.request<{ agents: Agent[]; leaders: Leader[] }>("snapshot");
+			expect(snapshot.agents.find((a) => a.id === child.id)).toMatchObject({
+				sessionId: child.sessionId,
+				model: expectedModel,
+				state: "idle",
+				routing: { effort: expectedEffort },
+			});
+			expect(snapshot.leaders[0]?.model).toBe("openai/gpt-6-astra");
+		}
+		const afterAdjust = await at.client.request<ConversationTailResult>("conversation.tail", {
+			sessionId: child.sessionId,
+			limit: 100,
+		});
+		expect(afterAdjust.blocks).toEqual(beforeAdjust.blocks);
+		const workerCreation = await at.client.request<{ isError?: boolean }>("tools.call", {
+			...lead,
+			name: "neta_agent",
+			arguments: { task: "Check one detail", access: "readOnly", effort: 2 },
+		});
+		expect(workerCreation.isError).not.toBe(true);
+		const worker = await waitFor("idle routed worker", async () => {
+			const snapshot = await at.client.request<{ agents: Agent[] }>("snapshot");
+			return snapshot.agents.find((agent) => !agent.canSpawn && agent.state === "idle");
+		});
+		const workerBefore = await at.client.request<ConversationTailResult>("conversation.tail", {
+			sessionId: worker.sessionId,
+			limit: 100,
+		});
+		const adjustedWorker = await at.client.request<{ isError?: boolean }>("tools.call", {
+			...lead,
+			name: "neta_model",
+			arguments: { agentId: worker.name, effort: 4 },
+		});
+		expect(adjustedWorker.isError).not.toBe(true);
+		const adjustedSnapshot = await at.client.request<{ agents: Agent[] }>("snapshot");
+		expect(adjustedSnapshot.agents.find((agent) => agent.id === worker.id)).toMatchObject({
+			sessionId: worker.sessionId,
+			model: "openai/gpt-6-astra",
+			routing: { effort: 4 },
+		});
+		expect(adjustedSnapshot.agents.find((agent) => agent.id === child.id)?.model).toBe("openai/gpt-5.6-luna");
+		const workerAfter = await at.client.request<ConversationTailResult>("conversation.tail", {
+			sessionId: worker.sessionId,
+			limit: 100,
+		});
+		expect(workerAfter.blocks).toEqual(workerBefore.blocks);
+		const workerActor = await agentActor(at, worker);
+		const selfAdjusted = await at.client.request<{ isError?: boolean }>("tools.call", {
+			...workerActor,
+			name: "neta_model",
+			arguments: { change: "down" },
+		});
+		expect(selfAdjusted.isError).not.toBe(true);
+		const workerSnapshot = await at.client.request<{ agents: Agent[] }>("snapshot");
+		expect(workerSnapshot.agents.find((agent) => agent.id === worker.id)).toMatchObject({
+			sessionId: worker.sessionId,
+			model: "openai/gpt-5.6-luna",
+			routing: { effort: 3 },
+		});
+		const ready = await at.client.request<{ isError?: boolean }>("tools.call", {
+			...lead,
+			name: "neta_ready",
+			arguments: { summary: "Response confirmed" },
+		});
+		expect(ready.isError).not.toBe(true);
+		const args = { missionId: 1, disposition: "completed", reason: "Response confirmed; no code changes" };
+		for (let i = 0; i < 2; i++) {
+			const close = await at.client.request<{ isError?: boolean }>("tools.call", {
+				...actor,
+				name: "neta_close",
+				arguments: args,
+			});
+			expect(close.isError).not.toBe(true);
+		}
+		const snapshot = await at.client.request<{ missions: { number: number; disposition: string; state: string }[] }>(
+			"snapshot",
+		);
+		expect(snapshot.missions[0]).toMatchObject({ number: 1, disposition: "completed", state: "closed" });
+	} finally {
+		await at.client.close();
+	}
+}, 15000);

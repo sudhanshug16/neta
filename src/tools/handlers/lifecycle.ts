@@ -2,13 +2,23 @@
 // `neta_mode`: the six mission lifecycle and mode tools. Closeout belongs to
 // 06 and Lead++ to 07; both are ports the Node wires in T5.9, and the input
 // and outcome shapes below mirror their plan contracts.
-import { needsPerson } from "../../core/state.ts";
+import { deriveMissionState, needsPerson } from "../../core/state.ts";
 import { nowIso } from "../../core/time.ts";
-import type { DecisionRecord, Disposition, LeaderMode, Mission, MissionId, WorkspaceId } from "../../core/types.ts";
+import type {
+	Agent,
+	DecisionRecord,
+	Disposition,
+	LeaderMode,
+	Mission,
+	MissionId,
+	WorkspaceId,
+} from "../../core/types.ts";
+import { resolveMission } from "../mission-reference.ts";
 import type { ToolContext, ToolDeps, ToolHandlers, ToolResult } from "../router.ts";
 import type {
 	CloseParams,
 	HistoryParams,
+	MissionRef,
 	ModeParams,
 	PinParams,
 	ReadyParams,
@@ -47,6 +57,8 @@ export type ModeApproval =
 	  };
 
 export interface LifecyclePorts {
+	sessions?: { release?(agent: Agent): Promise<void> };
+	modelCatalog?(workspaceId: WorkspaceId): Promise<{ provider: string; id: string; name: string }[]>;
 	missions: { save(mission: Mission): Promise<void> };
 	worktrees: { close(input: CloseMissionInput): Promise<CloseOutcome> };
 	modes: {
@@ -74,13 +86,13 @@ function notFound(message: string): ToolResult {
 // A lead works its own mission; the leader works any mission in the workspace.
 async function scopedMission(
 	ctx: LifecycleToolContext,
-	missionId: MissionId,
+	missionId: MissionRef | undefined,
 ): Promise<{ ok: true; mission: Mission } | { ok: false; result: ToolResult }> {
-	const mission = ctx.deps.store.getMission(missionId);
+	const mission = resolveMission(ctx, missionId);
 	if (mission === undefined || mission.workspaceId !== ctx.actor.workspaceId) {
 		return { ok: false, result: notFound(`no such mission: ${missionId}`) };
 	}
-	if (ctx.actor.kind === "lead" && missionId !== ctx.actor.missionId) {
+	if (ctx.actor.kind === "lead" && mission.id !== ctx.actor.missionId) {
 		return { ok: false, result: { ok: false, code: "notAuthorised", message: "a lead works its own mission only" } };
 	}
 	if (ctx.actor.kind !== "lead" && ctx.actor.kind !== "leader") {
@@ -109,7 +121,7 @@ async function recordScope(ctx: LifecycleToolContext, params: ScopeParams): Prom
 		missionId: updated.id,
 		data: {},
 	});
-	return { ok: true, data: { missionId: updated.id } };
+	return { ok: true, data: { missionId: updated.number } };
 }
 
 async function markReady(ctx: LifecycleToolContext, params: ReadyParams): Promise<ToolResult> {
@@ -120,6 +132,17 @@ async function markReady(ctx: LifecycleToolContext, params: ReadyParams): Promis
 	if (scoped.mission.state === "closed") {
 		return refused("the mission is closed");
 	}
+	const active = ctx.deps.store
+		.listAgents(scoped.mission.id)
+		.some(
+			(agent) =>
+				["queued", "starting", "running"].includes(agent.state) &&
+				!(ctx.actor.kind === "lead" && agent.id === ctx.actor.agentId),
+		);
+	if (active)
+		return refused(
+			"Agents are still active in this mission. Wait for their automatic reports before marking it ready.",
+		);
 	const updated: Mission = { ...scoped.mission, state: "readyToClose", attention: params.summary };
 	await ctx.deps.missions.save(updated);
 	await ctx.deps.store.appendEvent({
@@ -128,22 +151,52 @@ async function markReady(ctx: LifecycleToolContext, params: ReadyParams): Promis
 		missionId: updated.id,
 		data: {},
 	});
-	return { ok: true, data: { missionId: updated.id, state: updated.state } };
+	if (updated.lead.kind === "agent") {
+		const agent = ctx.deps.store.getAgent(updated.lead.agentId);
+		if (agent && !["completed", "archived"].includes(agent.state)) {
+			const finished: Agent = {
+				...agent,
+				pendingQuestion: undefined,
+				state: "completed",
+				outcome: params.summary,
+				endedAt: nowIso(),
+			};
+			await ctx.deps.store.putAgent(finished);
+			await ctx.deps.store.appendEvent({
+				workspaceId: updated.workspaceId,
+				kind: "agent.finished",
+				missionId: updated.id,
+				agentId: agent.id,
+				sessionId: agent.sessionId,
+				data: {},
+			});
+			await ctx.deps.sessions?.release?.(finished);
+		}
+	}
+	return { ok: true, data: { missionId: updated.number, state: updated.state } };
 }
 
 async function closeMission(ctx: LifecycleToolContext, params: CloseParams): Promise<ToolResult> {
 	if (ctx.actor.kind !== "leader") {
 		return { ok: false, code: "notAuthorised", message: "only the leader closes missions" };
 	}
-	const mission = ctx.deps.store.getMission(params.missionId);
+	const mission = resolveMission(ctx, params.missionId);
 	if (mission === undefined || mission.workspaceId !== ctx.actor.workspaceId) {
 		return notFound(`no such mission: ${params.missionId}`);
 	}
 	if (mission.state === "closed") {
-		return refused("the mission is already closed");
+		return mission.disposition === params.disposition
+			? { ok: true, data: { missionId: mission.number, disposition: mission.disposition, alreadyClosed: true } }
+			: refused("the mission is already closed with a different disposition");
 	}
 	if (params.disposition === "merged" && params.evidence === undefined) {
 		return refused("merged needs evidence");
+	}
+	if (
+		params.disposition !== "abandoned" &&
+		ctx.deps.store.listAgents(mission.id).some((agent) => ["queued", "starting", "running"].includes(agent.state))
+	) {
+		return refused("Agents are still active in this mission. Review their automatic reports before closing it.");
 	}
 	const outcome = await ctx.deps.worktrees.close({
 		mission,
@@ -155,7 +208,7 @@ async function closeMission(ctx: LifecycleToolContext, params: CloseParams): Pro
 	if (!outcome.ok) {
 		return refused(outcome.attention);
 	}
-	return { ok: true, data: { missionId: outcome.mission.id, disposition: params.disposition } };
+	return { ok: true, data: { missionId: outcome.mission.number, disposition: params.disposition } };
 }
 
 async function pinTurn(ctx: LifecycleToolContext, params: PinParams): Promise<ToolResult> {
@@ -188,7 +241,10 @@ async function missionStatus(ctx: LifecycleToolContext, _params: StatusParams): 
 	if (subject === undefined) {
 		return { ok: false, code: "notAuthorised", message: "only a lead or the leader reads status" };
 	}
-	const open = ctx.deps.store.listMissions(ctx.actor.workspaceId).filter((mission) => mission.state !== "closed");
+	const open = ctx.deps.store
+		.listMissions(ctx.actor.workspaceId)
+		.filter((mission) => mission.state !== "closed")
+		.map((mission) => ({ ...mission, state: deriveMissionState(mission, ctx.deps.store.listAgents(mission.id)) }));
 	const needsYou = open.filter((mission) => needsPerson(mission)).sort((a, b) => b.number - a.number);
 	const running = open.filter((mission) => !needsPerson(mission)).sort((a, b) => b.number - a.number);
 	const leader = ctx.deps.store.getLeader(ctx.actor.workspaceId);
@@ -196,13 +252,47 @@ async function missionStatus(ctx: LifecycleToolContext, _params: StatusParams): 
 	return {
 		ok: true,
 		data: {
+			self: {
+				role: ctx.actor.kind,
+				actorId: ctx.actor.kind === "leader" ? ctx.actor.sessionId : ctx.actor.agentId,
+				name: ctx.actor.kind === "leader" ? leader?.name : ctx.deps.store.getAgent(ctx.actor.agentId)?.name,
+			},
+			...(ctx.deps.modelCatalog ? { modelCatalog: await ctx.deps.modelCatalog(ctx.actor.workspaceId) } : {}),
 			missions: [...needsYou, ...running].map((mission) => ({
 				number: mission.number,
+				missionId: mission.number,
 				name: mission.name,
 				state: mission.state,
+				executingAgents: ctx.deps.store
+					.listAgents(mission.id)
+					.filter((agent) => ["running", "starting"].includes(agent.state)).length,
+				queuedAgents: ctx.deps.store.listAgents(mission.id).filter((agent) => agent.state === "queued").length,
 				...(mission.attention === undefined ? {} : { attention: mission.attention }),
 				agents: ctx.deps.store.listAgents(mission.id).length,
 			})),
+			agentDetails: open.flatMap((mission) =>
+				ctx.deps.store.listAgents(mission.id).map((agent) => ({
+					agentId: agent.id,
+					role: agent.canSpawn ? "lead" : "agent",
+					isSelf: ctx.actor.kind !== "leader" && ctx.actor.agentId === agent.id,
+					name: agent.name,
+					mission: mission.number,
+					state: agent.state,
+					model: agent.model,
+					requestedModel: agent.requestedModel,
+					...(agent.routing
+						? {
+								routing: {
+									effort: agent.routing.effort,
+									method: agent.routing.method,
+									selectedModel: agent.routing.selectedModel,
+									reason: agent.routing.reason,
+									warnings: agent.routing.warnings,
+								},
+							}
+						: {}),
+				})),
+			),
 			mode: snapshot?.mode ?? leader?.mode ?? "lead",
 			modeActiveMs: snapshot?.modeActiveMs ?? leader?.modeActiveMs ?? 0,
 		},
@@ -214,7 +304,13 @@ async function switchMode(ctx: LifecycleToolContext, params: ModeParams): Promis
 	if (subject === undefined) {
 		return { ok: false, code: "notAuthorised", message: "only a lead or the leader switches mode" };
 	}
-	const approval = await ctx.deps.modes.requestMode({ subject, mode: params.mode, record: params.record });
+	let record: DecisionRecord | undefined;
+	if (params.record) {
+		const scoped = await scopedMission(ctx, params.record.missionId);
+		if (!scoped.ok) return scoped.result;
+		record = { ...params.record, missionId: scoped.mission.id };
+	}
+	const approval = await ctx.deps.modes.requestMode({ subject, mode: params.mode, record });
 	if (!approval.approved && approval.reason === "unavailable") {
 		return { ok: false, code: "unavailable", message: approval.detail };
 	}

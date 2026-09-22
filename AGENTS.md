@@ -7,35 +7,22 @@ before non-trivial work. The v3 rebuild is specified in
 engineering spec for its tasks, and the manifesto wins when they disagree. Do
 not expand the product beyond those boundaries without the operator saying so.
 
-## Neta Operating Contract
+## Development agent workflow
 
-How agents work in this repo, in short. Design and rationale:
-[MANIFESTO.md](MANIFESTO.md).
+This repository is developed in regular Codex sessions, outside Neta itself.
+Neta's runtime leader modes, mission hierarchy, worker tools, writer leases,
+and progress protocol describe the product; they are not prerequisites for
+working on this repository.
 
-- **The leader does not write code.** It reads, decides, delegates, verifies —
-  including one-line fixes, which go to an agent with an exact instruction.
-  Reading is for verifying a bounded claim; building understanding across files
-  goes to an agent under a mission lead.
-- **CHARTER.md, when present, is the authority on scope.** If the project or
-  user has a CHARTER.md, anything inside it, do and report afterwards;
-  anything it reserves for the user, stop and ask. Without one, decide
-  routine technical matters yourself and ask before expensive, destructive,
-  or outward-facing actions. Finish the problem, then report once — never
-  ask approval for what the charter already granted, and never end a turn
-  with "workers are running".
-- **Only Neta workers count as delegation.** A backend's own subagent or task
-  tool is not a Neta worker, must not be used as a substitute for one, and
-  must never be represented as Neta delegation. If delegation is impossible,
-  say so in the first reply and stop — do not do the work yourself and do not
-  soften the failure.
-- **Reads parallelize; writes serialize.** One writer slot per session; extra
-  writer spawns queue. A writer commits everything it changes before it
-  finishes, so the next writer can be briefed from `git log`.
-- **Workers are quiet.** `neta progress` on start, on a completed major step,
-  and when something surprising changes the plan — not a running commentary.
-  `neta ask` only when genuinely blocked (agents have none: they stop and
-  report). The leader pulls status and blocks on `neta_wait` instead of
-  interrupting the user.
+- Codex may read, investigate, edit, and verify directly. Delegation is optional;
+  use ordinary Codex subagents when the task and session instructions allow it.
+- Missing Neta tools or an installed `neta` executable do not block development.
+- CHARTER.md, when present, governs scope and reserved user decisions. Otherwise,
+  decide routine technical matters within the user's request and ask before
+  expensive, destructive, or outward-facing actions.
+- Preserve unrelated uncommitted work. Serialize edits to shared files and
+  verify the resulting diff. Do not commit unless the user asks.
+- Report concrete results and blockers using the current Codex session's tools.
 
 ## Conversational Style
 
@@ -58,18 +45,6 @@ How agents work in this repo, in short. Design and rationale:
 - Inline single-line helpers that have only one call site.
 - Check node_modules for external API types; don't guess.
 - Always ask before removing functionality that appears intentional.
-
-## Swift
-
-- Swift 6 language mode, macOS 26 minimum, Swift Package Manager, no Xcode
-  project, no external Swift dependencies without a line in the task that
-  names it.
-- Every type is `Sendable` or `@MainActor`. Views own no state: the store
-  holds Node data, shell state holds the person's view.
-- Layout is pure: no store reads, no bare `Date()`, no SwiftUI state inside
-  layout code. Nodes never scale; zoom changes the lens only.
-- Status is never carried by color alone. Hit targets are 26 pt or taller.
-- Build and test from `apps/macos`: `swift build`, `swift test`.
 
 ## Toolchain
 
@@ -95,10 +70,7 @@ more than one place — the CLI reads it from `package.json`.
 
 ## Git
 
-- Never commit unless the user asks. The one exception is a Neta writer worker:
-  its injected working agreement tells it to commit on handoff, and that rule
-  wins for the writer and only for the writer. Every other agent waits to be
-  asked.
+- Never commit unless the user asks. This applies to Codex and its subagents.
 - Stage explicit paths; never `git add -A` / `git add .`.
 - Never run `git reset --hard`, `git checkout .`, `git clean -fd`,
   `git stash`, or `git commit --no-verify`.

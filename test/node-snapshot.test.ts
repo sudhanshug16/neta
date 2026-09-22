@@ -85,8 +85,8 @@ const M2 = mission(W1, "blocked", 1);
 const M3 = mission(W1, "readyToClose", 2);
 const M4 = mission(W1, "failed", 3);
 const M5 = mission(W1, "mergedNotClosed", 4);
-const M6 = mission(W1, "closed", 20, { closedAt: daysAgo(5) });
-const M7 = mission(W1, "closed", 20, { closedAt: daysAgo(13.99) });
+const M6 = mission(W1, "closed", 18, { closedAt: daysAgo(5) });
+const M7 = mission(W1, "closed", 19, { closedAt: daysAgo(13.99) });
 const M8 = mission(W1, "closed", 20, { closedAt: daysAgo(14.01) });
 const M9 = mission(W1, "running", 6);
 const M10 = mission(W2, "running", 11);
@@ -221,8 +221,8 @@ describe("buildSnapshot", () => {
 		expect(ids.has(M6.id)).toBe(true);
 		expect(ids.has(M7.id)).toBe(true);
 		expect(ids.has(M8.id)).toBe(false);
-		expect(ids.has(M20.id)).toBe(false);
-		expect(snapshot.missions).toHaveLength(18);
+		expect(ids.has(M20.id)).toBe(true);
+		expect(snapshot.missions).toHaveLength(19);
 		expect(snapshot.hasOlder).toBe(true);
 		expect(snapshot.windowDays).toBe(14);
 		expect(snapshot.protocolVersion).toBe(PROTOCOL_VERSION);
@@ -251,6 +251,18 @@ describe("buildSnapshot", () => {
 		expect(snapshot.completedCounts[M9.id]).toBe(12);
 	});
 
+	test("unresolved delivery stays visible even outside completed-agent history window", async () => {
+		const ctx = testCtx();
+		const oldest = BIG_COMPLETED[0];
+		if (!oldest) throw new Error("missing oldest fixture");
+		const list = ctx.store.listAgents;
+		ctx.store.listAgents = (missionId) =>
+			list(missionId).map((actor) => (actor.id === oldest.id ? { ...actor, deliveryStatus: "uncertain" } : actor));
+		const snapshot = await buildSnapshot(ctx, {});
+		expect(snapshot.agents.find((actor) => actor.id === oldest.id)?.deliveryStatus).toBe("uncertain");
+		expect(snapshot.completedCounts[M9.id]).toBe(12);
+	});
+
 	test("archived agents never appear, anywhere", async () => {
 		const snapshot = await buildSnapshot(testCtx(), {});
 		const ids = new Set(snapshot.agents.map((a) => a.id));
@@ -266,11 +278,44 @@ describe("buildSnapshot", () => {
 		expect(Object.values(snapshot.completedCounts).reduce((sum, n) => sum + n, 0)).toBe(18);
 	});
 
-	test("agents of missions outside the window do not leak in", async () => {
+	test("agents of omitted missions stay out while recent missions survive the window", async () => {
 		const snapshot = await buildSnapshot(testCtx(), {});
 		const missionIds = new Set(snapshot.agents.map((a) => a.missionId));
 		expect(missionIds.has(M8.id)).toBe(false);
-		expect(missionIds.has(M20.id)).toBe(false);
+		expect(missionIds.has(M20.id)).toBe(true);
+	});
+
+	test("keeps the newest eight per workspace after a quiet month, plus every open mission", async () => {
+		const ctx = testCtx();
+		const history = [W1, W2].flatMap((workspaceId) =>
+			Array.from({ length: 10 }, (_, index) =>
+				mission(workspaceId, "closed", 40 + index, { closedAt: daysAgo(30 + index) }),
+			),
+		);
+		const open = mission(W1, "running", 100);
+		ctx.store.listMissions = (workspaceId) =>
+			[...history, open].reverse().filter((entry) => !workspaceId || entry.workspaceId === workspaceId);
+		ctx.store.listAgents = () => [];
+		for (const workspaceId of [undefined, W1]) {
+			const snapshot = await buildSnapshot(ctx, { workspaceId });
+			for (const id of workspaceId ? [workspaceId] : [W1, W2]) {
+				expect(
+					snapshot.missions
+						.filter((entry) => entry.workspaceId === id && entry.state === "closed")
+						.map((entry) => entry.id)
+						.sort(),
+				).toEqual(
+					history
+						.filter((entry) => entry.workspaceId === id)
+						.slice(0, 8)
+						.map((entry) => entry.id)
+						.sort(),
+				);
+			}
+			expect(snapshot.missions.some((entry) => entry.id === open.id)).toBe(true);
+			expect(snapshot.missions).toHaveLength(workspaceId ? 9 : 17);
+			expect(snapshot.hasOlder).toBe(true);
+		}
 	});
 
 	test("attention is exact and newest first", async () => {

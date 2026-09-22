@@ -11,8 +11,9 @@ afterEach(() => {
 });
 
 test("Pi PTY survives detach and reattach with ordered replay and stale input rejection", async () => {
+	const dataDir = mkdtempSync(join(tmpdir(), "neta-pi-"));
 	const manager = createPiTerminalManager({
-		dataDir: mkdtempSync(join(tmpdir(), "neta-pi-")),
+		dataDir,
 		nodeCommand: "node",
 		piCommand: "node",
 		piArgs: [new URL("fixtures/fake-pi-tui.mjs", import.meta.url).pathname],
@@ -46,6 +47,10 @@ test("Pi PTY survives detach and reattach with ordered replay and stale input re
 		.reduce((all, chunk) => Buffer.concat([all, chunk]), Buffer.alloc(0))
 		.toString();
 	expect(resizedText).toContain("size:100x30");
+	const telemetry = readFileSync(join(dataDir, "runtime", "terminal.ndjson"), "utf8");
+	expect(telemetry).toContain('"event":"terminal.input"');
+	expect(telemetry).toContain('"byteCount":6');
+	expect(telemetry).not.toContain("hello");
 });
 
 test("concurrent attaches start one process and only the latest connection owns input", async () => {

@@ -1,0 +1,10 @@
+<svg width="400" height="44" viewBox="60 0 340 44" fill="none" xmlns="http://www.w3.org/2000/svg">
+<style>
+:root { --toc-fg:#24292f; --toc-link:#0969da; --toc-bullet:#59636e; --toc-muted:#57606a; --toc-rule:#d0d7de; }
+@media (prefers-color-scheme: dark) { :root { --toc-fg:#f0f6fc; --toc-link:#4493f8; --toc-bullet:#9198a1; --toc-muted:#8b949e; --toc-rule:#30363d; } }
+
+  .title { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif; font-size: 24px; font-weight: 600; fill: var(--toc-fg); }
+  .item { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif; font-size: 20px; fill: var(--toc-link); }
+</style>
+<text x="154" y="32" class="title">概要</text>
+</svg>

@@ -404,6 +404,27 @@ describe("openWorkspace", () => {
 		expect(world.broadcasts).toEqual([{ method: "state", params: { kind: "leader", record: first.leader } }]);
 	});
 
+	test("leader ownership records the model resolved by ACP", async () => {
+		const repo = join(dir, "resolved-model");
+		await initRepo(repo, "git@github.com:acme/resolved-model.git");
+		const world = emptyWorld();
+		const base = testCtx(world);
+		const ctx: NodeContext = {
+			...base,
+			acp: {
+				...base.acp,
+				createSession: (o) => {
+					world.sessions.push({ ...o });
+					return Promise.resolve({ sessionId: ulid(), provider: o.provider, model: "provider-current" });
+				},
+			},
+		};
+		const opened = await openWorkspace(ctx, repo);
+		expect(world.sessions[0]?.model).toBe("sonnet");
+		expect(opened.leader.model).toBe("provider-current");
+		expect(world.leaders.get(opened.workspace.id)?.model).toBe("provider-current");
+	});
+
 	test("concurrent opens create exactly one leader session", async () => {
 		const repo = join(dir, "concurrent");
 		await initRepo(repo, "git@github.com:acme/concurrent.git");

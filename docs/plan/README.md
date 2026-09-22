@@ -10,6 +10,14 @@ The current code (npm `@intervene/neta` 2.2.x, `src/`, `apps/macos/`) is retired
 tagged `v2-final` and stays readable in Git history and in the two appendices
 in this directory. Nothing from it is imported; ideas are.
 
+## Current client scope
+
+The native Swift/macOS client has been retired. Desktop workstreams 09–11,
+the desktop appendix, and desktop packaging sections of 12 are historical
+references, not implementation requirements. Current client development uses
+OpenCode/OpenTUI; see [OpenCode integration](../opencode.md). Do not recreate
+the removed app, Swift tests, or app-bundle release job.
+
 ## How to read this plan
 
 | File | Workstream | Depends on |

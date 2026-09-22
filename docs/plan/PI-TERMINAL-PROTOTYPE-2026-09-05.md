@@ -28,7 +28,7 @@ Claude Code 2.1.261. No paid prompt was sent.
 - Size on disk: 578 MiB
 - Signed UI/tool evidence: `/private/tmp/neta-pi-visible-proof.Tcuvti`
 - Full backend tests: 562 passed, 0 failed
-- Full desktop tests: 497 passed, 0 failed
+- Full desktop tests: 498 passed, 0 failed
 - Typecheck, diff check, and strict deep code-sign verification passed.
 
 The signed-app test used a deterministic local Pi provider and no provider API.
@@ -51,3 +51,43 @@ mission Pi JSONL files retain the same evidence durably.
   evidence; inspect glass, colors, and pointer behavior on an unlocked Mac.
 - Claude authentication and live model behavior still need confirmation on the
   user's unlocked Mac. No credentials were inspected and no paid call was made.
+
+## Terminal resize and editing follow-up
+
+The follow-up signed build is
+`/private/tmp/neta-pi-edit-final/NetaPiPrototype.app`. Evidence in
+`/private/tmp/neta-pi-edit-proof.1CZszR` verifies that the actual Pi viewport
+resized to 43 columns by 37 rows, accepted Unicode text and Backspace editing,
+and sent one PNG clipboard path. The final viewport contained no repeated
+trailing copies of earlier content. These checks prove the corrected native
+terminal behavior; they do not provide visual-fidelity evidence because the
+host remained locked.
+
+The distributable follow-up is
+`/Users/runner/NetaPiPrototype-resize-fix.zip` (191 MiB), SHA-256
+`dc332ca93981fc54c09326b62737a576d8acb456223129df140c4c96ac20abd0`.
+The extracted app at
+`/private/tmp/neta-pi-resize-extracted-20260905/NetaPiPrototype.app` passed
+strict deep code-sign verification. The final desktop suite log is
+`/private/tmp/neta-pi-resize-swift-final.log`.
+
+## Exporting a session for diagnosis
+
+Choose **File → Export Session…**. The save panel explains that the ZIP
+contains all locally known Neta workspaces, machines, missions, agents,
+conversation text, tool output, Pi session records, file paths, and bounded
+terminal lifecycle telemetry. It excludes service descriptors, provider
+settings and environment, authentication stores, sockets, locks, and external
+attachment targets. Review the archive before sharing it.
+
+The export records app/runtime/OS and current window geometry, plus Pi attach,
+generation, sequence, byte-count, and resize metadata. It never adds raw PTY
+bytes to telemetry; the complete Pi conversation remains in its ordinary
+session record. Machines known only through locally stored workspace roots are
+listed as unavailable rather than reported as live.
+
+The current action needs a connected Neta service. The app normally reconnects
+or starts that service automatically, but it cannot export when service startup
+itself fails. Cancelling the save panel creates no staging data. Successful and
+failed archive attempts ask the service to remove their private temporary
+directory.

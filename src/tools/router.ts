@@ -1,4 +1,4 @@
-// Node-side entry point for the thirteen Neta tools: resolve the actor,
+// Node-side entry point for Neta tools: resolve the actor,
 // authorise, validate, dispatch, render. The stdio MCP proxy (T5.4) holds no
 // state and forwards here over `tools.list` / `tools.call`.
 import { randomBytes, timingSafeEqual } from "node:crypto";
@@ -59,6 +59,7 @@ export interface McpTextBlock {
 
 export interface McpToolResponse {
 	content: McpTextBlock[];
+	structuredContent?: Record<string, unknown>;
 	isError: boolean;
 }
 
@@ -182,7 +183,10 @@ export function createRouter(
 				};
 			}
 			if (result.ok) {
-				return render(actor, deps, JSON.stringify(result.data), false);
+				const response = await render(actor, deps, JSON.stringify(result.data), false);
+				if (result.data !== null && typeof result.data === "object" && !Array.isArray(result.data))
+					response.structuredContent = result.data as Record<string, unknown>;
+				return response;
 			}
 			return render(actor, deps, `error ${result.code}: ${result.message}`, true);
 		},

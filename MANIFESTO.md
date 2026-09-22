@@ -83,8 +83,8 @@ machine.
 
 ## Neta on each machine
 
-An opted-in machine runs a long-lived **Neta Node**. The desktop app is one
-client of that Node; a phone or another desktop may connect later. Closing a
+An opted-in machine runs a long-lived **Neta Node**. The OpenCode/OpenTUI terminal
+is its supported interactive client. Closing a
 client leaves the Node and its work running. Explicitly stopping a Node stops
 only the processes owned by that Node.
 
@@ -218,9 +218,14 @@ Skills are composable instruction and tool bundles, not identities. A leader
 may attach the guidance needed for the task without forcing a predefined
 workflow.
 
-Each ACP provider has a configured default model. A leader may override it for
-an individual agent. Provider, model, skills, access, and exact conversation ID
-persist with the session and survive resume.
+For OpenCode delegation, the leader supplies task difficulty as `effort` from
+1 to 5, separately from the model's reasoning setting. Neta selects only from
+connected models using the user's fixed effort-to-model configuration or the
+Jev classifier. Explicit model choices bypass routing. An omitted model never
+silently inherits the parent's model; routing failures do not change policies.
+Other ACP providers retain their configured defaults. Provider, model, routing
+decision, skills, access, and exact conversation ID persist with the session and
+survive resume.
 
 ## Writers and worktrees
 
@@ -257,18 +262,25 @@ active or blocked
         ↓
 ready to close
         ↓
-merged or abandoned
+completed, merged, or abandoned
         ↓
 closed and archived
 ```
 
 The workspace leader owns closeout. It reviews the handoff, integrates or
-abandons the work, and calls the mission-close tool. Closeout requires:
+records completed non-code work, or abandons the work, and calls the mission-close tool. Closeout requires:
 
-- disposition: **merged** or **abandoned**;
+- disposition: **completed**, **merged**, or **abandoned**;
 - a concise reason;
 - integration evidence when merged;
 - a successful Worktrunk cleanup result for a Git mission.
+
+**Completed** records successful checks, research, and other work with nothing
+to merge. It requires a clean worktree with no unmerged changes; it never
+forces removal. Normal agent turn completion means **Idle**, not Interrupted
+or proof that the mission is complete. Its parent receives an automatic report
+and decides whether to continue, mark ready, or close. Mission leads can call
+`neta_ready` without an ID; public mission references use the permanent number.
 
 There is no "retained but closed" disposition. If the worktree must remain, the
 mission remains open and visible. Removal of a dirty or unmerged worktree is
@@ -352,7 +364,16 @@ it and evicts the least recently updated cached conversation. When the machine
 returns, its complete snapshot replaces the cached canvas before the UI reports
 the machine as live.
 
-## Canvas
+## Retired desktop design
+
+The native Swift/macOS app has been removed. The canvas and desktop design
+sections below are historical exploration, not current implementation or release
+requirements. The supported client is OpenCode/OpenTUI with Neta's workspace
+and machine navigation, mission spine, agent tabs, and native chat. Current
+terminal behavior is documented in [OpenCode integration](docs/opencode.md).
+Do not reintroduce the Swift app or its build/test/release jobs.
+
+### Historical canvas
 
 The desktop client is a SwiftUI canvas over the Node state. The canvas is the
 spine. The workspace leader is the stable focal node at Now, the right end of
@@ -403,7 +424,7 @@ separate popover surface. Older checkpoints coalesce into counts.
 The desktop client, native CLI, and future mobile clients are alternate views
 over the same Node-owned sessions and durable state.
 
-## Desktop information architecture
+### Historical desktop information architecture
 
 The desktop window has one primary surface: the canvas.
 
@@ -450,7 +471,7 @@ Use the vocabulary in this manifesto literally in product copy:
   three execution levels.
 - **Lead** and **Lead++** for leader access; describe Lead++ as **build access**
   where a plain-language explanation is needed.
-- **Running**, **Blocked**, **Ready to close**, **Failed**, **Offline**, and
+- **Running**, **Idle**, **Blocked**, **Ready to close**, **Failed**, **Offline**, and
   **Archived** for visible lifecycle states.
 - **Archived** as a state and **Archive agent** as the action.
 
@@ -465,7 +486,7 @@ Blocked` over invented job titles, character classes, or playful status prose.
 Agent character may come from name, activity, and restrained visual identity;
 it must not require a role taxonomy.
 
-## Canvas interaction and visual grammar
+## Historical desktop interaction and visual grammar
 
 The canvas is a time surface, not an organization chart and not a vertical list
 disguised as a graph. The spine runs in one direction because that direction is
@@ -497,7 +518,7 @@ Status and access never rely on color alone. Use a short label and, where
 helpful, an icon in addition to a restrained semantic color. Avoid progress-like
 decoration unless it measures real progress.
 
-## Visual direction
+## Historical desktop visual direction
 
 Neta should feel like a native, calm, long-running macOS workspace with enough
 personality that agents feel present. It must not feel like a generic admin
@@ -521,7 +542,7 @@ reads as an architecture diagram and loses agent character. A dense collection
 of cards and bubbles is also not sufficient; it becomes gimmicky and obscures
 the graph.
 
-## Rejected desktop patterns
+## Historical rejected desktop patterns
 
 The following patterns were tried and explicitly rejected. Do not restore them
 without new operator direction:
@@ -548,7 +569,7 @@ drawn on the same NoScrubs-scale data — record that exploration. The Spine
 direction was selected on 2026-09-03. The decisions in this document supersede
 both.
 
-## Open desktop design questions
+## Historical desktop design questions
 
 These remain deliberately unresolved:
 
