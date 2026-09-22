@@ -1,9 +1,9 @@
 import { chmod, copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve, join } from "node:path";
-import { readPin, sha256, verifyCheckout } from "./opencode-pin.ts";
+import { managedOpenCodeDir, readPin, sha256, verifyCheckout } from "./opencode-pin.ts";
 
 const root = resolve(import.meta.dir, "..");
-const fork = process.env.NETA_OPENCODE_DIR ?? resolve(root, "../neta-opencode-v2");
+const fork = process.env.NETA_OPENCODE_DIR ?? managedOpenCodeDir(root);
 const metadata = JSON.parse(await readFile(join(fork, "neta-fork.json"), "utf8"));
 if (metadata.integrationVersion !== 2) throw new Error("Incompatible Neta OpenCode checkout");
 const pin = await readPin();

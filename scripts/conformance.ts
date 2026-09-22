@@ -1,10 +1,10 @@
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, symlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { readPin, repositoryRoot, verifyCheckout } from "./opencode-pin.ts";
+import { managedOpenCodeDir, readPin, repositoryRoot, verifyCheckout } from "./opencode-pin.ts";
 import { assertRequiredReport } from "./conformance-report.ts";
 
 const root = repositoryRoot;
-const fork = process.env.NETA_OPENCODE_DIR ?? resolve(root, "../neta-opencode-v2");
+const fork = process.env.NETA_OPENCODE_DIR ?? managedOpenCodeDir(root);
 const pin = await readPin();
 await verifyCheckout(fork, pin);
 // Nested fixture directories must leave room for the macOS 103-byte socket limit.

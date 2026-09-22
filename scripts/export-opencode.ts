@@ -1,9 +1,9 @@
 import { lstat, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { git, overlayPath, pinPath, repositoryRoot, sha256, sourcePathAllowed, type OpenCodePin } from "./opencode-pin.ts";
+import { git, managedOpenCodeDir, overlayPath, pinPath, repositoryRoot, sha256, sourcePathAllowed, type OpenCodePin } from "./opencode-pin.ts";
 
 // Explicit review/export step. Never reads ignored files or user configuration.
-const fork = process.env.NETA_OPENCODE_DIR ?? resolve(repositoryRoot, "../neta-opencode-v2");
+const fork = process.env.NETA_OPENCODE_DIR ?? managedOpenCodeDir();
 const commit = (await git(fork, ["rev-parse", "HEAD"])).trim();
 const tracked = (await git(fork, ["diff", "HEAD", "--name-only"])).trim().split("\n").filter(Boolean);
 const added = (await git(fork, ["ls-files", "--others", "--exclude-standard"])).trim().split("\n").filter(Boolean);

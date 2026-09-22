@@ -3,8 +3,9 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { connectNode } from "../src/node/client.ts";
+import { managedOpenCodeDir } from "../scripts/opencode-pin.ts";
 
-const fork = process.env.NETA_OPENCODE_DIR ?? resolve(import.meta.dir, "../../neta-opencode-v2");
+const fork = process.env.NETA_OPENCODE_DIR ?? managedOpenCodeDir();
 const available =
 	Boolean(Bun.which("tmux")) &&
 	Boolean(
@@ -37,7 +38,7 @@ test.skipIf(!available)(
 			...process.env,
 			NETA_DIR: nodeDir,
 			PATH: process.env.NETA_TEST_PATH ?? `${dirname(process.execPath)}:/opt/homebrew/bin:/usr/bin:/bin`,
-			NETA_OPENCODE_DIR: process.env.NETA_OPENCODE_DIR ?? resolve(import.meta.dir, "../../neta-opencode-v2"),
+			NETA_OPENCODE_DIR: process.env.NETA_OPENCODE_DIR ?? managedOpenCodeDir(),
 			XDG_DATA_HOME: join(dir, "data"),
 			XDG_CONFIG_HOME: join(dir, "config"),
 			XDG_CACHE_HOME: join(dir, "cache"),

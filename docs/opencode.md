@@ -5,16 +5,9 @@ owns the native composer, transcript, model catalog and model execution. Neta's
 Node owns the workspace, leader, missions, agents, worktrees and writer leases.
 The Claude SDK integration is deferred.
 
-## Run from these checkouts
+## Run from the Neta checkout
 
-Keep the repositories side by side:
-
-```text
-workspace/neta            Node and orchestration
-workspace/neta-opencode-v2  OpenCode V2 fork and terminal interface
-```
-
-In `neta`, run:
+In Neta, run:
 
 ```sh
 bun install --frozen-lockfile
@@ -23,14 +16,13 @@ bun run build
 bun src/cli/main.ts tui
 ```
 
-`setup:opencode` creates a missing checkout from the exact upstream commit and
-reviewed source overlay in `vendor/opencode/integration.json`, verifies its
-hashes, and installs locked dependencies. Set `NETA_OPENCODE_DIR` for a different
-location. An existing checkout is checked, never reset or overwritten. Setup
-reports source drift so local edits cannot disappear during an update. Normal
-source launches perform the same full pin check and refuse a drifted checkout
-before launch. Preserve local changes; create a fresh checkout with
-`NETA_OPENCODE_DIR=/path/to/clean-neta-opencode-v2 bun run setup:opencode`.
+`setup:opencode` creates the repository-owned generated checkout at
+`vendor/opencode/runtime/` from the exact upstream commit and reviewed source
+overlay in `vendor/opencode/integration.json`, verifies its hashes, and installs
+locked dependencies. This ignored directory is reproducible from the committed
+pin, not an independently maintained sibling fork. Normal source launches use
+it and perform the same full pin check. `NETA_OPENCODE_DIR` remains an explicit
+advanced override; it is checked and is never reset or overwritten.
 
 Running `neta tui` starts a missing local Node, reuses a compatible one, and
 replaces an outdated local Node when its actors are idle. An open mission alone
@@ -56,8 +48,8 @@ leader identity and mission records. Migration is refused while that conversatio
 is busy. Old provider transcripts remain in Neta's conversation store; they are
 not presented as native OpenCode history.
 
-The fork can also launch the client with `bun run --cwd packages/cli ./src/index.ts neta`. If it must start the
-Node itself, it uses the sibling `neta/dist/main.js` or `NETA_ENGINE_ENTRY`.
+The managed runtime can also launch the client with `bun run --cwd vendor/opencode/runtime/packages/cli ./src/index.ts neta`.
+If it must start the Node itself, it uses Neta's `dist/main.js` or `NETA_ENGINE_ENTRY`.
 
 ## V1 to V2 data
 
@@ -69,10 +61,10 @@ or deleted. Set `NETA_OPENCODE_V1_DB` to select another source before first laun
 V2 retains imported session IDs; `/reset` remains an explicit fresh-context action.
 The first import is a snapshot, not ongoing synchronization with the old runtime.
 
-The previous `neta-opencode` checkout remains available for rollback with
-`NETA_OPENCODE_DIR`; it is not changed by setup or build. No Claude SDK bridge
-is added. V2 uses native integrations and credentials; account-specific model
-access still depends on the connected provider.
+An explicit `NETA_OPENCODE_DIR` checkout remains available for advanced
+development or rollback; it is not changed by setup or build. No Claude SDK
+bridge is added. V2 uses native integrations and credentials; account-specific
+model access still depends on the connected provider.
 
 ## Controls
 

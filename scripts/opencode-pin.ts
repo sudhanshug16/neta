@@ -6,6 +6,11 @@ export const repositoryRoot = resolve(import.meta.dir, "..");
 export const pinPath = resolve(repositoryRoot, "vendor/opencode/integration.json");
 export const overlayPath = resolve(repositoryRoot, "vendor/opencode/overlay.patch");
 
+/** The repository owns this generated checkout; a sibling fork is never implicit. */
+export function managedOpenCodeDir(root = repositoryRoot): string {
+	return resolve(root, "vendor/opencode/runtime");
+}
+
 export interface OpenCodePin {
 	format: 1;
 	repository: string;

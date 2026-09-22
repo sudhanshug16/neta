@@ -13,11 +13,12 @@ import type { SnapshotResult } from "../src/node/protocol.ts";
 import type { OpenCodeAttachment } from "../src/opencode/attachment.ts";
 import { openCodeEndpoint } from "../src/opencode/attachment.ts";
 import { managedOpenCodeProvider } from "../src/opencode/runtime.ts";
+import { managedOpenCodeDir } from "../scripts/opencode-pin.ts";
 import { visualProxy } from "./fixtures/neta-visual-proxy.ts";
 
-const fork = process.env.NETA_OPENCODE_DIR ?? resolve(import.meta.dir, "../../neta-opencode-v2");
+const fork = process.env.NETA_OPENCODE_DIR ?? managedOpenCodeDir();
 
-// Opt in after installing the pinned sibling fork. All inference is a local fake;
+// Opt in after installing the managed pinned fork. All inference is a local fake;
 // no provider credentials, user configuration or real workspaces are used.
 const nativeReady = process.env.NETA_OPENCODE_BIN
 	? existsSync(process.env.NETA_OPENCODE_BIN)

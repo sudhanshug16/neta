@@ -1,8 +1,8 @@
 import { access, mkdir, mkdtemp, rename, rm } from "node:fs/promises";
 import { resolve, join } from "node:path";
-import { git, overlayPath, readPin, verifyCheckout } from "./opencode-pin.ts";
+import { git, managedOpenCodeDir, overlayPath, readPin, verifyCheckout } from "./opencode-pin.ts";
 
-const fork = process.env.NETA_OPENCODE_DIR ?? resolve(import.meta.dir, "../../neta-opencode-v2");
+const fork = process.env.NETA_OPENCODE_DIR ?? managedOpenCodeDir();
 const pin = await readPin();
 if (Bun.version !== pin.bun) throw new Error(`Pinned OpenCode requires Bun ${pin.bun}; found ${Bun.version}`);
 if (!(await access(fork).then(() => true).catch(() => false))) {

@@ -5,6 +5,10 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ProviderSettings } from "../acp/settings.ts";
 
+function managedOpenCodeDir(root: string): string {
+	return resolve(root, "vendor/opencode/runtime");
+}
+
 interface OpenCodePin {
 	format: 1;
 	repository: string;
@@ -96,7 +100,7 @@ export function openCodeInvocation(options: OpenCodeRuntimeOptions = {}): {
 	}
 	const here = dirname(fileURLToPath(import.meta.url));
 	const root = options.root ?? (here.endsWith("/dist") ? dirname(here) : resolve(here, "../.."));
-	const fork = environment.NETA_OPENCODE_DIR ?? resolve(root, "../neta-opencode-v2");
+	const fork = environment.NETA_OPENCODE_DIR ?? managedOpenCodeDir(root);
 	const v2 = existsSync(join(fork, "packages/cli/src/acp/service.ts")) && !existsSync(join(fork, "packages/opencode"));
 	const binary = join(
 		root,
@@ -113,7 +117,7 @@ export function openCodeInvocation(options: OpenCodeRuntimeOptions = {}): {
 	}
 	if (!existsSync(join(fork, "neta-fork.json")))
 		throw new Error(
-			"Neta OpenCode is not installed. Run bun run setup:opencode, or set NETA_OPENCODE_DIR to the fork checkout.",
+			"Neta OpenCode is not installed. Run bun run setup:opencode. NETA_OPENCODE_DIR is an explicit advanced checkout override.",
 		);
 	try {
 		validateOpenCodeSource(fork, join(root, "vendor", "opencode", "integration.json"));
