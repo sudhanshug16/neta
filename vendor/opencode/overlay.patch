@@ -8320,6 +8320,86 @@ index 000000000..a8c28a64d
 +    }
 +  })
 +}
+diff --git a/packages/tui/test/neta-spine-leads.test.tsx b/packages/tui/test/neta-spine-leads.test.tsx
+new file mode 100644
+index 000000000..5c71831f8
+--- /dev/null
++++ b/packages/tui/test/neta-spine-leads.test.tsx
+@@ -0,0 +1,74 @@
++import { expect, test } from "bun:test"
++import { Socket } from "node:net"
++import { testRender } from "@opentui/solid"
++import { NetaClient, type Snapshot } from "@neta/client"
++import { NetaProvider } from "../src/neta/context"
++import { NetaShell } from "../src/neta/shell"
++import { ConfigProvider } from "../src/config"
++import { ClientProvider } from "../src/context/client"
++import { Keymap } from "../src/context/keymap"
++import { ThemeProvider } from "../src/context/theme"
++import { AttentionProvider } from "../src/context/attention"
++import { ExitProvider } from "../src/context/exit"
++import { DialogProvider } from "../src/ui/dialog"
++import { ToastProvider } from "../src/ui/toast"
++import { TestTuiContexts } from "./fixture/tui-environment"
++import { createApi, createEventStream, createFetch } from "./fixture/tui-client"
++import { createTuiResolvedConfig } from "./fixture/tui-runtime"
++
++test("spine pins declared and self-led mission leads without duplicating active workers", async () => {
++  const socket = new Socket()
++  const client = new NetaClient(socket)
++  const navigated: string[] = []
++  const snapshot: Snapshot = {
++    machine: { id: "local", name: "Local" },
++    workspaces: [{ id: "w", name: "Test project", roots: [] }],
++    leaders: [{ workspaceId: "w", machineId: "local", name: "Mace", sessionId: "leader", provider: "opencode", model: "fixture", mode: "lead", state: "idle" }],
++    missions: [
++      { id: "delegated", workspaceId: "w", number: 2, name: "Delegated", createdAt: "2026-09-23T12:00:00Z", state: "running", agentIds: ["lead", "active", "idle"], lead: { kind: "agent", agentId: "lead" } },
++      { id: "self", workspaceId: "w", number: 1, name: "Self led", createdAt: "2026-09-23T11:00:00Z", state: "running", agentIds: [], lead: { kind: "leader" } },
++    ],
++    agents: [
++      { id: "lead", missionId: "delegated", workspaceId: "w", sessionId: "lead", name: "Leto", provider: "opencode", model: "fixture", state: "idle", task: "lead", canSpawn: true },
++      { id: "active", missionId: "delegated", workspaceId: "w", sessionId: "active", name: "Asha", provider: "opencode", model: "fixture", state: "running", task: "active" },
++      { id: "idle", missionId: "delegated", workspaceId: "w", sessionId: "idle", name: "Iris", provider: "opencode", model: "fixture", state: "idle", task: "idle" },
++    ],
++  }
++  const app = await testRender(
++    () => (
++      <TestTuiContexts>
++        <ConfigProvider config={createTuiResolvedConfig()}>
++          <Keymap.Provider><ThemeProvider mode="dark" defaultName="neta" source={{ discover: async () => ({}) }}><AttentionProvider><ExitProvider exit={() => {}}><ToastProvider><DialogProvider><ClientProvider api={createApi(createFetch(undefined, createEventStream()).fetch)}><NetaProvider value={{ client, snapshot, view: { host: "local", workspaceId: "w", path: "/fixture", owner: "other", tabs: ["leader"] }, sessionId: "leader", hosts: [], drafts: new Map(), send: async () => undefined, navigate: async (view) => { navigated.push(view.owner) } }}><NetaShell><text>Chat</text></NetaShell></NetaProvider></ClientProvider></DialogProvider></ToastProvider></ExitProvider></AttentionProvider></ThemeProvider></Keymap.Provider>
++        </ConfigProvider>
++      </TestTuiContexts>
++    ),
++    { width: 160, height: 40 },
++  )
++  const click = async (text: string) => {
++    const lines = app.captureCharFrame().split("\n")
++    const row = lines.findIndex((line) => line.includes(text))
++    expect(row).toBeGreaterThanOrEqual(0)
++    await app.mockMouse.click(lines[row]!.indexOf(text) + 1, row)
++    await app.waitForVisualIdle()
++  }
++  try {
++    app.renderer.start()
++    await app.waitForFrame((frame) => frame.includes("#2 Delegated"))
++    const collapsed = app.captureCharFrame()
++    expect(collapsed).toContain("Leto · lead")
++    expect(collapsed).toContain("Asha")
++    expect(collapsed).not.toContain("Iris")
++    expect(collapsed).toContain("Mace · lead")
++    await click("Leto")
++    expect(navigated).toEqual(["lead"])
++    await click("#2 Delegated")
++    await app.waitForFrame((frame) => frame.includes("Iris"))
++    const expanded = app.captureCharFrame()
++    expect(expanded.match(/Leto/g)?.length).toBe(1)
++    expect(expanded.match(/Asha/g)?.length).toBe(1)
++    expect(expanded.match(/Iris/g)?.length).toBe(1)
++  } finally {
++    app.renderer.destroy()
++    socket.destroy()
++  }
++})
 diff --git a/packages/tui/test/neta-status.test.tsx b/packages/tui/test/neta-status.test.tsx
 new file mode 100644
 index 000000000..8ebb6286b

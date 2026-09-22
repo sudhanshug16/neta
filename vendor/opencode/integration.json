@@ -4,7 +4,7 @@
   "commit": "7a31b5c0f76ce1c06befacc09b47b4fc3c71c408",
   "bun": "1.4.2",
   "integrationVersion": 2,
-  "overlaySha256": "c74e3c21e3989edc8aacba6a4c6e93d6c6e928d94973a8a8b5c8e7a39ecf8958",
+  "overlaySha256": "a1349966fb32f36822f412aa8fe2c388f2682131bd0ea7b9216d6c16076d8e2a",
   "lockSha256": "1eede033cd5ffbe7d4d5994d0e4b4bfb72948d8fc27e2343cf220e8d5d277764",
   "files": {
     "NETA.md": "aa2832348726029679205dadf7d63063c82b518df16fb325ba45efb4d20c11a8",
@@ -126,6 +126,7 @@
     "packages/tui/test/neta-reconnect.test.ts": "3637bd1bfd2c78ab6e33fc7af4479d1b4436df34d7061d7fcb7a291abf4a7b9a",
     "packages/tui/test/neta-recovery.test.ts": "1c2db5fb9847ce6982099b937031cc45769c9cb3b78de54abbdb9c034cba9baa",
     "packages/tui/test/neta-routing.test.tsx": "883a17f79d95c1c5adc16bef93851ed75e6346ed0e1c1183793cd74575efd69c",
+    "packages/tui/test/neta-spine-leads.test.tsx": "7dbb43392a5e39157d2244c800722bae479ffd527a112b622ae6e5ac67163d1e",
     "packages/tui/test/neta-status.test.tsx": "77ca51b70854cecaec99d4bd52ec342a1a1969b9ff44f3fd8b0cad58b0f5d573",
     "packages/tui/test/neta-theme.test.ts": "3dec7d512d6e899f518f1eb5c76f7e49b704149a4f6e9a7e9f1871a81c8a261d",
     "packages/tui/test/neta-updates-model.test.ts": "97ca7b597d89fa889fdd6ce67683eb16843c8d364fc7cc5167a68aacb15ecce0",
