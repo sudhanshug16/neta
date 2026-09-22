@@ -173,7 +173,7 @@ function formatDetail(
 	const lead = mission.lead;
 	lines.push(
 		lead.kind === "leader"
-			? "Lead: leader"
+			? "Lead: workspace leader (shared conversation)"
 			: `Lead: agent ${agents.find((agent) => agent.id === lead.agentId)?.name ?? lead.agentId}`,
 	);
 	if (mission.worktree !== undefined) {

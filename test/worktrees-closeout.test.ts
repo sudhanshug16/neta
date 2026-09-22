@@ -53,7 +53,9 @@ interface Fixture {
 	leases: LeaseManager;
 }
 
-function fixture(remove?: (input: RemoveInput) => Promise<RemoveResult>): Fixture {
+function fixture(
+	options: { remove?: (input: RemoveInput) => Promise<RemoveResult>; list?: WorktreeDriver["list"] } = {},
+): Fixture {
 	const removes: RemoveInput[] = [];
 	const emitted: Array<{ kind: EventKind; missionId: MissionId }> = [];
 	const closed: Mission[] = [];
@@ -63,11 +65,11 @@ function fixture(remove?: (input: RemoveInput) => Promise<RemoveResult>): Fixtur
 		findExisting: () => Promise.reject(new Error("unused")),
 		remove: (input) => {
 			removes.push(input);
-			return remove === undefined
+			return options.remove === undefined
 				? Promise.resolve({ ok: true, branchOutcome: "deleted", path: input.path })
-				: remove(input);
+				: options.remove(input);
 		},
-		list: () => Promise.reject(new Error("unused")),
+		list: options.list ?? (() => Promise.reject(new Error("unused"))),
 		verify: () => Promise.reject(new Error("unused")),
 		defaultBase: () => Promise.reject(new Error("unused")),
 	};
@@ -155,6 +157,104 @@ describe("mission closeout", () => {
 		}
 	});
 
+	test("a removed worktree closes only when its named evidence is confirmed on the base", async () => {
+		const f = fixture({ list: async () => [] });
+		const start = mission({ provider: "worktrunk", path: "/removed", branch: "mission/1-lens", base: "main" });
+		const evidence = "1234567890abcdef1234567890abcdef12345678";
+		const calls: Array<Parameters<typeof isIntegrated>[0]> = [];
+		const outcome = await closeMission(
+			{
+				mission: start,
+				disposition: "merged",
+				evidence,
+				reason: "merged before Worktrunk cleanup completed",
+				repositoryRoot: "/repository-base",
+			},
+			{
+				...f.deps,
+				isIntegrated: async (query) => {
+					calls.push(query);
+					return { merged: true, base: "main", commit: evidence };
+				},
+			},
+		);
+		expect(outcome).toMatchObject({ ok: true, mission: { state: "closed", worktree: undefined } });
+		expect(calls).toEqual([
+			{ repoRoot: "/repository-base", branch: evidence, base: "main", evidenceCommit: evidence },
+		]);
+		expect(f.removes).toHaveLength(0);
+	});
+
+	test("a removed worktree with unconfirmed evidence remains open", async () => {
+		const f = fixture({ list: async () => [] });
+		const start = mission({ provider: "worktrunk", path: "/removed", branch: "mission/1-lens", base: "main" });
+		const outcome = await closeMission(
+			{
+				mission: start,
+				disposition: "merged",
+				evidence: "1234567",
+				reason: "merged",
+				repositoryRoot: "/repository-base",
+			},
+			{ ...f.deps, isIntegrated: async () => ({ merged: false, base: "main" }) },
+		);
+		expect(outcome).toMatchObject({
+			ok: false,
+			attention: "could not confirm removed worktree evidence 1234567 against main",
+			mission: { state: "running", worktree: start.worktree },
+		});
+		expect(f.removes).toHaveLength(0);
+	});
+
+	test("a removed worktree cannot close completed work without its clean-tree check", async () => {
+		const f = fixture({ list: async () => [] });
+		const start = mission({ provider: "worktrunk", path: "/removed", branch: "mission/1-lens", base: "main" });
+		const outcome = await closeMission(
+			{ mission: start, disposition: "completed", reason: "checked", repositoryRoot: "/repository-base" },
+			f.deps,
+		);
+		expect(outcome).toMatchObject({
+			ok: false,
+			attention:
+				"completed needs its recorded worktree; only merged closeout can recover confirmed evidence after cleanup",
+			mission: { state: "running", worktree: start.worktree },
+		});
+		expect(f.removes).toHaveLength(0);
+	});
+
+	test("a removed worktree requires fresh evidence even with recorded integration", async () => {
+		const f = fixture({ list: async () => [] });
+		const start = mission(
+			{ provider: "worktrunk", path: "/removed", branch: "mission/1-lens", base: "main" },
+			{ integration: { mergedAt: NOW, commit: "abcdef1", base: "main" } },
+		);
+		const missing = await closeMission(
+			{ mission: start, disposition: "merged", reason: "merged", repositoryRoot: "/repository-base" },
+			f.deps,
+		);
+		expect(missing).toMatchObject({
+			ok: false,
+			attention: "merged needs evidence naming a commit",
+			mission: { state: "running", worktree: start.worktree },
+		});
+		const unrelated = await closeMission(
+			{
+				mission: start,
+				disposition: "merged",
+				evidence: "1234567",
+				reason: "merged",
+				repositoryRoot: "/repository-base",
+			},
+			{ ...f.deps, isIntegrated: async () => ({ merged: false, base: "main" }) },
+		);
+		expect(unrelated).toMatchObject({
+			ok: false,
+			attention: "could not confirm removed worktree evidence 1234567 against main",
+			mission: { state: "running", worktree: start.worktree },
+		});
+		expect(f.removes).toHaveLength(0);
+	});
+
 	test("merged with a non-ancestor SHA, merged with neither, and abandoned with an empty reason each refuse", async () => {
 		const repo = await makeRepo();
 		try {
@@ -211,7 +311,9 @@ describe("mission closeout", () => {
 	});
 
 	test("a driver refusal leaves the mission intact with closedAt unset", async () => {
-		const f = fixture(() => Promise.resolve({ ok: false, refusal: "dirty", reason: "worktree is dirty" }));
+		const f = fixture({
+			remove: () => Promise.resolve({ ok: false, refusal: "dirty", reason: "worktree is dirty" }),
+		});
 		const start = mission({ provider: "worktrunk", path: "/wt-1", branch: "mission/1-x", base: "main" });
 		const outcome = await closeMission(
 			{ mission: start, disposition: "abandoned", reason: "done" },
@@ -351,7 +453,7 @@ test("completed inspection closes cleanly without invented merge evidence or for
 
 for (const refusal of ["dirty", "unmerged"] as const) {
 	test(`completed keeps a ${refusal} worktree open`, async () => {
-		const f = fixture(async () => ({ ok: false, refusal, reason: `worktree is ${refusal}` }));
+		const f = fixture({ remove: async () => ({ ok: false, refusal, reason: `worktree is ${refusal}` }) });
 		const start = mission({ provider: "worktrunk", path: "/wt-1", branch: "mission/check", base: "main" });
 		const result = await closeMission({ mission: start, disposition: "completed", reason: "checked" }, f.deps);
 		expect(result.ok).toBe(false);

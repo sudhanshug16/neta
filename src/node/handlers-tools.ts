@@ -589,7 +589,13 @@ export function toolMount(o: ToolMountOptions): {
 		const pending = pendingCloses.get(sessionId);
 		if (pending === undefined) return;
 		pendingCloses.delete(sessionId);
-		const failed = { ...pending.input.mission, attention: `Close failed: ${String(error)}` };
+		// A delayed callback may outlive a successful close (for example, when
+		// the provider reports an old turn after the closeout persisted). Never
+		// turn a terminal record back into an open one with the stale input that
+		// was captured when the close was scheduled.
+		const latest = o.store.getMission(pending.input.mission.id);
+		if (latest?.state === "closed") return;
+		const failed = { ...(latest ?? pending.input.mission), attention: `Close failed: ${String(error)}` };
 		await saveMission(failed);
 		await o.store.appendEvent({
 			workspaceId: failed.workspaceId,
@@ -603,6 +609,14 @@ export function toolMount(o: ToolMountOptions): {
 		const pending = pendingModes.get(sessionId);
 		if (pending === undefined) return;
 		pendingModes.delete(sessionId);
+		// Mode restoration is asynchronous because it waits for an old turn to
+		// reach its steering boundary. Closeout can finish first. In that case
+		// this callback has no mission left to restore and, crucially, must not
+		// write its captured pre-close mission back to the registry.
+		if (o.store.getMission(pending.mission.id)?.state === "closed") {
+			await releaseHolder(pending.subject.workspaceId, pending.holder);
+			return;
+		}
 		try {
 			const agent = pending.subject.kind === "lead" ? o.store.getAgent(pending.subject.agentId) : undefined;
 			await o.acp.ensureSession({
@@ -628,7 +642,12 @@ export function toolMount(o: ToolMountOptions): {
 		} catch (error) {
 			await o.acp.close(sessionId).catch(() => undefined);
 			await releaseHolder(pending.subject.workspaceId, pending.holder);
-			const failedMission = { ...pending.mission, attention: `Lead++ failed: ${String(error)}` };
+			// Do not resurrect a closed mission if session restoration lost a race
+			// with closeout. For non-terminal missions, preserve any fields written
+			// since this operation was scheduled rather than restoring the snapshot.
+			const latest = o.store.getMission(pending.mission.id);
+			if (latest?.state === "closed") return;
+			const failedMission = { ...(latest ?? pending.mission), attention: `Lead++ failed: ${String(error)}` };
 			await saveMission(failedMission);
 			await o.store.appendEvent({
 				workspaceId: failedMission.workspaceId,
@@ -969,7 +988,11 @@ export function toolMount(o: ToolMountOptions): {
 				if ((await modes.snapshot(subject)).mode === "leadPlus") {
 					const agent = subject.kind === "lead" ? o.store.getAgent(subject.agentId) : undefined;
 					const sessionId = agent?.sessionId ?? leaderOf(input.mission.workspaceId).sessionId;
-					pendingCloses.set(sessionId, { input, subject, ...(agent === undefined ? {} : { agent }) });
+					pendingCloses.set(sessionId, {
+						input: { ...input, repositoryRoot: rootFor(input.mission.workspaceId) },
+						subject,
+						...(agent === undefined ? {} : { agent }),
+					});
 					if (o.acp.isTurnActive?.(sessionId) === true) {
 						return { ok: false, attention: "close scheduled after the active turn", mission: input.mission };
 					}
@@ -984,7 +1007,7 @@ export function toolMount(o: ToolMountOptions): {
 						};
 					}
 				}
-				return worktrees.close(input);
+				return worktrees.close({ ...input, repositoryRoot: rootFor(input.mission.workspaceId) });
 			},
 		},
 		sessions: {

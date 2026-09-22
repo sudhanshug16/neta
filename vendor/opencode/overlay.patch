@@ -5746,10 +5746,10 @@ index 000000000..1c94b747d
 +}
 diff --git a/packages/tui/src/neta/shell.tsx b/packages/tui/src/neta/shell.tsx
 new file mode 100644
-index 000000000..fb7bae3dd
+index 000000000..832e52cd3
 --- /dev/null
 +++ b/packages/tui/src/neta/shell.tsx
-@@ -0,0 +1,837 @@
+@@ -0,0 +1,834 @@
 +import { createEffect, createMemo, createSignal, For, onCleanup, Show, type JSX } from "solid-js"
 +import { TerminalViewport, useTerminalDimensions } from "../ui/terminal-dimensions"
 +import { ownerSession, type Agent, type Mission, type Snapshot, type View } from "@neta/client"
@@ -6569,9 +6569,6 @@ index 000000000..fb7bae3dd
 +                Help · actions
 +              </text>
 +            </scrollbox>
-+            <text height={2} flexShrink={0} fg={theme.text.subdued}>
-+              {"Mission lead and active agents stay visible\nHelp opens actions and history"}
-+            </text>
 +          </box>
 +        </Show>
 +        <box flexGrow={1} minWidth={0} flexDirection="column">
