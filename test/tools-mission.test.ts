@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { ulid } from "../src/core/ids.ts";
 import { NAME_POOL } from "../src/core/names.ts";
 import type { Agent, EventKind, Leader, Mission, Workspace } from "../src/core/types.ts";
@@ -10,6 +13,9 @@ import {
 	type SessionLaunch,
 } from "../src/tools/handlers/mission.ts";
 import type { Actor } from "../src/tools/router.ts";
+import { createWorktreeService, LeaseManager, WorktrunkDriver } from "../src/worktrees/index.ts";
+import { WorktreeSetupError } from "../src/worktrees/setup-diagnostics.ts";
+import { fakeWtEnv, makeRepo } from "./helpers/git-repo.ts";
 
 function workspace(id: string, kind: Workspace["kind"]): Workspace {
 	return { id, kind, name: id, roots: [{ machineId: "m", path: `/tmp/${id}` }], createdAt: new Date(0).toISOString() };
@@ -147,6 +153,100 @@ function ctx(f: Fixture, actor: Actor): MissionToolContext {
 }
 
 describe("neta_mission", () => {
+	test("partial setup, persistence fallback, identity refusal and concurrent legacy recovery never replay hooks", async () => {
+		const repo = await makeRepo();
+		const temp = await mkdtemp(join(tmpdir(), "neta-handler-recovery-"));
+		const previousBin = process.env.NETA_WT_BIN;
+		const previousFail = process.env.FAKE_WT_POST_START_FAIL;
+		process.env.NETA_WT_BIN = fakeWtEnv().NETA_WT_BIN;
+		process.env.FAKE_WT_POST_START_FAIL = "1";
+		try {
+			const f = fixture("git");
+			const ws = f.store.getWorkspace("git-w");
+			if (!ws) throw new Error("missing workspace");
+			ws.roots = [{ machineId: "m", path: repo.root }];
+			const blocked = join(temp, "not-a-directory");
+			await writeFile(blocked, "preserve");
+			const driver = new WorktrunkDriver();
+			f.ports.numbers.isAllocated = async (_id, number) => number === 1;
+			f.ports.worktrees = createWorktreeService({
+				driver,
+				netaDir: blocked,
+				now: () => new Date(0).toISOString(),
+				leases: new LeaseManager({
+					read: async (workspaceId) => ({ workspaceId, leases: {} }),
+					write: async () => {},
+				}),
+				emit: () => {},
+				saveMission: f.ports.missions.save,
+				onMissionClosed: async () => {},
+			});
+			const params = {
+				name: "lens port",
+				objective: "recover setup",
+				access: "readOnly",
+				lead: { task: "work" },
+			} as const;
+			const context = ctx(f, f.leaderActor);
+			const failed = await missionHandlers.neta_mission(context, params);
+			expect(failed.ok).toBe(false);
+			if (failed.ok) throw new Error("unexpected success");
+			expect(failed.code).toBe("setupFailed");
+			const detail = JSON.parse(failed.message);
+			expect(detail).toMatchObject({ exitCode: 1, missionRegistered: false, agentsLaunched: false });
+			expect(detail.persistenceError).toBeString();
+			expect(detail.diagnostic).toBeUndefined();
+			expect(detail.stderr).toContain("intentional fixture failure");
+			expect(f.launches).toHaveLength(0);
+			expect(f.saved).toHaveLength(0);
+			const partial = await driver.findExisting({ repoRoot: repo.root, number: 1, slug: "lens-port" });
+			if (!partial) throw new Error("missing partial");
+			// Use an empty valid diagnostics directory to exercise legacy adoption.
+			f.ports.worktrees = createWorktreeService({
+				driver,
+				netaDir: temp,
+				now: () => new Date(0).toISOString(),
+				leases: new LeaseManager({
+					read: async (workspaceId) => ({ workspaceId, leases: {} }),
+					write: async () => {},
+				}),
+				emit: () => {},
+				saveMission: f.ports.missions.save,
+				onMissionClosed: async () => {},
+			});
+			const recoveryContext = ctx(f, f.leaderActor);
+			const recovery = {
+				number: 1,
+				path: partial.path,
+				branch: partial.branch,
+				base: partial.base,
+				setupDisposition: "waived",
+			} as const;
+			for (const mismatch of [{ path: repo.root }, { branch: "main" }, { base: "other" }, { number: 999 }]) {
+				const refused = await missionHandlers.neta_mission(recoveryContext, {
+					...params,
+					recoverWorktree: { ...recovery, ...mismatch },
+				});
+				expect(refused.ok).toBe(false);
+			}
+			expect(f.saved).toHaveLength(0);
+			const results = await Promise.all(
+				[1, 2].map(() => missionHandlers.neta_mission(recoveryContext, { ...params, recoverWorktree: recovery })),
+			);
+			expect(results.filter((r) => r.ok)).toHaveLength(1);
+			expect(f.launches).toHaveLength(1);
+			expect(f.saved[0]?.worktreeRecovery).toEqual({ setupDisposition: "waived", at: new Date(0).toISOString() });
+			expect(f.saved[0]?.worktree?.path).toBe(partial.path);
+			expect((await driver.list(repo.root)).filter((entry) => entry.branch === partial.branch)).toHaveLength(1);
+		} finally {
+			if (previousBin === undefined) delete process.env.NETA_WT_BIN;
+			else process.env.NETA_WT_BIN = previousBin;
+			if (previousFail === undefined) delete process.env.FAKE_WT_POST_START_FAIL;
+			else process.env.FAKE_WT_POST_START_FAIL = previousFail;
+			await rm(temp, { recursive: true, force: true });
+			await repo.cleanup();
+		}
+	});
 	test("a git workspace creates a worktree and a folder one does not", async () => {
 		const git = fixture("git");
 		const gitResult = await missionHandlers.neta_mission(ctx(git, git.leaderActor), {
@@ -174,6 +274,88 @@ describe("neta_mission", () => {
 		if (folderResult.ok) {
 			expect(folderResult.data.worktree).toBeNull();
 		}
+	});
+
+	test("a worktree setup failure is structured and starts no agents", async () => {
+		const f = fixture("git");
+		f.ports.worktrees.prepare = async () => {
+			throw new WorktreeSetupError({
+				workspaceId: "git-w",
+				number: 1,
+				name: "broken setup",
+				objective: "prove no provider starts",
+				access: "readOnly",
+				repoRoot: "/repo",
+				branch: "mission/1-broken-setup",
+				base: "main",
+				at: new Date(0).toISOString(),
+				exitCode: 1,
+				stdout: "hook output",
+				stderr: "hook failed",
+				partialWorktree: {
+					provider: "worktrunk",
+					path: "/repo.partial",
+					branch: "mission/1-broken-setup",
+					base: "main",
+				},
+			});
+		};
+		const result = await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+			name: "broken setup",
+			objective: "prove no provider starts",
+			access: "readOnly",
+			lead: { task: "do not start" },
+		});
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.code).toBe("setupFailed");
+			expect(JSON.parse(result.message)).toMatchObject({ kind: "worktreeSetup", partialWorktree: "/repo.partial" });
+		}
+		expect(f.launches).toHaveLength(0);
+		expect(f.saved).toHaveLength(0);
+	});
+
+	test("recovery rejects folders and passes explicit disposition without re-running setup", async () => {
+		const folder = fixture("folder");
+		const rejected = await missionHandlers.neta_mission(ctx(folder, folder.leaderActor), {
+			name: "legacy",
+			objective: "o",
+			access: "readOnly",
+			lead: "self",
+			recoverWorktree: {
+				number: 4,
+				path: "/x",
+				branch: "mission/4-legacy",
+				base: "main",
+				setupDisposition: "waived",
+			},
+		});
+		expect(rejected).toMatchObject({ ok: false, code: "refused" });
+		const git = fixture("git");
+		git.ports.numbers.isAllocated = async () => true;
+		let recovery: unknown;
+		git.ports.worktrees.prepare = async (mission, _workspace, opts) => {
+			recovery = opts?.recovery;
+			return {
+				...mission,
+				worktree: { provider: "worktrunk", path: "/x", branch: "mission/4-legacy", base: "main" },
+			};
+		};
+		const recovered = await missionHandlers.neta_mission(ctx(git, git.leaderActor), {
+			name: "legacy",
+			objective: "o",
+			access: "readOnly",
+			lead: "self",
+			recoverWorktree: {
+				number: 4,
+				path: "/x",
+				branch: "mission/4-legacy",
+				base: "main",
+				setupDisposition: "waived",
+			},
+		});
+		expect(recovered.ok).toBe(true);
+		expect(recovery).toMatchObject({ setupDisposition: "waived", path: "/x" });
 	});
 
 	test("numbers are monotonic and never reused", async () => {
@@ -526,7 +708,8 @@ test("staffing preserves ordered permitted fallback models and rejects unavailab
 	expect(result.ok).toBe(true);
 	expect(f.launches[0]?.fallbackModels).toEqual(["second", "third"]);
 	expect(f.launches[1]?.fallbackModels).toEqual([]);
-	const mission = f.store.listMissions(f.leaderActor.workspaceId)[0]!;
+	const mission = f.store.listMissions(f.leaderActor.workspaceId)[0];
+	if (mission === undefined) throw new Error("missing mission");
 	expect(f.store.listAgents(mission.id)[0]).toMatchObject({
 		requestedModel: "small",
 		fallbackModels: ["second", "third"],

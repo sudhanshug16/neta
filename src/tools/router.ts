@@ -18,6 +18,7 @@ export type ToolErrorCode =
 	| "refused"
 	| "timeout"
 	| "missingSkill"
+	| "setupFailed"
 	| "unavailable";
 
 export type ToolResult =

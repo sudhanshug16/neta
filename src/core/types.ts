@@ -77,6 +77,7 @@ export interface Mission {
 	agentIds: AgentId[];
 	access: Access; // what the mission may do at most
 	worktree?: Worktree; // present for git missions
+	worktreeRecovery?: { setupDisposition: "handled" | "waived"; at: IsoTime }; // explicit adoption, not setup success
 	state: MissionState;
 	attention?: string; // one line: the question, the error
 	createdAt: IsoTime;

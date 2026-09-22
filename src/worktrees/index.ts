@@ -2,13 +2,30 @@
 // Only four callers reach merge detection through here: agent finish,
 // `neta_ready`, `neta_close` and `workspace.open`. No timer, interval or
 // watcher may call it.
-import { stat } from "node:fs/promises";
-import type { AgentId, EventKind, IsoTime, Mission, MissionId, Workspace, WorkspaceId } from "../core/types.ts";
+import { realpath, stat } from "node:fs/promises";
+import type {
+	AgentId,
+	EventKind,
+	IsoTime,
+	Mission,
+	MissionId,
+	Workspace,
+	WorkspaceId,
+	Worktree,
+} from "../core/types.ts";
 import { type CloseMissionInput, type CloseOutcome, closeMission } from "./closeout.ts";
 import type { WorktreeDriver } from "./driver.ts";
 import { isIntegrated } from "./integration.ts";
 import { type LeaseManager, type LeaseOutcome, leaseKeyFor } from "./leases.ts";
 import { slugify } from "./naming.ts";
+import {
+	buildSetupDiagnostic,
+	readSetupDiagnostic,
+	safeExcerpt,
+	type WorktreeSetupDiagnostic,
+	WorktreeSetupError,
+	writeSetupDiagnostic,
+} from "./setup-diagnostics.ts";
 
 export interface WorktreeServiceDeps {
 	driver: WorktreeDriver;
@@ -21,7 +38,19 @@ export interface WorktreeServiceDeps {
 }
 
 export interface WorktreeService {
-	prepare(mission: Mission, workspace: Workspace): Promise<Mission>;
+	prepare(
+		mission: Mission,
+		workspace: Workspace,
+		opts?: {
+			recovery?: {
+				number: number;
+				path: string;
+				branch: string;
+				base: string;
+				setupDisposition: "handled" | "waived";
+			};
+		},
+	): Promise<Mission>;
 	acquireWriter(m: Mission, w: Workspace, a: AgentId): Promise<LeaseOutcome>;
 	releaseWriter(workspaceId: WorkspaceId, a: AgentId): Promise<Array<{ key: string; promoted?: AgentId }>>;
 	refreshIntegration(mission: Mission): Promise<Mission>;
@@ -47,7 +76,7 @@ async function rootFor(workspace: Workspace): Promise<string> {
 
 export function createWorktreeService(deps: WorktreeServiceDeps): WorktreeService {
 	return {
-		async prepare(mission, workspace) {
+		async prepare(mission, workspace, opts) {
 			if (workspace.kind !== "git") {
 				return mission;
 			}
@@ -58,12 +87,93 @@ export function createWorktreeService(deps: WorktreeServiceDeps): WorktreeServic
 				}
 			}
 			const repoRoot = await rootFor(workspace);
-			const worktree = await deps.driver.create({
+			const input = {
 				repoRoot,
 				number: mission.number,
 				slug: slugify(mission.name),
 				base: mission.worktree?.base,
-			});
+			};
+			if (opts?.recovery !== undefined) {
+				const recovery = opts.recovery;
+				const diagnostic = await readSetupDiagnostic(deps.netaDir, workspace.id, mission.number);
+				if (
+					diagnostic !== undefined &&
+					(diagnostic.name !== mission.name ||
+						diagnostic.objective !== mission.objective ||
+						diagnostic.access !== mission.access ||
+						diagnostic.repoRoot !== repoRoot ||
+						diagnostic.branch !== recovery.branch ||
+						diagnostic.base !== recovery.base)
+				) {
+					throw new Error(
+						`worktree recovery details do not match the recorded setup failure for mission #${mission.number}`,
+					);
+				}
+				if (
+					diagnostic?.partialWorktree !== undefined &&
+					(await realpath(diagnostic.partialWorktree.path)) !== (await realpath(recovery.path))
+				) {
+					throw new Error(
+						`worktree recovery path is not the recorded canonical partial worktree for mission #${mission.number}`,
+					);
+				}
+				const existing = await deps.driver.findExisting(input, {
+					provider: "worktrunk",
+					path: recovery.path,
+					branch: recovery.branch,
+					base: recovery.base,
+				});
+				if (existing === undefined) {
+					throw new Error(
+						`recorded setup failure for mission #${mission.number} has no matching existing worktree`,
+					);
+				}
+				const prepared: Mission = {
+					...mission,
+					worktree: existing,
+					worktreeRecovery: { setupDisposition: recovery.setupDisposition, at: deps.now() },
+				};
+				await deps.saveMission(prepared);
+				return prepared;
+			}
+			let worktree: Worktree;
+			try {
+				worktree = await deps.driver.create(input);
+			} catch (error) {
+				let partialWorktree: Worktree | undefined;
+				try {
+					partialWorktree = await deps.driver.findExisting(input);
+				} catch {
+					// Discovery must never replace the original Worktrunk failure.
+				}
+				const evidence = {
+					workspaceId: workspace.id,
+					number: mission.number,
+					name: mission.name,
+					objective: mission.objective,
+					access: mission.access,
+					repoRoot,
+					branch: partialWorktree?.branch ?? `mission/${mission.number}-${slugify(mission.name)}`,
+					base:
+						partialWorktree?.base ??
+						input.base ??
+						(await deps.driver.defaultBase(repoRoot).catch(() => "unknown")),
+					at: deps.now(),
+					partialWorktree,
+					error: error instanceof Error ? error : new Error(String(error)),
+				};
+				let diagnostic: WorktreeSetupDiagnostic;
+				try {
+					diagnostic = await writeSetupDiagnostic(deps.netaDir, evidence);
+				} catch (persistenceError) {
+					throw new WorktreeSetupError(
+						buildSetupDiagnostic(evidence),
+						deps.netaDir,
+						safeExcerpt(String(persistenceError)),
+					);
+				}
+				throw new WorktreeSetupError(diagnostic, deps.netaDir);
+			}
 			const prepared = { ...mission, worktree };
 			await deps.saveMission(prepared);
 			return prepared;
@@ -119,3 +229,4 @@ export * from "./driver.ts";
 export * from "./integration.ts";
 export * from "./leases.ts";
 export * from "./naming.ts";
+export * from "./setup-diagnostics.ts";

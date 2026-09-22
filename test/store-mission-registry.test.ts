@@ -46,11 +46,19 @@ describe("mission registry", () => {
 		const registry = openMissionRegistry();
 		const number = await registry.allocateNumber(ws);
 		expect(number).toBe(1);
-		await registry.create(mission(ws, number));
+		expect(await registry.isAllocated(ws, number)).toBe(true);
+		expect(await registry.isAllocated(ws, number + 1)).toBe(false);
+		const recovered = {
+			...mission(ws, number),
+			worktreeRecovery: { setupDisposition: "waived" as const, at: "2026-09-03T17:00:00.000Z" },
+		};
+		await registry.create(recovered);
 		const reopened = openMissionRegistry();
 		const back = await reopened.byNumber(ws, 1);
 		expect(back?.number).toBe(1);
 		expect(back?.state).toBe("running");
+		expect(back?.worktreeRecovery).toEqual(recovered.worktreeRecovery);
+		expect(await reopened.isAllocated(ws, number)).toBe(false);
 	});
 
 	test("allocateNumber gives 1, 2, 3 across a reopen and 100 distinct numbers", async () => {

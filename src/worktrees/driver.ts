@@ -3,6 +3,7 @@
 // (kept for the flag mapping). Removal pre-checks run before shelling out so
 // a check never destroys anything.
 import { realpath, stat } from "node:fs/promises";
+import { isAbsolute, resolve } from "node:path";
 import type { Worktree } from "../core/types.ts";
 import { isIntegrated, runGit } from "./integration.ts";
 import { missionBranch } from "./naming.ts";
@@ -42,6 +43,7 @@ export type RemoveResult =
 
 export interface WorktreeDriver {
 	create(input: CreateInput): Promise<Worktree>;
+	findExisting(input: CreateInput, expected?: Worktree): Promise<Worktree | undefined>;
 	remove(input: RemoveInput): Promise<RemoveResult>;
 	list(repoRoot: string): Promise<WorktreeEntry[]>;
 	verify(worktree: Worktree): Promise<{ ok: boolean; reason?: string }>;
@@ -127,6 +129,39 @@ export class WorktrunkDriver implements WorktreeDriver {
 			throw new Error(`wt switch --create is missing path or branch for ${branch}`);
 		}
 		return { provider: "worktrunk", path, branch: returnedBranch, base };
+	}
+
+	async findExisting(input: CreateInput, expected?: Worktree): Promise<Worktree | undefined> {
+		const branch = missionBranch(input.number, input.slug);
+		const base = input.base ?? (await this.defaultBase(input.repoRoot));
+		const entry = (await this.list(input.repoRoot)).find((candidate) => candidate.branch === branch);
+		if (entry === undefined) {
+			return undefined;
+		}
+		const worktree: Worktree = { provider: "worktrunk", path: entry.path, branch, base };
+		if (
+			expected !== undefined &&
+			(expected.branch !== worktree.branch ||
+				expected.base !== worktree.base ||
+				(await realpath(expected.path)) !== (await realpath(worktree.path)))
+		) {
+			throw new Error("existing worktree identity does not match the requested recovery path, branch, and base");
+		}
+		const commonDir = async (cwd: string): Promise<string | undefined> => {
+			const result = await runGit(["rev-parse", "--git-common-dir"], cwd);
+			if (result.code !== 0) return undefined;
+			const path = result.stdout.trim();
+			return realpath(isAbsolute(path) ? path : resolve(cwd, path));
+		};
+		const [repoGitDir, worktreeGitDir] = await Promise.all([commonDir(input.repoRoot), commonDir(worktree.path)]);
+		if (repoGitDir === undefined || worktreeGitDir === undefined || repoGitDir !== worktreeGitDir) {
+			throw new Error(`existing worktree is not part of the expected repository: ${worktree.path}`);
+		}
+		const verified = await this.verify(worktree);
+		if (!verified.ok) {
+			throw new Error(verified.reason ?? `existing worktree could not be verified: ${worktree.path}`);
+		}
+		return worktree;
 	}
 
 	async list(repoRoot: string): Promise<WorktreeEntry[]> {

@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { realpathSync } from "node:fs";
+import { mkdir, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { WorktrunkDriver } from "../src/worktrees/driver.ts";
+import { runGit } from "../src/worktrees/integration.ts";
 import { runWt, runWtJson, WtError, wtAvailable, wtSearchPath } from "../src/worktrees/wt.ts";
 import { fakeWtEnv, makeRepo } from "./helpers/git-repo.ts";
 
@@ -33,6 +36,33 @@ afterEach(async () => {
 });
 
 describe("wt process runner", () => {
+	test("real Worktrunk pre-start failure retains its worktree and both output streams", async () => {
+		savedWtBin = process.env.NETA_WT_BIN;
+		delete process.env.NETA_WT_BIN;
+		const repo = await makeRepo();
+		cleanups.push(repo.cleanup);
+		await mkdir(join(repo.root, ".config"));
+		await writeFile(
+			join(repo.root, ".config", "wt.toml"),
+			'[pre-start]\nsetup = "echo fixture-stdout; echo fixture-stderr >&2; exit 23"\n',
+		);
+		expect((await runGit(["add", ".config/wt.toml"], repo.root)).code).toBe(0);
+		expect((await runGit(["commit", "-m", "fixture hook"], repo.root)).code).toBe(0);
+		const driver = new WorktrunkDriver();
+		const input = { repoRoot: repo.root, number: 93, slug: "partial-hook" };
+		const error = await driver.create(input).catch((failure: unknown) => failure);
+		expect(error).toBeInstanceOf(WtError);
+		if (!(error instanceof WtError)) throw new Error("expected Worktrunk failure");
+		expect(error.code).toBe(23);
+		expect(error.stdout + error.stderr).toContain("fixture-stdout");
+		expect(error.stdout + error.stderr).toContain("fixture-stderr");
+		const partial = await driver.findExisting(input);
+		expect(partial).toBeDefined();
+		if (partial) {
+			cleanups.push(() => rm(partial.path, { recursive: true, force: true }));
+			expect(await driver.findExisting(input, partial)).toEqual(partial);
+		}
+	});
 	test("Finder PATH is augmented with Homebrew and per-user install locations", () => {
 		expect(wtSearchPath("/usr/bin:/bin", "/Users/example").split(":")).toEqual(
 			expect.arrayContaining(["/opt/homebrew/bin", "/usr/local/bin", "/Users/example/.local/bin"]),
