@@ -176,6 +176,13 @@ if (command === "switch" && rest[0] === "--create") {
 	process.stdout.write(
 		`${JSON.stringify({ action: "created", branch, path: sibling, created_branch: true, base_branch: base })}\n`,
 	);
+	// A disposable pre-start hook simulation for setup recovery tests. The
+	// worktree and branch intentionally already exist when this fails.
+	if (process.env.FAKE_WT_POST_START_FAIL === "1") {
+		process.stdout.write("fake setup hook output: preparing local state\n");
+		process.stderr.write("fake setup hook failed: intentional fixture failure\n");
+		process.exit(1);
+	}
 	process.exit(0);
 }
 

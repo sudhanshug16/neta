@@ -930,7 +930,10 @@ export function toolMount(o: ToolMountOptions): {
 								},
 						response,
 					),
-		numbers: { allocateNumber: (workspaceId) => o.real.missions.allocateNumber(workspaceId) },
+		numbers: {
+			allocateNumber: (workspaceId) => o.real.missions.allocateNumber(workspaceId),
+			isAllocated: (workspaceId, number) => o.real.missions.isAllocated(workspaceId, number),
+		},
 		missions,
 		// Against the workspace root, never `process.cwd()`: the Node is
 		// detached from wherever it was started, and a skill lives in

@@ -51,6 +51,15 @@ export interface MissionParams {
 	lead: "self" | LeadSpec;
 	agents?: AgentSpec[];
 	continues?: MissionRef;
+	// Explicitly adopt a partial Worktrunk creation recorded for this number.
+	// Normal creation never searches for or reuses existing worktrees.
+	recoverWorktree?: {
+		number: number;
+		path: string;
+		branch: string;
+		base: string;
+		setupDisposition: "handled" | "waived";
+	};
 }
 
 export interface AgentParams {
@@ -272,6 +281,23 @@ export const TOOLS: readonly ToolDef[] = [
 				lead: { oneOf: [{ const: "self" }, LEAD_SPEC] },
 				agents: { type: "array", maxItems: 8, items: AGENT_SPEC },
 				continues: MISSION_REF,
+				recoverWorktree: {
+					type: "object",
+					additionalProperties: false,
+					required: ["number", "path", "branch", "base", "setupDisposition"],
+					properties: {
+						number: { type: "integer", minimum: 1 },
+						path: { type: "string", minLength: 1 },
+						branch: { type: "string", minLength: 1 },
+						base: { type: "string", minLength: 1 },
+						setupDisposition: {
+							type: "string",
+							enum: ["handled", "waived"],
+							description:
+								"Explicit operator confirmation. Recovery adopts an existing worktree, skips all setup hooks, and never claims setup succeeded.",
+						},
+					},
+				},
 			},
 		},
 		actors: ["leader"],

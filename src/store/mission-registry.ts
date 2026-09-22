@@ -31,6 +31,7 @@ export interface RegistrySnapshot {
 export interface MissionRegistry {
 	load(workspaceId: WorkspaceId): Promise<void>;
 	allocateNumber(workspaceId: WorkspaceId): Promise<number>;
+	isAllocated(workspaceId: WorkspaceId, number: number): Promise<boolean>;
 	create(mission: Mission): Promise<Mission>;
 	update(mission: Mission): Promise<Mission>;
 	get(workspaceId: WorkspaceId, id: MissionId): Promise<Mission | undefined>;
@@ -125,6 +126,13 @@ export function openMissionRegistry(): MissionRegistry {
 				await writeFileAtomic(p.counter(workspaceId), `${nextNumber(next)}\n`);
 				return next;
 			});
+		},
+
+		isAllocated: async (workspaceId, number) => {
+			const state = await ensureLoaded(workspaceId);
+			const raw = await readText(paths().counter(workspaceId));
+			const next = raw === undefined ? nextNumber(state.index.maxNumber()) : Number.parseInt(raw, 10);
+			return Number.isInteger(next) && number >= 1 && number < next && state.index.byNumber(number) === undefined;
 		},
 
 		create: async (mission) => {

@@ -60,6 +60,7 @@ function fixture(remove?: (input: RemoveInput) => Promise<RemoveResult>): Fixtur
 	const leases = new LeaseManager(memoryStore());
 	const driver: WorktreeDriver = {
 		create: () => Promise.reject(new Error("unused")),
+		findExisting: () => Promise.reject(new Error("unused")),
 		remove: (input) => {
 			removes.push(input);
 			return remove === undefined

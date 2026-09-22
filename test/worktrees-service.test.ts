@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
-import { rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ulid } from "../src/core/ids.ts";
@@ -9,6 +9,8 @@ import { WorktrunkDriver } from "../src/worktrees/driver.ts";
 import { createWorktreeService, type WorktreeServiceDeps } from "../src/worktrees/index.ts";
 import { runGit } from "../src/worktrees/integration.ts";
 import { LeaseManager, type LeaseState } from "../src/worktrees/leases.ts";
+import { readSetupDiagnostic, WorktreeSetupError } from "../src/worktrees/setup-diagnostics.ts";
+import { WtError } from "../src/worktrees/wt.ts";
 import { fakeWtEnv, makeRepo } from "./helpers/git-repo.ts";
 
 let savedWtBin: string | undefined;
@@ -98,6 +100,91 @@ describe("worktree service", () => {
 			const folder = await service.prepare(mission(), workspace("folder", repo.root));
 			expect(folder.worktree).toBeUndefined();
 			expect(f.saved).toHaveLength(1);
+		} finally {
+			await repo.cleanup();
+		}
+	});
+
+	test("records a failed fake setup hook and explicitly recovers its one matching worktree", async () => {
+		const repo = await makeRepo();
+		const netaDir = await mkdtemp(join(tmpdir(), "neta-worktree-diagnostic-"));
+		const unrelated = `${repo.root}.unrelated`;
+		await writeFile(unrelated, "leave this alone\n");
+		process.env.FAKE_WT_POST_START_FAIL = "1";
+		try {
+			const f = fixture();
+			f.deps.netaDir = netaDir;
+			const service = createWorktreeService(f.deps);
+			const failed = mission({ number: 31 });
+			await expect(service.prepare(failed, workspace("git", repo.root))).rejects.toBeInstanceOf(WorktreeSetupError);
+			const diagnostic = await readSetupDiagnostic(netaDir, "w", 31);
+			expect(diagnostic).toMatchObject({
+				exitCode: 1,
+				partialWorktree: { branch: "mission/31-lens-port" },
+			});
+			expect(diagnostic?.stdout).toContain("fake setup hook output");
+			expect(diagnostic?.stderr).toContain("fake setup hook failed");
+			const partial = diagnostic?.partialWorktree;
+			if (partial === undefined) throw new Error("missing partial worktree");
+			expect((await f.deps.driver.verify(partial)).ok).toBe(true);
+
+			const recovered = await service.prepare(failed, workspace("git", repo.root), {
+				recovery: {
+					number: 31,
+					path: partial.path,
+					branch: partial.branch,
+					base: partial.base,
+					setupDisposition: "handled",
+				},
+			});
+			expect(recovered.worktree).toEqual(partial);
+			expect(f.saved[0]?.worktreeRecovery).toEqual({ setupDisposition: "handled", at: NOW });
+			expect((await f.deps.driver.list(repo.root)).filter((entry) => entry.branch === partial.branch)).toHaveLength(
+				1,
+			);
+			expect(await readFileSync(unrelated, "utf8")).toBe("leave this alone\n");
+		} finally {
+			delete process.env.FAKE_WT_POST_START_FAIL;
+			await rm(unrelated, { force: true });
+			await rm(netaDir, { recursive: true, force: true });
+			await repo.cleanup();
+		}
+	});
+
+	test("recovery disposition is saved only with successful mission registration", async () => {
+		const repo = await makeRepo();
+		const netaDir = await mkdtemp(join(tmpdir(), "neta-recovery-registration-"));
+		try {
+			const f = fixture();
+			f.deps.netaDir = netaDir;
+			const partial = await f.deps.driver.create({ repoRoot: repo.root, number: 1, slug: "lens-port" });
+			f.deps.saveMission = async () => {
+				throw new Error("registration unavailable");
+			};
+			await expect(
+				createWorktreeService(f.deps).prepare(mission(), workspace("git", repo.root), {
+					recovery: { number: 1, ...partial, setupDisposition: "waived" },
+				}),
+			).rejects.toThrow("registration unavailable");
+			expect(f.saved).toHaveLength(0);
+			expect(await readSetupDiagnostic(netaDir, "w", 1)).toBeUndefined();
+		} finally {
+			await rm(netaDir, { recursive: true, force: true });
+			await repo.cleanup();
+		}
+	});
+
+	test("diagnostic persistence failure preserves the original Worktrunk error", async () => {
+		const repo = await makeRepo();
+		try {
+			const f = fixture();
+			f.deps.netaDir = join(repo.root, "README");
+			f.deps.driver.create = async () => {
+				throw new WtError(["switch"], { stdout: "", stderr: "original setup failure", code: 7 });
+			};
+			await expect(createWorktreeService(f.deps).prepare(mission(), workspace("git", repo.root))).rejects.toThrow(
+				"original setup failure",
+			);
 		} finally {
 			await repo.cleanup();
 		}

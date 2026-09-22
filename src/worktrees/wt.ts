@@ -20,6 +20,7 @@ export interface WtOptions {
 export class WtError extends Error {
 	readonly argv: readonly string[];
 	readonly code: number | undefined;
+	readonly stdout: string;
 	readonly stderr: string;
 
 	constructor(argv: readonly string[], run: { stdout: string; stderr: string; code: number | undefined }) {
@@ -29,6 +30,7 @@ export class WtError extends Error {
 		this.name = "WtError";
 		this.argv = argv;
 		this.code = run.code;
+		this.stdout = run.stdout;
 		this.stderr = run.stderr;
 	}
 }
@@ -45,6 +47,17 @@ export function wtBinary(): string {
 }
 
 const DEFAULT_TIMEOUT_MS = 120_000;
+const MAX_CAPTURE_BYTES = 64 * 1024;
+
+function appendCaptured(current: string, chunk: string, limit = MAX_CAPTURE_BYTES): string {
+	const combined = current + chunk;
+	if (Buffer.byteLength(combined) <= limit) return combined;
+	const marker = "\n[output truncated]\n";
+	const headBytes = Math.floor((limit - marker.length) / 2);
+	const tailBytes = limit - marker.length - headBytes;
+	const bytes = Buffer.from(combined, "utf8");
+	return `${bytes.subarray(0, headBytes).toString("utf8")}${marker}${bytes.subarray(-tailBytes).toString("utf8")}`;
+}
 
 function baseEnv(): Record<string, string> {
 	return {
@@ -84,10 +97,16 @@ export function runWt(argv: readonly string[], o: WtOptions): Promise<WtRun> {
 		let stdout = "";
 		let stderr = "";
 		child.stdout?.on("data", (chunk: Buffer) => {
-			stdout += chunk.toString("utf8");
+			// Lists may describe hundreds of worktrees; do not apply the small
+			// hook-output budget to their structured JSON response.
+			stdout = appendCaptured(
+				stdout,
+				chunk.toString("utf8"),
+				argv[0] === "list" ? 8 * 1024 * 1024 : MAX_CAPTURE_BYTES,
+			);
 		});
 		child.stderr?.on("data", (chunk: Buffer) => {
-			stderr += chunk.toString("utf8");
+			stderr = appendCaptured(stderr, chunk.toString("utf8"));
 		});
 		child.on("error", (error) => {
 			const missing = (error as NodeJS.ErrnoException).code === "ENOENT";

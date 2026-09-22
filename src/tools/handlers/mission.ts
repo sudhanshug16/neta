@@ -17,6 +17,7 @@ import type {
 	WorkspaceId,
 } from "../../core/types.ts";
 import type { Effort, RoutingDecision } from "../../routing/types.ts";
+import { WorktreeSetupError } from "../../worktrees/setup-diagnostics.ts";
 import { resolveMission } from "../mission-reference.ts";
 import type { ToolContext, ToolDeps, ToolHandlers, ToolResult } from "../router.ts";
 import type { AgentParams, AgentSpec, LeadSpec, MissionParams } from "../schemas.ts";
@@ -40,7 +41,10 @@ export interface SessionLaunch {
 }
 
 export interface MissionPorts {
-	numbers: { allocateNumber(workspaceId: WorkspaceId): Promise<number> };
+	numbers: {
+		allocateNumber(workspaceId: WorkspaceId): Promise<number>;
+		isAllocated?(workspaceId: WorkspaceId, number: number): Promise<boolean>;
+	};
 	missions: { save(mission: Mission): Promise<void> };
 	sessions: {
 		pi?: boolean;
@@ -66,7 +70,13 @@ export interface MissionPorts {
 		close(sessionId: SessionId): Promise<void>;
 		failed(agent: Agent): Promise<void>;
 	};
-	worktrees: { prepare(mission: Mission, workspace: Workspace): Promise<Mission> };
+	worktrees: {
+		prepare(
+			mission: Mission,
+			workspace: Workspace,
+			opts?: { recovery?: NonNullable<MissionParams["recoverWorktree"]> },
+		): Promise<Mission>;
+	};
 	// The names resolve under the workspace root (`<root>/.neta/skills`, then
 	// `~/.neta/skills`), so the workspace travels with the request rather than
 	// the port guessing at a working directory.
@@ -225,7 +235,7 @@ async function announceSpawn(ctx: MissionToolContext, agent: Agent): Promise<voi
 	});
 }
 
-async function createMission(ctx: MissionToolContext, params: MissionParams): Promise<ToolResult> {
+async function createMissionUnlocked(ctx: MissionToolContext, params: MissionParams): Promise<ToolResult> {
 	if (ctx.actor.kind !== "leader") {
 		return { ok: false, code: "notAuthorised", message: "only the leader starts missions" };
 	}
@@ -233,6 +243,8 @@ async function createMission(ctx: MissionToolContext, params: MissionParams): Pr
 	if (workspace === undefined) {
 		return notFound(`no such workspace: ${ctx.actor.workspaceId}`);
 	}
+	if (params.recoverWorktree !== undefined && workspace.kind !== "git")
+		return refused("worktree recovery is available only for Git workspaces");
 	if (params.continues !== undefined) {
 		const prev = resolveMission(ctx, params.continues);
 		if (prev === undefined || prev.workspaceId !== workspace.id) {
@@ -289,7 +301,16 @@ async function createMission(ctx: MissionToolContext, params: MissionParams): Pr
 			}
 		}
 	}
-	const number = await ctx.deps.numbers.allocateNumber(workspace.id);
+	if (params.recoverWorktree !== undefined && resolveMission(ctx, params.recoverWorktree.number) !== undefined) {
+		return refused(`mission #${params.recoverWorktree.number} already exists and cannot be recovered`);
+	}
+	if (
+		params.recoverWorktree !== undefined &&
+		(ctx.deps.numbers.isAllocated === undefined ||
+			!(await ctx.deps.numbers.isAllocated(workspace.id, params.recoverWorktree.number)))
+	)
+		return refused(`mission #${params.recoverWorktree.number} is not an unused historical mission number`);
+	const number = params.recoverWorktree?.number ?? (await ctx.deps.numbers.allocateNumber(workspace.id));
 	const createdAt = nowIso();
 	let mission: Mission = {
 		id: ulid(),
@@ -307,7 +328,33 @@ async function createMission(ctx: MissionToolContext, params: MissionParams): Pr
 		continuesMissionId: params.continues === undefined ? undefined : resolveMission(ctx, params.continues)?.id,
 	};
 	if (workspace.kind === "git") {
-		mission = await ctx.deps.worktrees.prepare(mission, workspace);
+		try {
+			mission = await ctx.deps.worktrees.prepare(mission, workspace, { recovery: params.recoverWorktree });
+		} catch (error) {
+			if (error instanceof WorktreeSetupError) {
+				const { diagnostic } = error;
+				return {
+					ok: false,
+					code: "setupFailed",
+					message: JSON.stringify({
+						kind: "worktreeSetup",
+						number: diagnostic.number,
+						branch: diagnostic.branch,
+						partialWorktree: diagnostic.partialWorktree?.path,
+						exitCode: diagnostic.exitCode,
+						diagnostic: error.diagnosticPath,
+						persistenceError: error.persistenceError,
+						stdout: diagnostic.stdout,
+						stderr: diagnostic.stderr,
+						missionRegistered: false,
+						agentsLaunched: false,
+					}),
+				};
+			}
+			if (params.recoverWorktree !== undefined)
+				return refused(error instanceof Error ? error.message : "worktree recovery failed");
+			throw error;
+		}
 	}
 	// The mission exists before any agent receives its first prompt, so that
 	// its first tool call can resolve both the actor and its owning mission.
@@ -496,6 +543,24 @@ async function createAgentUnlocked(ctx: MissionToolContext, params: AgentParams)
 }
 
 const agentMutations = new Map<string, Promise<void>>();
+const missionMutations = new Map<string, Promise<void>>();
+async function createMission(ctx: MissionToolContext, params: MissionParams): Promise<ToolResult> {
+	const key = ctx.actor.workspaceId;
+	const previous = missionMutations.get(key) ?? Promise.resolve();
+	let release = (): void => undefined;
+	const current = new Promise<void>((done) => {
+		release = done;
+	});
+	const tail = previous.then(() => current);
+	missionMutations.set(key, tail);
+	await previous;
+	try {
+		return await createMissionUnlocked(ctx, params);
+	} finally {
+		release();
+		if (missionMutations.get(key) === tail) missionMutations.delete(key);
+	}
+}
 async function createAgent(ctx: MissionToolContext, params: AgentParams): Promise<ToolResult> {
 	const key = resolveMission(ctx, params.missionId)?.id ?? ctx.actor.workspaceId;
 	const previous = agentMutations.get(key) ?? Promise.resolve();
