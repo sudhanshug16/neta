@@ -5746,7 +5746,7 @@ index 0000000..1c94b74
 +}
 diff --git a/packages/tui/src/neta/shell.tsx b/packages/tui/src/neta/shell.tsx
 new file mode 100644
-index 0000000..a551fce
+index 0000000..76bf896
 --- /dev/null
 +++ b/packages/tui/src/neta/shell.tsx
 @@ -0,0 +1,814 @@
@@ -5817,7 +5817,7 @@ index 0000000..a551fce
 +  const currentOwner = createMemo(() => archiveActor()?.id ?? state.view.owner)
 +  const viewport = createMemo(() => ({
 +    width: Math.max(1, dimensions().width - sidebarWidth() - 2),
-+    height: Math.max(1, dimensions().height - (startupNotice() ? 1 : 0)),
++    height: Math.max(1, dimensions().height - (startupNotice() ? 1 : 0) - (sidebarWidth() ? 0 : 1)),
 +  }))
 +  const workspace = createMemo(() => snapshot().workspaces.find((one) => one.id === state.view.workspaceId))
 +  const leader = createMemo(() => snapshot().leaders.find((one) => one.workspaceId === state.view.workspaceId))
@@ -7433,6 +7433,135 @@ index 0000000..1f6e558
 +  onCleanup(dimensions.release)
 +  return dimensions.read
 +}
+diff --git a/packages/tui/test/neta-archive-navigation.test.tsx b/packages/tui/test/neta-archive-navigation.test.tsx
+new file mode 100644
+index 0000000..fdcd5a1
+--- /dev/null
++++ b/packages/tui/test/neta-archive-navigation.test.tsx
+@@ -0,0 +1,123 @@
++import { expect, test } from "bun:test"
++import { Socket } from "node:net"
++import { testRender } from "@opentui/solid"
++import { NetaClient, type Agent, type Snapshot } from "@neta/client"
++import { NetaProvider } from "../src/neta/context"
++import { NetaShell } from "../src/neta/shell"
++import { ConfigProvider } from "../src/config"
++import { ClientProvider } from "../src/context/client"
++import { Keymap } from "../src/context/keymap"
++import { ThemeProvider } from "../src/context/theme"
++import { AttentionProvider } from "../src/context/attention"
++import { ExitProvider } from "../src/context/exit"
++import { DialogProvider } from "../src/ui/dialog"
++import { ToastProvider } from "../src/ui/toast"
++import { TestTuiContexts } from "./fixture/tui-environment"
++import { createTuiResolvedConfig } from "./fixture/tui-runtime"
++import { createApi, createEventStream, createFetch } from "./fixture/tui-client"
++
++test("closed mission navigation opens its saved conversation read-only", async () => {
++  const socket = new Socket()
++  const client = new NetaClient(socket)
++  const calls: string[] = []
++  const actor: Agent = {
++    id: "archived-agent",
++    missionId: "m1",
++    workspaceId: "w",
++    sessionId: "saved",
++    name: "Hazel",
++    provider: "opencode",
++    model: "fixture",
++    state: "archived",
++    task: "inspect",
++  }
++  const snapshot: Snapshot = {
++    machine: { id: "local", name: "Local" },
++    workspaces: [{ id: "w", name: "Test project", roots: [] }],
++    leaders: [{ workspaceId: "w", machineId: "local", name: "Mace", sessionId: "leader", provider: "opencode", model: "fixture", mode: "lead", state: "idle" }],
++    missions: [{ id: "m1", workspaceId: "w", number: 1, name: "Archived work", state: "closed", createdAt: "2026-09-01T12:00:00Z", disposition: "completed", agentIds: [actor.id], lead: { kind: "agent", agentId: actor.id } }],
++    agents: [],
++  }
++  client.request = async <T,>(method: string): Promise<T> => {
++    calls.push(method)
++    if (method === "missions.get") return { agents: [actor] } as T
++    if (method === "conversation.tail") return { blocks: [{ seq: 1, role: "agent", kind: "text", text: "Saved mission result" }], prevCursor: null } as T
++    if (method === "conversation.untail") return {} as T
++    throw new Error(`Unexpected operation: ${method}`)
++  }
++  const app = await testRender(
++    () => (
++      <TestTuiContexts>
++        <ConfigProvider config={createTuiResolvedConfig()}>
++          <ClientProvider api={createApi(createFetch(undefined, createEventStream()).fetch)}>
++            <Keymap.Provider>
++              <ThemeProvider mode="dark" defaultName="neta" source={{ discover: async () => ({}) }}>
++                <AttentionProvider><ExitProvider exit={() => {}}><ToastProvider><DialogProvider>
++                  <NetaProvider value={{ client, snapshot, view: { host: "local", workspaceId: "w", path: "/fixture", owner: "leader", tabs: ["leader"] }, sessionId: "leader", hosts: [], drafts: new Map(), send: async () => undefined, navigate: async () => {} }}>
++                    <NetaShell><text>Live chat</text></NetaShell>
++                  </NetaProvider>
++                </DialogProvider></ToastProvider></ExitProvider></AttentionProvider>
++              </ThemeProvider>
++            </Keymap.Provider>
++          </ClientProvider>
++        </ConfigProvider>
++      </TestTuiContexts>
++    ),
++    { width: 120, height: 40 },
++  )
++  const click = async (text: string) => {
++    const lines = app.captureCharFrame().split("\n")
++    const row = lines.findIndex((line) => line.includes(text))
++    const line = lines[row]
++    expect(line, `Visible row for ${text}`).toBeDefined()
++    if (!line) throw new Error(`Missing row: ${text}`)
++    await app.mockMouse.click(line.indexOf(text) + 1, row)
++  }
++  try {
++    app.renderer.start()
++    await app.waitForFrame((frame) => frame.includes("#1 Archived work"))
++    await click("#1 Archived work")
++    await app.waitForFrame((frame) => frame.includes("Hazel"))
++    await click("Hazel")
++    await app.waitForFrame((frame) => frame.includes("Saved mission result"))
++    expect(app.captureCharFrame()).toContain("input disabled")
++    expect(calls).toEqual(["missions.get", "conversation.tail"])
++  } finally {
++    app.renderer.destroy()
++    socket.destroy()
++  }
++  expect(calls).toEqual(["missions.get", "conversation.tail", "conversation.untail"])
++})
++
++test("state notifications refresh the spine from archived to active work", async () => {
++  const socket = new Socket()
++  const client = new NetaClient(socket)
++  const actor: Agent = { id: "active-agent", missionId: "m1", workspaceId: "w", sessionId: "active", name: "Rowan", provider: "opencode", model: "fixture", state: "running", task: "work" }
++  let snapshot: Snapshot = {
++    machine: { id: "local", name: "Local" }, workspaces: [{ id: "w", name: "Test project", roots: [] }],
++    leaders: [{ workspaceId: "w", machineId: "local", name: "Mace", sessionId: "leader", provider: "opencode", model: "fixture", mode: "lead", state: "idle" }],
++    missions: [{ id: "m1", workspaceId: "w", number: 1, name: "Follow-up", state: "closed", createdAt: "2026-09-01T12:00:00Z", disposition: "completed", agentIds: [] }], agents: [],
++  }
++  client.request = async <T,>(method: string): Promise<T> => {
++    if (method === "snapshot") return snapshot as T
++    throw new Error(`Unexpected operation: ${method}`)
++  }
++  const app = await testRender(
++    () => (
++      <TestTuiContexts><ConfigProvider config={createTuiResolvedConfig()}><ClientProvider api={createApi(createFetch(undefined, createEventStream()).fetch)}><Keymap.Provider><ThemeProvider mode="dark" defaultName="neta" source={{ discover: async () => ({}) }}><AttentionProvider><ExitProvider exit={() => {}}><ToastProvider><DialogProvider>
++        <NetaProvider value={{ client, snapshot, view: { host: "local", workspaceId: "w", path: "/fixture", owner: "leader", tabs: ["leader"] }, sessionId: "leader", hosts: [], drafts: new Map(), send: async () => undefined, navigate: async () => {} }}><NetaShell><text>Live chat</text></NetaShell></NetaProvider>
++      </DialogProvider></ToastProvider></ExitProvider></AttentionProvider></ThemeProvider></Keymap.Provider></ClientProvider></ConfigProvider></TestTuiContexts>
++    ),
++    { width: 120, height: 40 },
++  )
++  try {
++    app.renderer.start()
++    await app.waitForFrame((frame) => frame.includes("ARCHIVED"))
++    snapshot = { ...snapshot, missions: [{ ...snapshot.missions[0], state: "running", agentIds: [actor.id] }], agents: [actor] }
++    socket.emit("data", `${JSON.stringify({ method: "state", params: {} })}\n`)
++    await app.waitForFrame((frame) => frame.includes("RUNNING") && frame.includes("Rowan"))
++  } finally {
++    app.renderer.destroy()
++    socket.destroy()
++  }
++})
 diff --git a/packages/tui/test/neta-archive.test.tsx b/packages/tui/test/neta-archive.test.tsx
 new file mode 100644
 index 0000000..b8dc7ed
@@ -7681,10 +7810,10 @@ index 0000000..9fab514
 +})
 diff --git a/packages/tui/test/neta-recent-missions.test.tsx b/packages/tui/test/neta-recent-missions.test.tsx
 new file mode 100644
-index 0000000..944a4e6
+index 0000000..4382026
 --- /dev/null
 +++ b/packages/tui/test/neta-recent-missions.test.tsx
-@@ -0,0 +1,189 @@
+@@ -0,0 +1,199 @@
 +import { expect, test } from "bun:test"
 +import { Socket } from "node:net"
 +import { testRender } from "@opentui/solid"
@@ -7702,6 +7831,12 @@ index 0000000..944a4e6
 +import { TestTuiContexts } from "./fixture/tui-environment"
 +import { createTuiResolvedConfig } from "./fixture/tui-runtime"
 +import { createApi, createEventStream, createFetch } from "./fixture/tui-client"
++import { useTerminalDimensions } from "../src/ui/terminal-dimensions"
++
++function ViewportProbe() {
++  const dimensions = useTerminalDimensions()
++  return <text>{dimensions().width}×{dimensions().height}</text>
++}
 +
 +for (const width of [80, 100, 160]) {
 +  test(`the spine keeps pinned agents visible and navigation reachable at ${width} columns`, async () => {
@@ -7721,7 +7856,7 @@ index 0000000..944a4e6
 +      task: "inspect",
 +      canSpawn: true,
 +    }
-+    let snapshot: Snapshot = {
++    const snapshot: Snapshot = {
 +      machine: { id: "local", name: "Local" },
 +      workspaces: [{ id: "w", name: "Test project", roots: [] }],
 +      leaders: [
@@ -7807,7 +7942,10 @@ index 0000000..944a4e6
 +                          }}
 +                        >
 +                          <NetaShell>
-+                            <text>Live chat</text>
++                            <box flexDirection="column">
++                              <text>Live chat</text>
++                              <ViewportProbe />
++                            </box>
 +                          </NetaShell>
 +                        </NetaProvider>
 +                      </DialogProvider>
@@ -7838,6 +7976,7 @@ index 0000000..944a4e6
 +      app.renderer.start()
 +      if (width < 95) {
 +        await app.waitForFrame((frame) => frame.includes("Help · actions"))
++        expect(app.captureCharFrame()).toContain("78×59")
 +        await click("Help · actions")
 +        await app.waitForFrame((frame) => frame.includes("Spine help"))
 +        expect(app.captureCharFrame()).toContain("Switch workspace")
