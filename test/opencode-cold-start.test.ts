@@ -154,7 +154,9 @@ test.skipIf(!available)(
 						throw new Error(`Reopen command exited before restoring the workspace:\n${reopened}`);
 					await Bun.sleep(100);
 				}
-				expect(reopened).toContain("[ project ▾  ^K ]");
+				expect(reopened).toContain("SPINE");
+				expect(reopened).not.toContain("[ Chat ]");
+				expect(reopened).not.toContain("[ Updates");
 				expect(reopened).toContain("Packaged fixture reply");
 				expect(
 					(await client.request<{ nativeOpenCodeRevision: number }>("runtime.capabilities"))
