@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { type AcpSession, startSession } from "../src/acp/session.ts";
+import type { Settings } from "../src/acp/settings.ts";
 import { ulid } from "../src/core/ids.ts";
 import { NAME_POOL } from "../src/core/names.ts";
 import type { Agent, EventKind, Leader, Mission, Workspace } from "../src/core/types.ts";
@@ -14,6 +16,7 @@ import {
 } from "../src/tools/handlers/mission.ts";
 import type { Actor } from "../src/tools/router.ts";
 import { createWorktreeService, LeaseManager, WorktrunkDriver } from "../src/worktrees/index.ts";
+import { runGit } from "../src/worktrees/integration.ts";
 import { WorktreeSetupError } from "../src/worktrees/setup-diagnostics.ts";
 import { fakeWtEnv, makeRepo } from "./helpers/git-repo.ts";
 
@@ -153,6 +156,92 @@ function ctx(f: Fixture, actor: Actor): MissionToolContext {
 }
 
 describe("neta_mission", () => {
+	test("real Worktrunk runs setup in the new worktree, launches the fake agent there, and blocks launch on setup failure", async () => {
+		const repo = await makeRepo();
+		const temp = await mkdtemp(join(tmpdir(), "neta-real-worktrunk-"));
+		const hook = join(temp, "setup-hook.sh");
+		const audit = join(temp, "setup-cwd.txt");
+		const sessions: AcpSession[] = [];
+		try {
+			await mkdir(join(repo.root, ".config"));
+			await writeFile(join(repo.root, ".config", "wt.toml"), `[pre-start]\nsetup = "sh ${hook}"\n`);
+			await writeFile(hook, `#!/bin/sh\nprintf '%s\\n' "$PWD" > "${audit}"\n`);
+			await chmod(hook, 0o755);
+			expect((await runGit(["add", ".config/wt.toml"], repo.root)).code).toBe(0);
+			expect((await runGit(["commit", "-m", "worktree setup fixture"], repo.root)).code).toBe(0);
+
+			const f = fixture("git");
+			const ws = f.store.getWorkspace("git-w");
+			if (ws === undefined) throw new Error("missing workspace");
+			ws.roots = [{ machineId: "m", path: repo.root }];
+			f.ports.worktrees = createWorktreeService({
+				driver: new WorktrunkDriver(),
+				netaDir: temp,
+				now: () => new Date(0).toISOString(),
+				leases: new LeaseManager({
+					read: async (workspaceId) => ({ workspaceId, leases: {} }),
+					write: async () => {},
+				}),
+				emit: () => {},
+				saveMission: f.ports.missions.save,
+				onMissionClosed: async () => {},
+			});
+			const settings: Settings = {
+				providers: {
+					fake: {
+						command: process.execPath,
+						args: [new URL("./fixtures/fake-acp-agent.mjs", import.meta.url).pathname],
+						resume: true,
+						defaultModel: "",
+					},
+				},
+				leader: { provider: "fake" },
+				forbiddenModels: [],
+			};
+			f.ports.sessions.launch = async (input) => {
+				const session = await startSession({
+					settings,
+					provider: "fake",
+					access: input.access,
+					cwd: input.worktreePath ?? repo.root,
+				});
+				sessions.push(session);
+				f.launches.push(input);
+				return { sessionId: session.sessionId };
+			};
+
+			const created = await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+				name: "setup cwd",
+				objective: "verify actual setup cwd",
+				access: "readOnly",
+				lead: { task: "launch fake ACP" },
+			});
+			expect(created.ok).toBe(true);
+			if (!created.ok) throw new Error("expected mission creation");
+			const worktree = created.data.worktree;
+			if (typeof worktree !== "string") throw new Error("expected worktree");
+			const setupCwd = (await Bun.file(audit).text()).trim();
+			expect(await realpath(setupCwd)).toBe(await realpath(worktree));
+			expect(f.launches[0]?.worktreePath).toBe(worktree);
+			expect(sessions[0]?.cwd).toBe(worktree);
+
+			await writeFile(hook, "#!/bin/sh\necho intentional setup failure >&2\nexit 23\n");
+			const failed = await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+				name: "setup failure",
+				objective: "do not launch fake ACP",
+				access: "readOnly",
+				lead: { task: "must not start" },
+			});
+			expect(failed).toMatchObject({ ok: false, code: "setupFailed" });
+			expect(f.launches).toHaveLength(1);
+			expect(sessions).toHaveLength(1);
+		} finally {
+			for (const session of sessions) await session.close();
+			await rm(temp, { recursive: true, force: true });
+			await repo.cleanup();
+		}
+	});
+
 	test("partial setup, persistence fallback, identity refusal and concurrent legacy recovery never replay hooks", async () => {
 		const repo = await makeRepo();
 		const temp = await mkdtemp(join(tmpdir(), "neta-handler-recovery-"));
