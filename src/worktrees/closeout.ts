@@ -12,6 +12,10 @@ export interface CloseMissionInput {
 	disposition: Disposition;
 	reason: string;
 	evidence?: string;
+	// The live workspace root is retained separately from a mission worktree.
+	// It permits evidence-only recovery when Worktrunk has already removed the
+	// recorded worktree before Neta could persist the closeout.
+	repositoryRoot?: string;
 }
 
 export type CloseOutcome = { ok: true; mission: Mission } | { ok: false; attention: string; mission: Mission };
@@ -44,8 +48,9 @@ export async function closeMission(i: CloseMissionInput, d: CloseoutDeps): Promi
 	}
 	try {
 		let mission = i.mission;
+		const worktreeAlreadyRemoved = await recordedWorktreeIsGone(i, d);
 		if (i.disposition === "merged") {
-			const confirmed = await confirmMerged(i, d);
+			const confirmed = await confirmMerged(i, d, worktreeAlreadyRemoved);
 			if (!confirmed.ok) {
 				return refuse(mission, confirmed.attention);
 			}
@@ -56,11 +61,11 @@ export async function closeMission(i: CloseMissionInput, d: CloseoutDeps): Promi
 		if (i.disposition === "completed" && mission.integration !== undefined) {
 			return refuse(mission, "integrated work must close as merged");
 		}
-		if (mission.worktree !== undefined) {
+		if (mission.worktree !== undefined && !worktreeAlreadyRemoved) {
 			// Any in-repo path anchors git and `wt`; only creation needs the
 			// true root, and closeout never creates.
 			const removed = await d.driver.remove({
-				repoRoot: mission.worktree.path,
+				repoRoot: i.repositoryRoot ?? mission.worktree.path,
 				path: mission.worktree.path,
 				branch: mission.worktree.branch,
 				base: mission.worktree.base,
@@ -70,6 +75,13 @@ export async function closeMission(i: CloseMissionInput, d: CloseoutDeps): Promi
 			if (!removed.ok) {
 				return refuse(mission, removed.reason);
 			}
+			mission = { ...mission, worktree: undefined };
+		}
+		if (mission.worktree !== undefined && worktreeAlreadyRemoved) {
+			// Worktrunk's current listing proves the recorded branch is no longer
+			// checked out. A merged recovery still requires the named commit to be
+			// confirmed on the repository base below; this is not a fabricated
+			// cleanup result.
 			mission = { ...mission, worktree: undefined };
 		}
 		const closed: Mission = {
@@ -94,9 +106,23 @@ export async function closeMission(i: CloseMissionInput, d: CloseoutDeps): Promi
 	}
 }
 
+async function recordedWorktreeIsGone(i: CloseMissionInput, d: CloseoutDeps): Promise<boolean> {
+	const worktree = i.mission.worktree;
+	if (worktree === undefined || i.repositoryRoot === undefined) return false;
+	try {
+		const entries = await d.driver.list(i.repositoryRoot);
+		return !entries.some((entry) => entry.branch === worktree.branch || entry.path === worktree.path);
+	} catch {
+		// The ordinary closeout path gives the driver a chance to report its
+		// concrete failure when the base checkout cannot be inspected.
+		return false;
+	}
+}
+
 async function confirmMerged(
 	i: CloseMissionInput,
 	d: CloseoutDeps,
+	worktreeAlreadyRemoved: boolean,
 ): Promise<{ ok: true; mission: Mission } | { ok: false; attention: string }> {
 	const mission = i.mission;
 	if (mission.integration !== undefined) {
@@ -117,8 +143,11 @@ async function confirmMerged(
 	let result: IntegrationResult;
 	try {
 		result = await d.isIntegrated({
-			repoRoot: mission.worktree.path,
-			branch: mission.worktree.branch,
+			repoRoot: worktreeAlreadyRemoved ? (i.repositoryRoot ?? mission.worktree.path) : mission.worktree.path,
+			// Once Worktrunk has removed the mission branch, the submitted commit
+			// itself is the only durable integration evidence. It must resolve and
+			// be an ancestor of the configured base; no branch is invented.
+			branch: worktreeAlreadyRemoved ? commit : mission.worktree.branch,
 			base: mission.worktree.base,
 			evidenceCommit: commit,
 		});
@@ -126,6 +155,12 @@ async function confirmMerged(
 		return { ok: false, attention: `could not confirm ${commit} against ${mission.worktree.base}` };
 	}
 	if (!result.merged) {
+		if (worktreeAlreadyRemoved) {
+			return {
+				ok: false,
+				attention: `could not confirm removed worktree evidence ${commit} against ${mission.worktree.base}`,
+			};
+		}
 		return {
 			ok: false,
 			attention: `branch ${mission.worktree.branch} is not merged into ${mission.worktree.base} by evidence ${commit}`,

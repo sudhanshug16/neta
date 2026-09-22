@@ -31,6 +31,7 @@ export interface CloseMissionInput {
 	disposition: Disposition;
 	reason: string;
 	evidence?: string;
+	repositoryRoot?: string;
 }
 
 export type CloseOutcome = { ok: true; mission: Mission } | { ok: false; attention: string; mission: Mission };

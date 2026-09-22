@@ -988,7 +988,11 @@ export function toolMount(o: ToolMountOptions): {
 				if ((await modes.snapshot(subject)).mode === "leadPlus") {
 					const agent = subject.kind === "lead" ? o.store.getAgent(subject.agentId) : undefined;
 					const sessionId = agent?.sessionId ?? leaderOf(input.mission.workspaceId).sessionId;
-					pendingCloses.set(sessionId, { input, subject, ...(agent === undefined ? {} : { agent }) });
+					pendingCloses.set(sessionId, {
+						input: { ...input, repositoryRoot: rootFor(input.mission.workspaceId) },
+						subject,
+						...(agent === undefined ? {} : { agent }),
+					});
 					if (o.acp.isTurnActive?.(sessionId) === true) {
 						return { ok: false, attention: "close scheduled after the active turn", mission: input.mission };
 					}
@@ -1003,7 +1007,7 @@ export function toolMount(o: ToolMountOptions): {
 						};
 					}
 				}
-				return worktrees.close(input);
+				return worktrees.close({ ...input, repositoryRoot: rootFor(input.mission.workspaceId) });
 			},
 		},
 		sessions: {
