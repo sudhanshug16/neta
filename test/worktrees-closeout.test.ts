@@ -206,6 +206,55 @@ describe("mission closeout", () => {
 		expect(f.removes).toHaveLength(0);
 	});
 
+	test("a removed worktree cannot close completed work without its clean-tree check", async () => {
+		const f = fixture({ list: async () => [] });
+		const start = mission({ provider: "worktrunk", path: "/removed", branch: "mission/1-lens", base: "main" });
+		const outcome = await closeMission(
+			{ mission: start, disposition: "completed", reason: "checked", repositoryRoot: "/repository-base" },
+			f.deps,
+		);
+		expect(outcome).toMatchObject({
+			ok: false,
+			attention:
+				"completed needs its recorded worktree; only merged closeout can recover confirmed evidence after cleanup",
+			mission: { state: "running", worktree: start.worktree },
+		});
+		expect(f.removes).toHaveLength(0);
+	});
+
+	test("a removed worktree requires fresh evidence even with recorded integration", async () => {
+		const f = fixture({ list: async () => [] });
+		const start = mission(
+			{ provider: "worktrunk", path: "/removed", branch: "mission/1-lens", base: "main" },
+			{ integration: { mergedAt: NOW, commit: "abcdef1", base: "main" } },
+		);
+		const missing = await closeMission(
+			{ mission: start, disposition: "merged", reason: "merged", repositoryRoot: "/repository-base" },
+			f.deps,
+		);
+		expect(missing).toMatchObject({
+			ok: false,
+			attention: "merged needs evidence naming a commit",
+			mission: { state: "running", worktree: start.worktree },
+		});
+		const unrelated = await closeMission(
+			{
+				mission: start,
+				disposition: "merged",
+				evidence: "1234567",
+				reason: "merged",
+				repositoryRoot: "/repository-base",
+			},
+			{ ...f.deps, isIntegrated: async () => ({ merged: false, base: "main" }) },
+		);
+		expect(unrelated).toMatchObject({
+			ok: false,
+			attention: "could not confirm removed worktree evidence 1234567 against main",
+			mission: { state: "running", worktree: start.worktree },
+		});
+		expect(f.removes).toHaveLength(0);
+	});
+
 	test("merged with a non-ancestor SHA, merged with neither, and abandoned with an empty reason each refuse", async () => {
 		const repo = await makeRepo();
 		try {

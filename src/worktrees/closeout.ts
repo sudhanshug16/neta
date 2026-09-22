@@ -48,7 +48,14 @@ export async function closeMission(i: CloseMissionInput, d: CloseoutDeps): Promi
 	}
 	try {
 		let mission = i.mission;
-		const worktreeAlreadyRemoved = await recordedWorktreeIsGone(i, d);
+		const recordedWorktreeGone = await recordedWorktreeIsGone(i, d);
+		if (recordedWorktreeGone && i.disposition !== "merged") {
+			return refuse(
+				mission,
+				`${i.disposition} needs its recorded worktree; only merged closeout can recover confirmed evidence after cleanup`,
+			);
+		}
+		const worktreeAlreadyRemoved = recordedWorktreeGone && i.disposition === "merged";
 		if (i.disposition === "merged") {
 			const confirmed = await confirmMerged(i, d, worktreeAlreadyRemoved);
 			if (!confirmed.ok) {
@@ -125,7 +132,11 @@ async function confirmMerged(
 	worktreeAlreadyRemoved: boolean,
 ): Promise<{ ok: true; mission: Mission } | { ok: false; attention: string }> {
 	const mission = i.mission;
-	if (mission.integration !== undefined) {
+	// A historical integration record is sufficient while the worktree is
+	// available for Worktrunk to recheck before removal. After external cleanup,
+	// require fresh, explicit evidence on the base: the old record alone cannot
+	// prove what was removed.
+	if (mission.integration !== undefined && !worktreeAlreadyRemoved) {
 		return { ok: true, mission };
 	}
 	// A folder workspace is not git: there is no ancestry to confirm, so the
