@@ -27,7 +27,10 @@ bun src/cli/main.ts tui
 reviewed source overlay in `vendor/opencode/integration.json`, verifies its
 hashes, and installs locked dependencies. Set `NETA_OPENCODE_DIR` for a different
 location. An existing checkout is checked, never reset or overwritten. Setup
-reports source drift so local edits cannot disappear during an update.
+reports source drift so local edits cannot disappear during an update. Normal
+source launches perform the same full pin check and refuse a drifted checkout
+before launch. Preserve local changes; create a fresh checkout with
+`NETA_OPENCODE_DIR=/path/to/clean-neta-opencode-v2 bun run setup:opencode`.
 
 Running `neta tui` starts a missing local Node, reuses a compatible one, and
 replaces an outdated local Node when its actors are idle. An open mission alone
