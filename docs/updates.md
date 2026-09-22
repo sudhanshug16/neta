@@ -33,7 +33,7 @@ History loads in native OpenCode pages. A `+` next to the unread count means
 older history could contain unread replies. **Load older updates** retrieves
 more; marking all read covers those older replies without fetching them.
 
-Implementation: `neta-opencode-v2/packages/tui/src/neta/updates*.ts*`, with small
+Implementation: `vendor/opencode/runtime/packages/tui/src/neta/updates*.ts*`, with small
 integration points in the native session route and composer. Fake-server tests
 cover formatting, scrolling, bulk read, new arrivals, failed sends, composer
 replies and persistence at 100 and 160 columns without real provider calls.
