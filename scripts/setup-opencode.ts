@@ -48,6 +48,7 @@ export async function ensureOpenCodeCheckout(setup: CheckoutSetup): Promise<void
 			await rename(backup, setup.fork);
 			throw promotionError;
 		}
+		console.log(`Preserved stale OpenCode runtime at ${backup}`);
 	}
 }
 
