@@ -68,7 +68,7 @@ the production client and preserve upstream license/provenance.
 If attachment requires replacing most of Toad's conversation behavior, its
 reuse advantage has failed the test. Only then compare the narrower cost of
 owning the chat composition on Textual or OpenTUI. Language alone is not a
-reason to retain Rust or choose a replacement.
+reason to retain a separate terminal client or choose a replacement.
 
 ## Sources
 

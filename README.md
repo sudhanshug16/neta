@@ -45,8 +45,9 @@ bun run check       # biome + tsc --noEmit
 bun run build       # dist/main.js — one file, targets Node
 ```
 
-The supported interactive client is the OpenCode/OpenTUI terminal. The native
-Swift/macOS app has been removed; it is no longer built, tested, or released.
+The supported interactive client is the OpenCode/OpenTUI terminal. Navigate its
+Neta conversations from the left spine; **Help · actions** contains workspace,
+machine, archive, delivery, and reset actions.
 See [model routing](docs/model-routing.md) for Jev or fixed effort-based models.
 
 To release, bump `version` in `package.json` and push to `main`. CI publishes

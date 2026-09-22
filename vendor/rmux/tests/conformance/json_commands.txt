@@ -1,6 +1,0 @@
-capabilities
-display-message
-list-clients
-list-panes
-list-sessions
-list-windows

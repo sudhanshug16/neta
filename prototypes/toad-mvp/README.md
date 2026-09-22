@@ -108,7 +108,7 @@ archive mutation rejection, export, and layout/composer visibility.
 
 Use **Ctrl-B, then M** (lowercase `m` also works), or click **Machines** in the
 spine. Existing connections are loaded from `$NETA_DIR/client-hosts.json`
-(default `~/.neta/client-hosts.json`), the same registry used by the Rust client.
+(default `~/.neta/client-hosts.json`).
 
 To add one, enter its name, SSH destination (such as `runner@noscrubsblr`), and
 remote Neta directory (default `~/.neta`), then choose **Save and connect**.

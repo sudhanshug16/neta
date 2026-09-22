@@ -136,10 +136,6 @@ describe("cli command table", () => {
 		expect(commandOf(["version"])).toEqual({ name: "version", args: [], flags: {} });
 	});
 
-	test("rmux", () => {
-		expect(commandOf(["rmux"])).toEqual({ name: "rmux", args: [], flags: {} });
-		expect(usageOf(["rmux", "extra"])).toContain("takes no arguments");
-	});
 });
 
 describe("cli durations", () => {

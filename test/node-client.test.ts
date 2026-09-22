@@ -185,7 +185,7 @@ async function installFakeNeta(script: string): Promise<void> {
 
 describe("autostart", () => {
 	// The fake sleeps 300 ms before it writes `node.json`, but the spawn
-	// itself is a whole process start: on a loaded machine (a Swift build in
+	// itself is a whole process start: on a loaded machine (a full build in
 	// the same checkout) 5 s was not enough and the connect timed out after
 	// the test had already been torn down. The wait is generous on purpose —
 	// a healthy machine still finishes in well under a second.

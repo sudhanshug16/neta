@@ -65,38 +65,22 @@ biome`, `@types/node`, `@types/bun` pinned exact; tsconfig strict,
 Tests: `test/smoke.test.ts` imports `src/index.ts`.
 Commit: `chore: scaffold v3 TypeScript package`
 
-### T0.4 Swift scaffold
-Goal: an empty macOS 26 app that builds and tests.
-Reads: `docs/plan/README.md`. Writes: `apps/macos/Package.swift`,
-`apps/macos/Sources/NetaDesktop/NetaDesktopApp.swift`,
-`apps/macos/Sources/NetaDesktop/ContentView.swift`,
-`apps/macos/Tests/NetaDesktopTests/SmokeTests.swift`,
-`apps/macos/Resources/Info.plist`, `apps/macos/README.md`.
-Contract: `swift-tools-version: 6.2`, `platforms: [.macOS(.v26)]`, one
-executable target `NetaDesktop`, one test target; `LSMinimumSystemVersion`
-26.0; bundle id `dev.neta.desktop`; window `.hiddenTitleBar`, default size
-1600×1000, min 1100×700, `.preferredColorScheme(.dark)`.
-Steps: write the files as contracted.
-Tests: one XCTest that instantiates the root view model.
-Commit: `chore: scaffold v3 macOS app`
-
 ### T0.5 CI
-Goal: both halves gated.
+Goal: Node and OpenCode gates run in CI.
 Reads: `.github/workflows/ci.yml` (current). Writes: `.github/workflows/ci.yml`,
 `.github/workflows/publish.yml` if separate.
 Contract: job `ts` on `ubuntu-latest`: `bun install --frozen-lockfile`,
-`bun run check`, `bun test`, `bun run build`; job `macos` on `macos-15` or
-newer with Xcode 26 selected: `swift build`, `swift test` in `apps/macos`.
-Publish job unchanged in behaviour (version-gated).
+`bun run check`, `bun test`, `bun run build`; the OpenCode matrix prepares the
+pinned fork, builds the native executable, and runs conformance. Publish is
+unchanged in behaviour (version-gated).
 Steps: write the workflow as contracted. Tests: CI green on the scaffold.
-Commit: `chore: build and test both halves in CI`
+Commit: `chore: build and test Node and OpenCode in CI`
 
 ### T0.6 AGENTS.md and README for v3
 Goal: repo instructions match the rebuild.
 Reads: `AGENTS.md`, `docs/plan/README.md`. Writes: `AGENTS.md`, `README.md`.
 Contract: AGENTS.md keeps the operating contract and code rules, replaces the
 "scout/journeyman" wording with the manifesto's (agent, mission lead), points
-at `docs/plan/README.md` for the rebuild, and adds the Swift rules from the
-plan. README states that v3 is in progress and that 2.2.x on npm is the last
+at `docs/plan/README.md` for the rebuild. README states that v3 is in progress and that 2.2.x on npm is the last
 v2 release. Steps: rewrite both files. Tests: none.
 Commit: `docs: repo instructions for the v3 rebuild`

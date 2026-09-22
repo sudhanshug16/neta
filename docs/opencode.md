@@ -75,19 +75,20 @@ access still depends on the connected provider.
 
 | Action | Control |
 |---|---|
-| Switch workspace | Ctrl+K or `/workspace` |
-| Jump to leader | Ctrl+L or `/leader` |
-| Switch machine | `/machines` |
+| Open spine help | Select **Help · actions** in the left spine or `/help` |
+| Switch workspace | **Help · actions** or `/workspace` |
+| Switch machine | **Help · actions** or `/machines` |
 | Choose model/provider model | Native `/models` |
 | Connect a model provider | Native `/connect` |
 | Start fresh context | `/reset`, followed by confirmation |
 | Recover a disconnected view | `/reconnect` |
 | Inspect worker result delivery | `/delivery` |
-| Open agent conversation | Select it in the spine |
-| Close an agent tab | Its × control; this does not stop the agent |
+| Open leader, mission lead, or active agent conversation | Select it in the left spine |
+| Inspect inactive workers or archived conversations | **Help · actions** |
 
-Mission rows, agent rows, tabs, and the selected conversation header share
-status indicators. Running and starting actors use OpenCode's one-cell loader;
+Mission rows and agent rows share status indicators. The left spine is the
+only Neta navigation surface: mission leads and active agents stay visible;
+other workers expand from their mission without duplicate rows. Running and starting actors use OpenCode's one-cell loader;
 it respects the native animations setting. An open mission only animates when
 one of its actors is working; otherwise it shows idle, queued, or interrupted.
 Text labels remain visible alongside the marks.

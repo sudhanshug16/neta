@@ -1,5 +1,5 @@
 diff --git a/bun.lock b/bun.lock
-index fc71cce48..a6308daa0 100644
+index fc71cce..a6308da 100644
 --- a/bun.lock
 +++ b/bun.lock
 @@ -114,12 +114,14 @@
@@ -52,7 +52,7 @@ index fc71cce48..a6308daa0 100644
  
      "@nodable/entities": ["@nodable/entities@3.0.0", "", {}, "sha512-8L9xFeTYKhm49xfIypoe2W5wV1m/3Z58kT+7kR9A8OyFxcPduI4VmxaUMQyKYrRjUoLLSXv6EKKID5Tvj9cUVw=="],
 diff --git a/packages/cli/package.json b/packages/cli/package.json
-index ce981d421..49f93c06b 100644
+index ce981d4..49f93c0 100644
 --- a/packages/cli/package.json
 +++ b/packages/cli/package.json
 @@ -47,7 +47,8 @@
@@ -66,7 +66,7 @@ index ce981d421..49f93c06b 100644
    "devDependencies": {
      "@opencode/script": "workspace:*",
 diff --git a/packages/cli/src/acp/agent.ts b/packages/cli/src/acp/agent.ts
-index 2d962c2b7..7cfa3679a 100644
+index 2d962c2..7cfa367 100644
 --- a/packages/cli/src/acp/agent.ts
 +++ b/packages/cli/src/acp/agent.ts
 @@ -20,8 +20,12 @@ import type { OpenCodeClient } from "@opencode/client/promise"
@@ -85,7 +85,7 @@ index 2d962c2b7..7cfa3679a 100644
      initialize: (params: InitializeRequest) => run(service.initialize(params)),
      authenticate: (params: AuthenticateRequest) => run(service.authenticate(params)),
 diff --git a/packages/cli/src/acp/error.ts b/packages/cli/src/acp/error.ts
-index fcdd3bc65..e2611ba3f 100644
+index fcdd3bc..e2611ba 100644
 --- a/packages/cli/src/acp/error.ts
 +++ b/packages/cli/src/acp/error.ts
 @@ -23,7 +23,9 @@ export class InvalidModeError extends Schema.TaggedError<InvalidModeError>()("AC
@@ -109,7 +109,7 @@ index fcdd3bc65..e2611ba3f 100644
        return RequestError.invalidParams({ methodId: error.methodId }, `unknown auth method: ${error.methodId}`)
      case "ACPServiceFailureError":
 diff --git a/packages/cli/src/acp/event.ts b/packages/cli/src/acp/event.ts
-index 0f1a6fe7a..26c6b2dce 100644
+index 0f1a6fe..26c6b2d 100644
 --- a/packages/cli/src/acp/event.ts
 +++ b/packages/cli/src/acp/event.ts
 @@ -559,7 +559,7 @@ function response(
@@ -122,7 +122,7 @@ index 0f1a6fe7a..26c6b2dce 100644
      throw new ACPError.ServiceFailureError({
        safeMessage: error.message || "OpenCode prompt failed",
 diff --git a/packages/cli/src/acp/service.ts b/packages/cli/src/acp/service.ts
-index c3182b56a..bacf6aeea 100644
+index c3182b5..bacf6ae 100644
 --- a/packages/cli/src/acp/service.ts
 +++ b/packages/cli/src/acp/service.ts
 @@ -58,6 +58,8 @@ import {
@@ -460,7 +460,7 @@ index c3182b56a..bacf6aeea 100644
    await client.session.switchAgent({ sessionID: state.id, agent: modeID })
  }
 diff --git a/packages/cli/src/commands/commands.ts b/packages/cli/src/commands/commands.ts
-index 9a9fc4c4b..14e849ecc 100644
+index 9a9fc4c..14e849e 100644
 --- a/packages/cli/src/commands/commands.ts
 +++ b/packages/cli/src/commands/commands.ts
 @@ -57,6 +57,14 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
@@ -490,7 +490,7 @@ index 9a9fc4c4b..14e849ecc 100644
              ),
            },
 diff --git a/packages/cli/src/commands/handlers/acp.ts b/packages/cli/src/commands/handlers/acp.ts
-index 9170b646e..11bdb3014 100644
+index 9170b64..11bdb30 100644
 --- a/packages/cli/src/commands/handlers/acp.ts
 +++ b/packages/cli/src/commands/handlers/acp.ts
 @@ -27,7 +27,17 @@ export default Runtime.handler(
@@ -513,7 +513,7 @@ index 9170b646e..11bdb3014 100644
      yield* Effect.promise(() => connection.closed)
      // EOF owns this stdio process; exiting also closes the private server's lease pipe.
 diff --git a/packages/cli/src/database-path.ts b/packages/cli/src/database-path.ts
-index 958449c3e..2962d2a8f 100644
+index 958449c..2962d2a 100644
 --- a/packages/cli/src/database-path.ts
 +++ b/packages/cli/src/database-path.ts
 @@ -1,7 +1,34 @@
@@ -552,7 +552,7 @@ index 958449c3e..2962d2a8f 100644
      process.env.OPENCODE_DB ??
      (["latest", "dev", "beta", "next", "prod"].includes(OPENCODE_CHANNEL) ||
 diff --git a/packages/cli/src/index.ts b/packages/cli/src/index.ts
-index 9ff4fac69..cbeb5a09a 100755
+index 9ff4fac..cbeb5a0 100755
 --- a/packages/cli/src/index.ts
 +++ b/packages/cli/src/index.ts
 @@ -21,6 +21,7 @@ if (process.env.OPENCODE_SSH_ASKPASS_PORT) {
@@ -564,7 +564,7 @@ index 9ff4fac69..cbeb5a09a 100755
    upgrade: () => import("./commands/handlers/upgrade"),
    uninstall: () => import("./commands/handlers/uninstall"),
 diff --git a/packages/cli/test/acp/service-fixture.ts b/packages/cli/test/acp/service-fixture.ts
-index f690def45..78b707ab3 100644
+index f690def..78b707a 100644
 --- a/packages/cli/test/acp/service-fixture.ts
 +++ b/packages/cli/test/acp/service-fixture.ts
 @@ -29,6 +29,7 @@ type FixtureHandler = (
@@ -584,7 +584,7 @@ index f690def45..78b707ab3 100644
      connection: {
        sessionUpdate: async (update) => {
 diff --git a/packages/cli/test/acp/service-usage.test.ts b/packages/cli/test/acp/service-usage.test.ts
-index 2e104c27d..3bedd391e 100644
+index 2e104c2..3bedd39 100644
 --- a/packages/cli/test/acp/service-usage.test.ts
 +++ b/packages/cli/test/acp/service-usage.test.ts
 @@ -250,3 +250,27 @@ function completeTurn(context: FixtureContext, sessionID: string, start: unknown
@@ -616,7 +616,7 @@ index 2e104c27d..3bedd391e 100644
 + })
 +}
 diff --git a/packages/cli/test/acp/service.test.ts b/packages/cli/test/acp/service.test.ts
-index 30ca6dab8..01613e3fb 100644
+index 30ca6da..01613e3 100644
 --- a/packages/cli/test/acp/service.test.ts
 +++ b/packages/cli/test/acp/service.test.ts
 @@ -5,7 +5,7 @@ import { ACPService } from "../../src/acp/service"
@@ -659,7 +659,7 @@ index 30ca6dab8..01613e3fb 100644
        expect(initialized.agentCapabilities?._meta).toEqual({ [ChildSessionUpdatesCapability]: true })
        expect(result.configOptions?.map((option) => option.id)).toEqual(["model", "effort", "mode"])
 diff --git a/packages/codemode/interpreter-support.md b/packages/codemode/interpreter-support.md
-index 04943b35b..5e43828f4 100644
+index 04943b3..5e43828 100644
 --- a/packages/codemode/interpreter-support.md
 +++ b/packages/codemode/interpreter-support.md
 @@ -26,6 +26,9 @@ ultimate source of truth. Upstream test262 files run verbatim from `test/test262
@@ -673,7 +673,7 @@ index 04943b35b..5e43828f4 100644
        rest parameter are accepted unless the program itself begins with `"use strict"`.
  - [ ] Valid JavaScript rejected by TypeScript transpilation before interpretation, such as `in` inside a destructuring
 diff --git a/packages/codemode/src/codemode.ts b/packages/codemode/src/codemode.ts
-index a3ba4c926..6ba17b08e 100644
+index a3ba4c9..6ba17b0 100644
 --- a/packages/codemode/src/codemode.ts
 +++ b/packages/codemode/src/codemode.ts
 @@ -36,6 +36,8 @@ export type Options<Provided extends Record<string, unknown> = {}> = ToolRuntime
@@ -686,7 +686,7 @@ index a3ba4c926..6ba17b08e 100644
  
  /** Options for one CodeMode execution. */
 diff --git a/packages/codemode/src/interpreter/execute.ts b/packages/codemode/src/interpreter/execute.ts
-index 050380a35..bb3bd1165 100644
+index 050380a..bb3bd11 100644
 --- a/packages/codemode/src/interpreter/execute.ts
 +++ b/packages/codemode/src/interpreter/execute.ts
 @@ -17,7 +17,7 @@ export const executeProgram = <R>(
@@ -716,7 +716,7 @@ index 050380a35..bb3bd1165 100644
            returned = { value: result, promises }
            const warnings = yield* promises.interrupt()
 diff --git a/packages/codemode/src/tool-runtime.ts b/packages/codemode/src/tool-runtime.ts
-index 63d576251..61581db0f 100644
+index 63d5762..61581db 100644
 --- a/packages/codemode/src/tool-runtime.ts
 +++ b/packages/codemode/src/tool-runtime.ts
 @@ -1,4 +1,4 @@
@@ -794,7 +794,7 @@ index 63d576251..61581db0f 100644
      search: (args) =>
        Effect.suspend(() =>
 diff --git a/packages/codemode/test/codemode.test.ts b/packages/codemode/test/codemode.test.ts
-index a8cf2f972..23652fc6f 100644
+index a8cf2f9..23652fc 100644
 --- a/packages/codemode/test/codemode.test.ts
 +++ b/packages/codemode/test/codemode.test.ts
 @@ -1205,3 +1205,82 @@ describe("CodeMode public contract", () => {
@@ -881,7 +881,7 @@ index a8cf2f972..23652fc6f 100644
 +  })
 +})
 diff --git a/packages/core/src/codemode/catalog.ts b/packages/core/src/codemode/catalog.ts
-index 3c8f2b9f1..ddf0e17b9 100644
+index 3c8f2b9..ddf0e17 100644
 --- a/packages/core/src/codemode/catalog.ts
 +++ b/packages/core/src/codemode/catalog.ts
 @@ -49,6 +49,19 @@ const DESCRIPTION_LIMIT = 120
@@ -914,7 +914,7 @@ index 3c8f2b9f1..ddf0e17b9 100644
            .filter((listing) => listing !== undefined),
        )
 diff --git a/packages/core/src/codemode/tool.ts b/packages/core/src/codemode/tool.ts
-index b2f99b020..e55c08517 100644
+index b2f99b0..e55c085 100644
 --- a/packages/core/src/codemode/tool.ts
 +++ b/packages/core/src/codemode/tool.ts
 @@ -64,7 +64,7 @@ const description = [
@@ -1004,7 +1004,7 @@ index b2f99b020..e55c08517 100644
  
  function getNode<T>(root: Node<T>, path: string) {
 diff --git a/packages/core/src/permission.ts b/packages/core/src/permission.ts
-index bc2767d10..85b8c5db3 100644
+index bc2767d..85b8c5d 100644
 --- a/packages/core/src/permission.ts
 +++ b/packages/core/src/permission.ts
 @@ -154,7 +154,19 @@ const layer = Layer.effect(
@@ -1029,7 +1029,7 @@ index bc2767d10..85b8c5db3 100644
  
      function denied(input: Pick<Request, "action" | "resources">, rules: Permission.Ruleset) {
 diff --git a/packages/core/src/plugin/optimize.ts b/packages/core/src/plugin/optimize.ts
-index f812abe98..889acbbd2 100644
+index f812abe..889acbb 100644
 --- a/packages/core/src/plugin/optimize.ts
 +++ b/packages/core/src/plugin/optimize.ts
 @@ -1,5 +1,6 @@
@@ -1049,7 +1049,7 @@ index f812abe98..889acbbd2 100644
  function make(
    id: string,
 diff --git a/packages/core/src/session/runner/step.ts b/packages/core/src/session/runner/step.ts
-index b43def2c3..2a9d1e1d0 100644
+index b43def2..2a9d1e1 100644
 --- a/packages/core/src/session/runner/step.ts
 +++ b/packages/core/src/session/runner/step.ts
 @@ -193,7 +193,7 @@ export const make = Effect.gen(function* () {
@@ -1062,7 +1062,7 @@ index b43def2c3..2a9d1e1d0 100644
          const interrupted = tools.declines.length > 0 || streamInterrupted || tools.interrupted
          const toolFailure = interrupted
 diff --git a/packages/core/src/session/to-session-error.ts b/packages/core/src/session/to-session-error.ts
-index 2d436c288..7656958ee 100644
+index 2d436c2..7656958 100644
 --- a/packages/core/src/session/to-session-error.ts
 +++ b/packages/core/src/session/to-session-error.ts
 @@ -1,3 +1,4 @@
@@ -1079,7 +1079,7 @@ index 2d436c288..7656958ee 100644
      switch (cause.reason._tag) {
        case "RateLimit":
 diff --git a/packages/core/src/shell.ts b/packages/core/src/shell.ts
-index 6f1d03635..85b8b4305 100644
+index 6f1d036..85b8b43 100644
 --- a/packages/core/src/shell.ts
 +++ b/packages/core/src/shell.ts
 @@ -269,7 +269,9 @@ const layer = () =>
@@ -1094,7 +1094,7 @@ index 6f1d03635..85b8b4305 100644
  
          const info: Info = {
 diff --git a/packages/core/src/shell/select.ts b/packages/core/src/shell/select.ts
-index 6645454c0..72c63b7cc 100644
+index 6645454..72c63b7 100644
 --- a/packages/core/src/shell/select.ts
 +++ b/packages/core/src/shell/select.ts
 @@ -161,10 +161,11 @@ function info(file: string, options?: Options, bin?: string): Item {
@@ -1111,7 +1111,7 @@ index 6645454c0..72c63b7cc 100644
  }
  
 diff --git a/packages/core/test/codemode/catalog.test.ts b/packages/core/test/codemode/catalog.test.ts
-index 3534ea3b6..cd5fc4314 100644
+index 3534ea3..cd5fc43 100644
 --- a/packages/core/test/codemode/catalog.test.ts
 +++ b/packages/core/test/codemode/catalog.test.ts
 @@ -250,3 +250,21 @@ describe("CodeModeInstructions.update", () => {
@@ -1137,7 +1137,7 @@ index 3534ea3b6..cd5fc4314 100644
 +  expect(worker.namespaces[0]?.entries.map((one) => one.path)).toEqual(["neta.neta_done"])
 +})
 diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permission.test.ts
-index d7298cfdd..1dfa70721 100644
+index d7298cf..1dfa707 100644
 --- a/packages/core/test/permission.test.ts
 +++ b/packages/core/test/permission.test.ts
 @@ -705,3 +705,38 @@ describe("shell scanner permission impact", () => {
@@ -1180,7 +1180,7 @@ index d7298cfdd..1dfa70721 100644
 +  }),
 +)
 diff --git a/packages/core/test/plugin/optimize.test.ts b/packages/core/test/plugin/optimize.test.ts
-index 047d5cdbc..d6c473a76 100644
+index 047d5cd..d6c473a 100644
 --- a/packages/core/test/plugin/optimize.test.ts
 +++ b/packages/core/test/plugin/optimize.test.ts
 @@ -54,6 +54,7 @@ describe("OptimizePlugin", () => {
@@ -1192,7 +1192,7 @@ index 047d5cdbc..d6c473a76 100644
    })
  
 diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
-index 608fe723d..1f84d58c3 100644
+index 608fe72..1f84d58 100644
 --- a/packages/core/test/session-runner.test.ts
 +++ b/packages/core/test/session-runner.test.ts
 @@ -4516,7 +4516,7 @@ describe("SessionRunnerLLM", () => {
@@ -1205,7 +1205,7 @@ index 608fe723d..1f84d58c3 100644
        ]),
      ])
 diff --git a/packages/core/test/shell.test.ts b/packages/core/test/shell.test.ts
-index 204d6e146..41f571df4 100644
+index 204d6e1..41f571d 100644
 --- a/packages/core/test/shell.test.ts
 +++ b/packages/core/test/shell.test.ts
 @@ -121,3 +121,16 @@ describe("shell", () => {
@@ -1226,7 +1226,7 @@ index 204d6e146..41f571df4 100644
 +  expect(ShellSelect.args("/bin/sh", "echo ok", { pipefail: true })).toEqual(["-c", "echo ok"])
 +})
 diff --git a/packages/core/test/tool-execute.test.ts b/packages/core/test/tool-execute.test.ts
-index e99d73701..d613a1638 100644
+index e99d737..d613a16 100644
 --- a/packages/core/test/tool-execute.test.ts
 +++ b/packages/core/test/tool-execute.test.ts
 @@ -27,7 +27,7 @@ test("execute describes invariant Code Mode behavior", () => {
@@ -1284,7 +1284,7 @@ index e99d73701..d613a1638 100644
 +  expect(JSON.stringify(result.content)).toContain("do not repeat successful operations")
 +})
 diff --git a/packages/tui/package.json b/packages/tui/package.json
-index 4e4442bdf..4ef37e0f3 100644
+index 4e4442b..4ef37e0 100644
 --- a/packages/tui/package.json
 +++ b/packages/tui/package.json
 @@ -99,7 +99,8 @@
@@ -1298,7 +1298,7 @@ index 4e4442bdf..4ef37e0f3 100644
    "devDependencies": {
      "@tsconfig/bun": "catalog:",
 diff --git a/packages/tui/src/app.tsx b/packages/tui/src/app.tsx
-index cb8dfd3a3..85a5bd164 100644
+index cb8dfd3..85a5bd1 100644
 --- a/packages/tui/src/app.tsx
 +++ b/packages/tui/src/app.tsx
 @@ -1,4 +1,7 @@
@@ -1492,7 +1492,7 @@ index cb8dfd3a3..85a5bd164 100644
          <DevToolsBar />
        </Show>
 diff --git a/packages/tui/src/component/devtools-bar.tsx b/packages/tui/src/component/devtools-bar.tsx
-index 45f3bb0d4..c8cfc5e59 100644
+index 45f3bb0..c8cfc5e 100644
 --- a/packages/tui/src/component/devtools-bar.tsx
 +++ b/packages/tui/src/component/devtools-bar.tsx
 @@ -1,5 +1,6 @@
@@ -1504,7 +1504,7 @@ index 45f3bb0d4..c8cfc5e59 100644
  import { tmpdir } from "node:os"
  import path from "node:path"
 diff --git a/packages/tui/src/component/dialog-error-details.tsx b/packages/tui/src/component/dialog-error-details.tsx
-index 22d9baacd..6553ba42c 100644
+index 22d9baa..6553ba4 100644
 --- a/packages/tui/src/component/dialog-error-details.tsx
 +++ b/packages/tui/src/component/dialog-error-details.tsx
 @@ -1,5 +1,6 @@
@@ -1516,7 +1516,7 @@ index 22d9baacd..6553ba42c 100644
  import { useConfig } from "../config"
  import { useClipboard } from "../context/clipboard"
 diff --git a/packages/tui/src/component/dialog-image-preview.tsx b/packages/tui/src/component/dialog-image-preview.tsx
-index 42fdfa781..bf430fa4d 100644
+index 42fdfa7..bf430fa 100644
 --- a/packages/tui/src/component/dialog-image-preview.tsx
 +++ b/packages/tui/src/component/dialog-image-preview.tsx
 @@ -1,5 +1,5 @@
@@ -1527,7 +1527,7 @@ index 42fdfa781..bf430fa4d 100644
  import { Keymap } from "../context/keymap"
  import { useTheme } from "../context/theme"
 diff --git a/packages/tui/src/component/dialog-open.tsx b/packages/tui/src/component/dialog-open.tsx
-index 4f4a3a888..e916b304e 100644
+index 4f4a3a8..e916b30 100644
 --- a/packages/tui/src/component/dialog-open.tsx
 +++ b/packages/tui/src/component/dialog-open.tsx
 @@ -1,7 +1,7 @@
@@ -1540,7 +1540,7 @@ index 4f4a3a888..e916b304e 100644
  import { dialogWidth, useDialog } from "../ui/dialog"
  import { DialogSelect, dialogSelectContentWidth, type DialogSelectRef } from "../ui/dialog-select"
 diff --git a/packages/tui/src/component/dialog-pair.tsx b/packages/tui/src/component/dialog-pair.tsx
-index f54c2eaa7..69bd52863 100644
+index f54c2ea..69bd528 100644
 --- a/packages/tui/src/component/dialog-pair.tsx
 +++ b/packages/tui/src/component/dialog-pair.tsx
 @@ -1,5 +1,5 @@
@@ -1551,7 +1551,7 @@ index f54c2eaa7..69bd52863 100644
  import { renderUnicodeCompact } from "uqr"
  import { useClient } from "../context/client"
 diff --git a/packages/tui/src/component/dialog-shell-output.tsx b/packages/tui/src/component/dialog-shell-output.tsx
-index 6e65c64e7..573f0aec2 100644
+index 6e65c64..573f0ae 100644
 --- a/packages/tui/src/component/dialog-shell-output.tsx
 +++ b/packages/tui/src/component/dialog-shell-output.tsx
 @@ -1,5 +1,5 @@
@@ -1562,7 +1562,7 @@ index 6e65c64e7..573f0aec2 100644
  import { createEffect, createMemo, createSignal, onCleanup, Show, untrack } from "solid-js"
  import stripAnsi from "strip-ansi"
 diff --git a/packages/tui/src/component/dialog-workspace-file-changes.tsx b/packages/tui/src/component/dialog-workspace-file-changes.tsx
-index 334467dd7..9eecbd3ba 100644
+index 334467d..9eecbd3 100644
 --- a/packages/tui/src/component/dialog-workspace-file-changes.tsx
 +++ b/packages/tui/src/component/dialog-workspace-file-changes.tsx
 @@ -1,5 +1,6 @@
@@ -1574,7 +1574,7 @@ index 334467dd7..9eecbd3ba 100644
  import { createMemo, For } from "solid-js"
  import { createStore } from "solid-js/store"
 diff --git a/packages/tui/src/component/dialog-workspaces.tsx b/packages/tui/src/component/dialog-workspaces.tsx
-index 7690c8c5a..a640fbc89 100644
+index 7690c8c..a640fbc 100644
 --- a/packages/tui/src/component/dialog-workspaces.tsx
 +++ b/packages/tui/src/component/dialog-workspaces.tsx
 @@ -1,4 +1,4 @@
@@ -1584,7 +1584,7 @@ index 7690c8c5a..a640fbc89 100644
  import { createMemo, createResource, createSignal, onMount, Show } from "solid-js"
  import path from "path"
 diff --git a/packages/tui/src/component/error-component.tsx b/packages/tui/src/component/error-component.tsx
-index 48ad4b107..06b022be0 100644
+index 48ad4b1..06b022b 100644
 --- a/packages/tui/src/component/error-component.tsx
 +++ b/packages/tui/src/component/error-component.tsx
 @@ -1,5 +1,6 @@
@@ -1596,7 +1596,7 @@ index 48ad4b107..06b022be0 100644
  import { getScrollAcceleration } from "../util/scroll"
  import { useClipboard } from "../context/clipboard"
 diff --git a/packages/tui/src/component/logo.tsx b/packages/tui/src/component/logo.tsx
-index 32b5e96b1..3dd4f882d 100644
+index 32b5e96..3dd4f88 100644
 --- a/packages/tui/src/component/logo.tsx
 +++ b/packages/tui/src/component/logo.tsx
 @@ -1,6 +1,6 @@
@@ -1608,7 +1608,7 @@ index 32b5e96b1..3dd4f882d 100644
  import { tint } from "../theme/color"
  import { go, logo } from "../logo"
 diff --git a/packages/tui/src/component/prompt/autocomplete.tsx b/packages/tui/src/component/prompt/autocomplete.tsx
-index 1a7c7b2dc..7c078a991 100644
+index 1a7c7b2..7c078a9 100644
 --- a/packages/tui/src/component/prompt/autocomplete.tsx
 +++ b/packages/tui/src/component/prompt/autocomplete.tsx
 @@ -14,7 +14,7 @@ import { useConfig } from "../../config"
@@ -1621,7 +1621,7 @@ index 1a7c7b2dc..7c078a991 100644
  import type { PromptInfo, PromptPartRef } from "../../prompt/history"
  import { useFrecency } from "../../prompt/frecency"
 diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
-index 06a20b435..1c2dbc104 100644
+index 06a20b4..1c2dbc1 100644
 --- a/packages/tui/src/component/prompt/index.tsx
 +++ b/packages/tui/src/component/prompt/index.tsx
 @@ -1,3 +1,5 @@
@@ -1768,7 +1768,7 @@ index 06a20b435..1c2dbc104 100644
              ...EmptyBorder,
              vertical: promptBg().a !== 0 ? "╹" : " ",
 diff --git a/packages/tui/src/component/prompt/metadata.tsx b/packages/tui/src/component/prompt/metadata.tsx
-index 9d468b86d..b6bf9cd76 100644
+index 9d468b8..b6bf9cd 100644
 --- a/packages/tui/src/component/prompt/metadata.tsx
 +++ b/packages/tui/src/component/prompt/metadata.tsx
 @@ -1,5 +1,5 @@
@@ -1779,7 +1779,7 @@ index 9d468b86d..b6bf9cd76 100644
  import { useTheme } from "../../context/theme"
  import { Locale } from "../../util/locale"
 diff --git a/packages/tui/src/component/session-frame.tsx b/packages/tui/src/component/session-frame.tsx
-index d8bac292a..2bc1cf4f2 100644
+index d8bac29..2bc1cf4 100644
 --- a/packages/tui/src/component/session-frame.tsx
 +++ b/packages/tui/src/component/session-frame.tsx
 @@ -1,3 +1,4 @@
@@ -1815,7 +1815,7 @@ index d8bac292a..2bc1cf4f2 100644
    const rightPane = createMemo(() => {
      if (activePanel()) return "panel"
 diff --git a/packages/tui/src/component/session-tabs.tsx b/packages/tui/src/component/session-tabs.tsx
-index 4d19e8f6b..3e1d3d896 100644
+index 4d19e8f..3e1d3d8 100644
 --- a/packages/tui/src/component/session-tabs.tsx
 +++ b/packages/tui/src/component/session-tabs.tsx
 @@ -19,7 +19,8 @@ import {
@@ -1829,7 +1829,7 @@ index 4d19e8f6b..3e1d3d896 100644
  import { useSessionTabs } from "../context/session-tabs"
  import { useData } from "../context/data"
 diff --git a/packages/tui/src/context/location.tsx b/packages/tui/src/context/location.tsx
-index 8c668757e..88447dc12 100644
+index 8c66875..88447dc 100644
 --- a/packages/tui/src/context/location.tsx
 +++ b/packages/tui/src/context/location.tsx
 @@ -1,5 +1,5 @@
@@ -1870,7 +1870,7 @@ index 8c668757e..88447dc12 100644
          set,
        }}
 diff --git a/packages/tui/src/context/theme.tsx b/packages/tui/src/context/theme.tsx
-index 380c97b91..2858a6970 100644
+index 380c97b..2858a69 100644
 --- a/packages/tui/src/context/theme.tsx
 +++ b/packages/tui/src/context/theme.tsx
 @@ -139,7 +139,7 @@ subscribeThemes(setThemeSources)
@@ -1892,7 +1892,7 @@ index 380c97b91..2858a6970 100644
        }),
      )
 diff --git a/packages/tui/src/feature-plugins/home/footer.tsx b/packages/tui/src/feature-plugins/home/footer.tsx
-index b13dae513..e34542bef 100644
+index b13dae5..e34542b 100644
 --- a/packages/tui/src/feature-plugins/home/footer.tsx
 +++ b/packages/tui/src/feature-plugins/home/footer.tsx
 @@ -1,6 +1,6 @@
@@ -1904,7 +1904,7 @@ index b13dae513..e34542bef 100644
  
  export function homeFooterVisibility(width: number) {
 diff --git a/packages/tui/src/feature-plugins/prompt/footer.tsx b/packages/tui/src/feature-plugins/prompt/footer.tsx
-index 712745089..6d7ec9dd2 100644
+index 7127450..6d7ec9d 100644
 --- a/packages/tui/src/feature-plugins/prompt/footer.tsx
 +++ b/packages/tui/src/feature-plugins/prompt/footer.tsx
 @@ -1,7 +1,7 @@
@@ -1917,7 +1917,7 @@ index 712745089..6d7ec9dd2 100644
  
  const money = new Intl.NumberFormat("en-US", {
 diff --git a/packages/tui/src/feature-plugins/system/diff-viewer-file-menu.tsx b/packages/tui/src/feature-plugins/system/diff-viewer-file-menu.tsx
-index 06a8d3f5b..88ba68629 100644
+index 06a8d3f..88ba686 100644
 --- a/packages/tui/src/feature-plugins/system/diff-viewer-file-menu.tsx
 +++ b/packages/tui/src/feature-plugins/system/diff-viewer-file-menu.tsx
 @@ -1,7 +1,8 @@
@@ -1931,7 +1931,7 @@ index 06a8d3f5b..88ba68629 100644
  
  export function DiffFileMenu(props: {
 diff --git a/packages/tui/src/feature-plugins/system/diff-viewer-image.tsx b/packages/tui/src/feature-plugins/system/diff-viewer-image.tsx
-index 570b67158..61b448a94 100644
+index 570b671..61b448a 100644
 --- a/packages/tui/src/feature-plugins/system/diff-viewer-image.tsx
 +++ b/packages/tui/src/feature-plugins/system/diff-viewer-image.tsx
 @@ -1,5 +1,5 @@
@@ -1942,7 +1942,7 @@ index 570b67158..61b448a94 100644
  import { createResource, createSignal, Match, onCleanup, Show, Switch } from "solid-js"
  import { DialogImagePreview } from "../../component/dialog-image-preview"
 diff --git a/packages/tui/src/feature-plugins/system/diff-viewer.tsx b/packages/tui/src/feature-plugins/system/diff-viewer.tsx
-index ce0e568dd..3fa1821ad 100644
+index ce0e568..3fa1821 100644
 --- a/packages/tui/src/feature-plugins/system/diff-viewer.tsx
 +++ b/packages/tui/src/feature-plugins/system/diff-viewer.tsx
 @@ -11,7 +11,8 @@ import {
@@ -1956,7 +1956,7 @@ index ce0e568dd..3fa1821ad 100644
  import { DiffViewerFileTree } from "./diff-viewer-file-tree"
  import { DiffFileMenu } from "./diff-viewer-file-menu"
 diff --git a/packages/tui/src/feature-plugins/system/notifications.ts b/packages/tui/src/feature-plugins/system/notifications.ts
-index 7dac44221..2e3037e69 100644
+index 7dac442..2e3037e 100644
 --- a/packages/tui/src/feature-plugins/system/notifications.ts
 +++ b/packages/tui/src/feature-plugins/system/notifications.ts
 @@ -13,7 +13,7 @@ function notify(
@@ -1986,7 +1986,7 @@ index 7dac44221..2e3037e69 100644
          if (route.type === "session" && route.sessionID === sessionID)
            context.ui.toast.show({ title: "Session failed", message: event.data.error.message, variant: "error" })
 diff --git a/packages/tui/src/feature-plugins/system/stats.tsx b/packages/tui/src/feature-plugins/system/stats.tsx
-index 124f057ec..ecb3e025d 100644
+index 124f057..ecb3e02 100644
 --- a/packages/tui/src/feature-plugins/system/stats.tsx
 +++ b/packages/tui/src/feature-plugins/system/stats.tsx
 @@ -2,7 +2,7 @@ import type { SessionStatsInfo } from "@opencode/client"
@@ -1999,7 +1999,7 @@ index 124f057ec..ecb3e025d 100644
  import { Logo } from "../../component/logo"
  import { useTheme, useThemes } from "../../context/theme"
 diff --git a/packages/tui/src/feature-plugins/system/storybook/index.tsx b/packages/tui/src/feature-plugins/system/storybook/index.tsx
-index 4830a3f1a..beae4ddd0 100644
+index 4830a3f..beae4dd 100644
 --- a/packages/tui/src/feature-plugins/system/storybook/index.tsx
 +++ b/packages/tui/src/feature-plugins/system/storybook/index.tsx
 @@ -1,5 +1,5 @@
@@ -2010,7 +2010,7 @@ index 4830a3f1a..beae4ddd0 100644
  import { StoryFooter } from "./footer"
  import { mermanLayoutsStory } from "./merman-layouts"
 diff --git a/packages/tui/src/feature-plugins/system/storybook/merman-layouts.tsx b/packages/tui/src/feature-plugins/system/storybook/merman-layouts.tsx
-index 1b6b9d4e4..ea0c2898e 100644
+index 1b6b9d4..ea0c289 100644
 --- a/packages/tui/src/feature-plugins/system/storybook/merman-layouts.tsx
 +++ b/packages/tui/src/feature-plugins/system/storybook/merman-layouts.tsx
 @@ -1,5 +1,5 @@
@@ -2021,7 +2021,7 @@ index 1b6b9d4e4..ea0c2898e 100644
  import { useTheme, useThemes } from "../../../context/theme"
  import { usePlugin } from "../../../plugin/context"
 diff --git a/packages/tui/src/feature-plugins/system/storybook/one-cell-spinner.tsx b/packages/tui/src/feature-plugins/system/storybook/one-cell-spinner.tsx
-index 98d1e45b4..e8fdef864 100644
+index 98d1e45..e8fdef8 100644
 --- a/packages/tui/src/feature-plugins/system/storybook/one-cell-spinner.tsx
 +++ b/packages/tui/src/feature-plugins/system/storybook/one-cell-spinner.tsx
 @@ -1,6 +1,6 @@
@@ -2033,7 +2033,7 @@ index 98d1e45b4..e8fdef864 100644
  import { OneCellSpinner } from "../../../component/one-cell-spinner"
  import { useConfig } from "../../../config"
 diff --git a/packages/tui/src/feature-plugins/system/storybook/session-location-missing.tsx b/packages/tui/src/feature-plugins/system/storybook/session-location-missing.tsx
-index 428fed7ae..0585340ff 100644
+index 428fed7..0585340 100644
 --- a/packages/tui/src/feature-plugins/system/storybook/session-location-missing.tsx
 +++ b/packages/tui/src/feature-plugins/system/storybook/session-location-missing.tsx
 @@ -1,5 +1,5 @@
@@ -2044,7 +2044,7 @@ index 428fed7ae..0585340ff 100644
  import { createSignal } from "solid-js"
  import { DialogWorkspaces } from "../../../component/dialog-workspaces"
 diff --git a/packages/tui/src/feature-plugins/system/storybook/session-tabs.tsx b/packages/tui/src/feature-plugins/system/storybook/session-tabs.tsx
-index dd7172005..c47bd73f1 100644
+index dd71720..c47bd73 100644
 --- a/packages/tui/src/feature-plugins/system/storybook/session-tabs.tsx
 +++ b/packages/tui/src/feature-plugins/system/storybook/session-tabs.tsx
 @@ -1,5 +1,5 @@
@@ -2055,7 +2055,7 @@ index dd7172005..c47bd73f1 100644
  import { createStore, reconcile } from "solid-js/store"
  import {
 diff --git a/packages/tui/src/mini/footer.command.tsx b/packages/tui/src/mini/footer.command.tsx
-index 3fa2d31ad..8c44143c9 100644
+index 3fa2d31..8c44143 100644
 --- a/packages/tui/src/mini/footer.command.tsx
 +++ b/packages/tui/src/mini/footer.command.tsx
 @@ -1,6 +1,7 @@
@@ -2068,7 +2068,7 @@ index 3fa2d31ad..8c44143c9 100644
  import { createEffect, createMemo, createSignal, type Accessor } from "solid-js"
  import { Keymap } from "../context/keymap"
 diff --git a/packages/tui/src/mini/footer.form.tsx b/packages/tui/src/mini/footer.form.tsx
-index 550f1dcec..d95e55689 100644
+index 550f1dc..d95e556 100644
 --- a/packages/tui/src/mini/footer.form.tsx
 +++ b/packages/tui/src/mini/footer.form.tsx
 @@ -1,6 +1,7 @@
@@ -2081,7 +2081,7 @@ index 550f1dcec..d95e55689 100644
  import {
    createFormBodyState,
 diff --git a/packages/tui/src/mini/footer.menu.tsx b/packages/tui/src/mini/footer.menu.tsx
-index 7feca80f2..32160c43e 100644
+index 7feca80..32160c4 100644
 --- a/packages/tui/src/mini/footer.menu.tsx
 +++ b/packages/tui/src/mini/footer.menu.tsx
 @@ -1,6 +1,7 @@
@@ -2094,7 +2094,7 @@ index 7feca80f2..32160c43e 100644
  import { transparent, type RunFooterTheme } from "./theme"
  import { Locale } from "../util/locale"
 diff --git a/packages/tui/src/mini/footer.permission.tsx b/packages/tui/src/mini/footer.permission.tsx
-index 6f11e8573..e4cd6459a 100644
+index 6f11e85..e4cd645 100644
 --- a/packages/tui/src/mini/footer.permission.tsx
 +++ b/packages/tui/src/mini/footer.permission.tsx
 @@ -12,7 +12,8 @@
@@ -2108,7 +2108,7 @@ index 6f11e8573..e4cd6459a 100644
  import {
    createPermissionBodyState,
 diff --git a/packages/tui/src/mini/footer.prompt.tsx b/packages/tui/src/mini/footer.prompt.tsx
-index 2c026908b..a8aedcdcf 100644
+index 2c02690..a8aedcd 100644
 --- a/packages/tui/src/mini/footer.prompt.tsx
 +++ b/packages/tui/src/mini/footer.prompt.tsx
 @@ -15,7 +15,8 @@ import {
@@ -2122,7 +2122,7 @@ index 2c026908b..a8aedcdcf 100644
  import { deduplicatePromptImages, promptAttachmentLabel } from "../prompt/attachment"
  import { resolvePastedAttachments } from "../component/prompt/local-attachment"
 diff --git a/packages/tui/src/mini/footer.subagent.tsx b/packages/tui/src/mini/footer.subagent.tsx
-index 9782c6330..d7ae7cf4c 100644
+index 9782c63..d7ae7cf 100644
 --- a/packages/tui/src/mini/footer.subagent.tsx
 +++ b/packages/tui/src/mini/footer.subagent.tsx
 @@ -1,6 +1,7 @@
@@ -2135,7 +2135,7 @@ index 9782c6330..d7ae7cf4c 100644
  import { Show, createMemo, createSignal, indexArray } from "solid-js"
  import { SPINNER_FRAMES } from "../component/spinner-frames"
 diff --git a/packages/tui/src/mini/footer.view.tsx b/packages/tui/src/mini/footer.view.tsx
-index 3b96008a1..04b362e7b 100644
+index 3b96008..04b362e 100644
 --- a/packages/tui/src/mini/footer.view.tsx
 +++ b/packages/tui/src/mini/footer.view.tsx
 @@ -8,7 +8,8 @@
@@ -2149,7 +2149,7 @@ index 3b96008a1..04b362e7b 100644
  import { For, Match, Show, Switch, createEffect, createMemo, createSignal, onCleanup } from "solid-js"
  import { OneCellSpinner } from "../component/one-cell-spinner"
 diff --git a/packages/tui/src/routes/home.tsx b/packages/tui/src/routes/home.tsx
-index 0712eacd2..ab853191b 100644
+index 0712eac..ab85319 100644
 --- a/packages/tui/src/routes/home.tsx
 +++ b/packages/tui/src/routes/home.tsx
 @@ -10,7 +10,7 @@ import { useData } from "../context/data"
@@ -2162,7 +2162,7 @@ index 0712eacd2..ab853191b 100644
  import { useUpdateNotification } from "../context/update-notification"
  import { useExit } from "../context/exit"
 diff --git a/packages/tui/src/routes/session/form.tsx b/packages/tui/src/routes/session/form.tsx
-index c5a007baf..e9108b722 100644
+index c5a007b..e9108b7 100644
 --- a/packages/tui/src/routes/session/form.tsx
 +++ b/packages/tui/src/routes/session/form.tsx
 @@ -1,6 +1,7 @@
@@ -2175,7 +2175,7 @@ index c5a007baf..e9108b722 100644
    CliRenderEvents,
    decodePasteBytes,
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
-index d7c89621e..d17283bda 100644
+index d7c8962..d17283b 100644
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
 @@ -1,3 +1,7 @@
@@ -2458,7 +2458,7 @@ index d7c89621e..d17283bda 100644
      if (message.type === "user") return [`## User\n\n${message.text}`]
      if (message.type === "shell")
 diff --git a/packages/tui/src/routes/session/permission.tsx b/packages/tui/src/routes/session/permission.tsx
-index fd7196511..e9762dbb7 100644
+index fd71965..e9762db 100644
 --- a/packages/tui/src/routes/session/permission.tsx
 +++ b/packages/tui/src/routes/session/permission.tsx
 @@ -1,6 +1,7 @@
@@ -2482,7 +2482,7 @@ index fd7196511..e9762dbb7 100644
                    </box>
                  </Show>
 diff --git a/packages/tui/src/theme/index.ts b/packages/tui/src/theme/index.ts
-index 91318219e..c0a1cdfc0 100644
+index 9131821..c0a1cdf 100644
 --- a/packages/tui/src/theme/index.ts
 +++ b/packages/tui/src/theme/index.ts
 @@ -1,4 +1,5 @@
@@ -2500,7 +2500,7 @@ index 91318219e..c0a1cdfc0 100644
      ...customThemes,
    }
 diff --git a/packages/tui/src/ui/dialog-select.tsx b/packages/tui/src/ui/dialog-select.tsx
-index 62e049d4e..32f181ff9 100644
+index 62e049d..32f181f 100644
 --- a/packages/tui/src/ui/dialog-select.tsx
 +++ b/packages/tui/src/ui/dialog-select.tsx
 @@ -4,14 +4,16 @@ import { useTheme, useThemes } from "../context/theme"
@@ -2574,7 +2574,7 @@ index 62e049d4e..32f181ff9 100644
                                </box>
                              )}
 diff --git a/packages/tui/src/ui/dialog.tsx b/packages/tui/src/ui/dialog.tsx
-index 4dae6fff8..ddcffb2a2 100644
+index 4dae6ff..ddcffb2 100644
 --- a/packages/tui/src/ui/dialog.tsx
 +++ b/packages/tui/src/ui/dialog.tsx
 @@ -1,13 +1,14 @@
@@ -2625,7 +2625,7 @@ index 4dae6fff8..ddcffb2a2 100644
            current?.onClose?.()
            setStore("stack", store.stack.slice(0, -1))
 diff --git a/packages/tui/src/ui/toast.tsx b/packages/tui/src/ui/toast.tsx
-index 2e03900b9..f957058cb 100644
+index 2e03900..f957058 100644
 --- a/packages/tui/src/ui/toast.tsx
 +++ b/packages/tui/src/ui/toast.tsx
 @@ -1,7 +1,9 @@
@@ -2659,7 +2659,7 @@ index 2e03900b9..f957058cb 100644
      pause() {
        if (!store.currentToast || paused) return
 diff --git a/packages/tui/src/util/selection.ts b/packages/tui/src/util/selection.ts
-index c812e9687..e72a2e84f 100644
+index c812e96..e72a2e8 100644
 --- a/packages/tui/src/util/selection.ts
 +++ b/packages/tui/src/util/selection.ts
 @@ -62,6 +62,15 @@ export function copy(renderer: Renderer, toast: Toast, clipboard: ClipboardServi
@@ -2690,7 +2690,7 @@ index c812e9687..e72a2e84f 100644
      event.stopPropagation()
      return
 diff --git a/packages/tui/test/cli/tui/dialog-select.test.tsx b/packages/tui/test/cli/tui/dialog-select.test.tsx
-index caf4026f3..e40511835 100644
+index caf4026..e405118 100644
 --- a/packages/tui/test/cli/tui/dialog-select.test.tsx
 +++ b/packages/tui/test/cli/tui/dialog-select.test.tsx
 @@ -196,6 +196,31 @@ test.each([true, false])("filter refs are ready when published with renderFilter
@@ -2727,7 +2727,7 @@ index caf4026f3..e40511835 100644
    let cancelled = 0
 diff --git a/NETA.md b/NETA.md
 new file mode 100644
-index 000000000..a8c1823ed
+index 0000000..a8c1823
 --- /dev/null
 +++ b/NETA.md
 @@ -0,0 +1,46 @@
@@ -2779,7 +2779,7 @@ index 000000000..a8c1823ed
 +are made by that fixture.
 diff --git a/neta-fork.json b/neta-fork.json
 new file mode 100644
-index 000000000..01289de78
+index 0000000..01289de
 --- /dev/null
 +++ b/neta-fork.json
 @@ -0,0 +1,8 @@
@@ -2793,7 +2793,7 @@ index 000000000..01289de78
 +}
 diff --git a/packages/cli/src/acp/fallback.ts b/packages/cli/src/acp/fallback.ts
 new file mode 100644
-index 000000000..282d25aa1
+index 0000000..282d25a
 --- /dev/null
 +++ b/packages/cli/src/acp/fallback.ts
 @@ -0,0 +1,101 @@
@@ -2900,7 +2900,7 @@ index 000000000..282d25aa1
 +}
 diff --git a/packages/cli/src/commands/handlers/neta.ts b/packages/cli/src/commands/handlers/neta.ts
 new file mode 100644
-index 000000000..fd057b2e7
+index 0000000..fd057b2
 --- /dev/null
 +++ b/packages/cli/src/commands/handlers/neta.ts
 @@ -0,0 +1,266 @@
@@ -3172,7 +3172,7 @@ index 000000000..fd057b2e7
 +)
 diff --git a/packages/cli/test/acp/fallback.test.ts b/packages/cli/test/acp/fallback.test.ts
 new file mode 100644
-index 000000000..674690419
+index 0000000..6746904
 --- /dev/null
 +++ b/packages/cli/test/acp/fallback.test.ts
 @@ -0,0 +1,218 @@
@@ -3396,7 +3396,7 @@ index 000000000..674690419
 +})
 diff --git a/packages/cli/test/acp/model-refresh.test.ts b/packages/cli/test/acp/model-refresh.test.ts
 new file mode 100644
-index 000000000..4fea5229b
+index 0000000..4fea522
 --- /dev/null
 +++ b/packages/cli/test/acp/model-refresh.test.ts
 @@ -0,0 +1,59 @@
@@ -3461,7 +3461,7 @@ index 000000000..4fea5229b
 +})
 diff --git a/packages/cli/test/neta-database.test.ts b/packages/cli/test/neta-database.test.ts
 new file mode 100644
-index 000000000..281f76dbb
+index 0000000..281f76d
 --- /dev/null
 +++ b/packages/cli/test/neta-database.test.ts
 @@ -0,0 +1,41 @@
@@ -3508,7 +3508,7 @@ index 000000000..281f76dbb
 +})
 diff --git a/packages/core/src/plugin/neta-context.ts b/packages/core/src/plugin/neta-context.ts
 new file mode 100644
-index 000000000..ae8040d41
+index 0000000..ae8040d
 --- /dev/null
 +++ b/packages/core/src/plugin/neta-context.ts
 @@ -0,0 +1,132 @@
@@ -3646,7 +3646,7 @@ index 000000000..ae8040d41
 +})
 diff --git a/packages/core/test/plugin/neta-context.test.ts b/packages/core/test/plugin/neta-context.test.ts
 new file mode 100644
-index 000000000..8a412c6f6
+index 0000000..8a412c6
 --- /dev/null
 +++ b/packages/core/test/plugin/neta-context.test.ts
 @@ -0,0 +1,208 @@
@@ -3860,7 +3860,7 @@ index 000000000..8a412c6f6
 +}
 diff --git a/packages/neta-client/package.json b/packages/neta-client/package.json
 new file mode 100644
-index 000000000..75a3415a2
+index 0000000..75a3415
 --- /dev/null
 +++ b/packages/neta-client/package.json
 @@ -0,0 +1,21 @@
@@ -3887,7 +3887,7 @@ index 000000000..75a3415a2
 +}
 diff --git a/packages/neta-client/src/index.test.ts b/packages/neta-client/src/index.test.ts
 new file mode 100644
-index 000000000..5546fcef3
+index 0000000..5546fce
 --- /dev/null
 +++ b/packages/neta-client/src/index.test.ts
 @@ -0,0 +1,127 @@
@@ -4020,7 +4020,7 @@ index 000000000..5546fcef3
 +})
 diff --git a/packages/neta-client/src/index.ts b/packages/neta-client/src/index.ts
 new file mode 100644
-index 000000000..c693edaa0
+index 0000000..c693eda
 --- /dev/null
 +++ b/packages/neta-client/src/index.ts
 @@ -0,0 +1,333 @@
@@ -4359,7 +4359,7 @@ index 000000000..c693edaa0
 +}
 diff --git a/packages/neta-client/src/remote.ts b/packages/neta-client/src/remote.ts
 new file mode 100644
-index 000000000..41b4e3286
+index 0000000..41b4e32
 --- /dev/null
 +++ b/packages/neta-client/src/remote.ts
 @@ -0,0 +1,101 @@
@@ -4466,7 +4466,7 @@ index 000000000..41b4e3286
 +}
 diff --git a/packages/neta-client/src/startup.ts b/packages/neta-client/src/startup.ts
 new file mode 100644
-index 000000000..974cac2dd
+index 0000000..974cac2
 --- /dev/null
 +++ b/packages/neta-client/src/startup.ts
 @@ -0,0 +1,115 @@
@@ -4587,7 +4587,7 @@ index 000000000..974cac2dd
 +}
 diff --git a/packages/neta-client/test/startup-socket.test.ts b/packages/neta-client/test/startup-socket.test.ts
 new file mode 100644
-index 000000000..255b908d5
+index 0000000..255b908
 --- /dev/null
 +++ b/packages/neta-client/test/startup-socket.test.ts
 @@ -0,0 +1,66 @@
@@ -4659,7 +4659,7 @@ index 000000000..255b908d5
 +})
 diff --git a/packages/neta-client/test/startup.test.ts b/packages/neta-client/test/startup.test.ts
 new file mode 100644
-index 000000000..cd2206f2b
+index 0000000..cd2206f
 --- /dev/null
 +++ b/packages/neta-client/test/startup.test.ts
 @@ -0,0 +1,222 @@
@@ -4887,14 +4887,14 @@ index 000000000..cd2206f2b
 +})
 diff --git a/packages/neta-client/tsconfig.json b/packages/neta-client/tsconfig.json
 new file mode 100644
-index 000000000..3ed29de3e
+index 0000000..3ed29de
 --- /dev/null
 +++ b/packages/neta-client/tsconfig.json
 @@ -0,0 +1 @@
 +{ "extends": "@tsconfig/bun/tsconfig.json", "compilerOptions": { "strict": true, "noEmit": true } }
 diff --git a/packages/tui/src/neta/archive.tsx b/packages/tui/src/neta/archive.tsx
 new file mode 100644
-index 000000000..3ef107225
+index 0000000..3ef1072
 --- /dev/null
 +++ b/packages/tui/src/neta/archive.tsx
 @@ -0,0 +1,98 @@
@@ -4998,7 +4998,7 @@ index 000000000..3ef107225
 +}
 diff --git a/packages/tui/src/neta/context.tsx b/packages/tui/src/neta/context.tsx
 new file mode 100644
-index 000000000..0829b4fa5
+index 0000000..0829b4f
 --- /dev/null
 +++ b/packages/tui/src/neta/context.tsx
 @@ -0,0 +1,32 @@
@@ -5036,7 +5036,7 @@ index 000000000..0829b4fa5
 +}
 diff --git a/packages/tui/src/neta/model-preferences.tsx b/packages/tui/src/neta/model-preferences.tsx
 new file mode 100644
-index 000000000..c209efbb5
+index 0000000..c209efb
 --- /dev/null
 +++ b/packages/tui/src/neta/model-preferences.tsx
 @@ -0,0 +1,148 @@
@@ -5190,7 +5190,7 @@ index 000000000..c209efbb5
 +}
 diff --git a/packages/tui/src/neta/notifications.ts b/packages/tui/src/neta/notifications.ts
 new file mode 100644
-index 000000000..ec287ba86
+index 0000000..ec287ba
 --- /dev/null
 +++ b/packages/tui/src/neta/notifications.ts
 @@ -0,0 +1,59 @@
@@ -5255,7 +5255,7 @@ index 000000000..ec287ba86
 +}
 diff --git a/packages/tui/src/neta/presentation.ts b/packages/tui/src/neta/presentation.ts
 new file mode 100644
-index 000000000..d4c91af03
+index 0000000..d4c91af
 --- /dev/null
 +++ b/packages/tui/src/neta/presentation.ts
 @@ -0,0 +1,86 @@
@@ -5347,7 +5347,7 @@ index 000000000..d4c91af03
 +}
 diff --git a/packages/tui/src/neta/reconnect.ts b/packages/tui/src/neta/reconnect.ts
 new file mode 100644
-index 000000000..f319d08a0
+index 0000000..f319d08
 --- /dev/null
 +++ b/packages/tui/src/neta/reconnect.ts
 @@ -0,0 +1,39 @@
@@ -5392,7 +5392,7 @@ index 000000000..f319d08a0
 +}
 diff --git a/packages/tui/src/neta/recovery.ts b/packages/tui/src/neta/recovery.ts
 new file mode 100644
-index 000000000..5cf137abd
+index 0000000..5cf137a
 --- /dev/null
 +++ b/packages/tui/src/neta/recovery.ts
 @@ -0,0 +1,18 @@
@@ -5416,7 +5416,7 @@ index 000000000..5cf137abd
 +}
 diff --git a/packages/tui/src/neta/routing.tsx b/packages/tui/src/neta/routing.tsx
 new file mode 100644
-index 000000000..1c94b747d
+index 0000000..1c94b74
 --- /dev/null
 +++ b/packages/tui/src/neta/routing.tsx
 @@ -0,0 +1,324 @@
@@ -5746,16 +5746,16 @@ index 000000000..1c94b747d
 +}
 diff --git a/packages/tui/src/neta/shell.tsx b/packages/tui/src/neta/shell.tsx
 new file mode 100644
-index 000000000..27c3589dc
+index 0000000..3b05d0b
 --- /dev/null
 +++ b/packages/tui/src/neta/shell.tsx
-@@ -0,0 +1,987 @@
+@@ -0,0 +1,802 @@
 +import { createEffect, createMemo, createSignal, For, onCleanup, Show, type JSX } from "solid-js"
 +import { TerminalViewport, useTerminalDimensions } from "../ui/terminal-dimensions"
 +import { ownerSession, type Agent, type Mission, type Snapshot, type View } from "@neta/client"
 +import { deliveryLabel, deliveryNeedsAttention, parentOwner } from "./recovery"
 +import { NetaArchive } from "./archive"
-+import { archiveTimestamp, missionDisplayState, spineStatusRank, spineWidth, stateLabel, workspaceActivity } from "./presentation"
++import { missionDisplayState, spineStatusRank, spineWidth, stateLabel, workspaceActivity } from "./presentation"
 +import { NetaStatus } from "./status"
 +import { useNeta } from "./context"
 +import { useNetaUpdates } from "./updates-context"
@@ -5803,7 +5803,6 @@ index 000000000..27c3589dc
 +  const [connected, setConnected] = createSignal(true)
 +  const [busy, setBusy] = createSignal(false)
 +  const [archived, setArchived] = createSignal(false)
-+  const [needsAttention, setNeedsAttention] = createSignal(false)
 +  const [collapsed, setCollapsed] = createSignal(
 +    new Set(
 +      state.snapshot.missions
@@ -5816,10 +5815,9 @@ index 000000000..27c3589dc
 +  const [archiveAgents, setArchiveAgents] = createSignal<Record<string, Agent[]>>({})
 +  const sidebarWidth = createMemo(() => spineWidth(dimensions().width))
 +  const currentOwner = createMemo(() => archiveActor()?.id ?? state.view.owner)
-+  const activity = createMemo(() => workspaceActivity(snapshot(), state.view.workspaceId))
 +  const viewport = createMemo(() => ({
 +    width: Math.max(1, dimensions().width - sidebarWidth() - 2),
-+    height: Math.max(1, dimensions().height - 9 - (startupNotice() ? 1 : 0)),
++    height: Math.max(1, dimensions().height - (startupNotice() ? 1 : 0)),
 +  }))
 +  const workspace = createMemo(() => snapshot().workspaces.find((one) => one.id === state.view.workspaceId))
 +  const leader = createMemo(() => snapshot().leaders.find((one) => one.workspaceId === state.view.workspaceId))
@@ -5828,26 +5826,15 @@ index 000000000..27c3589dc
 +  )
 +  const missions = createMemo(() =>
 +    [...new Map([...archiveMissions(), ...snapshot().missions].map((mission) => [mission.id, mission])).values()]
-+      .filter(
-+        (mission) =>
-+          mission.workspaceId === state.view.workspaceId &&
-+          (!needsAttention() ||
-+            ["failed", "blocked", "readyToClose"].includes(mission.state) ||
-+            snapshot().agents.some((agent) => agent.missionId === mission.id && deliveryNeedsAttention(agent))),
-+      )
++      .filter((mission) => mission.workspaceId === state.view.workspaceId)
 +      .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.number - a.number),
 +  )
 +  const recentMissions = createMemo(() =>
-+    missions()
-+      .filter((mission, index) => index < 8 || mission.state !== "closed")
-+      .sort((a, b) =>
-+        spineStatusRank(missionDisplayState(a, snapshot().agents, leader())) -
-+          spineStatusRank(missionDisplayState(b, snapshot().agents, leader())) ||
-+        b.createdAt.localeCompare(a.createdAt) || b.number - a.number,
-+      ),
-+  )
-+  const olderArchives = createMemo(() =>
-+    missions().filter((mission, index) => index >= 8 && mission.state === "closed"),
++    missions().sort((a, b) =>
++      spineStatusRank(missionDisplayState(a, snapshot().agents, leader())) -
++        spineStatusRank(missionDisplayState(b, snapshot().agents, leader())) ||
++      b.createdAt.localeCompare(a.createdAt) || b.number - a.number,
++    ),
 +  )
 +  const selectedMission = createMemo(() => {
 +    const actor = selected()
@@ -6290,6 +6277,32 @@ index 000000000..27c3589dc
 +      setBusy(false)
 +    }
 +  }
++  function help() {
++    dialog.replace(() => (
++      <DialogSelect
++        title="Spine help"
++        placeholder="Find an action…"
++        options={[
++          { title: "Switch workspace", value: "workspace", description: "Open another workspace" },
++          { title: "Switch machine", value: "machine", description: "Open a workspace on another machine" },
++          { title: "Leader updates", value: "updates", description: "Catch up on workspace leader replies" },
++          { title: "Agent conversations", value: "agents", description: "Open a saved or active conversation" },
++          { title: "Archived missions", value: "archive", description: "Inspect saved mission conversations" },
++          { title: "Worker result delivery", value: "delivery", description: "Inspect parent delivery status" },
++          { title: "Reset", value: "reset", description: "Start fresh chat or workspace context" },
++        ]}
++        onSelect={(option) => {
++          if (option.value === "workspace") workspaces()
++          else if (option.value === "machine") machines()
++          else if (option.value === "updates") void openUpdates()
++          else if (option.value === "agents") tabs()
++          else if (option.value === "archive") void toggleArchive(true)
++          else if (option.value === "delivery") deliveries()
++          else reset()
++        }}
++      />
++    ))
++  }
 +  Keymap.createLayer(() => ({
 +    mode: "global",
 +    commands: [
@@ -6300,6 +6313,7 @@ index 000000000..27c3589dc
 +        slashName: "updates",
 +        run: openUpdates,
 +      },
++      { name: "neta.help", title: "Spine help", category: "Neta", slashName: "help", run: help },
 +      { name: "neta.tabs", title: "Agents and open tabs", category: "Neta", slashName: "tabs", run: () => tabs() },
 +      {
 +        name: "neta.routing",
@@ -6315,13 +6329,6 @@ index 000000000..27c3589dc
 +          dialog.setSize("large")
 +        },
 +      },
-+      {
-+        name: "neta.archive",
-+        title: "Inspect archived missions",
-+        category: "Neta",
-+        slashName: "archive",
-+        run: () => toggleArchive(true),
-+      },
 +      { name: "neta.reset", title: "Reset chat or workspace", category: "Neta", slashName: "reset", run: reset },
 +      { name: "neta.workspaces", title: "Switch workspace", category: "Neta", slashName: "workspace", run: workspaces },
 +      { name: "neta.machines", title: "Switch machine", category: "Neta", slashName: "machines", run: machines },
@@ -6331,13 +6338,6 @@ index 000000000..27c3589dc
 +        category: "Neta",
 +        slashName: "delivery",
 +        run: deliveries,
-+      },
-+      {
-+        name: "neta.leader",
-+        title: "Jump to workspace leader",
-+        category: "Neta",
-+        slashName: "leader",
-+        run: () => select("leader"),
 +      },
 +      {
 +        name: "neta.reconnect",
@@ -6369,6 +6369,11 @@ index 000000000..27c3589dc
 +        .sort((a, b) => spineStatusRank(a.state) - spineStatusRank(b.state))
 +    const status = () => missionDisplayState(mission, agents(), leader())
 +    const expanded = () => !collapsed().has(mission.id) && (mission.state !== "closed" || !!archiveAgents()[mission.id])
++    const visibleAgents = () => {
++      const all = agents()
++      if (expanded()) return all.filter((agent) => !agent.canSpawn)
++      return all.filter((agent) => agent.canSpawn || ["running", "starting", "blocked", "failed"].includes(agent.state))
++    }
 +    return (
 +      <box flexDirection="row" marginBottom={1}>
 +        <text width={6} flexShrink={0} fg={theme.text.subdued}>
@@ -6397,7 +6402,7 @@ index 000000000..27c3589dc
 +            </text>
 +          </box>
 +          <Show when={expanded()}>
-+            <For each={agents()}>
++            <For each={visibleAgents()}>
 +              {(agent, index) => (
 +                <box flexDirection="column">
 +                  <box
@@ -6406,7 +6411,7 @@ index 000000000..27c3589dc
 +                    onMouseUp={() => select(agent.id)}
 +                  >
 +                    <text width={2} flexShrink={0} fg={theme.text.subdued}>
-+                      {index() === agents().length - 1 ? "└ " : "├ "}
++                      {index() === visibleAgents().length - 1 ? "└ " : "├ "}
 +                    </text>
 +                    <NetaStatus state={agent.state} />
 +                    <text
@@ -6450,29 +6455,6 @@ index 000000000..27c3589dc
 +      paddingRight={1}
 +      backgroundColor={theme.background.surface.offset}
 +    >
-+      <box
-+        height={2}
-+        flexShrink={0}
-+        paddingLeft={1}
-+        paddingRight={1}
-+        alignItems="center"
-+        flexDirection="row"
-+        border={["bottom"]}
-+        borderColor={theme.border.default}
-+      >
-+        <text fg={theme.text.default} onMouseUp={workspaces} wrapMode="none" truncate>
-+          {`[ ${workspace()?.name ?? state.view.path} ▾  ^K ]`}
-+        </text>
-+        <box flexGrow={1} minWidth={2} />
-+        <Show when={dimensions().width >= 95}>
-+          <text fg={theme.text.subdued} onMouseUp={() => select("leader")}>
-+            [ Jump to leader ]{"     "}
-+          </text>
-+        </Show>
-+        <text fg={theme.text.subdued}>
-+          {activity().running} running · {activity().attention} needs you
-+        </text>
-+      </box>
 +      <Show when={startupNotice()}>
 +        <box flexDirection="row" paddingLeft={1} paddingRight={1} height={1} flexShrink={0}>
 +          <text flexGrow={1} wrapMode="none" truncate fg={theme.text.subdued}>
@@ -6495,28 +6477,10 @@ index 000000000..27c3589dc
 +            border={["right"]}
 +            borderColor={theme.border.default}
 +          >
-+            <box height={1} flexShrink={0} flexDirection="row" justifyContent="space-between">
-+              <text width={6} flexShrink={0} fg={theme.text.default}>
-+                SPINE
-+              </text>
-+              <box flexGrow={1} minWidth={0} alignItems="flex-end">
-+                <text
-+                  maxWidth={sidebarWidth() - 9}
-+                  fg={theme.text.action.primary.default}
-+                  onMouseUp={machines}
-+                  truncate
-+                  wrapMode="none"
-+                >
-+                  [ {snapshot().machine.name} ▾ ]
-+                </text>
-+              </box>
-+            </box>
 +            <box height={1} flexShrink={0} marginBottom={1} flexDirection="row" justifyContent="space-between">
++              <text fg={theme.text.default}>SPINE</text>
 +              <text fg={connected() ? theme.text.subdued : theme.text.feedback.error.default}>
-+                {!connected() ? "DISCONNECTED" : chatClient.connection.status() === "connected" ? "CONNECTED" : "CHAT RECONNECTING"}
-+              </text>
-+              <text fg={theme.text.subdued} onMouseUp={() => setNeedsAttention(!needsAttention())}>
-+                [ {needsAttention() ? "needs you" : "all states"} ▾ ]
++                {!connected() ? "OFFLINE" : "LIVE"}
 +              </text>
 +            </box>
 +            <box flexDirection="row" flexShrink={0}>
@@ -6566,146 +6530,16 @@ index 000000000..27c3589dc
 +            </box>
 +            <scrollbox flexGrow={1} minHeight={0} marginTop={1}>
 +              <For each={recentMissions()}>{(mission) => <MissionRow mission={mission} />}</For>
-+              <box flexDirection="row" marginTop={1} marginBottom={1} flexShrink={0}>
-+                <text width={6} fg={theme.text.subdued}>
-+                  {archiveTimestamp(latestArchive()?.closedAt)}
-+                </text>
-+                <text width={2} fg={theme.border.default}>
-+                  └
-+                </text>
-+                <text height={1} flexShrink={0} fg={theme.text.subdued} onMouseUp={() => void toggleArchive()}>
-+                  {archived() ? "▾" : "▸"} Archived (
-+                  {archived()
-+                    ? archiveMissions().length
-+                    : snapshot().missions.filter(
-+                        (mission) => mission.workspaceId === state.view.workspaceId && mission.state === "closed",
-+                      ).length}
-+                  )
-+                </text>
-+              </box>
-+              <Show when={archived()}>
-+                <For each={olderArchives()}>{(mission) => <MissionRow mission={mission} />}</For>
-+              </Show>
++              <text height={1} flexShrink={0} fg={theme.text.subdued} onMouseUp={help}>
++                Help · actions
++              </text>
 +            </scrollbox>
 +            <text height={2} flexShrink={0} fg={theme.text.subdued}>
-+              {"Click mission to expand\n/tabs agents · /archive history"}
++              {"Mission lead and active agents stay visible\nHelp opens actions and history"}
 +            </text>
 +          </box>
 +        </Show>
 +        <box flexGrow={1} minWidth={0} flexDirection="column">
-+          <box height={2} flexShrink={0} flexDirection="row" border={["bottom"]} borderColor={theme.border.default}>
-+            <scrollbox
-+              flexGrow={1}
-+              minWidth={0}
-+              height={2}
-+              width={Math.max(1, viewport().width - 12)}
-+              scrollX
-+              scrollY={false}
-+              horizontalScrollbarOptions={{ visible: false }}
-+              contentOptions={{ flexDirection: "row" }}
-+            >
-+              <For each={[...new Set(["leader", ...state.view.tabs, ...(archiveActor() ? [archiveActor()!.id] : [])])]}>
-+                {(owner) => {
-+                  const actor = () =>
-+                    archiveActor()?.id === owner
-+                      ? archiveActor()
-+                      : ownerSession(snapshot(), state.view.workspaceId, owner)
-+                  const mission = () => {
-+                    const value = actor()
-+                    return value && "missionId" in value
-+                      ? [...snapshot().missions, ...archiveMissions()].find((item) => item.id === value.missionId)
-+                      : undefined
-+                  }
-+                  return (
-+                    <Show when={actor()}>
-+                      <box
-+                        flexDirection="row"
-+                        height={2}
-+                        width={owner === "leader" ? 23 : 27}
-+                        justifyContent="space-between"
-+                        border={["bottom"]}
-+                        borderColor={
-+                          owner === currentOwner() ? theme.text.action.primary.default : theme.border.default
-+                        }
-+                        flexShrink={0}
-+                        paddingLeft={1}
-+                        paddingRight={1}
-+                        gap={1}
-+                        backgroundColor={owner === currentOwner() ? theme.background.surface.overlay : undefined}
-+                      >
-+                        <box flexDirection="row" gap={1} flexGrow={1} minWidth={0} onMouseUp={() => select(owner)}>
-+                          <NetaStatus state={mission()?.state === "closed" ? "archived" : (actor()?.state ?? "idle")} />
-+                          <text
-+                            wrapMode="none"
-+                            truncate
-+                            flexShrink={1}
-+                            fg={owner === currentOwner() ? theme.text.action.primary.default : theme.text.subdued}
-+                          >
-+                            {actor()?.name} ·{" "}
-+                            {owner === "leader"
-+                              ? "LEADER"
-+                              : `#${mission()?.number ?? "?"} · ${mission()?.state === "closed" ? "ARCH" : actor()?.state === "running" ? "RUN" : stateLabel(actor()?.state ?? "idle")}`}
-+                          </text>
-+                        </box>
-+                        <Show when={owner !== "leader"}>
-+                          <text
-+                            fg={theme.text.subdued}
-+                            onMouseUp={() => {
-+                              if (archiveActor()?.id === owner) {
-+                                setArchiveActor(undefined)
-+                                return
-+                              }
-+                              void navigate({
-+                                ...state.view,
-+                                owner: state.view.owner === owner ? "leader" : state.view.owner,
-+                                tabs: state.view.tabs.filter((tab) => tab !== owner),
-+                              })
-+                            }}
-+                          >
-+                            ×
-+                          </text>
-+                        </Show>
-+                      </box>
-+                    </Show>
-+                  )
-+                }}
-+              </For>
-+            </scrollbox>
-+            <text width={12} flexShrink={0} fg={theme.text.subdued} onMouseUp={() => tabs()}>
-+              {" "}
-+              [ tabs ▾ ]{" "}
-+            </text>
-+          </box>
-+          <box height={2} flexShrink={0} paddingLeft={2} flexDirection="column">
-+            <text height={1} wrapMode="none" truncate fg={theme.text.subdued}>
-+              {workspace()?.name} / {snapshot().machine.name} /{" "}
-+              {selectedMission() ? `#${selectedMission()!.number} ${selectedMission()!.name} / ` : ""}
-+              {selected()?.name}
-+              {busy() ? " · Opening…" : ""}
-+            </text>
-+            <box height={1} flexDirection="row" gap={1}>
-+              <NetaStatus state={archiveActor() ? "archived" : (selected()?.state ?? "idle")} />
-+              <text height={1} flexGrow={1} minWidth={0} wrapMode="none" truncate fg={theme.text.subdued}>
-+                {archiveActor()
-+                  ? `ARCHIVED${archiveTimestamp(selectedMission()?.closedAt, true) ? ` · ${archiveTimestamp(selectedMission()?.closedAt, true)}` : ""} · saved output · input disabled`
-+                  : `${currentOwner() === "leader" ? "Workspace leader" : selected() && "canSpawn" in selected()! && (selected() as Agent).canSpawn ? "Mission lead" : "Worker"} · ${stateLabel(selected()?.state ?? "idle")} · ${currentOwner() === "leader" ? (leader()?.mode === "leadPlus" ? "Lead++" : "Lead") : (selected() as Agent)?.canSpawn ? "Lead" : "Agent"} · OpenCode`}
-+                {(() => {
-+                  const actor = selected()
-+                  return actor &&
-+                    "requestedModel" in actor &&
-+                    actor.requestedModel &&
-+                    actor.requestedModel !== actor.model
-+                    ? ` · Requested: ${actor.requestedModel}`
-+                    : ""
-+                })()}
-+                {(() => {
-+                  const actor = selected()
-+                  if (!actor || !("routing" in actor) || !actor.routing) return ""
-+                  return ` · ${actor.model} · effort ${actor.routing.effort ?? "explicit"} · /routing`
-+                })()}
-+              </text>
-+            </box>
-+          </box>
 +          <box flexGrow={1} minHeight={0} backgroundColor={theme.background.default}>
 +            <TerminalViewport value={viewport}>
 +              <Show when={archiveActor()} keyed fallback={props.children}>
@@ -6715,31 +6549,12 @@ index 000000000..27c3589dc
 +          </box>
 +        </box>
 +      </box>
-+      <box
-+        height={2}
-+        flexShrink={0}
-+        flexDirection="row"
-+        paddingLeft={1}
-+        paddingRight={1}
-+        border={["top"]}
-+        borderColor={theme.border.default}
-+      >
-+        <text fg={theme.text.subdued} wrapMode="none" truncate>
-+          {dimensions().width >= 120
-+            ? "^K workspaces  ^L leader  /machines  /tabs  /archive"
-+            : "/workspace · /machines · /tabs"}
-+        </text>
-+        <box flexGrow={1} />
-+        <text fg={theme.text.subdued} wrapMode="none" truncate>
-+          {dimensions().width >= 95 ? "/models · /connect · /reset · /delivery" : "ctrl+p commands"}
-+        </text>
-+      </box>
 +    </box>
 +  )
 +}
 diff --git a/packages/tui/src/neta/status.tsx b/packages/tui/src/neta/status.tsx
 new file mode 100644
-index 000000000..ae45ee909
+index 0000000..ae45ee9
 --- /dev/null
 +++ b/packages/tui/src/neta/status.tsx
 @@ -0,0 +1,61 @@
@@ -6806,7 +6621,7 @@ index 000000000..ae45ee909
 +}
 diff --git a/packages/tui/src/neta/updates-context.tsx b/packages/tui/src/neta/updates-context.tsx
 new file mode 100644
-index 000000000..c916020cf
+index 0000000..c916020
 --- /dev/null
 +++ b/packages/tui/src/neta/updates-context.tsx
 @@ -0,0 +1,131 @@
@@ -6943,7 +6758,7 @@ index 000000000..c916020cf
 +export const useNetaUpdates = () => useContext(Context)
 diff --git a/packages/tui/src/neta/updates-model.ts b/packages/tui/src/neta/updates-model.ts
 new file mode 100644
-index 000000000..716190c61
+index 0000000..716190c
 --- /dev/null
 +++ b/packages/tui/src/neta/updates-model.ts
 @@ -0,0 +1,59 @@
@@ -7008,7 +6823,7 @@ index 000000000..716190c61
 +}
 diff --git a/packages/tui/src/neta/updates.tsx b/packages/tui/src/neta/updates.tsx
 new file mode 100644
-index 000000000..04be39332
+index 0000000..04be393
 --- /dev/null
 +++ b/packages/tui/src/neta/updates.tsx
 @@ -0,0 +1,332 @@
@@ -7346,7 +7161,7 @@ index 000000000..04be39332
 +}
 diff --git a/packages/tui/src/theme/assets/neta.json b/packages/tui/src/theme/assets/neta.json
 new file mode 100644
-index 000000000..ceb25a440
+index 0000000..ceb25a4
 --- /dev/null
 +++ b/packages/tui/src/theme/assets/neta.json
 @@ -0,0 +1,198 @@
@@ -7550,7 +7365,7 @@ index 000000000..ceb25a440
 +}
 diff --git a/packages/tui/src/ui/terminal-dimensions.ts b/packages/tui/src/ui/terminal-dimensions.ts
 new file mode 100644
-index 000000000..1f6e558da
+index 0000000..1f6e558
 --- /dev/null
 +++ b/packages/tui/src/ui/terminal-dimensions.ts
 @@ -0,0 +1,52 @@
@@ -7608,7 +7423,7 @@ index 000000000..1f6e558da
 +}
 diff --git a/packages/tui/test/neta-archive.test.tsx b/packages/tui/test/neta-archive.test.tsx
 new file mode 100644
-index 000000000..b8dc7ed3a
+index 0000000..b8dc7ed
 --- /dev/null
 +++ b/packages/tui/test/neta-archive.test.tsx
 @@ -0,0 +1,55 @@
@@ -7669,7 +7484,7 @@ index 000000000..b8dc7ed3a
 +})
 diff --git a/packages/tui/test/neta-notifications.test.ts b/packages/tui/test/neta-notifications.test.ts
 new file mode 100644
-index 000000000..e351650ef
+index 0000000..e351650
 --- /dev/null
 +++ b/packages/tui/test/neta-notifications.test.ts
 @@ -0,0 +1,45 @@
@@ -7720,7 +7535,7 @@ index 000000000..e351650ef
 +})
 diff --git a/packages/tui/test/neta-presentation.test.ts b/packages/tui/test/neta-presentation.test.ts
 new file mode 100644
-index 000000000..9fab51417
+index 0000000..9fab514
 --- /dev/null
 +++ b/packages/tui/test/neta-presentation.test.ts
 @@ -0,0 +1,128 @@
@@ -7854,7 +7669,7 @@ index 000000000..9fab51417
 +})
 diff --git a/packages/tui/test/neta-recent-missions.test.tsx b/packages/tui/test/neta-recent-missions.test.tsx
 new file mode 100644
-index 000000000..2cb064fb7
+index 0000000..2cb064f
 --- /dev/null
 +++ b/packages/tui/test/neta-recent-missions.test.tsx
 @@ -0,0 +1,207 @@
@@ -8067,7 +7882,7 @@ index 000000000..2cb064fb7
 +}
 diff --git a/packages/tui/test/neta-reconnect.test.ts b/packages/tui/test/neta-reconnect.test.ts
 new file mode 100644
-index 000000000..d2e3a3f6c
+index 0000000..d2e3a3f
 --- /dev/null
 +++ b/packages/tui/test/neta-reconnect.test.ts
 @@ -0,0 +1,65 @@
@@ -8138,7 +7953,7 @@ index 000000000..d2e3a3f6c
 +})
 diff --git a/packages/tui/test/neta-recovery.test.ts b/packages/tui/test/neta-recovery.test.ts
 new file mode 100644
-index 000000000..b48a77bda
+index 0000000..b48a77b
 --- /dev/null
 +++ b/packages/tui/test/neta-recovery.test.ts
 @@ -0,0 +1,28 @@
@@ -8172,7 +7987,7 @@ index 000000000..b48a77bda
 +})
 diff --git a/packages/tui/test/neta-routing.test.tsx b/packages/tui/test/neta-routing.test.tsx
 new file mode 100644
-index 000000000..a8c28a64d
+index 0000000..a8c28a6
 --- /dev/null
 +++ b/packages/tui/test/neta-routing.test.tsx
 @@ -0,0 +1,302 @@
@@ -8480,7 +8295,7 @@ index 000000000..a8c28a64d
 +}
 diff --git a/packages/tui/test/neta-status.test.tsx b/packages/tui/test/neta-status.test.tsx
 new file mode 100644
-index 000000000..8ebb6286b
+index 0000000..8ebb628
 --- /dev/null
 +++ b/packages/tui/test/neta-status.test.tsx
 @@ -0,0 +1,109 @@
@@ -8595,7 +8410,7 @@ index 000000000..8ebb6286b
 +})
 diff --git a/packages/tui/test/neta-theme.test.ts b/packages/tui/test/neta-theme.test.ts
 new file mode 100644
-index 000000000..dd0e5d6f4
+index 0000000..dd0e5d6
 --- /dev/null
 +++ b/packages/tui/test/neta-theme.test.ts
 @@ -0,0 +1,22 @@
@@ -8623,7 +8438,7 @@ index 000000000..dd0e5d6f4
 +})
 diff --git a/packages/tui/test/neta-updates-model.test.ts b/packages/tui/test/neta-updates-model.test.ts
 new file mode 100644
-index 000000000..e6d4cee9f
+index 0000000..e6d4cee
 --- /dev/null
 +++ b/packages/tui/test/neta-updates-model.test.ts
 @@ -0,0 +1,42 @@
@@ -8671,7 +8486,7 @@ index 000000000..e6d4cee9f
 +})
 diff --git a/packages/tui/test/neta-updates.test.tsx b/packages/tui/test/neta-updates.test.tsx
 new file mode 100644
-index 000000000..fca928f89
+index 0000000..fca928f
 --- /dev/null
 +++ b/packages/tui/test/neta-updates.test.tsx
 @@ -0,0 +1,267 @@
@@ -8944,7 +8759,7 @@ index 000000000..fca928f89
 +)
 diff --git a/packages/tui/test/neta-viewport.test.tsx b/packages/tui/test/neta-viewport.test.tsx
 new file mode 100644
-index 000000000..0544f2afe
+index 0000000..0544f2a
 --- /dev/null
 +++ b/packages/tui/test/neta-viewport.test.tsx
 @@ -0,0 +1,38 @@
@@ -8988,7 +8803,7 @@ index 000000000..0544f2afe
 +})
 diff --git a/packages/tui/test/terminal-dimensions.test.ts b/packages/tui/test/terminal-dimensions.test.ts
 new file mode 100644
-index 000000000..24b86a3f4
+index 0000000..24b86a3
 --- /dev/null
 +++ b/packages/tui/test/terminal-dimensions.test.ts
 @@ -0,0 +1,22 @@
@@ -9016,7 +8831,7 @@ index 000000000..24b86a3f4
 +})
 diff --git a/packages/util/src/neta-contract.ts b/packages/util/src/neta-contract.ts
 new file mode 100644
-index 000000000..3be915ecf
+index 0000000..3be915e
 --- /dev/null
 +++ b/packages/util/src/neta-contract.ts
 @@ -0,0 +1,54 @@

@@ -1,8 +1,0 @@
-{
-  "name": "rmux-xterm-recovery-oracle",
-  "private": true,
-  "type": "module",
-  "devDependencies": {
-    "@xterm/headless": "6.0.0"
-  }
-}

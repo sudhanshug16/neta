@@ -3,7 +3,6 @@ import { realpathSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { openCodeCommand } from "../opencode/launcher.ts";
-import { rmuxCommand } from "../rmux/bridge.ts";
 import { toadCommand } from "../toad/launcher.ts";
 // The `neta` command entry: argument parsing, dispatch and exit codes (08).
 // Every command is a thin client of the Node over its socket; this module owns
@@ -30,7 +29,6 @@ export type Command = {
 		| "models"
 		| "model"
 		| "mcp"
-		| "rmux"
 		| "tui"
 		| "version";
 	sub?: string;
@@ -60,7 +58,6 @@ const COMMAND_TABLE = `usage: neta [command] [options]
   neta mcp --actor <id> --token <t>      stdio MCP server for one ACP session
   neta tui [path] [--migrate] [--host id]  open native OpenCode chat and the Neta spine
   neta tui --legacy [--demo]              open the retired Toad client
-  neta rmux                              open the Neta rmux terminal workspace
   neta version                            print the version from package.json
 
 <dur> is <n>[mhdw], e.g. 90m, 3d. --json is accepted only where listed above.`;
@@ -264,9 +261,6 @@ export function parse(argv: string[]): Command | Usage {
 			return rest.length
 				? { usage: "neta chat takes no arguments" }
 				: { name: "attach", args: [], flags: { legacy: true } };
-		case "rmux":
-			if (rest.length > 0) return { usage: "neta rmux takes no arguments" };
-			return { name: "rmux", args: [], flags: {} };
 		case "version":
 		case "--version":
 			if (rest.length > 0) return { usage: "neta version takes no arguments" };
@@ -327,7 +321,6 @@ const handlers: Record<Command["name"], (cmd: Command) => number | Promise<numbe
 	models: (cmd) => withClient((client) => modelsCommand(client, cmd.flags)),
 	model: (cmd) => withClient((client) => modelCommand(client, cmd.args[0] as string)),
 	mcp: (cmd) => mcpCommand(cmd.flags),
-	rmux: rmuxCommand,
 	tui: (cmd) =>
 		cmd.flags.legacy === true || cmd.flags.demo === true
 			? toadCommand(cmd.flags.demo === true)

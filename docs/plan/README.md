@@ -6,7 +6,7 @@ small agent can execute one task from it without reading anything else except
 the files the task names. The manifesto is the product spec; this plan is the
 engineering spec. When they disagree, the manifesto wins and the plan is wrong.
 
-The current code (npm `@intervene/neta` 2.2.x, `src/`, `apps/macos/`) is retired. It is
+The current code (npm `@intervene/neta` 2.2.x and `src/`) is retired. It is
 tagged `v2-final` and stays readable in Git history and in the two appendices
 in this directory. Nothing from it is imported; ideas are.
 
@@ -15,8 +15,8 @@ in this directory. Nothing from it is imported; ideas are.
 The native Swift/macOS client has been retired. Desktop workstreams 09–11,
 the desktop appendix, and desktop packaging sections of 12 are historical
 references, not implementation requirements. Current client development uses
-OpenCode/OpenTUI; see [OpenCode integration](../opencode.md). Do not recreate
-the removed app, Swift tests, or app-bundle release job.
+OpenCode/OpenTUI; see [OpenCode integration](../opencode.md). The removed
+Swift app and its package are not part of this repository.
 
 ## How to read this plan
 
@@ -31,17 +31,10 @@ the removed app, Swift tests, or app-bundle release job.
 | `06-worktrees.md` | Worktrunk worktrees, writer leases, merge detection, closeout | 01, 02, 05 |
 | `07-modes.md` | Lead and Lead++ | 01, 02, 03, 05 |
 | `08-cli.md` | The `neta` command line client | 04 |
-| `09-desktop-shell.md` | macOS app: window, Node client, store, glass, navigator, mission bar | 04 |
-| `10-desktop-spine.md` | The spine canvas | 09 |
-| `11-desktop-chat.md` | Chat: turns, streaming, composer controls, model picker, Details | 09 |
-| `12-release.md` | Packaging, versioning, publishing | all |
 | `appendix-v2-engine.md` | Map of the retired engine, for reference only | — |
-| `appendix-v2-desktop.md` | Map of the retired desktop app, for reference only | — |
 
 Workstreams 02 and 03 can run in parallel once 01 is merged. 05, 06 and 07
-can run in parallel once 04 is merged. 09 can start as soon as the protocol
-in 04 is merged, against a recorded fixture. 10 and 11 can run in parallel
-once 09 is merged.
+can run in parallel once 04 is merged.
 
 ## Task format
 
@@ -58,8 +51,8 @@ Contract: the exact exported names, types or protocol messages this task
 Steps: numbered, concrete.
 Tests: the test file to write and what each test proves. Tests use
   test/fixtures/fake-acp-agent.mjs for anything ACP; never a real provider.
-Done when: `bun run check` and `bun test` (or `swift build` and `swift test`
-  for Swift) pass, the tests listed exist and pass, and the commit is made.
+Done when: `bun run check` and `bun test` pass, the tests listed exist and pass,
+  and the commit is made.
 Commit: `<type>: <message>` exactly as given.
 ```
 
@@ -78,8 +71,6 @@ These restate [AGENTS.md](../../AGENTS.md) for the rebuild:
 - The published artifact is a Node-runnable bundle. Nothing in `src/` may
   import a Bun-only module (`bun:sqlite`, `bun:ffi`, `Bun.*`). Tests may use
   Bun's test runner.
-- Swift: Swift 6 language mode, macOS 26 minimum, Swift Package Manager, no
-  Xcode project, no external Swift dependencies without a line in the task.
 - Stage explicit paths. One commit per task with the message given. Never
   `git add -A`, never reset or stash.
 - A writer commits everything it changed before it finishes.
@@ -100,10 +91,6 @@ neta-node (TypeScript, one per machine, long-lived)
 neta (TypeScript CLI, thin client of the Node)
   starts the Node on demand; attaches to a leader's conversation in the
   terminal; lists missions and events; changes modes; stops the Node.
-
-NetaDesktop (SwiftUI, macOS 26, thin client of the Node)
-  connects to the same socket; renders the spine, mission bar, navigator,
-  chat; never owns a session.
 
 neta mcp --actor <id> (TypeScript, one per ACP session that needs tools)
   a stdio MCP server the provider launches; every tool call is forwarded to
@@ -127,7 +114,6 @@ src/
   worktrees/   06: Worktrunk driver, writer leases, merge detection
   modes/       07: Lead and Lead++ state, decision records, reminders
   cli/         08: the neta command
-apps/macos/    09–11: NetaDesktop Swift package
 test/          Bun tests; test/fixtures/fake-acp-agent.mjs is kept verbatim
 design/        design working files (kept)
 docs/plan/     this plan
@@ -216,9 +202,9 @@ Defined exactly in `01-domain.md`. In short:
 3. **Authority and isolation** (06, 07): worktrees per Git mission, writer
    leases, merge detection, closeout; Lead and Lead++ with decision records
    and reminders.
-4. **Clients** (08, 09, 10, 11): the CLI attaches to a leader; the desktop
-   renders the spine, mission bar, navigator and chat from a live Node.
-5. **Release** (12): app bundle, npm 3.0.0, docs rewritten.
+4. **Clients** (08): the CLI attaches to a leader; OpenCode/OpenTUI renders
+   native chat and the Neta spine from the live Node.
+5. **Release** (12): Node bundle, native OpenCode artifacts, and docs rewritten.
 
 Definition of done for the whole plan: the Paper artboards "Neta · Spine",
 "Neta · Typical day" and "Neta · Navigator open" can be reproduced on a real

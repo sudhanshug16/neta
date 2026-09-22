@@ -460,9 +460,10 @@ manual path, a person's own choice with no decision record; records
 belong to the leader's own tool requests, never to a client
 (`src/cli/commands/leader.ts`).
 
-The native Swift/macOS app has been retired. The OpenCode/OpenTUI shell is the
-supported interactive client; the Node protocol remains shared with command-line
-controls. There is no native app build, Swift test suite, or app-bundle release.
+The OpenCode/OpenTUI shell is the supported interactive client; the Node protocol
+remains shared with command-line controls. Its left spine is the navigation
+surface, with workspace, machine, archive, delivery, and reset actions under
+**Help · actions**.
 
 The `neta mcp --actor <id>` proxy is a stdio MCP server the provider
 launches inside the agent session (`src/tools/proxy.ts`,
