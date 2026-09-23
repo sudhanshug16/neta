@@ -3,6 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Leader, Workspace } from "../src/core/types.ts";
 import { type MeDecision, type MeSource, meSourceId, openMeStore } from "../src/me/store.ts";
 import { meHandlers } from "../src/node/handlers-me.ts";
 import type { NodeContext } from "../src/node/server.ts";
@@ -129,4 +130,83 @@ test("Me reply rejects stale or cross-workspace destinations", async () => {
 	await expect(
 		meHandlers["me.reply"](ctx, { cardId: card.id, text: "Yes", idempotencyKey: "reply-stale" }, {} as never),
 	).rejects.toThrow("no longer owned");
+});
+
+test("Sol opens a distinct persisted native session with GPT-6 Sol medium and verifies runtime selection", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "neta-sol-handler-"));
+	dirs.push(dir);
+	process.env.NETA_DIR = dir;
+	const workspace: Workspace = {
+		id: "workspace-sol",
+		kind: "folder",
+		name: "Sol",
+		roots: [{ machineId: "machine-sol", path: dir }],
+		createdAt: new Date(0).toISOString(),
+	};
+	const leader: Leader = {
+		workspaceId: workspace.id,
+		machineId: "machine-sol",
+		name: "Leader",
+		sessionId: "leader-session",
+		provider: "opencode",
+		model: "openai/gpt-6-luna-fast",
+		mode: "lead",
+		modeSince: new Date(0).toISOString(),
+		modeActiveMs: 0,
+		state: "idle",
+	};
+	const calls: unknown[] = [];
+	const runtime = {
+		createSession: async (options: unknown) => {
+			calls.push(options);
+			return {
+				sessionId: (options as { sessionId: string }).sessionId,
+				provider: "opencode",
+				model: "openai/gpt-6-sol",
+			};
+		},
+		ensureSession: async (options: unknown) => {
+			calls.push(options);
+			return {
+				sessionId: (options as { sessionId: string }).sessionId,
+				provider: "opencode",
+				model: "openai/gpt-6-sol",
+			};
+		},
+		setModel: async (_id: string, model: string) => calls.push(["model", model]),
+		setNativeVariant: async (_id: string, variant: string) => calls.push(["variant", variant]),
+		runtimeDiagnostics: async () => ({ model: "openai/gpt-6-sol", variant: "medium" }),
+	};
+	const ctx = {
+		store: {
+			machine: () => ({ id: "machine-sol" }),
+			getWorkspace: (id: string) => (id === workspace.id ? workspace : undefined),
+			getLeader: (id: string) => (id === leader.workspaceId ? leader : undefined),
+		},
+		runtime,
+		hub: { broadcast() {} },
+	} as unknown as NodeContext;
+	const [opened, concurrent] = (await Promise.all([
+		meHandlers["sol.open"](ctx, { workspaceId: workspace.id }, {} as never),
+		meHandlers["sol.open"](ctx, { workspaceId: workspace.id }, {} as never),
+	])) as [{ sessionId: string; model: string; variant: string }, { sessionId: string }];
+	expect(opened).toMatchObject({ model: "openai/gpt-6-sol", variant: "medium" });
+	expect(opened.sessionId).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/);
+	expect(opened.sessionId).not.toBe("sol");
+	expect(concurrent.sessionId).toBe(opened.sessionId);
+	expect(calls[0]).toMatchObject({
+		sessionId: opened.sessionId,
+		provider: "opencode",
+		model: "openai/gpt-6-sol",
+		netaTools: false,
+	});
+	expect(calls).toContainEqual(["variant", "medium"]);
+	expect(calls.filter((call) => typeof call === "object" && call !== null && "netaTools" in call)).toHaveLength(1);
+	const restored = (await meHandlers["sol.open"](ctx, {}, {} as never)) as { sessionId: string };
+	expect(restored.sessionId).toBe(opened.sessionId);
+	expect(
+		calls.some(
+			(call) => typeof call === "object" && call !== null && "allowFresh" in call && call.allowFresh === false,
+		),
+	).toBe(true);
 });

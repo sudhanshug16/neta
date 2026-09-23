@@ -457,11 +457,12 @@ export function adaptRuntime(
 	onReaderTurn: (sessionId: SessionId, turn: Turn, blocks: Block[]) => Promise<void> = () => Promise.resolve(),
 	recoveryHandoff?: (sessionId: SessionId) => Promise<string>,
 	inboxStore?: Store["inbox"],
-	systemContext?: (sessionId: string) => string,
+	systemContext?: (sessionId: string) => string | Promise<string>,
 	durableTurn?: (notification: TurnNotification) => Promise<void>,
 	runtimeAdmission?: RuntimeAdmission,
 	inboxGuard?: (message: InboxMessage) => Promise<boolean>,
 	sessionFactory: (options: StartOptions) => Promise<RuntimeSession> = startSession,
+	systemContextRole?: (sessionId: string) => "leader" | "lead" | "agent" | "orchestrator" | undefined,
 ): AdaptedRuntime {
 	const makeSession = sessionFactory;
 	const sessionLifecycle = new SessionLifecycle();
@@ -1139,8 +1140,8 @@ export function adaptRuntime(
 					sessionId: id,
 					actorId,
 					bindingGeneration: session.bindingGeneration,
-					role: actorId === id ? "leader" : session.unsandboxed ? "lead" : "agent",
-					text: systemContext(id),
+					role: systemContextRole?.(id) ?? (actorId === id ? "leader" : session.unsandboxed ? "lead" : "agent"),
+					text: await systemContext(id),
 				});
 			}
 			// Set before the turn opens: `prompt` pushes the turn event
@@ -1251,8 +1252,10 @@ export function adaptRuntime(
 							sessionId: id,
 							actorId,
 							bindingGeneration: relaunched.bindingGeneration,
-							role: actorId === id ? "leader" : relaunched.unsandboxed ? "lead" : "agent",
-							text: systemContext(id),
+							role:
+								systemContextRole?.(id) ??
+								(actorId === id ? "leader" : relaunched.unsandboxed ? "lead" : "agent"),
+							text: await systemContext(id),
 						});
 					}
 					turnId = relaunched.prompt(delivered, attachments);
@@ -1281,6 +1284,10 @@ export function adaptRuntime(
 					bindingGeneration: record.session.bindingGeneration,
 					turnId: record.session.openTurnId,
 					model: record.session.model,
+					variant: (() => {
+						const value = record.session.configOptions.find((option) => option.id === "effort")?.currentValue;
+						return typeof value === "string" ? value : undefined;
+					})(),
 					provider: record.provider,
 					contract: record.session.nativeAttachment?.contract,
 				};
@@ -1785,6 +1792,7 @@ export async function startNode(o?: {
 			storePort = adapted;
 		}
 		const settings = loadSettings({ netaDir: netaDir() }).settings;
+		const solIdentity = await openMeStore().solIdentity();
 		let adaptedRuntime: AdaptedRuntime | undefined;
 		let runtimePort: NodeRuntime;
 		if (o?.runtime === undefined) {
@@ -1828,11 +1836,13 @@ export async function startNode(o?: {
 				captureGlance,
 				(sessionId) => prepareHandoffForSession({ store: storePort }, sessionId),
 				realStore?.inbox,
-				(sessionId) => sessionSystemContext({ store: storePort }, sessionId),
+				(sessionId) =>
+					sessionSystemContext({ store: storePort, superleaderSessionId: solIdentity.sessionId }, sessionId),
 				(notification) => mounted?.recordTurn(notification) ?? Promise.resolve(),
 				runtimeAdmission,
 				(message) => mounted?.canDeliverInbox(message) ?? Promise.resolve(true),
 				o?.sessionFactory,
+				(sessionId) => (sessionId === solIdentity.sessionId ? "orchestrator" : undefined),
 			);
 			runtimePort = adaptedRuntime;
 		} else {

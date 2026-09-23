@@ -248,9 +248,15 @@ bounded preview and a session/turn/block-range/hash pointer to the original
 transcript. Capture is durable before event or block-sequence checkpoints
 advance. On startup the Node replays after those checkpoints; source identity
 makes crash/retry idempotent, and a page-split turn stays buffered until its
-final block. This capture path does not start the Luna classifier or make a
-feed visibility decision. Permission requests, Sol's native session, and
-authorized route delivery remain separate integration work.
+final block. Sol opens one persisted native OpenCode session on user request;
+chat messages use durable inbox admission, and the session is resumed under the
+same ID. Superleader routes preserve the exact user instruction separately from
+the derived text and explanation, validate a current workspace-leader session,
+and deliver with a stable source key. The TUI exposes the route only as an
+explicit confirmation action. GPT-6 Sol medium is selected and checked through
+the native runtime when that provider is configured. Luna classification and
+permission-request capture are still not wired; uncategorized sources remain
+pending, and no background classifier runs.
 
 ## Missions
 

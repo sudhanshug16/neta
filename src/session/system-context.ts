@@ -8,7 +8,7 @@ export interface SystemContextBundle {
 	actorId: string;
 	sessionId: string;
 	generation: string;
-	role: "leader" | "lead" | "agent";
+	role: "leader" | "lead" | "agent" | "orchestrator";
 	revision: string;
 	hash: string;
 	text: string;

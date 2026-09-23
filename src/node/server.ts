@@ -119,6 +119,7 @@ export interface NodeRuntime {
 		bindingGeneration?: string;
 		turnId?: string;
 		model?: string;
+		variant?: string;
 		provider?: string;
 		contract?: OpenCodeExecutionContract;
 	}>;

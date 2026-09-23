@@ -83,6 +83,10 @@ export interface SolIdentity {
 	title: "Sol";
 	sessionId: SessionId;
 	createdAt: string;
+	workspaceId?: string;
+	provider?: string;
+	model?: string;
+	runtimeInitialized?: boolean;
 }
 export interface SolTurn {
 	id: string;
@@ -90,12 +94,15 @@ export interface SolTurn {
 	at: string;
 	author: "user" | "sol";
 	text: string;
+	nativeTurnId?: string;
 }
 export interface SolRouteIntent {
 	id: string;
 	idempotencyKey: string;
 	solTurnId: string;
 	instruction: string;
+	derivedInstruction?: string;
+	derivation?: string;
 	destinationSessionIds: string[];
 	provenanceSourceIds: string[];
 	status: MeReplyStatus;
@@ -126,22 +133,28 @@ export interface MeStore {
 	getCheckpoint(): Promise<MeCheckpoint>;
 	setCheckpoint(checkpoint: MeCheckpoint): Promise<MeCheckpoint>;
 	solIdentity(): Promise<SolIdentity>;
+	bindSolRuntime(input: { workspaceId: string; provider: string; model: string }): Promise<SolIdentity>;
 	appendSolTurn(input: {
 		idempotencyKey: string;
 		author: "user" | "sol";
 		text: string;
 		at?: string;
 	}): Promise<SolTurn>;
+	getSolTurn(id: string): Promise<SolTurn | undefined>;
+	bindSolNativeTurn(id: string, nativeTurnId: string): Promise<SolTurn>;
 	listSolTurns(options?: { limit?: number; after?: string }): Promise<{ turns: SolTurn[]; hasMore: boolean }>;
 	queueRoute(input: {
 		idempotencyKey: string;
 		solTurnId: string;
 		instruction: string;
+		derivedInstruction?: string;
+		derivation?: string;
 		destinationSessionIds: string[];
 		provenanceSourceIds: string[];
 	}): Promise<SolRouteIntent>;
 	updateRoute(id: string, status: MeReplyStatus, receipt?: string): Promise<SolRouteIntent>;
 	getRoute(id: string): Promise<SolRouteIntent | undefined>;
+	listRoutes(limit?: number): Promise<SolRouteIntent[]>;
 }
 
 interface Document {
@@ -519,6 +532,34 @@ export function openMeStore(): MeStore {
 				}
 				return copy(doc.sol);
 			}),
+		bindSolRuntime: (input) =>
+			locked(async () => {
+				const doc = await load();
+				if (!doc.sol) {
+					doc.sol = {
+						id: SOL_ID,
+						role: SOL_ROLE,
+						title: "Sol",
+						sessionId: ulid() as SessionId,
+						createdAt: new Date().toISOString(),
+					};
+				}
+				if (doc.sol.workspaceId) {
+					if (
+						doc.sol.workspaceId !== input.workspaceId ||
+						doc.sol.provider !== input.provider ||
+						doc.sol.model !== input.model
+					)
+						throw new Error("Sol native session is already bound to another runtime target");
+					return copy(doc.sol);
+				}
+				doc.sol.workspaceId = bounded(input.workspaceId, "Sol workspaceId", 256);
+				doc.sol.provider = bounded(input.provider, "Sol provider", 256);
+				doc.sol.model = bounded(input.model, "Sol model", 256);
+				doc.sol.runtimeInitialized = true;
+				await save(doc);
+				return copy(doc.sol);
+			}),
 		appendSolTurn: (input) =>
 			locked(async () => {
 				const doc = await load();
@@ -554,11 +595,30 @@ export function openMeStore(): MeStore {
 				const turns = doc.solTurns.slice(offset + 1, offset + 1 + limit);
 				return { turns: copy(turns), hasMore: doc.solTurns.length > offset + 1 + turns.length };
 			}),
+		getSolTurn: (id) => locked(async () => copy((await load()).solTurns.find((turn) => turn.id === id))),
+		bindSolNativeTurn: (id, nativeTurnId) =>
+			locked(async () => {
+				const doc = await load();
+				const turn = doc.solTurns.find((item) => item.id === id);
+				if (!turn) throw new Error("unknown Sol turn");
+				const bound = bounded(nativeTurnId, "native turn id", 256);
+				if (turn.nativeTurnId && turn.nativeTurnId !== bound)
+					throw new Error("Sol turn is already correlated to another native turn");
+				turn.nativeTurnId = bound;
+				await save(doc);
+				return copy(turn);
+			}),
 		queueRoute: (input) =>
 			locked(async () => {
 				const doc = await load();
 				const idempotencyKey = bounded(input.idempotencyKey, "idempotency key", 256);
 				const instruction = exactText(input.instruction, "route instruction", 16_000);
+				const derivedInstruction =
+					input.derivedInstruction === undefined
+						? undefined
+						: exactText(input.derivedInstruction, "derived route instruction", 16_000);
+				const derivation =
+					input.derivation === undefined ? undefined : bounded(input.derivation, "route derivation", 2_000);
 				const destinationSessionIds = distinctIds(input.destinationSessionIds, "route destinations");
 				const provenanceSourceIds = distinctIds(input.provenanceSourceIds, "route provenance", 32);
 				const existing = doc.routes.find((item) => item.idempotencyKey === idempotencyKey);
@@ -566,6 +626,8 @@ export function openMeStore(): MeStore {
 					if (
 						existing.solTurnId !== input.solTurnId ||
 						existing.instruction !== instruction ||
+						existing.derivedInstruction !== derivedInstruction ||
+						existing.derivation !== derivation ||
 						existing.destinationSessionIds.join("\u0000") !== destinationSessionIds.join("\u0000") ||
 						existing.provenanceSourceIds.join("\u0000") !== provenanceSourceIds.join("\u0000")
 					)
@@ -577,16 +639,15 @@ export function openMeStore(): MeStore {
 					throw new Error("Sol route must preserve the exact user instruction");
 				if (!destinationSessionIds.length || destinationSessionIds.includes(SOL_SESSION_ID))
 					throw new Error("Sol route requires an explicit workspace destination");
-				if (
-					!provenanceSourceIds.length ||
-					provenanceSourceIds.some((id) => !doc.sources.some((source) => source.id === id))
-				)
+				if (provenanceSourceIds.some((id) => !doc.sources.some((source) => source.id === id)))
 					throw new Error("Sol route provenance is not a captured source");
 				const route: SolRouteIntent = {
 					id: `route-${digest([idempotencyKey])}`,
 					idempotencyKey,
 					solTurnId: turn.id,
 					instruction,
+					...(derivedInstruction === undefined ? {} : { derivedInstruction }),
+					...(derivation === undefined ? {} : { derivation }),
 					destinationSessionIds,
 					provenanceSourceIds,
 					status: "queued",
@@ -606,5 +667,10 @@ export function openMeStore(): MeStore {
 				return copy(route);
 			}),
 		getRoute: (id) => locked(async () => copy(await load().then((doc) => doc.routes.find((item) => item.id === id)))),
+		listRoutes: (limit = 20) =>
+			locked(async () => {
+				if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error("invalid Sol route limit");
+				return copy((await load()).routes.slice(-limit).reverse());
+			}),
 	};
 }
