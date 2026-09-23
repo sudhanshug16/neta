@@ -243,6 +243,12 @@ async function createMissionUnlocked(ctx: MissionToolContext, params: MissionPar
 	if (workspace === undefined) {
 		return notFound(`no such workspace: ${ctx.actor.workspaceId}`);
 	}
+	if (
+		[...(params.lead === "self" ? [] : [params.lead]), ...(params.agents ?? [])].some(
+			(spec) => spec.fallbackModels?.length,
+		)
+	)
+		return refused("fallbackModels is deprecated: automatic model switching is disabled. Omit it or pass [].");
 	if (params.recoverWorktree !== undefined && workspace.kind !== "git")
 		return refused("worktree recovery is available only for Git workspaces");
 	if (params.continues !== undefined) {
@@ -485,6 +491,8 @@ async function createAgentUnlocked(ctx: MissionToolContext, params: AgentParams)
 	if (ctx.actor.kind === "lead" && mission.id !== ctx.actor.missionId) {
 		return refused("a lead adds agents to its own mission only");
 	}
+	if (params.fallbackModels?.length)
+		return refused("fallbackModels is deprecated: automatic model switching is disabled. Omit it or pass [].");
 	if (mission.state === "closed") {
 		return refused("the mission is closed");
 	}

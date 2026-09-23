@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { openCodeExecutionContract } from "../src/opencode/contract.ts";
 import { openCodeEndpoint } from "../src/opencode/attachment.ts";
+import { openCodeExecutionContract } from "../src/opencode/contract.ts";
 
 const contract = {
 	version: 1,
@@ -8,8 +8,6 @@ const contract = {
 	resume: "exact-provider-session",
 	instructions: "system-per-request",
 	instructionAcknowledgment: "local-request-hook",
-	fallback: "ordered-allowlist-or-connected-default",
-	fallbackAfterOutput: false,
 	modelVariants: "catalog-validated",
 	readiness: "configured-connection-not-authentication-proof",
 	leaderAccess: "unrestricted",
@@ -25,7 +23,7 @@ test("native capability declarations are verified and never equate connection co
 		{ version: 2 },
 		{ workerShellAccess: "sandboxed" },
 		{ readiness: "authenticated" },
-		{ fallbackAfterOutput: true },
+		{ modelVariants: "unvalidated" },
 	])
 		expect(() => openCodeExecutionContract({ ...contract, ...altered })).toThrow("incompatible");
 	const attachment = openCodeEndpoint({

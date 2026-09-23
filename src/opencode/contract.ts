@@ -5,8 +5,6 @@ export interface OpenCodeExecutionContract {
 	resume: "exact-provider-session";
 	instructions: "system-per-request";
 	instructionAcknowledgment: "local-request-hook";
-	fallback: "ordered-allowlist-or-connected-default";
-	fallbackAfterOutput: false;
 	modelVariants: "catalog-validated";
 	readiness: "configured-connection-not-authentication-proof";
 	leaderAccess: "unrestricted";
@@ -21,8 +19,6 @@ const expected: OpenCodeExecutionContract = {
 	resume: "exact-provider-session",
 	instructions: "system-per-request",
 	instructionAcknowledgment: "local-request-hook",
-	fallback: "ordered-allowlist-or-connected-default",
-	fallbackAfterOutput: false,
 	modelVariants: "catalog-validated",
 	readiness: "configured-connection-not-authentication-proof",
 	leaderAccess: "unrestricted",

@@ -191,14 +191,13 @@ come from enabled models on connected integrations or providers with configured
 credentials. Legacy `codex` and `claude` runtime selections are normalized to
 OpenCode; an unavailable requested worker model is rejected instead of silently replaced. Use neta_status.modelCatalog to choose an exact connected model.
 
-On authentication, quota, rate-limit, routing, transport, or provider-internal
-failure before output or tools, the adapter tries another connected provider.
-It prefers the configured default, then tool-capable models by context capacity
-and release date. Each provider is attempted once, with at most three providers
-per turn. The transcript names the failed connection, directs the user to
-`/connect`, and names the replacement. Forbidden models stay excluded.
-Cancellation, permission denials, policy refusals, turns that already produced
-output, commands, skills, and attachment prompts are not automatically replayed.
+On authentication, quota, rate-limit, missing-model, transport, or execution
+failure, the turn stops on its selected model. The failure and model are recorded
+in the transcript and reported to the parent; a workspace leader failure is
+visible directly in its conversation and state. Neta does not replay a failed
+prompt or select an alternate provider. Resume uses the same session and model
+after the underlying problem is resolved. `/connect` is suggested only for
+authentication evidence; network outages are reported as transport failures.
 
 ### Reset choices
 
@@ -227,9 +226,9 @@ The spine and `/delivery` distinguish queued, received, uncertain, and failed
 parent delivery. Retry only resubmits unsent reports. An uncertain provider
 prompt requires inspection of the parent conversation; it is not blindly replayed.
 
-Staffing tools accept `fallbackModels`, an ordered list of exact permitted model
-IDs. Omission means no substitution for that assignment. Requested and actual
-models remain separate, including when a permitted alternative executes.
+`fallbackModels` is a deprecated compatibility field. New nonempty lists are
+rejected; omitted or empty lists mean no substitution. Previously stored lists
+are inert, including on resume. Explicit user model changes remain available.
 
 ## Reproducible native releases
 
@@ -266,4 +265,4 @@ OpenCode text, file mentions, or skill selections. The direct adapter unwraps th
 payload and invokes OpenCode's prompt, command, or skill API. The adapter pins the
 session and admission ID to the owning actor; OpenCode validates the native
 payload and loads skills. Neta-owned delegation restrictions remain in force.
-Native skill, command, and file requests are not automatically replayed through model fallback.
+Native skill, command, and file requests are not automatically replayed after failures.

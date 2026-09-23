@@ -37,7 +37,8 @@ OpenCode's connected model catalog:
 
 All five keys are required. Repeated models are allowed. Each effort maps to
 one model; it is not a fallback sequence. If that model is disconnected,
-Neta refuses the launch and points to the configuration or `/connect`.
+Neta refuses the launch and reports the selected model; use `/connect` only
+when the connection requires authentication.
 Fixed routing does not call Jev, PublicAI, or models.dev.
 
 A workspace can supply `.neta/routing.json`. It replaces the entire user policy.
@@ -166,8 +167,8 @@ effort, policy, reason and warnings. Jev decisions additionally preserve the
 candidate IDs, classifier model/confidence and selected metadata. Runtime
 notifications may update the actual model; the original decision remains intact.
 The full staffing plan is resolved before creating missions or worktrees.
-Provider fallback remains the separate explicitly permitted `fallbackModels`
-mechanism; routing never adds one automatically.
+After routing, a failure stops on the selected model. `fallbackModels` is
+deprecated and nonempty lists are rejected; existing stored lists are inert.
 
 ## Validation
 
@@ -217,10 +218,9 @@ selecting one saves the preference immediately. Neta does not infer training
 policies or require extra confirmation based on model names. Existing explicit
 allow, prefer, and exclude choices remain in effect.
 
-Exclusions apply to automatic routing, explicit delegation overrides, model
-adjustments, and launch fallback choices. They do not interrupt an already
-running conversation or retroactively revoke a fallback policy already handed
-to a running provider. Changes apply to the next delegation/model adjustment.
+Exclusions apply to automatic routing, explicit delegation overrides, and model
+adjustments. They do not interrupt an already running conversation. Changes
+apply to the next delegation/model adjustment.
 The model cannot change preferences through the Neta MCP tools. A malformed
 preferences file stops routing instead of silently losing the user's policy.
 

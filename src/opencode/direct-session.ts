@@ -148,7 +148,7 @@ async function loadCatalog(api: NativeApi, cwd: string, forbidden: readonly stri
 		last = models.length ? "No primary agents are available" : "No connected models are available";
 		await new Promise((done) => setTimeout(done, 25));
 	}
-	throw new Error(`${last}. Open /connect to repair or add a provider connection.`);
+	throw new Error(`${last}. Check the model connection and use /connect if authentication is required.`);
 }
 
 function configOptions(catalog: Catalog, model: ModelRef, agent: string): SessionConfigOption[] {
@@ -386,6 +386,11 @@ export async function startOpenCodeSession(opts: StartOptions): Promise<RuntimeS
 							...(typeof info.model.variant === "string" ? { variant: info.model.variant } : {}),
 						}
 					: nextCatalog.defaultModel;
+			if (resumeId && !desiredModelId && !isRecord(info.model))
+				throw new ResumeFailedError(
+					resumeId,
+					new Error("Saved OpenCode model is missing; refusing a default model substitution"),
+				);
 			const requested = desiredModelId;
 			if (requested) {
 				if (opts.settings.forbiddenModels.includes(requested)) throw new ForbiddenModelError(requested);
@@ -416,12 +421,7 @@ export async function startOpenCodeSession(opts: StartOptions): Promise<RuntimeS
 
 	await launch(opts.resumeVendorSessionId);
 
-	async function runPrompt(
-		turnId: TurnId,
-		text: string,
-		attachments: PromptAttachment[],
-		failedProviders = new Set<string>(),
-	): Promise<void> {
+	async function runPrompt(turnId: TurnId, text: string, attachments: PromptAttachment[]): Promise<void> {
 		const api = server?.api;
 		if (!api) throw new SessionClosedError();
 		const messageId = `msg_${randomUUID().replaceAll("-", "")}`;
@@ -430,7 +430,6 @@ export async function startOpenCodeSession(opts: StartOptions): Promise<RuntimeS
 		activeAbort = abort;
 		const tools = new Map<string, ToolState>();
 		let started = false;
-		let produced = false;
 		let assistantId: string | undefined;
 		let finish: string | undefined;
 		let failure: string | undefined;
@@ -497,16 +496,13 @@ export async function startOpenCodeSession(opts: StartOptions): Promise<RuntimeS
 					if (!started) continue;
 					if (event.type === "session.text.delta" && typeof data.delta === "string") {
 						assistantId = string(data.assistantMessageID) ?? assistantId;
-						produced = true;
 						block({ role: "agent", kind: "text", text: data.delta }, turnId);
 					} else if (event.type === "session.reasoning.delta" && typeof data.delta === "string") {
 						assistantId = string(data.assistantMessageID) ?? assistantId;
-						produced = true;
 						block({ role: "agent", kind: "thought", text: data.delta }, turnId);
 					} else if (event.type === "session.tool.input.started" && typeof data.id === "string") {
 						const name = string(data.name) ?? "tool";
 						tools.set(data.id, { name, input: {} });
-						produced = true;
 						block(
 							{
 								role: "agent",
@@ -604,69 +600,27 @@ export async function startOpenCodeSession(opts: StartOptions): Promise<RuntimeS
 				if (typeof error.message === "string") failure = error.message;
 				failureType = string(error.type) ?? failureType;
 			}
-			const connectionFailure = [
-				"provider.auth",
-				"provider.rate-limit",
-				"provider.quota",
-				"provider.no-route",
-				"provider.internal",
-				"provider.transport",
-			].includes(failureType ?? "");
-			if (terminal === "failed" && connectionFailure && !cancelled) {
-				const previous = model;
-				failedProviders.add(previous.providerID);
-				const safe = !produced && prepared.path === "prompt" && failedProviders.size < 3;
-				const candidates =
-					opts.fallbackModels === undefined
-						? [
-								catalog.defaultModel,
-								...catalog.models
-									.toSorted((a, b) => b.limit.context - a.limit.context)
-									.map((item) => ({ id: item.id, providerID: item.providerID })),
-							]
-						: opts.fallbackModels.flatMap((id) => {
-								try {
-									return [parseModel(id, catalog)];
-								} catch {
-									return [];
-								}
-							});
-				const next = safe ? candidates.find((item) => !failedProviders.has(item.providerID)) : undefined;
-				const repair = `${modelId(previous)} failed. Open /connect to repair or reconnect ${previous.providerID}.`;
-				if (next) {
-					await api.request("POST", `${sessionPath(vendorSessionId)}/model`, { model: next });
-					model = next;
-					desiredModelId = modelId(next);
-					push({ type: "model", model: desiredModelId });
-					const notice = `${repair} Continuing with ${desiredModelId}.`;
-					await api.request("POST", `${sessionPath(vendorSessionId)}/synthetic`, {
-						text: notice,
-						description: notice,
-						delivery: "steer",
-						resume: false,
-					});
-					block({ role: "agent", kind: "status", text: notice }, turnId);
-					abort.abort();
-					return await runPrompt(turnId, text, attachments, failedProviders);
-				}
-				const reason = !safe
-					? "Automatic fallback stopped because this turn already produced output or ran tools."
-					: opts.fallbackModels === undefined
-						? "No further connected fallback is available."
-						: "No permitted connected fallback is available.";
-				block({ role: "agent", kind: "status", text: `${repair} ${reason}` }, turnId);
+			if (terminal === "failed" && !cancelled) {
+				const advice = failureType === "provider.auth" ? " Use /connect to repair authentication." : "";
+				block(
+					{
+						role: "agent",
+						kind: "status",
+						text: `${modelId(model)} failed: ${failure ?? failureType ?? "OpenCode execution failed"}.${advice} The selected model and session are retained; inspect the transcript before resuming.`,
+					},
+					turnId,
+				);
 			}
-			if (failure && !cancelled) block({ role: "agent", kind: "status", text: failure }, turnId);
 			const stopReason =
 				cancelled || terminal === "interrupted"
 					? "cancelled"
+					: terminal === "failed"
+						? "error"
 					: finish === "length"
 						? "max_tokens"
 						: finish === "content-filter"
 							? "refusal"
-							: terminal === "failed"
-								? "error"
-								: "end_turn";
+							: "end_turn";
 			push({ type: "turnEnd", turnId, stopReason, cancelled: stopReason === "cancelled" });
 		} catch (error) {
 			if (openTurnId !== turnId || closed) return;
@@ -680,6 +634,8 @@ export async function startOpenCodeSession(opts: StartOptions): Promise<RuntimeS
 					},
 					turnId,
 				);
+				push({ type: "turnEnd", turnId, stopReason: "error", cancelled: false });
+				clearTurn();
 				await server?.close().catch(() => undefined);
 				return;
 			}
@@ -705,8 +661,6 @@ export async function startOpenCodeSession(opts: StartOptions): Promise<RuntimeS
 							resume: "exact-provider-session",
 							instructions: "system-per-request",
 							instructionAcknowledgment: "local-request-hook",
-							fallback: "ordered-allowlist-or-connected-default",
-							fallbackAfterOutput: false,
 							modelVariants: "catalog-validated",
 							readiness: "configured-connection-not-authentication-proof",
 							leaderAccess: "unrestricted",

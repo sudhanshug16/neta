@@ -41,7 +41,7 @@ test.skipIf(!nativeReady)(
 		let client: NodeClient | undefined;
 		let requests = 0;
 		const modelInputs: Array<{ messages?: Array<{ role: string; content: unknown }> }> = [];
-		let responseMode: "success" | "auth" | "hang" = "success";
+		let responseMode: "success" | "auth" | "rate" | "network" | "missing" | "hang" = "success";
 		let externalRead = false;
 		const evidence = join(dir, "downloaded-evidence.txt");
 		const llm = Bun.serve({
@@ -91,6 +91,21 @@ test.skipIf(!nativeReady)(
 					return Response.json(
 						{ error: { message: "Fixture sign-in expired", type: "authentication_error" } },
 						{ status: 401 },
+					);
+				if (responseMode === "rate")
+					return Response.json(
+						{ error: { message: "Fixture rate limit", type: "rate_limit_error" } },
+						{ status: 429, headers: { "x-should-retry": "false" } },
+					);
+				if (responseMode === "network")
+					return Response.json(
+						{ error: { message: "Fixture DNS outage", type: "transport_error" } },
+						{ status: 503, headers: { "x-should-retry": "false" } },
+					);
+				if (responseMode === "missing")
+					return Response.json(
+						{ error: { message: "Fixture model unavailable", type: "model_not_found" } },
+						{ status: 404 },
 					);
 				if (responseMode === "hang")
 					return new Response(
@@ -159,11 +174,24 @@ test.skipIf(!nativeReady)(
 				OPENCODE_CONFIG_CONTENT: JSON.stringify({
 					model: "test/test-model",
 					small_model: "test/test-model",
-					enabled_providers: ["test"],
+					enabled_providers: ["test", "other"],
 					formatter: false,
 					lsp: false,
-					provider: {
-						test: {
+						provider: {
+							other: {
+								name: "Alternative fixture provider",
+								npm: "@ai-sdk/openai-compatible",
+								env: [],
+								options: { apiKey: "fixture", baseURL: llm.url.href },
+								models: {
+									"backup-model": {
+										name: "Alternative fixture model",
+										limit: { context: 100000, output: 10000 },
+										cost: { input: 0, output: 0 },
+									},
+								},
+							},
+							test: {
 							name: "Fixture",
 							npm: "@ai-sdk/openai-compatible",
 							env: [],
@@ -680,21 +708,55 @@ test.skipIf(!nativeReady)(
 				(await fetch(`${native.url}/api/session/${native.sessionId}/interrupt`, { method: "POST", headers }))
 					.status,
 			).toBe(200);
-			responseMode = "auth";
-			await fetch(`${native.url}/api/session/${native.sessionId}/neta-prompt`, {
-				method: "POST",
-				headers,
-				body: JSON.stringify({ text: "Show provider error" }),
+			for (const [mode, cause] of [
+				["auth", "Fixture sign-in expired"],
+				["rate", "Fixture rate limit"],
+				["network", "Fixture DNS outage"],
+				["missing", "Fixture model unavailable"],
+			] as const) {
+				responseMode = mode;
+				const before = requests;
+				await client.request("conversation.prompt", {
+					sessionId: opened.leader.sessionId,
+					text: `Show ${mode} error`,
+				});
+				const errorDeadline = Date.now() + 15000;
+				let failure = "";
+				while (Date.now() < errorDeadline) {
+					failure = JSON.stringify(
+						await client.request("conversation.tail", { sessionId: opened.leader.sessionId }),
+					);
+					if (failure.includes(cause)) break;
+					await Bun.sleep(100);
+				}
+				expect(failure).toContain(cause);
+				expect(failure).not.toContain("Continuing with");
+				expect(requests).toBe(before + 1);
+				expect(
+					(await client.request<{ leaders: Leader[] }>("snapshot")).leaders.find(
+						(leader) => leader.workspaceId === opened.workspace.id,
+					)?.state,
+				).toBe("failed");
+			}
+			responseMode = "success";
+			await client.request("conversation.prompt", {
+				sessionId: opened.leader.sessionId,
+				text: "Resume selected model after outage",
 			});
-			const errorDeadline = Date.now() + 10000;
-			let failure = "";
-			while (Date.now() < errorDeadline) {
-				failure = JSON.stringify(await client.request("conversation.tail", { sessionId: opened.leader.sessionId }));
-				if (failure.includes("Fixture sign-in expired")) break;
+			const recoveredDeadline = Date.now() + 10000;
+			while (Date.now() < recoveredDeadline) {
+				const tail = await client.request<{ turns: Array<{ model?: string; endedAt?: string }> }>(
+					"conversation.tail", { sessionId: opened.leader.sessionId },
+				);
+				if (tail.turns.at(-1)?.endedAt) {
+					expect(tail.turns.at(-1)?.model).toBe("test/test-model");
+					break;
+				}
 				await Bun.sleep(100);
 			}
-			expect(failure).toContain("Fixture sign-in expired");
-			responseMode = "success";
+			expect((await client.request<{ leaders: Leader[] }>("snapshot")).leaders.find(
+				(leader) => leader.workspaceId === opened.workspace.id,
+			)?.state).toBe("idle");
 			let count = requests;
 			await client.request("conversation.reset", { sessionId: opened.leader.sessionId });
 			await client.request("workspace.reset", { workspaceId: opened.workspace.id, confirm: true });

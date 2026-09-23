@@ -117,6 +117,33 @@ test("worker stops report to mission leader, including cancellation and explicit
 	expect(f.sent[0]?.text).toContain("Turn interrupted.");
 });
 
+test.each([true, false])(
+	"failed %s actor reports selected model and cause once to the correct parent",
+	async (canSpawn) => {
+		const f = fixture(canSpawn);
+		f.ports.store.recentConversation = async () => [
+			{
+				seq: 1,
+				turnId: "turn",
+				role: "agent",
+				kind: "status",
+				text: "anthropic/haiku failed: DNS lookup timed out. The selected model and session are retained.",
+				at: f.end.turn.endedAt,
+			},
+		];
+		const ended = { ...f.end, turn: { ...f.end.turn, failed: true, model: "anthropic/haiku" } };
+		await reportAgentRuntime(ended, f.ports);
+		await reportAgentRuntime(ended, f.ports);
+		expect(f.agents.get("child")?.state).toBe("failed");
+		expect(f.agents.get("child")?.model).toBe("anthropic/haiku");
+		expect(f.sent).toHaveLength(1);
+		expect(f.sent[0]?.id).toBe(canSpawn ? "workspace-session" : "lead-session");
+		expect(f.sent[0]?.text).toContain("DNS lookup timed out");
+		expect(f.sent[0]?.text).toContain("Actual model: anthropic/haiku. State: failed");
+		expect(f.sent[0]?.text).not.toContain("/connect");
+	},
+);
+
 test("an idle mission lead cannot hide missing workers behind its final prose", async () => {
 	const f = fixture();
 	f.agents.delete("lead");
