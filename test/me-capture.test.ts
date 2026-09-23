@@ -223,4 +223,14 @@ test("turn replay buffers a page-split turn and checkpoints only after its final
 	expect((await store.getCheckpoint()).workspaces[0]?.turns).toEqual([
 		{ sessionId: "leader-A", turnId: "turn-split", blockSeq: 3 },
 	]);
+	expect(
+		await replayMeLeaderTurns({
+			store: openMeStore(),
+			workspace,
+			sessionId: turn.sessionId,
+			read: async () => ({ blocks: [block(1), block(2), block(3)], cursor: 20, more: false }),
+			getTurn: async () => turn,
+		}),
+	).toBe(0);
+	expect(await openMeStore().pendingSources()).toHaveLength(1);
 });
