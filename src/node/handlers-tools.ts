@@ -11,6 +11,7 @@
 
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { distinctMissionLead } from "../core/mission-lead.ts";
 import { nowIso } from "../core/time.ts";
 import type {
 	Access,
@@ -403,6 +404,30 @@ export function toolMount(o: ToolMountOptions): {
 	// nothing calls yet; whoever wires it announces its own save.
 	async function saveMission(mission: Mission, announce = true): Promise<void> {
 		const existing = await o.real.missions.get(mission.workspaceId, mission.id);
+		if (mission.lead.kind === "agent") {
+			const leader = o.store.getLeader(mission.workspaceId);
+			const lead = o.store.getAgent(mission.lead.agentId);
+			// Both the worktree close callback and neta_close save the terminal record.
+			// A saved historical alias may pass through those saves without assigning
+			// or reviving its lead; every active save still requires distinct identities.
+			const historicalClose =
+				mission.state === "closed" &&
+				existing?.lead.kind === "agent" &&
+				existing.lead.agentId === mission.lead.agentId;
+			if (
+				!historicalClose &&
+				(!lead ||
+					lead.missionId !== mission.id ||
+					lead.workspaceId !== mission.workspaceId ||
+					!lead.canSpawn ||
+					!mission.agentIds.includes(lead.id) ||
+					!distinctMissionLead(mission, leader, lead))
+			) {
+				throw new Error(
+					"Mission lead must be a reserved, separate actor and session for this mission. Supply a separate lead task and effort.",
+				);
+			}
+		}
 		if (existing === undefined) {
 			await o.real.missions.create(mission);
 		} else {
@@ -1003,7 +1028,7 @@ export function toolMount(o: ToolMountOptions): {
 			release: releaseHolder,
 		},
 		worktrees: {
-			prepare: (mission, workspace) => worktrees.prepare(mission, workspace),
+			prepare: (mission, workspace, opts) => worktrees.prepare(mission, workspace, opts),
 			close: async (input) => {
 				if ([...pendingReleases.values()].some((agent) => agent.missionId === input.mission.id)) {
 					return {
@@ -1012,6 +1037,16 @@ export function toolMount(o: ToolMountOptions): {
 						mission: input.mission,
 					};
 				}
+				// Historical alias closeout must not relaunch the workspace leader's
+				// session as the saved mission lead, even if an old Lead++ mode remains.
+				if (
+					!distinctMissionLead(
+						input.mission,
+						o.store.getLeader(input.mission.workspaceId),
+						input.mission.lead.kind === "agent" ? o.store.getAgent(input.mission.lead.agentId) : undefined,
+					)
+				)
+					return worktrees.close({ ...input, repositoryRoot: rootFor(input.mission.workspaceId) });
 				const subject: ModeSubject =
 					input.mission.lead.kind === "agent"
 						? {
@@ -1052,6 +1087,18 @@ export function toolMount(o: ToolMountOptions): {
 				getAgent: (id) => o.store.getAgent(id),
 				getMission: (id) => o.store.getMission(id),
 				putAgent: (agent) => o.store.putAgent(agent),
+				validateMission: (mission) => {
+					if (
+						!distinctMissionLead(
+							mission,
+							o.store.getLeader(mission.workspaceId),
+							mission.lead.kind === "agent" ? o.store.getAgent(mission.lead.agentId) : undefined,
+						)
+					)
+						throw new Error(
+							`Mission #${mission.number} cannot resume: its lead aliases the workspace leader. Close it and create a new mission with a separate lead task and effort.`,
+						);
+				},
 				saveMission: (mission) => missions.save(mission),
 				resume: (agent) => deps.sessions.resume(agent),
 				admit: async (sessionId, text, sourceId) => {
@@ -1284,6 +1331,21 @@ export function toolMount(o: ToolMountOptions): {
 				}
 				if (input.record === undefined)
 					return { approved: false, reason: "incompleteRecord", detail: "record is missing" };
+				const assigned = o.store.getMission(input.record.missionId);
+				if (
+					assigned &&
+					!distinctMissionLead(
+						assigned,
+						o.store.getLeader(assigned.workspaceId),
+						assigned.lead.kind === "agent" ? o.store.getAgent(assigned.lead.agentId) : undefined,
+					)
+				)
+					return {
+						approved: false,
+						reason: "notAuthorised",
+						detail:
+							"Close this legacy self-led mission and create a new mission with a separate lead task and effort.",
+					};
 				const approval = await modes.evaluateLeadPlus(input.subject, input.record);
 				if (!approval.approved) return approval;
 				const mission = o.store.getMission(input.record.missionId);
@@ -1411,6 +1473,19 @@ export function toolMount(o: ToolMountOptions): {
 			const leader = leaderOf(parsed.workspaceId);
 			const missionId = parsed.missionId ?? leader.activeMissionId;
 			const mission = missionId === undefined ? undefined : o.store.getMission(missionId);
+			if (
+				parsed.mode === "leadPlus" &&
+				mission &&
+				!distinctMissionLead(
+					mission,
+					leader,
+					mission.lead.kind === "agent" ? o.store.getAgent(mission.lead.agentId) : undefined,
+				)
+			)
+				throw new NodeError(
+					"INVALID_PARAMS",
+					`Mission #${mission.number} cannot resume self-led work. Close it and create a new mission with a separate lead task and effort.`,
+				);
 			if (parsed.missionId !== undefined && mission === undefined) {
 				throw new NodeError("NOT_FOUND", `no such mission: ${parsed.missionId}`);
 			}

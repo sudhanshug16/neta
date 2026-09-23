@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ulid } from "../src/core/ids.ts";
 import type { Mission } from "../src/core/types.ts";
-import { appendLine, readText } from "../src/store/files.ts";
+import { appendLine, readText, writeJsonAtomic } from "../src/store/files.ts";
 import { openMissionRegistry } from "../src/store/mission-registry.ts";
 import { paths } from "../src/store/paths.ts";
 
@@ -31,7 +31,7 @@ function mission(workspaceId: string, number: number, state: Mission["state"] = 
 		name: `mission ${number}`,
 		objective: "Do it.",
 		changes: [],
-		lead: { kind: "leader" },
+		lead: { kind: "agent", agentId: ulid() },
 		agentIds: [],
 		access: "readOnly",
 		state,
@@ -40,6 +40,51 @@ function mission(workspaceId: string, number: number, state: Mission["state"] = 
 }
 
 describe("mission registry", () => {
+	test("direct create and reassignment reject workspace leader actor and session aliases", async () => {
+		useTempDir();
+		const ws = "git:github.com/org/repo";
+		const leaderSession = ulid();
+		const leadId = ulid();
+		await writeJsonAtomic(paths().leader(ws), { workspaceId: ws, sessionId: leaderSession });
+		const registry = openMissionRegistry();
+		const m = mission(ws, 1);
+		await expect(registry.create({ ...m, lead: { kind: "agent", agentId: leaderSession } })).rejects.toThrow(
+			"must differ",
+		);
+		expect((await registry.list(ws, {})).missions).toHaveLength(0);
+		await registry.create(m);
+		await writeJsonAtomic(join(paths().root, "agents.json"), {
+			[leadId]: { id: leadId, sessionId: leaderSession },
+		});
+		await expect(registry.update({ ...m, lead: { kind: "agent", agentId: leadId } })).rejects.toThrow("must differ");
+		await expect(
+			registry.update({ ...m, lead: { kind: "agent", agentId: leaderSession }, state: "closed" }),
+		).rejects.toThrow("must differ");
+		expect((await registry.get(ws, m.id))?.lead).toEqual(m.lead);
+		await expect(registry.create({ ...mission(ws, 2), lead: { kind: "agent", agentId: leadId } })).rejects.toThrow(
+			"must differ",
+		);
+		// A historical alias is still readable and can be closed without changing its lead.
+		const old = { ...mission(ws, 3), lead: { kind: "agent" as const, agentId: leadId } };
+		await appendLine(paths().registryLog(ws), { op: "create", at: old.createdAt, mission: old });
+		const reopened = openMissionRegistry();
+		expect((await reopened.get(ws, old.id))?.lead).toEqual(old.lead);
+		await reopened.update({ ...old, state: "closed", disposition: "abandoned", closeReason: "legacy cleanup" });
+		expect((await reopened.get(ws, old.id))?.state).toBe("closed");
+	});
+	test("refuses a new self-led assignment but loads and closes legacy history", async () => {
+		useTempDir();
+		const ws = "git:github.com/org/repo";
+		const registry = openMissionRegistry();
+		const old = { ...mission(ws, await registry.allocateNumber(ws)), lead: { kind: "leader" as const } };
+		await expect(registry.create(old)).rejects.toThrow("separate mission lead");
+		await appendLine(paths().registryLog(ws), { op: "create", at: old.createdAt, mission: old });
+		const reopened = openMissionRegistry();
+		expect((await reopened.get(ws, old.id))?.lead).toEqual({ kind: "leader" });
+		await reopened.update({ ...old, state: "closed", disposition: "abandoned", closeReason: "legacy cleanup" });
+		expect((await openMissionRegistry().get(ws, old.id))?.state).toBe("closed");
+		await expect(reopened.update(old)).rejects.toThrow("separate mission lead");
+	});
 	test("create then reopen returns the mission with the same number", async () => {
 		useTempDir();
 		const ws = "git:github.com/org/repo";

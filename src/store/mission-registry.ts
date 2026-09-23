@@ -1,6 +1,8 @@
+import { join } from "node:path";
+import { distinctMissionLead } from "../core/mission-lead.ts";
 import { nextNumber } from "../core/numbering.ts";
 import { nowIso } from "../core/time.ts";
-import type { IsoTime, Mission, MissionId, WorkspaceId } from "../core/types.ts";
+import type { Agent, AgentId, IsoTime, Leader, Mission, MissionId, WorkspaceId } from "../core/types.ts";
 import {
 	appendLine,
 	createMutex,
@@ -50,8 +52,35 @@ interface WorkspaceState {
 	loaded: boolean;
 }
 
-export function openMissionRegistry(): MissionRegistry {
+export interface RegistryIdentityLookup {
+	leader(workspaceId: WorkspaceId): Promise<Pick<Leader, "sessionId"> | undefined>;
+	agent(agentId: AgentId): Promise<Pick<Agent, "id" | "sessionId"> | undefined>;
+}
+
+// Direct registry callers use the same durable identities as the Node. An
+// injected lookup is useful when an owner keeps a fresher in-memory mirror.
+const durableIdentities: RegistryIdentityLookup = {
+	leader: (workspaceId) => readJson<Leader>(paths().leader(workspaceId)),
+	agent: async (agentId) => (await readJson<Record<AgentId, Agent>>(join(paths().root, "agents.json")))?.[agentId],
+};
+
+export function openMissionRegistry(identities: RegistryIdentityLookup = durableIdentities): MissionRegistry {
 	const states = new Map<WorkspaceId, WorkspaceState>();
+
+	async function requireDistinctLead(mission: Mission): Promise<void> {
+		if (mission.lead.kind !== "agent") {
+			throw new Error(
+				"A mission needs a separate mission lead. Supply a lead task and effort; the workspace leader cannot lead its own mission.",
+			);
+		}
+		const leader = await identities.leader(mission.workspaceId);
+		const agent = leader === undefined ? undefined : await identities.agent(mission.lead.agentId);
+		if (!distinctMissionLead(mission, leader, agent)) {
+			throw new Error(
+				"Mission lead actor and session must differ from the workspace leader. Supply a separate lead task and effort.",
+			);
+		}
+	}
 
 	function stateFor(workspaceId: WorkspaceId): WorkspaceState {
 		let state = states.get(workspaceId);
@@ -138,6 +167,7 @@ export function openMissionRegistry(): MissionRegistry {
 		create: async (mission) => {
 			const state = await ensureLoaded(mission.workspaceId);
 			return state.mutex(async () => {
+				await requireDistinctLead(mission);
 				if (state.index.get(mission.id) !== undefined) {
 					throw new Error(`mission ${mission.id} already exists`);
 				}
@@ -154,8 +184,40 @@ export function openMissionRegistry(): MissionRegistry {
 		update: async (mission) => {
 			const state = await ensureLoaded(mission.workspaceId);
 			return state.mutex(async () => {
-				if (state.index.get(mission.id) === undefined) {
+				const previous = state.index.get(mission.id);
+				if (previous === undefined) {
 					throw new Error(`mission ${mission.id} is unknown`);
+				}
+				if (
+					previous.state === "closed" &&
+					(previous.lead.kind !== mission.lead.kind ||
+						(previous.lead.kind === "agent" &&
+							mission.lead.kind === "agent" &&
+							previous.lead.agentId !== mission.lead.agentId))
+				) {
+					throw new Error(
+						"A closed mission cannot be reassigned; create a new mission with a separate lead task and effort.",
+					);
+				}
+				// Historical self-led records may be updated for closeout, never assigned
+				// afresh or moved back into active operation.
+				if (
+					mission.lead.kind === "leader" &&
+					(previous.lead.kind !== "leader" || (previous.state === "closed" && mission.state !== "closed"))
+				) {
+					throw new Error(
+						"A mission needs a separate mission lead; close the legacy mission and create a delegated mission.",
+					);
+				}
+				// Closing existing historical records does not reassign their actors.
+				// All new or active delegated assignments must pass the identity gate.
+				if (
+					mission.lead.kind === "agent" &&
+					(mission.state !== "closed" ||
+						previous.lead.kind !== "agent" ||
+						previous.lead.agentId !== mission.lead.agentId)
+				) {
+					await requireDistinctLead(mission);
 				}
 				await ensureDir(paths().missionsDir(mission.workspaceId));
 				const line: RegistryLine = { op: "update", at: nowIso(), mission };

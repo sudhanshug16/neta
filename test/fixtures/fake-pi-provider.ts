@@ -45,7 +45,7 @@ function stream(model: Model<Api>, context: Context, _options?: SimpleStreamOpti
 					name: "Pi fixture mission",
 					objective: "Verify the Pi mission bridge",
 					access: "readOnly",
-					lead: "self",
+					lead: { task: "Verify the Pi mission bridge", model: "fixture" },
 				},
 			};
 			output.content.push(call);

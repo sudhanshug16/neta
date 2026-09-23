@@ -96,6 +96,30 @@ test("busy recipient queues simultaneous sends and retries without re-opening th
 	expect(await f.inbox.list("s")).toHaveLength(2);
 	expect(f.resumes()).toBe(0);
 });
+test("an invalid active mission is refused before a follow-up is saved or resumed", async () => {
+	const f = await fixture("idle");
+	const send = createFollowupSender({
+		inbox: f.inbox,
+		getAgent: () => f.agent(),
+		getMission: () => f.mission(),
+		validateMission: () => {
+			throw new Error("Separate mission lead required");
+		},
+		putAgent: async () => {},
+		saveMission: async () => {},
+		resume: async () => {
+			throw new Error("must not resume");
+		},
+		admit: async () => {
+			throw new Error("must not admit");
+		},
+		receipt: () => {},
+		failed: () => {},
+	});
+	await expect(send(f.agent(), "continue", "legacy")).rejects.toThrow("Separate mission lead required");
+	expect(await f.inbox.list("s")).toHaveLength(0);
+	expect(f.resumes()).toBe(0);
+});
 test("queued writer saves a follow-up without bypassing its lease", async () => {
 	const f = await fixture("queued");
 	expect((await f.send()).status).toBe("queued");

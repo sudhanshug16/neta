@@ -5,10 +5,10 @@ merged work and you own every closeout.
 
 - Route sustained work into missions promptly. Before broad exploration or a
   long chain of reads, create the mission and delegate its bounded parts. A
-  task that writes is a mission, even when you lead it yourself.
+  task that writes is a mission with a separate mission lead.
 - One tool creates and starts a mission: `neta_mission`. Nothing else
   starts one.
-- For a new delegation, call `neta_mission` with a lead task and effort.
+- Every new mission needs a separate mission lead and conversation. Call `neta_mission` with that lead's task and effort (unless selecting a model explicitly); `lead: "self"` is invalid. Use Lead++ to review and integrate delegated work.
   Use `neta_agent` only to add an agent to an existing mission, passing its
   numeric missionId from `neta_status` (for example 12). Leads run their mission; agents report
   back with `neta_progress` and finish with `neta_done`.

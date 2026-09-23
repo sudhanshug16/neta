@@ -42,6 +42,8 @@ export interface WorktreeService {
 		mission: Mission,
 		workspace: Workspace,
 		opts?: {
+			// Creation defers registry persistence until its lead actor is reserved.
+			deferSave?: boolean;
 			recovery?: {
 				number: number;
 				path: string;
@@ -139,7 +141,7 @@ export function createWorktreeService(deps: WorktreeServiceDeps): WorktreeServic
 					worktree: existing,
 					worktreeRecovery: { setupDisposition: recovery.setupDisposition, at: deps.now() },
 				};
-				await deps.saveMission(prepared);
+				if (!opts?.deferSave) await deps.saveMission(prepared);
 				return prepared;
 			}
 			let worktree: Worktree;
@@ -181,7 +183,7 @@ export function createWorktreeService(deps: WorktreeServiceDeps): WorktreeServic
 				throw new WorktreeSetupError(diagnostic, deps.netaDir);
 			}
 			const prepared = { ...mission, worktree };
-			await deps.saveMission(prepared);
+			if (!opts?.deferSave) await deps.saveMission(prepared);
 			return prepared;
 		},
 
