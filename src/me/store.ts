@@ -119,6 +119,7 @@ export interface LunaIdentity {
 	workspaceId?: string;
 	provider?: string;
 	model?: string;
+	runtimeInitialized?: boolean;
 }
 
 export interface MeStore {
@@ -145,6 +146,7 @@ export interface MeStore {
 	setCheckpoint(checkpoint: MeCheckpoint): Promise<MeCheckpoint>;
 	solIdentity(): Promise<SolIdentity>;
 	bindSolRuntime(input: { workspaceId: string; provider: string; model: string }): Promise<SolIdentity>;
+	markSolRuntimeInitialized(): Promise<SolIdentity>;
 	appendSolTurn(input: {
 		idempotencyKey: string;
 		author: "user" | "sol";
@@ -154,6 +156,7 @@ export interface MeStore {
 	getSolTurn(id: string): Promise<SolTurn | undefined>;
 	bindSolNativeTurn(id: string, nativeTurnId: string): Promise<SolTurn>;
 	listSolTurns(options?: { limit?: number; after?: string }): Promise<{ turns: SolTurn[]; hasMore: boolean }>;
+	listRecentSolTurns(limit?: number): Promise<SolTurn[]>;
 	queueRoute(input: {
 		idempotencyKey: string;
 		solTurnId: string;
@@ -168,6 +171,7 @@ export interface MeStore {
 	listRoutes(limit?: number): Promise<SolRouteIntent[]>;
 	lunaIdentity(): Promise<LunaIdentity>;
 	bindLunaRuntime(input: { workspaceId: string; provider: string; model: string }): Promise<LunaIdentity>;
+	markLunaRuntimeInitialized(): Promise<LunaIdentity>;
 }
 
 interface Document {
@@ -588,6 +592,15 @@ export function openMeStore(): MeStore {
 				doc.luna.workspaceId = bounded(input.workspaceId, "Luna workspaceId", 256);
 				doc.luna.provider = bounded(input.provider, "Luna provider", 256);
 				doc.luna.model = bounded(input.model, "Luna model", 256);
+				doc.luna.runtimeInitialized = false;
+				await save(doc);
+				return copy(doc.luna);
+			}),
+		markLunaRuntimeInitialized: () =>
+			locked(async () => {
+				const doc = await load();
+				if (!doc.luna?.workspaceId) throw new Error("Luna runtime target is not reserved");
+				doc.luna.runtimeInitialized = true;
 				await save(doc);
 				return copy(doc.luna);
 			}),
@@ -615,6 +628,14 @@ export function openMeStore(): MeStore {
 				doc.sol.workspaceId = bounded(input.workspaceId, "Sol workspaceId", 256);
 				doc.sol.provider = bounded(input.provider, "Sol provider", 256);
 				doc.sol.model = bounded(input.model, "Sol model", 256);
+				doc.sol.runtimeInitialized = false;
+				await save(doc);
+				return copy(doc.sol);
+			}),
+		markSolRuntimeInitialized: () =>
+			locked(async () => {
+				const doc = await load();
+				if (!doc.sol?.workspaceId) throw new Error("Sol runtime target is not reserved");
 				doc.sol.runtimeInitialized = true;
 				await save(doc);
 				return copy(doc.sol);
@@ -653,6 +674,12 @@ export function openMeStore(): MeStore {
 				if (options.after && offset < 0) throw new Error("unknown Sol turn cursor");
 				const turns = doc.solTurns.slice(offset + 1, offset + 1 + limit);
 				return { turns: copy(turns), hasMore: doc.solTurns.length > offset + 1 + turns.length };
+			}),
+		listRecentSolTurns: (limit = 12) =>
+			locked(async () => {
+				if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100)
+					throw new Error("invalid Sol recent-turn limit");
+				return copy((await load()).solTurns.slice(-limit));
 			}),
 		getSolTurn: (id) => locked(async () => copy((await load()).solTurns.find((turn) => turn.id === id))),
 		bindSolNativeTurn: (id, nativeTurnId) =>

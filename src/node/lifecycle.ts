@@ -53,6 +53,7 @@ import {
 } from "../me/capture.ts";
 import { createMeCurator } from "../me/curator.ts";
 import { createRuntimeMeClassifier } from "../me/runtime-curator.ts";
+import { openPersistedRuntimeSession } from "../me/runtime-session.ts";
 import { openMeStore } from "../me/store.ts";
 import { nativeEndpointReady } from "../opencode/attachment.ts";
 import { openCodeInvocation } from "../opencode/runtime.ts";
@@ -84,7 +85,7 @@ import {
 } from "./handlers-conversation.ts";
 import { diagnosticsHandlers } from "./handlers-diagnostics.ts";
 import { glanceHandlers } from "./handlers-glance.ts";
-import { meHandlers } from "./handlers-me.ts";
+import { createSuperleaderToolBridge, meHandlers } from "./handlers-me.ts";
 import { registryHandlers } from "./handlers-registry.ts";
 import { routingHandlers } from "./handlers-routing.ts";
 import { terminalHandlers } from "./handlers-terminal.ts";
@@ -1801,7 +1802,7 @@ export async function startNode(o?: {
 	try {
 		let storePort: NodeStore;
 		let adapted: AdaptedStore | undefined;
-		let scheduleMeCurator: () => void = () => {};
+		let scheduleMeCurator: (delay?: number) => void = () => {};
 		let stopMeCurator: () => void = () => {};
 		let curatorSessionId: SessionId | undefined;
 		let notifyMeChanged: () => void = () => {};
@@ -2056,6 +2057,10 @@ export async function startNode(o?: {
 						settings,
 						runtimeAdmission,
 						hub: () => hub,
+						superleaderTools: createSuperleaderToolBridge({
+							actorId: solIdentity.sessionId,
+							context: () => ({ ...ctx, hub }),
+						}),
 						...(pi === undefined
 							? {}
 							: {
@@ -2086,6 +2091,8 @@ export async function startNode(o?: {
 			let activeRun: Promise<void> | undefined;
 			let timer: ReturnType<typeof setTimeout> | undefined;
 			let rerunRequested = false;
+			let rerunDelay = 250;
+			let failureBackoff = 1_000;
 			const ensureLuna = async (sourceWorkspaceId: string): Promise<void> => {
 				const saved = await me.lunaIdentity();
 				const workspaceId = saved.workspaceId ?? sourceWorkspaceId;
@@ -2098,7 +2105,6 @@ export async function startNode(o?: {
 				const model = "openai/gpt-6-luna";
 				if (!settings.providers[provider] || settings.forbiddenModels.includes(model))
 					throw new Error("GPT-6 Luna is unavailable in the configured OpenCode runtime");
-				const alreadyBound = saved.workspaceId !== undefined;
 				const identity = await me.bindLunaRuntime({ workspaceId, provider, model });
 				const request = {
 					sessionId: identity.sessionId,
@@ -2110,11 +2116,12 @@ export async function startNode(o?: {
 					unsandboxed: false,
 					netaTools: false,
 				};
-				const selected = alreadyBound
-					? await runtimePort.ensureSession({ ...request, allowFresh: false })
-					: await runtimePort.createSession(request);
-				if (selected.sessionId !== identity.sessionId)
-					throw new Error("Luna native runtime changed its persisted session identity");
+				await openPersistedRuntimeSession({
+					runtime: runtimePort,
+					request,
+					initialized: saved.runtimeInitialized ?? saved.workspaceId !== undefined,
+					markInitialized: () => me.markLunaRuntimeInitialized(),
+				});
 				await runtimePort.setModel(identity.sessionId, model);
 				const diagnostics = await runtimePort.runtimeDiagnostics?.(identity.sessionId);
 				if (diagnostics?.model !== undefined && diagnostics.model !== model)
@@ -2133,22 +2140,46 @@ export async function startNode(o?: {
 					return classifier(input);
 				},
 			});
-			scheduleMeCurator = () => {
-				rerunRequested = true;
+			scheduleMeCurator = (delay = 250) => {
+				if (activeRun) {
+					rerunRequested = true;
+					rerunDelay = Math.min(rerunDelay, delay);
+					return;
+				}
 				if (timer) clearTimeout(timer);
 				timer = setTimeout(() => {
 					timer = undefined;
-					if (activeRun) return;
 					rerunRequested = false;
+					rerunDelay = 250;
+					let followupDelay: number | undefined;
 					activeRun = curator
-						.run()
-						.then(() => notifyMeChanged())
-						.catch(() => undefined)
+						.drain(20, 5)
+						.then((result) => {
+							notifyMeChanged();
+							if (result.pending === 0) {
+								failureBackoff = 1_000;
+								return;
+							}
+							if (result.processed.length > 0 && result.failed.length === 0) {
+								failureBackoff = 1_000;
+								followupDelay = 250;
+								return;
+							}
+							followupDelay = failureBackoff;
+							failureBackoff = Math.min(failureBackoff * 2, 300_000);
+						})
+						.catch(() => {
+							followupDelay = failureBackoff;
+							failureBackoff = Math.min(failureBackoff * 2, 300_000);
+						})
 						.finally(() => {
 							activeRun = undefined;
-							if (rerunRequested) scheduleMeCurator();
+							const nextDelay = rerunRequested ? rerunDelay : followupDelay;
+							rerunRequested = false;
+							rerunDelay = 250;
+							if (nextDelay !== undefined) scheduleMeCurator(nextDelay);
 						});
-				}, 250);
+				}, delay);
 				timer.unref();
 			};
 			stopMeCurator = () => {

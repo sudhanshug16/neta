@@ -374,6 +374,7 @@ describe("allHandlers", () => {
 				"runtime.upgrade.commit",
 				"runtime.upgrade.cancel",
 				"snapshot",
+				"sol.evidence",
 				"sol.open",
 				"sol.prompt",
 				"sol.route",

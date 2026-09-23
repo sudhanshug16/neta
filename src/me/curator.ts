@@ -2,6 +2,7 @@ import type { MeCard, MeDecision, MeSource, MeStore } from "./store.ts";
 
 export interface MeCurator {
 	run(limit?: number): Promise<{ processed: MeCard[]; pending: number; failed: string[] }>;
+	drain(limit?: number, maxBatches?: number): Promise<{ processed: MeCard[]; pending: number; failed: string[] }>;
 }
 
 export interface MeClassifierInput {
@@ -18,31 +19,46 @@ Surface direct questions, permission requests and failures requiring attention. 
 
 /** A caller supplies the configured exact model transport. No alternate provider or local heuristic classifier is used. */
 export function createMeCurator(options: { store: MeStore; classify: MeClassifier }): MeCurator {
-	return {
-		run: async (limit = 20) => {
-			if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100)
-				throw new Error("invalid Me curator batch limit");
-			const sources = (await options.store.pendingSources()).slice(0, limit);
-			const processed: MeCard[] = [];
-			const failed: string[] = [];
-			for (const source of sources) {
-				try {
-					const page = await options.store.list({ includeSuppressed: true, limit: 30 });
-					const recentCards = page.cards.filter((card) => card.workspaceId === source.workspaceId);
-					const decision = (await options.classify({
-						source,
-						recentCards,
-						instructions: ME_CURATOR_INSTRUCTIONS,
-					})) as MeDecision;
-					const card = await options.store.decide(source.id, decision);
-					if (card) processed.push(card);
-				} catch {
-					// Transport failure, invalid model JSON, or failed persistence leaves the source pending.
-					// Never log raw model output or source text.
-					failed.push(source.id);
-				}
+	const run = async (limit = 20) => {
+		if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error("invalid Me curator batch limit");
+		const sources = (await options.store.pendingSources()).slice(0, limit);
+		const processed: MeCard[] = [];
+		const failed: string[] = [];
+		for (const source of sources) {
+			try {
+				const page = await options.store.list({ includeSuppressed: true, limit: 30 });
+				const recentCards = page.cards.filter((card) => card.workspaceId === source.workspaceId);
+				const decision = (await options.classify({
+					source,
+					recentCards,
+					instructions: ME_CURATOR_INSTRUCTIONS,
+				})) as MeDecision;
+				const card = await options.store.decide(source.id, decision);
+				if (card) processed.push(card);
+			} catch {
+				// Transport failure, invalid model JSON, or failed persistence leaves the source pending.
+				// Never log raw model output or source text.
+				failed.push(source.id);
 			}
-			return { processed, failed, pending: (await options.store.pendingSources()).length };
+		}
+		return { processed, failed, pending: (await options.store.pendingSources()).length };
+	};
+	return {
+		run,
+		drain: async (limit = 20, maxBatches = 5) => {
+			if (!Number.isSafeInteger(maxBatches) || maxBatches < 1 || maxBatches > 20)
+				throw new Error("invalid Me curator drain batch limit");
+			const processed: MeCard[] = [];
+			const failed = new Set<string>();
+			let pending = 0;
+			for (let batch = 0; batch < maxBatches; batch += 1) {
+				const result = await run(limit);
+				processed.push(...result.processed);
+				for (const id of result.failed) failed.add(id);
+				pending = result.pending;
+				if (pending === 0 || result.processed.length === 0 || result.failed.length > 0) break;
+			}
+			return { processed, pending, failed: [...failed] };
 		},
 	};
 }

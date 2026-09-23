@@ -252,13 +252,20 @@ final block. Sol opens one persisted native OpenCode session on user request;
 chat messages use durable inbox admission, and the session is resumed under the
 same ID. Superleader routes preserve the exact user instruction separately from
 the derived text and explanation, validate a current workspace-leader session,
-and deliver with a stable source key. The TUI exposes the route only as an
-explicit confirmation action. GPT-6 Sol medium is selected and checked through
+and deliver with a stable source key. Sol's native session receives only
+session-scoped feed, evidence, and user-directed leader-routing tools; ordinary
+Neta coordination and permission tools are not exposed. Its chat context includes
+recent Sol turns and current feed records, while those tools can retrieve
+suppressed history and verify bounded transcript evidence. Routing records a
+visible destination and receipt. GPT-6 Sol medium is selected and checked through
 the native runtime when that provider is configured. Luna classification uses
 the authenticated OpenCode runtime and a persisted read-only session with Neta
-tools disabled. It runs only when `meCurator.enabled` is explicitly set to
+ordinary Neta tools disabled. It runs only when `meCurator.enabled` is explicitly set to
 `true` in `~/.neta/settings.json`. It is off by default. Model/transport errors leave
-sources pending for retry on a later relevant event or Node restart.
+sources pending; startup backlog drains in bounded batches and failures retry with
+backoff. Session identity is reserved durably and marked initialized only after
+successful native session creation, so a failed first launch can retry under the
+same ID while established sessions resume rather than being recreated.
 Permission events are captured with the disposition applied by the existing
 OpenCode/Neta permission policy; Superleader does not grant additional access.
 

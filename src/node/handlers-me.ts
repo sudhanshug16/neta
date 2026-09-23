@@ -1,8 +1,11 @@
 import { createHash } from "node:crypto";
 import type { InboxMessage } from "../core/types.ts";
+import { readMeEvidence } from "../me/evidence.ts";
+import { openPersistedRuntimeSession } from "../me/runtime-session.ts";
 import { type MeReply, openMeStore, type SolIdentity, type SolRouteIntent } from "../me/store.ts";
+import type { SessionToolBridge } from "../tools/router.ts";
 import { NodeError } from "./protocol.ts";
-import type { NodeHandlers } from "./server.ts";
+import type { NodeContext, NodeHandlers } from "./server.ts";
 
 const SOL_MODEL = "openai/gpt-6-sol";
 const SOL_EFFORT = "medium";
@@ -34,36 +37,28 @@ async function openSolSession(ctx: Parameters<NonNullable<NodeHandlers["me.list"
 			throw new NodeError("NOT_FOUND", "Sol needs an available workspace leader and local workspace root to start");
 		const provider = existing.provider ?? leader.provider;
 		const model = existing.model ?? (provider === "opencode" ? SOL_MODEL : leader.model);
-		const identity = await store.bindSolRuntime({
+		let identity = await store.bindSolRuntime({
 			workspaceId,
 			provider,
 			model,
 		});
 		try {
-			const selected = existing.workspaceId
-				? await ctx.runtime.ensureSession({
-						sessionId: identity.sessionId,
-						workspaceId,
-						cwd: root,
-						provider,
-						model,
-						access: "readOnly",
-						unsandboxed: false,
-						netaTools: false,
-						allowFresh: false,
-					})
-				: await ctx.runtime.createSession({
-						sessionId: identity.sessionId,
-						workspaceId,
-						cwd: root,
-						provider,
-						model,
-						access: "readOnly",
-						unsandboxed: false,
-						netaTools: false,
-					});
-			if (selected.sessionId !== identity.sessionId)
-				throw new NodeError("PROVIDER_ERROR", "Sol runtime did not restore its persisted native session identity");
+			const selected = await openPersistedRuntimeSession({
+				runtime: ctx.runtime,
+				request: {
+					sessionId: identity.sessionId,
+					workspaceId,
+					cwd: root,
+					provider,
+					model,
+					access: "readOnly",
+					unsandboxed: false,
+					netaTools: true,
+				},
+				initialized: existing.runtimeInitialized ?? existing.workspaceId !== undefined,
+				markInitialized: () => store.markSolRuntimeInitialized(),
+			});
+			identity = await store.solIdentity();
 			if (provider === "opencode") {
 				if (!ctx.runtime.setNativeVariant || !ctx.runtime.runtimeDiagnostics)
 					throw new NodeError("PROVIDER_ERROR", "Sol model effort cannot be verified by this runtime");
@@ -135,6 +130,29 @@ export const meHandlers: NodeHandlers = {
 		if (p.after !== undefined && typeof p.after !== "string")
 			throw new NodeError("INVALID_PARAMS", "after must be a turn id");
 		return openMeStore().listSolTurns({ limit: p.limit as number | undefined, after: p.after as string | undefined });
+	},
+	"sol.evidence": async (ctx, value) => {
+		const p = params(value);
+		if (
+			!Array.isArray(p.sourceIds) ||
+			p.sourceIds.length < 1 ||
+			p.sourceIds.length > 8 ||
+			p.sourceIds.some((id) => typeof id !== "string" || id.length > 256)
+		)
+			throw new NodeError("INVALID_PARAMS", "sourceIds must contain 1 to 8 captured source ids");
+		const store = openMeStore();
+		const evidence = [];
+		for (const sourceId of p.sourceIds as string[]) {
+			const source = await store.getSource(sourceId);
+			if (!source) continue;
+			const expanded = await readMeEvidence(ctx.store, source);
+			evidence.push({
+				source,
+				text: expanded.text.slice(0, 8_000),
+				complete: expanded.complete && expanded.text.length <= 8_000,
+			});
+		}
+		return { evidence };
 	},
 	"sol.routes": async (_ctx, value) => {
 		const p = params(value);
@@ -310,3 +328,97 @@ export const meHandlers: NodeHandlers = {
 		return { id: saved.id, status: saved.status, receipt: saved.receipt, destinationSessionId };
 	},
 };
+
+export function createSuperleaderToolBridge(input: { actorId: string; context(): NodeContext }): SessionToolBridge {
+	return {
+		actorId: input.actorId,
+		tools: [
+			{
+				name: "superleader_feed",
+				description:
+					"Read current and suppressed cross-workspace Superleader cards plus bounded pending-source previews.",
+				inputSchema: {
+					type: "object",
+					properties: { limit: { type: "integer", minimum: 1, maximum: 50 } },
+					additionalProperties: false,
+				},
+			},
+			{
+				name: "superleader_evidence",
+				description:
+					"Retrieve captured source text or verified bounded transcript evidence for up to eight source IDs from the Superleader feed.",
+				inputSchema: {
+					type: "object",
+					properties: {
+						sourceIds: { type: "array", minItems: 1, maxItems: 8, items: { type: "string", maxLength: 256 } },
+					},
+					required: ["sourceIds"],
+					additionalProperties: false,
+				},
+			},
+			{
+				name: "superleader_route",
+				description:
+					"Forward a user-directed instruction from an exact saved Sol user turn to one current workspace leader. Keep original and derived instruction distinct, explain the derivation, and include only captured provenance IDs. Use only when the user directed or authorized this work. This tool cannot grant permissions or act as a workspace leader.",
+				inputSchema: {
+					type: "object",
+					properties: {
+						solTurnId: { type: "string", minLength: 1, maxLength: 256 },
+						destinationSessionId: { type: "string", minLength: 1, maxLength: 256 },
+						derivedInstruction: { type: "string", minLength: 1, maxLength: 16_000 },
+						derivation: { type: "string", minLength: 1, maxLength: 2_000 },
+						provenanceSourceIds: {
+							type: "array",
+							maxItems: 32,
+							items: { type: "string", minLength: 1, maxLength: 256 },
+						},
+					},
+					required: ["solTurnId", "destinationSessionId", "derivedInstruction", "derivation"],
+					additionalProperties: false,
+				},
+			},
+		],
+		call: async (name, args) => {
+			const p =
+				typeof args === "object" && args !== null && !Array.isArray(args) ? (args as Record<string, unknown>) : {};
+			let result: unknown;
+			if (name === "superleader_feed") {
+				const requested = p.limit === undefined ? 20 : p.limit;
+				if (typeof requested !== "number" || !Number.isSafeInteger(requested) || requested < 1 || requested > 50)
+					throw new NodeError("INVALID_PARAMS", "limit must be an integer from 1 to 50");
+				const feed = (await meHandlers["me.list"](
+					input.context(),
+					{ includeSuppressed: true, limit: requested },
+					{} as never,
+				)) as { cards: unknown[]; pending: unknown[]; hasMore: boolean };
+				result = { ...feed, pending: feed.pending.slice(0, requested) };
+			} else if (name === "superleader_evidence") {
+				result = await meHandlers["sol.evidence"](input.context(), args, {} as never);
+			} else if (name === "superleader_route") {
+				const idempotencyKey = createHash("sha256")
+					.update(
+						JSON.stringify([
+							p.solTurnId,
+							p.destinationSessionId,
+							p.derivedInstruction,
+							p.derivation,
+							p.provenanceSourceIds ?? [],
+						]),
+					)
+					.digest("hex");
+				result = await meHandlers["sol.route"](input.context(), { ...p, idempotencyKey }, {} as never);
+			} else {
+				throw new NodeError("METHOD_NOT_FOUND", "unknown Superleader model tool");
+			}
+			const structuredContent =
+				typeof result === "object" && result !== null && !Array.isArray(result)
+					? (result as Record<string, unknown>)
+					: undefined;
+			return {
+				content: [{ type: "text", text: JSON.stringify(result) }],
+				...(structuredContent === undefined ? {} : { structuredContent }),
+				isError: false,
+			};
+		},
+	};
+}

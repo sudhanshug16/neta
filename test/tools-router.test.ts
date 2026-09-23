@@ -2,7 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { ulid } from "../src/core/ids.ts";
 import type { Agent, Leader, Mission } from "../src/core/types.ts";
 import type { NodeStore } from "../src/node/server.ts";
-import { createRouter, createTokenTable, type ToolHandlers, type ToolResult } from "../src/tools/router.ts";
+import {
+	createRouter,
+	createTokenTable,
+	type SessionToolBridge,
+	type ToolHandlers,
+	type ToolResult,
+} from "../src/tools/router.ts";
 
 const WORKSPACE = "w";
 
@@ -219,6 +225,31 @@ describe("tool router authorisation", () => {
 });
 
 describe("tool router rendering", () => {
+	test("session-scoped Superleader bridge exposes only its bounded model tools and verifies actor token", async () => {
+		const actorId = ulid();
+		const lunaId = ulid();
+		const tokens = createTokenTable();
+		const token = tokens.mint(actorId);
+		const lunaToken = tokens.mint(lunaId);
+		let called = "";
+		const bridge: SessionToolBridge = {
+			actorId,
+			tools: [{ name: "superleader_feed", description: "Read feed", inputSchema: { type: "object" } }],
+			call: async (name) => {
+				called = name;
+				return { content: [{ type: "text", text: "feed" }], isError: false };
+			},
+		};
+		const router = createRouter({ store: stubStore([], [], []) }, stubHandlers().handlers, tokens, bridge);
+		expect(router.list(actorId, token)).toEqual(bridge.tools);
+		expect(router.list(actorId, "wrong")).toMatchObject({ ok: false, code: "notAuthorised" });
+		expect(router.list(lunaId, lunaToken)).toMatchObject({ ok: false, code: "notAuthorised" });
+		expect((await router.call(actorId, token, "neta_ready", {})).isError).toBe(true);
+		expect((await router.call(lunaId, lunaToken, "superleader_feed", {})).isError).toBe(true);
+		expect((await router.call(actorId, token, "superleader_feed", {})).isError).toBe(false);
+		expect(called).toBe("superleader_feed");
+	});
+
 	test("leader and lead responses carry the reminder, an agent's does not", async () => {
 		const { router, leaderId, leaderToken, leadId, leadToken, agentId, agentToken } = setup();
 		const leadCall = await router.call(leadId, leadToken, "neta_status", {});

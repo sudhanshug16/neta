@@ -5,7 +5,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import type { SessionId, WorkspaceId } from "../core/types.ts";
 import type { NodeStore } from "../node/server.ts";
 import { reminder } from "./reminder.ts";
-import { TOOLS, type ToolDef, type ToolName, type ToolParams, toolsFor, validate } from "./schemas.ts";
+import { type JsonSchema, TOOLS, type ToolName, type ToolParams, toolsFor, validate } from "./schemas.ts";
 
 export type Actor =
 	| { kind: "leader"; workspaceId: WorkspaceId; sessionId: SessionId }
@@ -62,6 +62,12 @@ export interface McpToolResponse {
 	content: McpTextBlock[];
 	structuredContent?: Record<string, unknown>;
 	isError: boolean;
+}
+
+export interface SessionToolBridge {
+	actorId: string;
+	tools: Array<{ name: string; description: string; inputSchema: JsonSchema }>;
+	call(name: string, args: unknown): Promise<McpToolResponse>;
 }
 
 // Memory only, never written to disk: a Node restart wipes the table, so a
@@ -139,8 +145,12 @@ export function createRouter(
 	deps: ToolDeps,
 	handlers: ToolHandlers,
 	tokens: TokenTable,
+	sessionTools?: SessionToolBridge,
 ): {
-	list(actorId: string, token: string): ToolDef[] | ToolResult;
+	list(
+		actorId: string,
+		token: string,
+	): Array<{ name: string; description: string; inputSchema: JsonSchema }> | ToolResult;
 	call(actorId: string, token: string, name: string, args: unknown): Promise<McpToolResponse>;
 } {
 	function authed(actorId: string, token: string): Actor | undefined {
@@ -151,7 +161,14 @@ export function createRouter(
 	}
 
 	return {
-		list(actorId: string, token: string): ToolDef[] | ToolResult {
+		list(
+			actorId: string,
+			token: string,
+		): Array<{ name: string; description: string; inputSchema: JsonSchema }> | ToolResult {
+			if (sessionTools?.actorId === actorId)
+				return tokens.verify(actorId, token)
+					? sessionTools.tools
+					: { ok: false, code: "notAuthorised", message: "bad token or unknown session tools actor" };
 			const actor = authed(actorId, token);
 			if (actor === undefined) {
 				return { ok: false, code: "notAuthorised", message: "bad token or unknown actor" };
@@ -160,6 +177,28 @@ export function createRouter(
 		},
 
 		async call(actorId: string, token: string, name: string, args: unknown): Promise<McpToolResponse> {
+			if (sessionTools?.actorId === actorId) {
+				if (!tokens.verify(actorId, token))
+					return { content: [{ type: "text", text: "error notAuthorised: bad token" }], isError: true };
+				if (!sessionTools.tools.some((tool) => tool.name === name))
+					return {
+						content: [{ type: "text", text: `error notAuthorised: no such session tool: ${name}` }],
+						isError: true,
+					};
+				try {
+					return await sessionTools.call(name, args);
+				} catch (error) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: `error unavailable: ${error instanceof Error ? error.message : String(error)}`,
+							},
+						],
+						isError: true,
+					};
+				}
+			}
 			const actor = authed(actorId, token);
 			if (actor === undefined) {
 				return refused(deps, undefined, "bad token or unknown actor");

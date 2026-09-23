@@ -50,7 +50,7 @@ import type { CloseMissionInput, CloseOutcome, ModeApproval, ModeSubject } from 
 import type { MissionPorts, SessionLaunch } from "../tools/handlers/mission.ts";
 import type { ModelPorts } from "../tools/handlers/model.ts";
 import { toolHandlers } from "../tools/launch.ts";
-import { type Actor, createRouter, type ToolDeps } from "../tools/router.ts";
+import { type Actor, createRouter, type SessionToolBridge, type ToolDeps } from "../tools/router.ts";
 import { createFileLeaseStore, createWorktreeService, LeaseManager, WorktrunkDriver } from "../worktrees/index.ts";
 import { createAgentModelChanger } from "./agent-model.ts";
 import { type ReportPorts, recordAgentRuntime } from "./agent-runtime.ts";
@@ -75,6 +75,7 @@ export interface ToolMountOptions {
 	settings: Settings;
 	runtimeAdmission?: RuntimeAdmission;
 	hub(): Hub;
+	superleaderTools?: SessionToolBridge;
 	pi?: {
 		start(input: { sessionId: string; actorId: string; cwd: string; prompt: string }): Promise<void>;
 		close(sessionId: string): void;
@@ -1386,7 +1387,7 @@ export function toolMount(o: ToolMountOptions): {
 		},
 	};
 
-	const router = createRouter(deps, toolHandlers(), o.runtime.tokens);
+	const router = createRouter(deps, toolHandlers(), o.runtime.tokens, o.superleaderTools);
 
 	const resetting = new Set<string>();
 	const creating = new Map<string, Set<Promise<unknown>>>();

@@ -156,9 +156,14 @@ test("Sol opens a distinct persisted native session with GPT-6 Sol medium and ve
 		state: "idle",
 	};
 	const calls: unknown[] = [];
+	let firstLaunch = true;
 	const runtime = {
 		createSession: async (options: unknown) => {
 			calls.push(options);
+			if (firstLaunch) {
+				firstLaunch = false;
+				throw new Error("fixture first launch failure");
+			}
 			return {
 				sessionId: (options as { sessionId: string }).sessionId,
 				provider: "opencode",
@@ -186,6 +191,12 @@ test("Sol opens a distinct persisted native session with GPT-6 Sol medium and ve
 		runtime,
 		hub: { broadcast() {} },
 	} as unknown as NodeContext;
+	await expect(meHandlers["sol.open"](ctx, { workspaceId: workspace.id }, {} as never)).rejects.toThrow(
+		"fixture first launch failure",
+	);
+	const pendingIdentity = await openMeStore().solIdentity();
+	expect(pendingIdentity.workspaceId).toBe(workspace.id);
+	expect(pendingIdentity.runtimeInitialized).toBe(false);
 	const [opened, concurrent] = (await Promise.all([
 		meHandlers["sol.open"](ctx, { workspaceId: workspace.id }, {} as never),
 		meHandlers["sol.open"](ctx, { workspaceId: workspace.id }, {} as never),
@@ -198,10 +209,10 @@ test("Sol opens a distinct persisted native session with GPT-6 Sol medium and ve
 		sessionId: opened.sessionId,
 		provider: "opencode",
 		model: "openai/gpt-6-sol",
-		netaTools: false,
+		netaTools: true,
 	});
 	expect(calls).toContainEqual(["variant", "medium"]);
-	expect(calls.filter((call) => typeof call === "object" && call !== null && "netaTools" in call)).toHaveLength(1);
+	expect(calls.filter((call) => typeof call === "object" && call !== null && "netaTools" in call)).toHaveLength(2);
 	const restored = (await meHandlers["sol.open"](ctx, {}, {} as never)) as { sessionId: string };
 	expect(restored.sessionId).toBe(opened.sessionId);
 	expect(
@@ -209,4 +220,100 @@ test("Sol opens a distinct persisted native session with GPT-6 Sol medium and ve
 			(call) => typeof call === "object" && call !== null && "allowFresh" in call && call.allowFresh === false,
 		),
 	).toBe(true);
+	expect(calls.filter((call) => typeof call === "object" && call !== null && "allowFresh" in call)).toHaveLength(1);
+});
+
+test("Sol route forwards only a saved user turn whose native transcript matches to a current leader", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "neta-sol-route-"));
+	dirs.push(dir);
+	process.env.NETA_DIR = dir;
+	const workspace: Workspace = {
+		id: "workspace-route",
+		kind: "folder",
+		name: "Route",
+		roots: [{ machineId: "machine-route", path: dir }],
+		createdAt: new Date(0).toISOString(),
+	};
+	const leader: Leader = {
+		workspaceId: workspace.id,
+		machineId: "machine-route",
+		name: "Leader",
+		sessionId: "leader-current",
+		provider: "fake",
+		model: "fixture",
+		mode: "lead",
+		modeSince: new Date(0).toISOString(),
+		modeActiveMs: 0,
+		state: "idle",
+	};
+	const store = openMeStore();
+	const identity = await store.bindSolRuntime({ workspaceId: workspace.id, provider: "fake", model: "fixture" });
+	const savedTurn = await store.appendSolTurn({
+		idempotencyKey: "route-user-turn",
+		author: "user",
+		text: "Fix the login bug",
+	});
+	await store.bindSolNativeTurn(savedTurn.id, "native-user-turn");
+	const sent: Array<{ sessionId: string; text: string; sourceId: string }> = [];
+	let nativeText = "Fix the login bug";
+	const ctx = {
+		store: {
+			listLeaders: () => [leader],
+			getLeader: (workspaceId: string) => (workspaceId === workspace.id ? leader : undefined),
+			tailConversation: async (sessionId: string) => ({
+				blocks:
+					sessionId === identity.sessionId
+						? [{ turnId: "native-user-turn", role: "user", kind: "text", text: nativeText, seq: 1 }]
+						: [],
+			}),
+		},
+		runtime: {
+			send: async (sessionId: string, text: string, _attachments: never[], provenance: { sourceId: string }) => {
+				sent.push({ sessionId, text, sourceId: provenance.sourceId });
+				return {
+					id: "receipt-route-1",
+					sessionId,
+					createdAt: new Date(0).toISOString(),
+					text,
+					attachments: [],
+					status: "delivered" as const,
+				};
+			},
+		},
+		hub: { broadcast() {} },
+	} as unknown as NodeContext;
+	const result = await meHandlers["sol.route"](
+		ctx,
+		{
+			idempotencyKey: "route-idempotency",
+			solTurnId: savedTurn.id,
+			destinationSessionId: leader.sessionId,
+			derivedInstruction: "Inspect and fix the login bug; report findings.",
+			derivation: "The user directly requested the login bug fix.",
+			provenanceSourceIds: [],
+		},
+		{} as never,
+	);
+	expect(result).toMatchObject({ status: "delivered", receipt: "receipt-route-1" });
+	expect(sent).toHaveLength(1);
+	expect(sent[0]).toMatchObject({
+		sessionId: leader.sessionId,
+		text: "Inspect and fix the login bug; report findings.",
+	});
+	nativeText = "A forged native user turn";
+	await expect(
+		meHandlers["sol.route"](
+			ctx,
+			{
+				idempotencyKey: "route-forged",
+				solTurnId: savedTurn.id,
+				destinationSessionId: leader.sessionId,
+				derivedInstruction: "Do unrelated work",
+				derivation: "fabricated",
+				provenanceSourceIds: [],
+			},
+			{} as never,
+		),
+	).rejects.toThrow("does not match Sol's captured native user turn");
+	expect(sent).toHaveLength(1);
 });

@@ -92,3 +92,45 @@ test("malformed classification cannot discard source; suppression remains inspec
 	expect((await store.list()).cards).toEqual([]);
 	expect((await store.list({ includeSuppressed: true })).cards[0]?.sourceIds).toEqual([item.id]);
 });
+
+test("bounded curator drain processes a 25-source restart backlog and stops when only failed sources remain", async () => {
+	isolate();
+	const store = openMeStore();
+	const items = await Promise.all(Array.from({ length: 25 }, (_, index) => store.capture(source(`backlog-${index}`))));
+	expect(items).toHaveLength(25);
+	let calls = 0;
+	const curator = createMeCurator({
+		store,
+		classify: async ({ source: current }) => {
+			calls += 1;
+			return decision(current);
+		},
+	});
+	const partial = await curator.drain(20, 1);
+	expect(partial.processed).toHaveLength(20);
+	expect(partial.pending).toBe(5);
+	const afterRestart = createMeCurator({
+		store: openMeStore(),
+		classify: async ({ source: current }) => decision(current),
+	});
+	const resumed = await afterRestart.drain(20, 5);
+	expect(resumed.processed).toHaveLength(5);
+	expect(resumed.pending).toBe(0);
+	expect((await store.list({ includeSuppressed: true, limit: 30 })).cards[0]?.sourceIds).toHaveLength(25);
+	expect(calls).toBe(20);
+
+	const pending = await Promise.all(Array.from({ length: 3 }, (_, index) => store.capture(source(`broken-${index}`))));
+	let failures = 0;
+	const unavailable = createMeCurator({
+		store,
+		classify: async () => {
+			failures += 1;
+			throw new Error("model unavailable");
+		},
+	});
+	const stalled = await unavailable.drain(20, 5);
+	expect(stalled.processed).toHaveLength(0);
+	expect(stalled.pending).toBe(3);
+	expect(stalled.failed).toEqual(pending.map((item) => item.id));
+	expect(failures).toBe(3);
+});
