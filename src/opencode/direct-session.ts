@@ -473,6 +473,11 @@ export async function startOpenCodeSession(opts: StartOptions): Promise<RuntimeS
 							].includes(action)
 								? "once"
 								: "reject";
+						await api.request(
+							"POST",
+							`${sessionPath(vendorSessionId)}/permission/${encodeURIComponent(string(data.id) ?? "")}/reply`,
+							{ reply },
+						);
 						try {
 							const message = string(data.message);
 							await opts.onPermissionRequest?.(
@@ -491,11 +496,6 @@ export async function startOpenCodeSession(opts: StartOptions): Promise<RuntimeS
 						} catch {
 							// Preserve the current native permission policy if Me audit persistence is unavailable.
 						}
-						await api.request(
-							"POST",
-							`${sessionPath(vendorSessionId)}/permission/${encodeURIComponent(string(data.id) ?? "")}/reply`,
-							{ reply },
-						);
 						continue;
 					}
 					if (event.type === "form.created") {
