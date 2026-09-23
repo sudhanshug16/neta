@@ -1412,7 +1412,11 @@ export function toolMount(o: ToolMountOptions): {
 					if (pending.subject.workspaceId === parsed.workspaceId) pendingModes.delete(id);
 				for (const [id, agent] of pendingReleases)
 					if (agent.workspaceId === parsed.workspaceId) pendingReleases.delete(id);
-				await archiveWorkspace(ctx, parsed.workspaceId, { save: missions.save, release: releaseHolder });
+				await archiveWorkspace(ctx, parsed.workspaceId, {
+					save: missions.save,
+					release: releaseHolder,
+					close: (input) => worktrees.close(input),
+				});
 				const reset = conversationHandlers["conversation.reset"];
 				if (!reset) throw new NodeError("PROVIDER_ERROR", "chat reset is unavailable");
 				return await reset(ctx, { sessionId: leaderOf(parsed.workspaceId).sessionId }, conn);

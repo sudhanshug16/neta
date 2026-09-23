@@ -18,11 +18,11 @@
 //   happened to be detached from.
 
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ulid } from "../src/core/ids.ts";
-import type { Agent, Block, Leader, Turn, Workspace } from "../src/core/types.ts";
+import type { Agent, Block, Leader, Mission, Turn, Workspace } from "../src/core/types.ts";
 import { connectNode, type NodeClient } from "../src/node/client.ts";
 import { type Node as NetaNode, startNode } from "../src/node/lifecycle.ts";
 import type { ConversationTailResult, StateNotification, TurnNotification } from "../src/node/protocol.ts";
@@ -2408,6 +2408,110 @@ test("workspace reset archives missions and queued workers and creates one blank
 			sessionId: leader?.sessionId,
 		});
 		expect(tail.blocks).toEqual([]);
+	} finally {
+		await at.client.close();
+	}
+}, 90000);
+
+test("workspace reset on a git workspace reclaims clean idle worktrees and keeps active ones open", async () => {
+	await makeGitWorkspace();
+	await writeBarrierSettings(
+		join(dir, "reset-git-workspace-sessions.json"),
+		join(dir, "reset-barrier"),
+		join(dir, "reset-barrier-ready"),
+	);
+	node = await startNode({ sessionFactory: startLegacySession });
+	const at = await attach();
+	try {
+		const actor = await leaderActor(at);
+		const busy = await at.client.request<{ isError?: boolean; content: Array<{ text: string }> }>("tools.call", {
+			...actor,
+			name: "neta_mission",
+			arguments: {
+				name: "Busy reset",
+				objective: "stay active across reset",
+				access: "readWrite",
+				lead: { task: "Coordinate busy reset", effort: 2 },
+				agents: [
+					// The first writer blocks on the barrier while holding the
+					// lease, so the second writer stays queued behind it.
+					{ task: "WAIT_FOR_BARRIER hold the writer lease", access: "readWrite" },
+					{ task: "queued writer", access: "readWrite" },
+				],
+			},
+		});
+		if (busy.isError) throw new Error(JSON.stringify(busy));
+		const busyId = (JSON.parse(busy.content[0]?.text.split("\n")[0] ?? "{}") as { id: string }).id;
+		const idle = await at.client.request<{ isError?: boolean; content: Array<{ text: string }> }>("tools.call", {
+			...actor,
+			name: "neta_mission",
+			arguments: {
+				name: "Idle reset",
+				objective: "inspect only",
+				access: "readOnly",
+				lead: { task: "Coordinate idle reset", effort: 1 },
+			},
+		});
+		if (idle.isError) throw new Error(JSON.stringify(idle));
+		const idleId = (JSON.parse(idle.content[0]?.text.split("\n")[0] ?? "{}") as { id: string }).id;
+		const leads = await at.client.request<{ agents: Agent[] }>("snapshot", {});
+		const busyLead = leads.agents.find((agent) => agent.missionId === busyId && agent.canSpawn);
+		if (!busyLead) throw new Error("missing busy lead");
+		await at.client.request("conversation.tail", { sessionId: busyLead.sessionId, limit: 20 });
+		await at.client.request("conversation.prompt", { sessionId: busyLead.sessionId, text: "HOLD_FOREVER" });
+		await waitFor("busy lead turn", () =>
+			at.turns.find((turn) => turn.sessionId === busyLead.sessionId && turn.turn?.endedAt === undefined),
+		);
+		// The first writer blocks on the barrier while holding the lease, so
+		// the second writer stays queued behind it; neither may be promoted
+		// (started) by reset's own lease releases.
+		await waitFor("queued writer waiting", async () => {
+			const current = await at.client.request<{ agents: Agent[] }>("snapshot", {});
+			const workers = current.agents.filter((agent) => agent.missionId === busyId && !agent.canSpawn);
+			return workers.some((agent) => agent.state === "running") &&
+				workers.some((agent) => agent.state === "queued")
+				? true
+				: undefined;
+		});
+		await waitFor("idle lead settled", async () => {
+			const current = await at.client.request<{ agents: Agent[] }>("snapshot", {});
+			const lead = current.agents.find((agent) => agent.missionId === idleId && agent.canSpawn);
+			return lead !== undefined && ["idle", "completed"].includes(lead.state) ? true : undefined;
+		});
+		const beforeA = await at.client.request<{ mission: Mission }>("missions.get", { missionId: busyId });
+		const beforeB = await at.client.request<{ mission: Mission }>("missions.get", { missionId: idleId });
+		const pathA = beforeA.mission.worktree?.path;
+		const pathB = beforeB.mission.worktree?.path;
+		const branchB = beforeB.mission.worktree?.branch;
+		if (!pathA || !pathB || !branchB) throw new Error(JSON.stringify({ beforeA, beforeB }));
+		await expect(stat(pathA)).resolves.toBeDefined();
+		await expect(stat(pathB)).resolves.toBeDefined();
+
+		await at.client.request("workspace.reset", { workspaceId: at.leader.workspaceId, confirm: true });
+
+		// The busy mission stays open with its directory intact and a reason.
+		const afterA = await at.client.request<{ mission: Mission; agents: Agent[] }>("missions.get", {
+			missionId: busyId,
+		});
+		expect(afterA.mission.state).not.toBe("closed");
+		expect(afterA.mission.worktree?.path).toBe(pathA);
+		expect(afterA.mission.attention).toContain("agents were active");
+		await expect(stat(pathA)).resolves.toBeDefined();
+		expect(afterA.agents.every((agent) => agent.state === "archived")).toBe(true);
+		expect(afterA.agents.some((agent) => !agent.canSpawn)).toBe(true);
+		// The clean idle mission closed through the pipeline: its directory
+		// is reclaimed while its committed branch is retained.
+		const afterB = await at.client.request<{ mission: Mission }>("missions.get", { missionId: idleId });
+		expect(afterB.mission.state).toBe("closed");
+		expect(afterB.mission.worktree).toBeUndefined();
+		await expect(stat(pathB)).rejects.toThrow();
+		const branchCheck = Bun.spawn(["git", "rev-parse", "--verify", branchB], { cwd: work, stdout: "ignore" });
+		expect(await branchCheck.exited).toBe(0);
+		// No queued work was promoted across the reset.
+		const snapshot = await at.client.request<{ agents: Agent[] }>("snapshot", {});
+		expect(
+			snapshot.agents.filter((agent) => ["queued", "starting", "running"].includes(agent.state)),
+		).toHaveLength(0);
 	} finally {
 		await at.client.close();
 	}
