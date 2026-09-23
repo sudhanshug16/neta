@@ -21,10 +21,13 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ulid } from "../src/core/ids.ts";
 import type { Agent, Block, Leader, Turn, Workspace } from "../src/core/types.ts";
 import { connectNode, type NodeClient } from "../src/node/client.ts";
 import { type Node as NetaNode, startNode } from "../src/node/lifecycle.ts";
 import type { ConversationTailResult, StateNotification, TurnNotification } from "../src/node/protocol.ts";
+import { appendLine } from "../src/store/files.ts";
+import { paths } from "../src/store/paths.ts";
 import { startLegacySession } from "./fixtures/legacy-acp-runtime.ts";
 
 const FIXTURE = new URL("./fixtures/fake-acp-agent.mjs", import.meta.url).pathname;
@@ -741,7 +744,8 @@ test("an interrupted agent resumes its exact conversation when the leader contin
 		});
 		expect(sent.isError).toBe(false);
 		const after = await second.client.request<{ agents: Agent[] }>("snapshot", {});
-		expect(after.agents.find((one) => one.id === agent.id)?.state).toBe("running");
+		expect(after.agents.find((one) => one.id === agent.id)?.sessionId).toBe(agent.sessionId);
+		expect(["running", "idle"]).toContain(after.agents.find((one) => one.id === agent.id)?.state ?? "missing");
 		// Send acknowledges durable inbox insertion; transcript projection follows.
 		const history = await waitFor("resumed prompt in transcript", async () => {
 			const tail = await second.client.request<ConversationTailResult>("conversation.tail", {
@@ -808,7 +812,7 @@ test("completed lead follow-up keeps identity and off-screen clients receive com
 			arguments: { agentId: original.id, text: "follow-up in original review" },
 		});
 		expect(sent.isError).toBe(false);
-		expect(sent.content[0]?.text).toContain('"delivered":"resumed"');
+		expect(sent.content[0]?.text).toContain('"status":"delivered"');
 		await waitFor("follow-up completion", () =>
 			ended.filter((item) => item.sessionId === original.sessionId).length >= 2 ? true : undefined,
 		);
@@ -861,8 +865,15 @@ test("a rejected idle-agent resume does not invent a replacement session", async
 			name: "neta_send",
 			arguments: { agentId: agent.id, text: "must not fork" },
 		});
-		expect(sent.isError).toBe(true);
-		expect(sent.content[0]?.text).toContain("Could not restore saved conversation");
+		expect(sent.isError).toBe(false);
+		expect(sent.content[0]?.text).toContain('"status":"queued"');
+		const inbox = await second.client.request<{ messages: Array<{ text: string; status: string }> }>(
+			"conversation.inbox",
+			{ sessionId: agent.sessionId },
+		);
+		expect(inbox.messages.some((message) => message.text === "must not fork" && message.status === "queued")).toBe(
+			true,
+		);
 		const after = await second.client.request<{ agents: Agent[] }>("snapshot", {});
 		expect(after.agents.find((one) => one.id === agent.id)?.state).toBe("idle");
 		expect(after.agents.find((one) => one.id === agent.id)?.sessionId).toBe(agent.sessionId);
@@ -914,7 +925,7 @@ test("two real writers serialize and completion starts exactly one queued succes
 				name: "Serialized writers",
 				objective: "one writer at a time",
 				access: "readWrite",
-				lead: "self",
+				lead: { task: "Coordinate serialized writers", effort: 2 },
 				agents: [
 					{ task: "first writer", access: "readWrite" },
 					{ task: "second writer", access: "readWrite" },
@@ -922,9 +933,11 @@ test("two real writers serialize and completion starts exactly one queued succes
 			},
 		});
 		let snapshot = await at.client.request<{ agents: Agent[] }>("snapshot", {});
-		const first = snapshot.agents.find((agent) => agent.state !== "queued");
-		const second = snapshot.agents.find((agent) => agent.state === "queued");
+		const first = snapshot.agents.find((agent) => agent.task === "first writer");
+		const second = snapshot.agents.find((agent) => agent.task === "second writer");
 		if (first === undefined || second === undefined) throw new Error("expected active and queued writers");
+		expect(first.state).not.toBe("queued");
+		expect(second.state).toBe("queued");
 		await expect(
 			at.client.request("conversation.tail", { sessionId: second.sessionId, limit: 20 }),
 		).rejects.toThrow();
@@ -968,7 +981,7 @@ test("a failed promoted writer is closed before the next queued writer starts", 
 				name: "Promotion failure",
 				objective: "skip a broken provider",
 				access: "readWrite",
-				lead: "self",
+				lead: { task: "Coordinate promotion", effort: 2 },
 				agents: [
 					{ task: "holder", access: "readWrite" },
 					{ task: "broken", access: "readWrite", provider: "missing" },
@@ -1011,7 +1024,7 @@ test("an initial writer launch failure releases its lease before the next writer
 				name: "Initial launch failure",
 				objective: "clean up before continuing",
 				access: "readWrite",
-				lead: "self",
+				lead: { task: "Coordinate launch recovery", effort: 2 },
 				agents: [
 					{ task: "broken first", access: "readWrite", provider: "missing" },
 					{ task: "healthy second", access: "readWrite" },
@@ -1026,13 +1039,13 @@ test("an initial writer launch failure releases its lease before the next writer
 		expect(["starting", "running", "idle", "interrupted"]).toContain(
 			snapshot.agents.find((agent) => agent.task === "healthy second")?.state ?? "missing",
 		);
-		expect(snapshot.missions[0]?.agentIds).toHaveLength(2);
+		expect(snapshot.missions[0]?.agentIds).toHaveLength(3);
 	} finally {
 		await at.client.close();
 	}
 }, 90000);
 
-test("restart preserves writer FIFO and explicit continuation starts the queued head", async () => {
+test("restart preserves writer FIFO and the queued head's exact session", async () => {
 	await writeSettings(join(dir, "writer-restart-sessions.json"));
 	node = await startNode({ sessionFactory: startLegacySession });
 	const firstNode = await attach();
@@ -1044,7 +1057,7 @@ test("restart preserves writer FIFO and explicit continuation starts the queued 
 			name: "Restart writers",
 			objective: "preserve FIFO",
 			access: "readWrite",
-			lead: "self",
+			lead: { task: "Coordinate writer recovery", effort: 2 },
 			agents: [
 				{ task: "interrupted holder", access: "readWrite" },
 				{ task: "queued head", access: "readWrite" },
@@ -1054,6 +1067,7 @@ test("restart preserves writer FIFO and explicit continuation starts the queued 
 	const before = await firstNode.client.request<{ agents: Agent[] }>("snapshot", {});
 	const head = before.agents.find((agent) => agent.task === "queued head");
 	if (head === undefined) throw new Error("expected queued head");
+	expect(head.state).toBe("queued");
 	await firstNode.client.close();
 	await node.stop();
 
@@ -1067,18 +1081,15 @@ test("restart preserves writer FIFO and explicit continuation starts the queued 
 			arguments: { agentId: head.id, text: "continue FIFO head" },
 		});
 		expect(sent.isError).toBe(false);
-		await waitFor("queued head start after restart", () =>
-			secondNode.states.find(
-				(state) =>
-					state.kind === "agent" &&
-					(state.record as Agent).id === head.id &&
-					(state.record as Agent).state === "starting",
-			),
-		);
 		const after = await secondNode.client.request<{ agents: Agent[] }>("snapshot", {});
-		expect(["starting", "running", "idle", "interrupted"]).toContain(
-			after.agents.find((agent) => agent.id === head.id)?.state ?? "missing",
-		);
+		const resumedHead = after.agents.find((agent) => agent.id === head.id);
+		expect(resumedHead?.sessionId).toBe(head.sessionId);
+		expect(["starting", "running", "idle"]).toContain(resumedHead?.state ?? "missing");
+		const headHistory = await secondNode.client.request<ConversationTailResult>("conversation.tail", {
+			sessionId: head.sessionId,
+			limit: 40,
+		});
+		expect(headHistory.blocks.some((block) => block.text.includes("queued head"))).toBe(true);
 		expect(after.agents.find((agent) => agent.task === "interrupted holder")?.state).toBe("idle");
 	} finally {
 		await secondNode.client.close();
@@ -1097,7 +1108,7 @@ test("an interrupted writer queued behind another resumes its exact history when
 			name: "Queued resume history",
 			objective: "preserve the interrupted writer",
 			access: "readWrite",
-			lead: "self",
+			lead: { task: "Coordinate resumed writers", effort: 2 },
 			agents: [
 				{ task: "original holder", access: "readWrite" },
 				{ task: "next holder", access: "readWrite" },
@@ -1152,12 +1163,16 @@ test("an interrupted writer queued behind another resumes its exact history when
 			name: "neta_send",
 			arguments: { agentId: next.id, text: "take writer first" },
 		});
-		const queued = await secondNode.client.request<{ isError: boolean }>("tools.call", {
-			...nextLeader,
-			name: "neta_send",
-			arguments: { agentId: original.id, text: "resume after next" },
-		});
-		expect(queued.isError).toBe(true);
+		const queued = await secondNode.client.request<{ isError: boolean; content: Array<{ text: string }> }>(
+			"tools.call",
+			{
+				...nextLeader,
+				name: "neta_send",
+				arguments: { agentId: original.id, text: "resume after next" },
+			},
+		);
+		expect(queued.isError).toBe(false);
+		expect(queued.content[0]?.text).toContain('"status":"queued"');
 		const beforePromotion = await secondNode.client.request<ConversationTailResult>("conversation.tail", {
 			sessionId: original.sessionId,
 			limit: 100,
@@ -1210,7 +1225,12 @@ test("concurrent agent additions preserve both ids and admit one real writer", a
 		const made = await at.client.request<{ content: Array<{ text: string }> }>("tools.call", {
 			...leader,
 			name: "neta_mission",
-			arguments: { name: "Concurrent additions", objective: "keep both", access: "readWrite", lead: "self" },
+			arguments: {
+				name: "Concurrent additions",
+				objective: "keep both",
+				access: "readWrite",
+				lead: { task: "Coordinate additions", effort: 2 },
+			},
 		});
 		const mission = JSON.parse(made.content[0]?.text.split("\n")[0] ?? "{}") as { id: string };
 		await Promise.all(
@@ -1227,12 +1247,14 @@ test("concurrent agent additions preserve both ids and admit one real writer", a
 			agents: Agent[];
 		}>("snapshot", {});
 		const agents = snapshot.agents.filter((agent) => agent.missionId === mission.id);
-		expect(agents).toHaveLength(2);
-		expect(snapshot.missions.find((one) => one.id === mission.id)?.agentIds).toHaveLength(2);
+		expect(agents.filter((agent) => !agent.canSpawn)).toHaveLength(2);
+		expect(snapshot.missions.find((one) => one.id === mission.id)?.agentIds).toHaveLength(3);
 		expect(
-			agents.filter((agent) => ["starting", "running", "idle", "interrupted"].includes(agent.state)),
+			agents.filter(
+				(agent) => !agent.canSpawn && ["starting", "running", "idle", "interrupted"].includes(agent.state),
+			),
 		).toHaveLength(1);
-		expect(agents.filter((agent) => agent.state === "queued")).toHaveLength(1);
+		expect(agents.filter((agent) => !agent.canSpawn && agent.state === "queued")).toHaveLength(1);
 	} finally {
 		await at.client.close();
 	}
@@ -1250,7 +1272,7 @@ test("a completed writer is closed at its turn boundary before promotion", async
 				name: "Turn boundary",
 				objective: "no overlap",
 				access: "readWrite",
-				lead: "self",
+				lead: { task: "Coordinate turn boundary", effort: 2 },
 				agents: [
 					{ task: "holding writer", access: "readWrite" },
 					{ task: "waiting writer", access: "readWrite" },
@@ -1338,6 +1360,64 @@ test("the real Node mount reserves a separate lead before persisting and launchi
 		expect(at.states.some((s) => s.kind === "mission" && (s.record as { id: string }).id === created.id)).toBe(true);
 	} finally {
 		await at.client.close();
+	}
+}, 90000);
+
+test("a saved self-led mission remains readable and closeable without resuming self-lead work", async () => {
+	node = await startNode({ sessionFactory: startLegacySession });
+	const first = await attach();
+	const leader = first.leader;
+	const mission = {
+		id: ulid(),
+		number: 1,
+		workspaceId: leader.workspaceId,
+		machineId: leader.machineId,
+		name: "Historical direct work",
+		objective: "Review old work",
+		changes: [],
+		lead: { kind: "leader" as const },
+		agentIds: [],
+		access: "readOnly" as const,
+		state: "readyToClose" as const,
+		createdAt: new Date().toISOString(),
+	};
+	await first.client.close();
+	await node.stop();
+	await appendLine(paths().registryLog(leader.workspaceId), { op: "create", at: mission.createdAt, mission });
+	node = await startNode({ sessionFactory: startLegacySession });
+	const second = await attach();
+	try {
+		const before = await second.client.request<{ missions: Array<{ id: string; lead: { kind: string } }> }>(
+			"snapshot",
+			{},
+		);
+		expect(before.missions.find((one) => one.id === mission.id)?.lead.kind).toBe("leader");
+		const actor = await leaderActor(second);
+		const refused = await second.client.request<{ isError: boolean; content: Array<{ text: string }> }>(
+			"tools.call",
+			{
+				...actor,
+				name: "neta_agent",
+				arguments: { missionId: mission.number, task: "resume old work", access: "readOnly" },
+			},
+		);
+		expect(refused.isError).toBe(true);
+		expect(refused.content[0]?.text).toContain("legacy self-led mission cannot resume");
+		const closed = await second.client.request<{ isError: boolean }>("tools.call", {
+			...actor,
+			name: "neta_close",
+			arguments: { missionId: mission.number, disposition: "completed", reason: "Historical review finished" },
+		});
+		expect(closed.isError).toBe(false);
+		const after = await second.client.request<{
+			missions: Array<{ id: string; state: string; lead: { kind: string } }>;
+		}>("snapshot", {});
+		expect(after.missions.find((one) => one.id === mission.id)).toMatchObject({
+			state: "closed",
+			lead: { kind: "leader" },
+		});
+	} finally {
+		await second.client.close();
 	}
 }, 90000);
 
@@ -1431,7 +1511,12 @@ test("the charter's reservations gate neta_mode", async () => {
 			actorId,
 			token,
 			name: "neta_mission",
-			arguments: { name: "Move the schema", objective: "Ship the new tables", access: "readWrite", lead: "self" },
+			arguments: {
+				name: "Move the schema",
+				objective: "Ship the new tables",
+				access: "readWrite",
+				lead: { task: "Coordinate schema work", effort: 2 },
+			},
 		});
 		const mission = JSON.parse(created.content[0]?.text.split("\n")[0] ?? "{}") as { id: string };
 
@@ -1476,7 +1561,12 @@ test("neta_mode moves the leader to leadPlus and back", async () => {
 			actorId,
 			token,
 			name: "neta_mission",
-			arguments: { name: "Rework the loader", objective: "Make it fast", access: "readWrite", lead: "self" },
+			arguments: {
+				name: "Rework the loader",
+				objective: "Make it fast",
+				access: "readWrite",
+				lead: { task: "Coordinate loader work", effort: 2 },
+			},
 		});
 		const mission = JSON.parse(created.content[0]?.text.split("\n")[0] ?? "{}") as { id: string };
 		const record = {
@@ -1513,8 +1603,11 @@ test("neta_mode moves the leader to leadPlus and back", async () => {
 		// The way back is a real write, not a bare `approved: true`: Lead++
 		// outlives a restart, so a leader that cannot return stays in build
 		// access until a person flips it.
-		await at.client.request("leader.setMode", { workspaceId: at.leader.workspaceId, mode: "lead" });
-		const back = await leaderNow();
+		expect((await mode({ mode: "lead" })).approved).toBe(true);
+		const back = await waitFor("leader returned to Lead", async () => {
+			const current = await leaderNow();
+			return current?.mode === "lead" ? current : undefined;
+		});
 		expect(back?.mode).toBe("lead");
 		expect(
 			at.states.filter((s) => s.kind === "leader" && (s.record as Leader).mode === "lead").length,
@@ -1535,7 +1628,12 @@ test("Lead++ waits for a normal turn boundary before relaunching writable", asyn
 		const created = await at.client.request<{ content: Array<{ text: string }> }>("tools.call", {
 			...actor,
 			name: "neta_mission",
-			arguments: { name: "Deferred mode", objective: "switch safely", access: "readWrite", lead: "self" },
+			arguments: {
+				name: "Deferred mode",
+				objective: "switch safely",
+				access: "readWrite",
+				lead: { task: "Coordinate deferred mode", effort: 2 },
+			},
 		});
 		const mission = JSON.parse(created.content[0]?.text.split("\n")[0] ?? "{}") as { id: string };
 		await at.client.request("conversation.prompt", {
@@ -1585,7 +1683,12 @@ test("cancelling a turn invalidates its pending Lead++ grant and frees the write
 		const created = await at.client.request<{ content: Array<{ text: string }> }>("tools.call", {
 			...actor,
 			name: "neta_mission",
-			arguments: { name: "Cancelled mode", objective: "remain read only", access: "readWrite", lead: "self" },
+			arguments: {
+				name: "Cancelled mode",
+				objective: "remain read only",
+				access: "readWrite",
+				lead: { task: "Coordinate cancellation", effort: 2 },
+			},
 		});
 		const mission = JSON.parse(created.content[0]?.text.split("\n")[0] ?? "{}") as { id: string };
 		await at.client.request("conversation.prompt", { sessionId: at.leader.sessionId, text: "HOLD_FOREVER" });
@@ -1634,7 +1737,7 @@ test("cancelling a turn invalidates its pending Lead++ grant and frees the write
 	}
 }, 90000);
 
-test("closing a self-led Lead++ mission downgrades it before promoting another mission", async () => {
+test("closing a delegated Lead++ mission downgrades its lead before promoting another mission", async () => {
 	await writeSettings(join(dir, "mode-close-sessions.json"));
 	node = await startNode({ sessionFactory: startLegacySession });
 	const at = await attach();
@@ -1643,10 +1746,22 @@ test("closing a self-led Lead++ mission downgrades it before promoting another m
 		const first = await at.client.request<{ content: Array<{ text: string }> }>("tools.call", {
 			...actor,
 			name: "neta_mission",
-			arguments: { name: "Leader writer", objective: "close safely", access: "readWrite", lead: "self" },
+			arguments: {
+				name: "Leader writer",
+				objective: "close safely",
+				access: "readWrite",
+				lead: { task: "Coordinate closeout", effort: 2 },
+			},
 		});
 		const mission = JSON.parse(first.content[0]?.text.split("\n")[0] ?? "{}") as { id: string };
-		await at.client.request("leader.setMode", { workspaceId: at.leader.workspaceId, mode: "leadPlus" });
+		const firstSnapshot = await at.client.request<{ agents: Agent[] }>("snapshot", {});
+		const lead = firstSnapshot.agents.find((agent) => agent.missionId === mission.id && agent.canSpawn);
+		if (!lead) throw new Error("missing delegated lead");
+		await at.client.request("leader.setMode", {
+			workspaceId: at.leader.workspaceId,
+			missionId: mission.id,
+			mode: "leadPlus",
+		});
 		at.turns.length = 0;
 		const writableActor = await leaderActor(at);
 		await at.client.request("tools.call", {
@@ -1656,15 +1771,16 @@ test("closing a self-led Lead++ mission downgrades it before promoting another m
 				name: "Waiting mission",
 				objective: "start after close",
 				access: "readWrite",
-				lead: "self",
+				lead: { task: "Coordinate waiting work", effort: 2 },
 				agents: [{ task: "successor writer", access: "readWrite" }],
 			},
 		});
 		let snapshot = await at.client.request<{ agents: Agent[] }>("snapshot", {});
 		expect(snapshot.agents.find((agent) => agent.task === "successor writer")?.state).toBe("queued");
-		await at.client.request("conversation.prompt", { sessionId: at.leader.sessionId, text: "HOLD_FOREVER" });
+		await at.client.request("conversation.tail", { sessionId: lead.sessionId, limit: 20 });
+		await at.client.request("conversation.prompt", { sessionId: lead.sessionId, text: "HOLD_FOREVER" });
 		await waitFor("active Lead++ close turn", () =>
-			at.turns.find((turn) => turn.sessionId === at.leader.sessionId && turn.turn?.endedAt === undefined),
+			at.turns.find((turn) => turn.sessionId === lead.sessionId && turn.turn?.endedAt === undefined),
 		);
 		const closed = await at.client.request<{ isError: boolean }>("tools.call", {
 			...writableActor,
@@ -1674,7 +1790,7 @@ test("closing a self-led Lead++ mission downgrades it before promoting another m
 		expect(closed.isError).toBe(true);
 		snapshot = await at.client.request<{ agents: Agent[] }>("snapshot", {});
 		expect(snapshot.agents.find((agent) => agent.task === "successor writer")?.state).toBe("queued");
-		await at.client.request("conversation.cancel", { sessionId: at.leader.sessionId });
+		await at.client.request("conversation.cancel", { sessionId: lead.sessionId });
 		await waitFor("successor after Lead++ close", () =>
 			at.states.find(
 				(state) =>
@@ -1689,12 +1805,16 @@ test("closing a self-led Lead++ mission downgrades it before promoting another m
 		);
 		const reopened = await at.client.request<{ leader: Leader }>("workspace.open", { path: work });
 		expect(reopened.leader.mode).toBe("lead");
+		const saved = (await Bun.file(paths().leader(at.leader.workspaceId)).json()) as {
+			leadModes?: Record<string, { mode: string }>;
+		};
+		expect(saved.leadModes?.[lead.id]?.mode).toBe("lead");
 	} finally {
 		await at.client.close();
 	}
 }, 90000);
 
-test("a refused Lead++ close returns and persists its real closeout outcome", async () => {
+test("a refused Lead++ close rejects an active lead and persists closeout evidence once idle", async () => {
 	await makeGitWorkspace();
 	const sessionStore = join(dir, "mode-refused-close-sessions.json");
 	await writeCwdResumeSettings(sessionStore);
@@ -1705,10 +1825,22 @@ test("a refused Lead++ close returns and persists its real closeout outcome", as
 		const created = await at.client.request<{ content: Array<{ text: string }> }>("tools.call", {
 			...actor,
 			name: "neta_mission",
-			arguments: { name: "Refused close", objective: "remain open", access: "readWrite", lead: "self" },
+			arguments: {
+				name: "Refused close",
+				objective: "remain open",
+				access: "readWrite",
+				lead: { task: "Coordinate refused close", effort: 2 },
+			},
 		});
 		const mission = JSON.parse(created.content[0]?.text.split("\n")[0] ?? "{}") as { id: string };
-		await at.client.request("leader.setMode", { workspaceId: at.leader.workspaceId, mode: "leadPlus" });
+		const initial = await at.client.request<{ agents: Agent[] }>("snapshot", {});
+		const lead = initial.agents.find((agent) => agent.missionId === mission.id && agent.canSpawn);
+		if (!lead) throw new Error("missing delegated lead");
+		await at.client.request("leader.setMode", {
+			workspaceId: at.leader.workspaceId,
+			missionId: mission.id,
+			mode: "leadPlus",
+		});
 		at.turns.length = 0;
 		actor = await leaderActor(at);
 		const refused = await at.client.request<{ isError: boolean; content: Array<{ text: string }> }>("tools.call", {
@@ -1725,20 +1857,38 @@ test("a refused Lead++ close returns and persists its real closeout outcome", as
 		expect(snapshot.missions.find((one) => one.id === mission.id)?.state).not.toBe("closed");
 		expect(snapshot.missions.find((one) => one.id === mission.id)?.attention).toContain("not merged");
 
-		await at.client.request("leader.setMode", { workspaceId: at.leader.workspaceId, mode: "leadPlus" });
+		await at.client.request("leader.setMode", {
+			workspaceId: at.leader.workspaceId,
+			missionId: mission.id,
+			mode: "leadPlus",
+		});
 		at.turns.length = 0;
 		actor = await leaderActor(at);
-		await at.client.request("conversation.prompt", { sessionId: at.leader.sessionId, text: "HOLD_FOREVER" });
+		await at.client.request("conversation.tail", { sessionId: lead.sessionId, limit: 20 });
+		await at.client.request("conversation.prompt", { sessionId: lead.sessionId, text: "HOLD_FOREVER" });
 		await waitFor("active refused close turn", () =>
-			at.turns.find((turn) => turn.sessionId === at.leader.sessionId && turn.turn?.endedAt === undefined),
+			at.turns.find((turn) => turn.sessionId === lead.sessionId && turn.turn?.endedAt === undefined),
 		);
-		await at.client.request("tools.call", {
+		const deferred = await at.client.request("tools.call", {
 			...actor,
 			name: "neta_close",
 			arguments: { missionId: mission.id, disposition: "merged", reason: "done", evidence: "cafebabe" },
 		});
-		await at.client.request("conversation.cancel", { sessionId: at.leader.sessionId });
-		await waitFor("deferred refused close attention", async () => {
+		expect((deferred as { isError: boolean }).isError).toBe(true);
+		expect((deferred as { content: Array<{ text: string }> }).content[0]?.text).toContain("Agents are still active");
+		await at.client.request("conversation.cancel", { sessionId: lead.sessionId });
+		await waitFor("mission lead is idle after cancellation", async () => {
+			const current = await at.client.request<{ agents: Agent[] }>("snapshot", {});
+			return current.agents.find((agent) => agent.id === lead.id)?.state === "interrupted" ? true : undefined;
+		});
+		const retry = await at.client.request<{ isError: boolean; content: Array<{ text: string }> }>("tools.call", {
+			...actor,
+			name: "neta_close",
+			arguments: { missionId: mission.id, disposition: "merged", reason: "done", evidence: "cafebabe" },
+		});
+		expect(retry.isError).toBe(true);
+		expect(retry.content[0]?.text).toContain("not merged");
+		await waitFor("refused close attention", async () => {
 			snapshot = await at.client.request("snapshot", {});
 			return snapshot.missions.find((one) => one.id === mission.id)?.attention?.includes("cafebabe")
 				? true
@@ -1794,31 +1944,55 @@ test("a skill in the workspace root is found, whatever the node's cwd is", async
 // modes keep the provider unrestricted. The ACP unit test proves the access
 // value changes across the relaunch; this runtime test proves the durable mode
 // transition keeps the same conversation and never re-sandboxes its leader.
-test("a mode change keeps the leader provider unrestricted", async () => {
+test("a mode change keeps the delegated mission lead provider unrestricted", async () => {
 	await writeSettings(join(dir, "fake-sessions.json"));
 	node = await startNode({ sessionFactory: startLegacySession });
 	const at = await attach();
 	try {
 		const actor = await leaderActor(at);
-		await at.client.request("tools.call", {
+		const created = await at.client.request<{ content: Array<{ text: string }> }>("tools.call", {
 			...actor,
 			name: "neta_mission",
-			arguments: { name: "Writable mode", objective: "Test access", access: "readWrite", lead: "self" },
+			arguments: {
+				name: "Writable mode",
+				objective: "Test access",
+				access: "readWrite",
+				lead: { task: "Coordinate access test", effort: 2 },
+			},
 		});
-		await at.client.request("conversation.prompt", { sessionId: at.leader.sessionId, text: "EDIT" });
-		await waitFor("the Lead permission answer", () => at.turns.find((n) => n.block?.text === "permission=allow"));
-		const allowsBefore = at.turns.filter((notification) => notification.block?.text === "permission=allow").length;
+		const mission = JSON.parse(created.content[0]?.text.split("\n")[0] ?? "{}") as { id: string };
+		const snapshot = await at.client.request<{ agents: Agent[] }>("snapshot", {});
+		const lead = snapshot.agents.find((agent) => agent.missionId === mission.id && agent.canSpawn);
+		if (!lead) throw new Error("missing delegated lead");
+		await at.client.request("conversation.tail", { sessionId: lead.sessionId, limit: 20 });
+		await at.client.request("conversation.prompt", { sessionId: lead.sessionId, text: "EDIT" });
+		await waitFor("the Lead permission answer", () =>
+			at.turns.find((n) => n.sessionId === lead.sessionId && n.block?.text === "permission=allow"),
+		);
+		const allowsBefore = at.turns.filter(
+			(notification) => notification.sessionId === lead.sessionId && notification.block?.text === "permission=allow",
+		).length;
 
-		await at.client.request("leader.setMode", { workspaceId: at.leader.workspaceId, mode: "leadPlus" });
+		await at.client.request("leader.setMode", {
+			workspaceId: at.leader.workspaceId,
+			missionId: mission.id,
+			mode: "leadPlus",
+		});
 		const reopened = await at.client.request<{ leader: Leader }>("workspace.open", { path: work });
-		expect(reopened.leader.mode).toBe("leadPlus");
+		expect(reopened.leader.mode).toBe("lead");
 		// Relaunched in place: the person keeps the conversation they are
 		// looking at.
-		expect(reopened.leader.sessionId).toBe(at.leader.sessionId);
+		expect(
+			(await at.client.request<{ agents: Agent[] }>("snapshot", {})).agents.find((agent) => agent.id === lead.id)
+				?.sessionId,
+		).toBe(lead.sessionId);
 
-		await at.client.request("conversation.prompt", { sessionId: at.leader.sessionId, text: "EDIT again" });
+		await at.client.request("conversation.prompt", { sessionId: lead.sessionId, text: "EDIT again" });
 		await waitFor("the Lead++ permission answer", () => {
-			const allows = at.turns.filter((notification) => notification.block?.text === "permission=allow");
+			const allows = at.turns.filter(
+				(notification) =>
+					notification.sessionId === lead.sessionId && notification.block?.text === "permission=allow",
+			);
 			return allows.length > allowsBefore ? allows.at(-1) : undefined;
 		});
 	} finally {
@@ -1826,30 +2000,56 @@ test("a mode change keeps the leader provider unrestricted", async () => {
 	}
 }, 90000);
 
-test("workspace open reacquires a durable Lead++ mission before reviving writable", async () => {
+test("workspace open restores a delegated Lead++ mission lead's writable session", async () => {
 	await writeSettings(join(dir, "mode-restart-sessions.json"));
 	node = await startNode({ sessionFactory: startLegacySession });
 	const first = await attach();
 	const actor = await leaderActor(first);
-	await first.client.request("tools.call", {
+	const created = await first.client.request<{ content: Array<{ text: string }> }>("tools.call", {
 		...actor,
 		name: "neta_mission",
-		arguments: { name: "Restarted Lead++", objective: "recover safely", access: "readWrite", lead: "self" },
+		arguments: {
+			name: "Restarted Lead++",
+			objective: "recover safely",
+			access: "readWrite",
+			lead: { task: "Coordinate restoration", effort: 2 },
+		},
 	});
-	await first.client.request("leader.setMode", { workspaceId: first.leader.workspaceId, mode: "leadPlus" });
-	const sessionId = first.leader.sessionId;
+	const mission = JSON.parse(created.content[0]?.text.split("\n")[0] ?? "{}") as { id: string };
+	const before = await first.client.request<{ agents: Agent[] }>("snapshot", {});
+	const lead = before.agents.find((agent) => agent.missionId === mission.id && agent.canSpawn);
+	if (!lead) throw new Error("missing delegated lead");
+	await first.client.request("leader.setMode", {
+		workspaceId: first.leader.workspaceId,
+		missionId: mission.id,
+		mode: "leadPlus",
+	});
+	const sessionId = lead.sessionId;
 	await first.client.close();
 	await node.stop();
 
 	node = await startNode({ sessionFactory: startLegacySession });
 	const second = await attach();
 	try {
-		expect(second.leader.mode).toBe("leadPlus");
-		expect(second.leader.sessionId).toBe(sessionId);
-		await second.client.request("conversation.prompt", { sessionId, text: "EDIT after restart" });
-		await waitFor("restored Lead++ access", () =>
-			second.turns.find((turn) => turn.sessionId === sessionId && turn.block?.text === "permission=allow"),
-		);
+		expect(second.leader.mode).toBe("lead");
+		expect(
+			(await second.client.request<{ agents: Agent[] }>("snapshot", {})).agents.find((agent) => agent.id === lead.id)
+				?.sessionId,
+		).toBe(sessionId);
+		const actor = await leaderActor(second);
+		const resumed = await second.client.request<{ isError: boolean }>("tools.call", {
+			...actor,
+			name: "neta_send",
+			arguments: { agentId: lead.id, text: "EDIT after restart" },
+		});
+		expect(resumed.isError).toBe(false);
+		await waitFor("restored Lead++ access", async () => {
+			const tail = await second.client.request<ConversationTailResult>("conversation.tail", {
+				sessionId,
+				limit: 60,
+			});
+			return tail.blocks.some((block) => block.text === "permission=allow") ? true : undefined;
+		});
 	} finally {
 		await second.client.close();
 	}
@@ -1865,7 +2065,12 @@ test("provider switching keeps the Neta session, owner, tools, and a one-shot vi
 		const created = await at.client.request<{ content: Array<{ text: string }> }>("tools.call", {
 			...actor,
 			name: "neta_mission",
-			arguments: { name: "Provider handoff", objective: "keep the context", access: "readOnly", lead: "self" },
+			arguments: {
+				name: "Provider handoff",
+				objective: "keep the context",
+				access: "readOnly",
+				lead: { task: "Coordinate handoff", effort: 2 },
+			},
 		});
 		const mission = JSON.parse(created.content[0]?.text.split("\n")[0] ?? "{}") as { id: string };
 		await at.client.request("conversation.prompt", { sessionId: at.leader.sessionId, text: "USER_CONTEXT_MARKER" });
@@ -2012,29 +2217,38 @@ test("a provider that cannot assume writable access restores the original live p
 				name: "Writable provider rollback",
 				objective: "preserve the original provider",
 				access: "readWrite",
-				lead: "self",
+				lead: { task: "Coordinate provider rollback", effort: 2 },
 			},
 		});
+		const snapshotBefore = await at.client.request<{ missions: Array<{ id: string }>; agents: Agent[] }>(
+			"snapshot",
+			{},
+		);
+		const mission = snapshotBefore.missions[0];
+		const lead = snapshotBefore.agents.find((agent) => agent.canSpawn);
+		if (!mission || !lead) throw new Error("missing delegated mission lead");
 		await at.client.request("leader.setMode", {
 			workspaceId: at.leader.workspaceId,
+			missionId: mission.id,
 			mode: "leadPlus",
 		});
 		await expect(
 			at.client.request("conversation.setProvider", {
-				sessionId: at.leader.sessionId,
+				sessionId: lead.sessionId,
 				provider: "alternate",
 				handoff: "ROLLBACK_HANDOFF_MUST_NOT_APPLY",
 			}),
 		).rejects.toThrow(/restored fake/);
-		const snapshot = await at.client.request<{ leaders: Leader[] }>("snapshot", {});
-		expect(snapshot.leaders[0]?.provider).toBe("fake");
+		const snapshot = await at.client.request<{ agents: Agent[] }>("snapshot", {});
+		expect(snapshot.agents.find((agent) => agent.id === lead.id)?.provider).toBe("fake");
 		at.turns.length = 0;
+		await at.client.request("conversation.tail", { sessionId: lead.sessionId, limit: 20 });
 		await at.client.request("conversation.prompt", {
-			sessionId: at.leader.sessionId,
+			sessionId: lead.sessionId,
 			text: "ORIGINAL_PROVIDER_USABLE",
 		});
 		await waitFor("restored provider turn", () =>
-			at.turns.find((turn) => turn.sessionId === at.leader.sessionId && turn.turn?.endedAt !== undefined),
+			at.turns.find((turn) => turn.sessionId === lead.sessionId && turn.turn?.endedAt !== undefined),
 		);
 	} finally {
 		await at.client.close();
@@ -2053,7 +2267,7 @@ test("workspace reset archives missions and queued workers and creates one blank
 				name: "Archive reset",
 				objective: "reset all",
 				access: "readWrite",
-				lead: "self",
+				lead: { task: "Coordinate reset", effort: 2 },
 				agents: [
 					{ task: "first worker", access: "readWrite" },
 					{ task: "queued worker", access: "readWrite" },
@@ -2062,7 +2276,8 @@ test("workspace reset archives missions and queued workers and creates one blank
 		});
 		if (creation.isError) throw new Error(JSON.stringify(creation));
 		const beforeReset = await at.client.request<{ agents: Agent[] }>("snapshot");
-		if (beforeReset.agents.length !== 2) throw new Error(JSON.stringify({ creation, beforeReset }));
+		if (beforeReset.agents.length !== 3) throw new Error(JSON.stringify({ creation, beforeReset }));
+		expect(beforeReset.agents.filter((agent) => !agent.canSpawn)).toHaveLength(2);
 		await expect(at.client.request("workspace.reset", { workspaceId: at.leader.workspaceId })).rejects.toThrow(
 			"confirmation",
 		);
@@ -2075,7 +2290,7 @@ test("workspace reset archives missions and queued workers and creates one blank
 		const archived = await at.client.request<{ agents: Agent[] }>("missions.get", {
 			missionId: beforeReset.agents[0]?.missionId,
 		});
-		expect(archived.agents).toHaveLength(2);
+		expect(archived.agents).toHaveLength(3);
 		expect(archived.agents.every((agent) => agent.state === "archived")).toBe(true);
 		expect(snapshot.leaders).toHaveLength(1);
 		const leader = snapshot.leaders[0];
@@ -2102,7 +2317,7 @@ test("runtime wakes workspace leader when mission leader ends without a completi
 				name: "Automatic report",
 				objective: "inspect only",
 				access: "readOnly",
-				lead: { task: "CONFIG_UPDATE" },
+				lead: { task: "CONFIG_UPDATE", effort: 2 },
 			},
 		});
 		expect(creation.isError).not.toBe(true);
@@ -2126,8 +2341,8 @@ test("runtime wakes workspace leader when mission leader ends without a completi
 		const snapshot = await at.client.request<{ agents: Agent[] }>("snapshot");
 		const missionLead = snapshot.agents.find((agent) => agent.canSpawn);
 		if (!missionLead) throw new Error("mission lead is missing");
-		expect(missionLead.model).toBe("fixture-fast");
-		expect(messages.some((message) => message.text.includes("Actual model: fixture-fast"))).toBe(true);
+		expect(missionLead.model).toBe("test-model");
+		expect(messages.some((message) => message.text.includes(`Actual model: ${missionLead.model}`))).toBe(true);
 		const workerCreation = await at.client.request<{ isError?: boolean }>("tools.call", {
 			...(await leaderActor(at)),
 			name: "neta_agent",
