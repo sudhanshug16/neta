@@ -206,9 +206,11 @@ function promptPayload(
 		if (!isRecord(parsed)) throw new Error("Invalid native OpenCode prompt");
 		if (parsed.agents && Array.isArray(parsed.agents) && parsed.agents.length > 0)
 			throw new Error("Use Neta missions to delegate work");
-		if (typeof parsed.command === "string") return { path: "command", body: { ...parsed, delivery: "steer" } };
-		if (typeof parsed.skill === "string") return { path: "skill", body: { ...parsed, id, delivery: "steer" } };
-		return { path: "prompt", body: { ...parsed, id, delivery: "steer" } };
+		const nativeId = typeof parsed.id === "string" ? parsed.id : id;
+		const delivery = parsed.delivery === "queue" || parsed.delivery === "steer" ? parsed.delivery : "steer";
+		if (typeof parsed.command === "string") return { path: "command", body: { ...parsed, id: nativeId, delivery } };
+		if (typeof parsed.skill === "string") return { path: "skill", body: { ...parsed, id: nativeId, delivery } };
+		return { path: "prompt", body: { ...parsed, id: nativeId, delivery } };
 	}
 	const files = attachments.map((item) => ({
 		uri: `data:${item.mimeType};base64,${item.dataBase64}`,

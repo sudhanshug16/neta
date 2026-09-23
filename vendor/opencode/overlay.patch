@@ -122,7 +122,7 @@ index 0f1a6fe7a..26c6b2dce 100644
      throw new ACPError.ServiceFailureError({
        safeMessage: error.message || "OpenCode prompt failed",
 diff --git a/packages/cli/src/acp/service.ts b/packages/cli/src/acp/service.ts
-index c3182b56a..b960dc67f 100644
+index c3182b56a..1dbabfb83 100644
 --- a/packages/cli/src/acp/service.ts
 +++ b/packages/cli/src/acp/service.ts
 @@ -58,6 +58,8 @@ import {
@@ -350,7 +350,7 @@ index c3182b56a..b960dc67f 100644
          if (active.get(state.id) === control) active.delete(state.id)
        })
        await sendUsageUpdate(input.client, input.connection, state, response.usage?.totalTokens).catch(() => {})
-@@ -358,19 +463,35 @@ export function make(input: { readonly client: OpenCodeClient; readonly connecti
+@@ -358,19 +463,40 @@ export function make(input: { readonly client: OpenCodeClient; readonly connecti
  }
  
  function preparePrompt(catalog: Catalog, prompt: PromptRequest["prompt"], messageID: string): PreparedPrompt {
@@ -382,7 +382,12 @@ index c3182b56a..b960dc67f 100644
  
  async function submitPrompt(client: OpenCodeClient, session: Attached, prompt: PreparedPrompt, signal: AbortSignal) {
 +  if (prompt.native) {
-+    const payload = { ...prompt.native, sessionID: session.id, id: prompt.start.id, delivery: "steer" as const }
++    const payload = {
++      ...prompt.native,
++      sessionID: session.id,
++      id: prompt.native.id ?? prompt.start.id,
++      delivery: prompt.native.delivery ?? "steer",
++    }
 +    if (payload.command) return client.session.command({ ...payload, command: payload.command }, { signal })
 +    if (payload.skill) return client.session.skill({ ...payload, skill: payload.skill, resume: payload.resume ?? undefined }, { signal })
 +    return client.session.prompt(payload, { signal })
@@ -390,7 +395,7 @@ index c3182b56a..b960dc67f 100644
    if (prompt.synthetic.length > 0) {
      await client.session.synthetic({
        sessionID: session.id,
-@@ -406,7 +527,7 @@ function turnStart(messageID: string, slash: PreparedPrompt["slash"], skill: Ski
+@@ -406,7 +532,7 @@ function turnStart(messageID: string, slash: PreparedPrompt["slash"], skill: Ski
    return { type: "input", id: messageID }
  }
  
@@ -399,7 +404,7 @@ index c3182b56a..b960dc67f 100644
    const location = { directory: cwd }
    await client.plugin.awaitActivation({ location })
    // Some providers discover models in the background after activation has settled.
-@@ -420,11 +541,39 @@ async function loadCatalog(client: OpenCodeClient, cwd: string): Promise<Catalog
+@@ -420,11 +546,39 @@ async function loadCatalog(client: OpenCodeClient, cwd: string): Promise<Catalog
        client.command.list({ location }),
        client.skill.list({ location }),
      ])
@@ -442,7 +447,7 @@ index c3182b56a..b960dc67f 100644
        : models[0]
      const agents = agentResult.data.filter((agent) => agent.mode !== "subagent" && !agent.hidden)
      const defaultAgent = agents.find((agent) => agent.mode === "primary") ?? agents[0]
-@@ -446,7 +595,7 @@ async function loadCatalog(client: OpenCodeClient, cwd: string): Promise<Catalog
+@@ -446,7 +600,7 @@ async function loadCatalog(client: OpenCodeClient, cwd: string): Promise<Catalog
      missing = defaultModel ? "No primary agents are available" : "No models are available"
      await Bun.sleep(25)
    }
@@ -451,7 +456,7 @@ index c3182b56a..b960dc67f 100644
  }
  
  function providers(models: readonly ModelInfo[]): ConfigOptionProvider[] {
-@@ -481,6 +630,7 @@ function requireModel(catalog: Catalog, modelID: string, current: ModelRef): Mod
+@@ -481,6 +635,7 @@ function requireModel(catalog: Catalog, modelID: string, current: ModelRef): Mod
  
  async function selectMode(client: OpenCodeClient, state: Attached, modeID: string) {
    if (!state.catalog.modes.some((mode) => mode.id === modeID)) throw new ACPError.InvalidModeError({ mode: modeID })
@@ -459,7 +464,7 @@ index c3182b56a..b960dc67f 100644
    state.modeID = modeID
    await client.session.switchAgent({ sessionID: state.id, agent: modeID })
  }
-@@ -513,11 +663,19 @@ async function registerMcpServers(
+@@ -513,11 +668,19 @@ async function registerMcpServers(
  ) {
    const current = registered.get(session.id) ?? new Set<string>()
    registered.set(session.id, current)
@@ -723,6 +728,39 @@ index 30ca6dab8..49f944c65 100644
        expect(result.sessionId).toBe("ses_acp")
        expect(initialized.agentCapabilities?._meta).toEqual({ [ChildSessionUpdatesCapability]: true })
        expect(result.configOptions?.map((option) => option.id)).toEqual(["model", "effort", "mode"])
+diff --git a/packages/client/src/solid/data.ts b/packages/client/src/solid/data.ts
+index 4ad3a1f06..1b1352875 100644
+--- a/packages/client/src/solid/data.ts
++++ b/packages/client/src/solid/data.ts
+@@ -1506,8 +1506,16 @@ export function createData(config: CreateDataInput) {
+       // upsert that same ID with the server's payload. Server admission is
+       // idempotent per ID, so retrying with the identical payload cannot
+       // double-admit.
+-      prompt(input: SessionPromptInput & { gate?: Promise<unknown>; prepare?: () => Promise<unknown> }) {
+-        const { gate, prepare, ...request } = input
++      prompt(
++        input: SessionPromptInput & {
++          gate?: Promise<unknown>
++          prepare?: () => Promise<unknown>
++          // Managed Neta admission uses the same optimistic row and ID. The
++          // durable inbox echo upserts that row; it must not create another.
++          submit?: (request: SessionPromptInput) => Promise<unknown>
++        },
++      ) {
++        const { gate, prepare, submit, ...request } = input
+         const id = request.id ?? SessionMessage.ID.create()
+         // A retry may reuse an ID that is already rendered — and possibly
+         // already durable. Admit optimistically only for new IDs so a failed
+@@ -1537,7 +1545,8 @@ export function createData(config: CreateDataInput) {
+           request.sessionID,
+           async () => {
+             await prepare?.()
+-            return api().session.prompt({ ...request, id })
++            const admitted = { ...request, id }
++            return submit ? submit(admitted) : api().session.prompt(admitted)
+           },
+           gate,
+         ).catch((error) => {
 diff --git a/packages/codemode/interpreter-support.md b/packages/codemode/interpreter-support.md
 index 04943b35b..5e43828f4 100644
 --- a/packages/codemode/interpreter-support.md
@@ -1686,7 +1724,7 @@ index 1a7c7b2dc..7c078a991 100644
  import type { PromptInfo, PromptPartRef } from "../../prompt/history"
  import { useFrecency } from "../../prompt/frecency"
 diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
-index 06a20b435..1c2dbc104 100644
+index 06a20b435..26bfdedab 100644
 --- a/packages/tui/src/component/prompt/index.tsx
 +++ b/packages/tui/src/component/prompt/index.tsx
 @@ -1,3 +1,5 @@
@@ -1772,7 +1810,7 @@ index 06a20b435..1c2dbc104 100644
      } else if (slashHead && isCommand) {
        const send = async () => {
          await prepareAgent()
-@@ -1358,11 +1390,25 @@ export function Prompt(props: PromptProps) {
+@@ -1358,14 +1390,12 @@ export function Prompt(props: PromptProps) {
            }
          }
        }
@@ -1780,30 +1818,34 @@ index 06a20b435..1c2dbc104 100644
 -      // and rolls back if the server rejects it, so submission does not wait
 -      // on the network. On rejection the row is already rolled back; restore
 -      // the composer unless the user has started typing something new.
--      data.session
-+      // Neta owns admission and message IDs; native events render its accepted
-+      // messages. Standalone views retain optimistic admission. Restore a failed
-+      // draft only when the user has not started typing another message.
-+      ;(neta
-+        ? {
-+            prompt: async (input: Parameters<typeof data.session.prompt>[0]) => {
-+              await input.prepare?.()
-+              const { prepare: _prepare, gate: _gate, ...request } = input
-+              const receipt = await neta.send({
-+                ...request,
-+                text: reply ? updateReplyText(reply, request.text) : request.text,
-+              })
-+              if (reply) props.onReplySent?.(reply, request.text, receipt)
-+              props.onNetaSent?.()
-+              return receipt
-+            },
-+          }
-+        : data.session
-+      )
++      // Neta still owns the POST, but the row uses native inbox admission so a
++      // queued prompt is visible immediately and reconciles by the same ID.
+       data.session
          .prompt({
            sessionID: target,
-           text: inputText,
-@@ -1664,7 +1710,9 @@ export function Prompt(props: PromptProps) {
+-          text: inputText,
++          text: reply ? updateReplyText(reply, inputText) : inputText,
+           files: entry.files,
+           agents: entry.agents,
+           skills: entry.skills?.length ? entry.skills : undefined,
+@@ -1375,6 +1405,16 @@ export function Prompt(props: PromptProps) {
+           // compaction setup. Cached state may still precede their SSE echoes;
+           // the server makes an unchanged selection a no-op.
+           prepare: commitModel,
++          ...(neta
++            ? {
++                submit: async (request) => {
++                  const receipt = await neta.send(request)
++                  if (reply) props.onReplySent?.(reply, request.text, receipt)
++                  props.onNetaSent?.()
++                  return receipt
++                },
++              }
++            : {}),
+         })
+         .catch((error) => {
+           if (newSession) return newSession.recover(error)
+@@ -1664,7 +1704,9 @@ export function Prompt(props: PromptProps) {
    })
    const maxHeight = createMemo(() => Math.max(6, Math.floor(dimensions().height / 3)))
  
@@ -1814,7 +1856,7 @@ index 06a20b435..1c2dbc104 100644
  
    return (
      <>
-@@ -1672,7 +1720,7 @@ export function Prompt(props: PromptProps) {
+@@ -1672,7 +1714,7 @@ export function Prompt(props: PromptProps) {
          <box
            width="100%"
            border={["left"]}
@@ -1823,7 +1865,7 @@ index 06a20b435..1c2dbc104 100644
            customBorderChars={{
              ...SplitBorder.customBorderChars,
              bottomLeft: "╹",
-@@ -1868,7 +1916,7 @@ export function Prompt(props: PromptProps) {
+@@ -1868,7 +1910,7 @@ export function Prompt(props: PromptProps) {
          <box
            height={1}
            border={["left"]}
@@ -2973,7 +3015,7 @@ index 000000000..282d25aa1
 +}
 diff --git a/packages/cli/src/commands/handlers/neta.ts b/packages/cli/src/commands/handlers/neta.ts
 new file mode 100644
-index 000000000..fd057b2e7
+index 000000000..7ac1d18ed
 --- /dev/null
 +++ b/packages/cli/src/commands/handlers/neta.ts
 @@ -0,0 +1,266 @@
@@ -3214,7 +3256,7 @@ index 000000000..fd057b2e7
 +                  const response = await fetch(`${attachment.url}/api/session/${attachment.sessionId}/neta-prompt`, {
 +                    method: "POST",
 +                    headers: { Authorization: attachment.authorization, "content-type": "application/json" },
-+                    body: JSON.stringify({ ...input, id: crypto.randomUUID() }),
++                    body: JSON.stringify({ ...input, id: input.id ?? crypto.randomUUID() }),
 +                  })
 +                  if (!response.ok) {
 +                    const error = (await response.json()) as { data?: { message?: string } }
@@ -3579,6 +3621,108 @@ index 000000000..281f76dbb
 +    rmSync(directory, { recursive: true, force: true })
 +  }
 +})
+diff --git a/packages/client/test/solid-neta-queue.test.ts b/packages/client/test/solid-neta-queue.test.ts
+new file mode 100644
+index 000000000..f1da18675
+--- /dev/null
++++ b/packages/client/test/solid-neta-queue.test.ts
+@@ -0,0 +1,96 @@
++import { expect, test } from "bun:test"
++import { createRoot } from "solid-js"
++import { createData } from "../src/solid"
++import { OpenCode, type OpenCodeEvent } from "../src/promise"
++
++const sessionID = "ses_queue"
++
++test("Neta admission keeps queued text, order, and status, then reconciles without a duplicate transcript row", async () => {
++  const submitted: { id?: string | null; text: string; delivery?: "steer" | "queue" | null }[] = []
++  const listeners = new Set<(event: { name: OpenCodeEvent["type"]; details: OpenCodeEvent }) => void>()
++  const root = createRoot((dispose) => ({
++    data: createData({
++      api: () =>
++        OpenCode.make({
++          baseUrl: "http://opencode.local",
++          fetch: async () => {
++            throw new Error("Neta admission must not call the native prompt route")
++          },
++        }),
++      directory: "/project",
++      event: { on: () => () => {}, listen: (handler) => (listeners.add(handler), () => listeners.delete(handler)) },
++    }),
++    dispose,
++  }))
++  const emit = (details: OpenCodeEvent) => listeners.forEach((listener) => listener({ name: details.type, details }))
++  try {
++    const first = root.data.session.prompt({
++      sessionID,
++      id: "msg_first",
++      text: "First queued",
++      delivery: "queue",
++      submit: async (request) => {
++        submitted.push(request)
++        return { status: "queued" }
++      },
++    })
++    const second = root.data.session.prompt({
++      sessionID,
++      id: "msg_second",
++      text: "Second queued",
++      delivery: "queue",
++      submit: async (request) => {
++        submitted.push(request)
++        return { status: "queued" }
++      },
++    })
++    const pending = () =>
++      root.data.session.pending.list(sessionID).map((item) =>
++        item.type === "user" ? { id: item.id, text: item.payload.text, delivery: item.delivery } : item,
++      )
++    expect(pending()).toEqual([
++      { id: "msg_first", text: "First queued", delivery: "queue" },
++      { id: "msg_second", text: "Second queued", delivery: "queue" },
++    ])
++    await Promise.all([first, second])
++    expect(submitted.map((item) => item.id)).toEqual(["msg_first", "msg_second"])
++    for (const item of [
++      { id: "msg_first", text: "First queued" },
++      { id: "msg_second", text: "Second queued" },
++    ]) {
++      emit(enqueued(item.id, item.text, item.id === "msg_first" ? 20 : 21))
++    }
++    expect(pending()).toEqual([
++      { id: "msg_first", text: "First queued", delivery: "queue" },
++      { id: "msg_second", text: "Second queued", delivery: "queue" },
++    ])
++    expect(root.data.session.message.list(sessionID).map((message) => message.id)).toEqual(["msg_first", "msg_second"])
++    emit(delivered("msg_first", 30))
++    emit(delivered("msg_second", 31))
++    expect(root.data.session.pending.list(sessionID)).toEqual([])
++    expect(root.data.session.message.list(sessionID).map((message) => ({ id: message.id, text: message.text }))).toEqual([
++      { id: "msg_first", text: "First queued" },
++      { id: "msg_second", text: "Second queued" },
++    ])
++  } finally {
++    root.dispose()
++  }
++})
++
++function enqueued(id: string, text: string, created: number): OpenCodeEvent {
++  return {
++    id: `evt_${id}`,
++    created,
++    type: "session.inbox.enqueued",
++    data: { sessionID, inboxID: id, item: { type: "user", delivery: "queue", payload: { text } } },
++  } as OpenCodeEvent
++}
++
++function delivered(id: string, created: number): OpenCodeEvent {
++  return {
++    id: `evt_delivered_${id}`,
++    created,
++    type: "session.inbox.delivered",
++    data: { sessionID, inboxID: id },
++  } as OpenCodeEvent
++}
 diff --git a/packages/core/src/plugin/neta-context.ts b/packages/core/src/plugin/neta-context.ts
 new file mode 100644
 index 000000000..ae8040d41
