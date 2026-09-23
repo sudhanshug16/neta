@@ -211,6 +211,26 @@ describe("neta_close", () => {
 		expect(onlyMission(f).state).toBe("closed");
 	});
 
+	test("abandoned forwards an explicit discard confirmation", async () => {
+		const seen: CloseMissionInput[] = [];
+		const f = fixture({
+			close: async (input) => {
+				seen.push(input);
+				return { ok: true, mission: { ...input.mission, state: "closed" as const } };
+			},
+		});
+		const id = onlyMission(f).id;
+		const result = await lifecycleHandlers.neta_close(ctx(f), {
+			missionId: id,
+			disposition: "abandoned",
+			reason: "superseded",
+			discardUncommitted: true,
+		});
+		expect(result.ok).toBe(true);
+		expect(seen).toHaveLength(1);
+		expect(seen[0]).toMatchObject({ disposition: "abandoned", discardUncommitted: true });
+	});
+
 	test("repeating the same close is idempotent but a different disposition is refused", async () => {
 		const f = fixture();
 		const id = onlyMission(f).id;

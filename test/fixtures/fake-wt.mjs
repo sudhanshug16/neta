@@ -207,6 +207,20 @@ if (command === "remove") {
 	if (status.porcelain.trim() !== "" && !force) {
 		fail(`Cannot remove worktree: ${branch} has uncommitted changes`);
 	}
+	// Test hook for deferred cleanup: report Worktrunk's `deferred` outcome
+	// without removing anything, so closeout must stay open and retryable.
+	// `deferred-gone` performs the removal but still reports `deferred`, so
+	// the driver must confirm the directory independently of the label.
+	if (process.env.FAKE_WT_REMOVE_OUTCOME === "deferred") {
+		process.stdout.write(
+			`${JSON.stringify([{ kind: "worktree", branch, path: entry.path, branch_outcome: "deferred", branch_checked_out_at: null }])}\n`,
+		);
+		process.exit(0);
+	}
+	const reportDeferredGone = process.env.FAKE_WT_REMOVE_OUTCOME === "deferred-gone";
+	// Like real `wt remove`, the branch is deleted when merged unless
+	// `--no-delete-branch` keeps it; `-D` deletes unmerged branches.
+	const keepBranch = rest.includes("--no-delete-branch");
 	// Removal may be invoked from the worktree being removed. Keep subsequent
 	// git commands anchored in the primary worktree, as real Worktrunk does.
 	const primary = listWorktrees()[0].path;
@@ -220,13 +234,13 @@ if (command === "remove") {
 		}
 		args.push(entry.path);
 		git(primary, args);
-		if (rest.includes("-D") || treesMatch) {
+		if (!keepBranch && (rest.includes("-D") || treesMatch)) {
 			try {
 				git(primary, ["branch", "-D", branch]);
 			} catch {
 				// The branch may already be gone.
 			}
-		} else {
+		} else if (!keepBranch) {
 			try {
 				git(primary, ["branch", "-d", branch]);
 			} catch {
@@ -237,11 +251,15 @@ if (command === "remove") {
 		fail(`fake-wt: ${error.message}`);
 	}
 	let branchOutcome = "deleted";
-	try {
-		git(primary, ["rev-parse", "--verify", branch]);
-		branchOutcome = "retained_unmerged";
-	} catch {
-		branchOutcome = "deleted";
+	if (reportDeferredGone) {
+		branchOutcome = "deferred";
+	} else {
+		try {
+			git(primary, ["rev-parse", "--verify", branch]);
+			branchOutcome = "retained_unmerged";
+		} catch {
+			branchOutcome = "deleted";
+		}
 	}
 	process.stdout.write(
 		`${JSON.stringify([{ kind: "worktree", branch, path: entry.path, branch_outcome: branchOutcome, branch_checked_out_at: null }])}\n`,

@@ -168,15 +168,27 @@ list.json-schema=1`; `dirty` is true when any of `staged, modified, untracked,
 renamed, deleted` is. 3. `defaultBase` is the `branch` of the `is_main: true`
 row, else `git symbolic-ref --short HEAD`, memoised per `repoRoot`, cleared by
 `forgetBase`. 4. `verify` fails with a reason when the path is missing from disk
-or `list`, or under another branch. 5. `remove` pre-checks before shelling out —
-dirty per `list`, or `isIntegrated` false, with `abandon !== true` — and returns
-refusal `dirty` or `unmerged` without running `wt`, so a check never destroys
-anything. The stored integration commit is passed as `evidenceCommit` and
-rechecked against the current branch, so stale evidence cannot discard new
-work. 6. Otherwise `remove <branch> --foreground -y --format=json`, adding
-`--force -D` when `abandon` and `--force` when `force`; a non-zero exit is
-`failed` with the first stderr line, and on exit 0 `deleted`, `deferred` or
-`not_attempted` is `ok:true`, `retained_checked_out` is `checkedOut`, any other
+or `list`, or under another branch. 5. `remove` pre-checks before shelling out — dirty refuses `dirty` without running
+`wt`, so a check never destroys anything, unless the call carries both
+`abandon` and an explicit `discardUncommitted` confirmation. There is no merge
+gate without evidence: a clean committed branch removes its directory and
+keeps its branch, merged or not. When closeout supplies `evidenceCommit` (a
+merged close), `isIntegrated` rechecks it against the current branch tip, so
+stale evidence cannot discard new work. 6. Otherwise
+`remove <branch> --foreground -y --format=json`, adding `--no-delete-branch`
+for every non-merged close (completed, and abandoned with or without evidence)
+so committed history always stays on its named branch, plus `--force` only for
+a dirty tree with an explicit `discardUncommitted` confirmation; `-D` is never
+passed — deleting an unmerged branch needs a separate explicit authorization
+that does not exist yet; a non-zero exit is
+`failed` with the first stderr line, and on exit 0 `deleted` and
+`retained_unmerged` confirm the path is actually gone via `lstat` before
+returning `ok:true` — only `ENOENT`/`ENOTDIR` prove absence, so a dangling
+symlink still counts as present and any other filesystem error is a retryable
+`failed` rather than a false success —
+(the branch survives `retained_unmerged`), while `deferred` or `not_attempted`
+is `failed` with a retryable reason so the mission stays open and visible,
+`retained_checked_out` is `checkedOut`, and any other
 `retained_*` is `failed`. 7. Only closeout passes `abandon`; `force` is false.
 Tests: `test/worktrees-driver.test.ts` against the shim — mission 7 named "add
 retry budget" yields `mission/7-add-retry-budget` and the payload's path, not a
@@ -184,7 +196,9 @@ computed one; `defaultBase` returns `main` and shells out once for two calls;
 `verify` passes fresh, then fails once the directory is deleted and when the
 branch does not match; a clean merged worktree removes with `branchOutcome:
 "deleted"`; a dirty worktree is refused `dirty` and still exists, then removes
-with `abandon:true`; a clean unmerged branch is refused `unmerged`; a non-zero
+with `abandon:true`; a clean unmerged branch removes its directory with
+`branchOutcome: "retained_unmerged"` and keeps its branch; a deferred removal
+fails retryably and the retry reclaims the directory; a non-zero
 exit gives `failed` with the stderr line.
 Done when: `bun run check` and `bun test` pass.
 Commit: `feat(worktrees): worktrunk driver`
@@ -269,7 +283,12 @@ closes and records `integration`; merged with a non-ancestor evidence SHA, merge
 with neither, and abandoned with an empty reason each refuse and leave the
 mission open with `attention`; abandoned with a reason removes the worktree with
 `abandon:true` and closes; a driver refusal leaves it intact and `closedAt`
-unset; `onMissionClosed` runs once on success, never on refusal.
+unset; `onMissionClosed` runs once on success, never on refusal; a completed
+close on a clean unmerged worktree succeeds with the branch retained; an
+incomplete (`deferred`/`not_attempted`) removal stays open with a retryable
+reason and the retry closes; an abandoned close on a dirty worktree stays open
+unless `discardUncommitted` is explicitly confirmed, and the confirmation is
+forwarded to the driver.
 Done when: `bun run check` and `bun test` pass.
 Commit: `feat(worktrees): mission closeout`
 

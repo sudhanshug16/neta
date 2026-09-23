@@ -31,6 +31,7 @@ export interface CloseMissionInput {
 	disposition: Disposition;
 	reason: string;
 	evidence?: string;
+	discardUncommitted?: boolean;
 	repositoryRoot?: string;
 }
 
@@ -204,6 +205,7 @@ async function closeMission(ctx: LifecycleToolContext, params: CloseParams): Pro
 		disposition: params.disposition,
 		reason: params.reason,
 		evidence: params.evidence,
+		...(params.discardUncommitted === true ? { discardUncommitted: true as const } : {}),
 	});
 	await ctx.deps.missions.save(outcome.mission);
 	if (!outcome.ok) {

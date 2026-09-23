@@ -102,6 +102,10 @@ export interface CloseParams {
 	evidence?: string;
 	disposition: Disposition;
 	reason: string;
+	// Explicit user confirmation that uncommitted changes may be discarded.
+	// Required for removing a dirty worktree on an abandoned close; clean
+	// closes never need it.
+	discardUncommitted?: boolean;
 }
 
 export interface ModeParams {
@@ -406,7 +410,7 @@ export const TOOLS: readonly ToolDef[] = [
 	{
 		name: "neta_close",
 		description:
-			"Close and archive a mission: completed for successful work without a merge; merged requires commit evidence; abandoned explicitly discards the work. Completed still refuses dirty or unmerged worktrees.",
+			"Close and archive a mission: completed for work with a committed branch (no merge required; the branch is retained even when unmerged); merged requires commit evidence; abandoned discards the work. A dirty worktree must be committed first, or closed as abandoned with discardUncommitted true to explicitly discard uncommitted changes including untracked content.",
 		inputSchema: {
 			type: "object",
 			additionalProperties: false,
@@ -421,6 +425,11 @@ export const TOOLS: readonly ToolDef[] = [
 				},
 				disposition: { type: "string", enum: ["merged", "completed", "abandoned"] },
 				reason: { type: "string", minLength: 1, maxLength: 1000 },
+				discardUncommitted: {
+					type: "boolean",
+					description:
+						"Required true to remove a dirty worktree on an abandoned close; confirms uncommitted changes may be discarded. Clean closes never need it.",
+				},
 			},
 		},
 		actors: ["leader"],

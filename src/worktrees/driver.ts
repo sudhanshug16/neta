@@ -1,8 +1,13 @@
 // Mission worktrees through Worktrunk (`wt`): create, describe, verify and
 // remove. Only closeout passes `abandon`; `force` is always false in practice
 // (kept for the flag mapping). Removal pre-checks run before shelling out so
-// a check never destroys anything.
-import { realpath, stat } from "node:fs/promises";
+// a check never destroys anything. Dirty removal additionally requires an
+// explicit `discardUncommitted` confirmation alongside `abandon`. A merge is
+// not a close prerequisite: a clean unmerged branch removes its directory
+// and keeps its branch. Merge evidence, when closeout supplies it, is still
+// rechecked against the current branch tip so stale evidence cannot discard
+// new work.
+import { lstat, realpath, stat } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import type { Worktree } from "../core/types.ts";
 import { isIntegrated, runGit } from "./integration.ts";
@@ -35,6 +40,10 @@ export interface RemoveInput {
 	evidenceCommit?: string;
 	force?: boolean;
 	abandon?: boolean;
+	// Explicit user confirmation that uncommitted changes (tracked and
+	// untracked) may be discarded. Required with `abandon` for a dirty
+	// worktree; a clean abandoned worktree needs no confirmation.
+	discardUncommitted?: boolean;
 }
 
 export type RemoveResult =
@@ -48,6 +57,28 @@ export interface WorktreeDriver {
 	list(repoRoot: string): Promise<WorktreeEntry[]>;
 	verify(worktree: Worktree): Promise<{ ok: boolean; reason?: string }>;
 	defaultBase(repoRoot: string): Promise<string>;
+}
+
+function isGoneError(error: unknown): boolean {
+	const code = (error as { code?: unknown }).code;
+	return code === "ENOENT" || code === "ENOTDIR";
+}
+
+// True only when the path itself is absent. `lstat` (not `stat`) sees through
+// nothing: a dangling symlink left behind still counts as present. Any other
+// error (EACCES, EIO, …) proves nothing, so it is reported instead of treated
+// as a successful removal.
+export async function removalConfirmed(path: string): Promise<{ gone: true } | { gone: false; reason: string }> {
+	try {
+		await lstat(path);
+	} catch (error) {
+		if (isGoneError(error)) {
+			return { gone: true };
+		}
+		const detail = error instanceof Error ? error.message : String(error);
+		return { gone: false, reason: `cannot confirm worktree removal at ${path}: ${detail}; retry the close` };
+	}
+	return { gone: false, reason: `worktree is still present at ${path} after removal; retry the close` };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -228,29 +259,52 @@ export class WorktrunkDriver implements WorktreeDriver {
 	}
 
 	async remove(input: RemoveInput): Promise<RemoveResult> {
+		const entries = await this.list(input.repoRoot);
+		const entry = entries.find((candidate) => candidate.branch === input.branch);
+		if (entry?.dirty && !(input.abandon === true && input.discardUncommitted === true)) {
+			return {
+				ok: false,
+				refusal: "dirty",
+				reason:
+					input.abandon === true
+						? `worktree ${input.branch} has uncommitted changes; confirm discardUncommitted to discard them or commit them first`
+						: `worktree ${input.branch} has uncommitted changes; commit them or close as abandoned with discardUncommitted confirmed`,
+			};
+		}
 		if (input.abandon !== true) {
-			const entries = await this.list(input.repoRoot);
-			const entry = entries.find((candidate) => candidate.branch === input.branch);
-			if (entry?.dirty) {
-				return { ok: false, refusal: "dirty", reason: `worktree ${input.branch} has uncommitted changes` };
-			}
-			const integrated = await isIntegrated({
-				repoRoot: input.repoRoot,
-				branch: input.branch,
-				base: input.base,
-				evidenceCommit: input.evidenceCommit,
-			});
-			if (!integrated.merged) {
-				return {
-					ok: false,
-					refusal: "unmerged",
-					reason: `branch ${input.branch} is not merged into ${input.base}`,
-				};
+			// No merge gate when closeout supplies no evidence: a clean
+			// committed branch closes with its branch retained, merged or
+			// not. With evidence (a merged close), the branch must contain
+			// nothing beyond it.
+			if (input.evidenceCommit !== undefined) {
+				const integrated = await isIntegrated({
+					repoRoot: input.repoRoot,
+					branch: input.branch,
+					base: input.base,
+					evidenceCommit: input.evidenceCommit,
+				});
+				if (!integrated.merged) {
+					return {
+						ok: false,
+						refusal: "unmerged",
+						reason: `branch ${input.branch} has work beyond the merge evidence into ${input.base}`,
+					};
+				}
 			}
 		}
 		const argv = ["remove", input.branch, "--foreground", "--format=json"];
-		if (input.abandon === true) {
-			argv.push("--force", "-D");
+		// Branch fate is never decided by the discard flag: `wt remove`
+		// deletes a merged branch by default, so every non-merged close
+		// passes `--no-delete-branch` and keeps committed history on its
+		// named branch. Deleting an unmerged branch (`-D`) needs a separate
+		// explicit authorization that does not exist yet, so it is never
+		// passed. `--force` removes a dirty tree only after the explicit
+		// `discardUncommitted` confirmation enforced above.
+		if (input.abandon === true || input.evidenceCommit === undefined) {
+			argv.push("--no-delete-branch");
+		}
+		if (input.abandon === true && entry?.dirty === true) {
+			argv.push("--force");
 		} else if (input.force === true) {
 			argv.push("--force");
 		}
@@ -266,8 +320,35 @@ export class WorktrunkDriver implements WorktreeDriver {
 		if (outcome === undefined) {
 			return { ok: false, refusal: "failed", reason: "wt remove returned no branch outcome" };
 		}
-		if (outcome === "deleted" || outcome === "deferred" || outcome === "not_attempted") {
-			return { ok: true, branchOutcome: outcome, path: input.path };
+		if (outcome === "deleted" || outcome === "retained_unmerged") {
+			// `retained_unmerged` keeps the branch and removes the checkout:
+			// the committed source survives while the directory (including
+			// ignored runtime trees) is reclaimed. Either way a successful
+			// close must actually reclaim the path, so confirm it is gone
+			// instead of trusting the label alone.
+			const confirmed = await removalConfirmed(input.path);
+			if (confirmed.gone) {
+				return { ok: true, branchOutcome: outcome, path: input.path };
+			}
+			return { ok: false, refusal: "failed", reason: confirmed.reason };
+		}
+		if (outcome === "deferred" || outcome === "not_attempted") {
+			// The label describes the postponed branch operation, not the
+			// directory: confirm the path independently instead of inventing
+			// a retention fact from it. A reclaimed directory closes; a
+			// remaining one stays open with a retryable reason. This is safe
+			// by construction: non-merged closes always pass
+			// `--no-delete-branch`, so a reclaimed directory leaves its
+			// committed history on the retained branch.
+			const confirmed = await removalConfirmed(input.path);
+			if (confirmed.gone) {
+				return { ok: true, branchOutcome: outcome, path: input.path };
+			}
+			return {
+				ok: false,
+				refusal: "failed",
+				reason: `worktree removal for ${input.branch} did not complete (${outcome}); worktree still present at ${input.path}, retry the close`,
+			};
 		}
 		if (outcome === "retained_checked_out") {
 			return {

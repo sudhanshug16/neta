@@ -20,12 +20,20 @@ export async function archiveWorkspace(
 	// cannot promote a queued worker during reset. Retain every worktree.
 	for (const mission of missions) {
 		if (mission.state === "closed") continue;
+		// Reset retains every worktree by design (no removal is attempted
+		// here). Record the retained path on the closed record so the strand
+		// is visible in archive instead of silent: reclaim it after review.
+		const retained = mission.worktree?.path;
 		const closed: Mission = {
 			...mission,
 			state: "closed",
 			closedAt: nowIso(),
 			disposition: "abandoned",
-			closeReason: "Archived by workspace reset",
+			closeReason:
+				retained === undefined
+					? "Archived by workspace reset"
+					: `Archived by workspace reset; worktree retained at ${retained}`,
+			attention: retained === undefined ? undefined : `Worktree retained at ${retained}; delete it after review`,
 		};
 		await ports.save(closed);
 		ctx.hub.broadcast("state", { kind: "mission", record: closed });
