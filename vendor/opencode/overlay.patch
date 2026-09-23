@@ -2792,10 +2792,10 @@ index caf4026f3..e40511835 100644
    let cancelled = 0
 diff --git a/NETA.md b/NETA.md
 new file mode 100644
-index 000000000..a8c1823ed
+index 000000000..53028de7c
 --- /dev/null
 +++ b/NETA.md
-@@ -0,0 +1,46 @@
+@@ -0,0 +1,54 @@
 +# Neta on OpenCode V2
 +
 +Baseline: OpenCode V2 2.0.3, commit
@@ -2820,6 +2820,14 @@ index 000000000..a8c1823ed
 +```
 +
 +Use `/machines`, `/workspace`, `/leader`, `/reset`, `/models`, and `/connect`.
++Use `/me` to open the cross-workspace Me feed. It is a separate destination from
++the current workspace chat: select a card for its evidence, press `i` to compose
++an exact reply, and choose a session when the card has multiple destinations.
++The feed can reveal suppressed history and shows a limited set of explicit
++questions and failures while classification is pending. `j`/`k` move between
++cards; Esc returns to chat. Ctrl+M is not bound: native Move session already
++uses it, and ordinary terminal input can encode Ctrl+M as Enter (CR). `/me`
++does not intercept Enter in the native composer.
 +Native standalone session creation/fork/revert controls are disabled in managed
 +views. Neta prompts use a private gateway endpoint; V2 model and interrupt routes
 +are mediated by Node. Managed actors cannot bypass Neta via native delegation.
@@ -5099,6 +5107,274 @@ index 000000000..0829b4fa5
 +export function useNeta() {
 +  return useContext(Context)
 +}
+diff --git a/packages/tui/src/neta/me.tsx b/packages/tui/src/neta/me.tsx
+new file mode 100644
+index 000000000..146e178cc
+--- /dev/null
++++ b/packages/tui/src/neta/me.tsx
+@@ -0,0 +1,262 @@
++import { randomUUID } from "node:crypto"
++import type { NetaClient, Snapshot, View } from "@neta/client"
++import { TextareaRenderable } from "@opentui/core"
++import { useRenderer } from "@opentui/solid"
++import { createSignal, For, onCleanup, onMount, Show } from "solid-js"
++import { Keymap } from "../context/keymap"
++import { useTheme } from "../context/theme"
++import { useDialog } from "../ui/dialog"
++import { DialogSelect } from "../ui/dialog-select"
++
++export type MeCard = {
++  id: string
++  version: number
++  headline: string
++  summary: string
++  workspaceId: string
++  workspaceName: string
++  sourceIds: string[]
++  destinationSessionIds: string[]
++  needsReply: boolean
++  resolved: boolean
++  readAt?: string
++  latestAt: string
++  action: "surface" | "update" | "suppress" | string
++}
++
++type Source = { id: string; sessionId?: string; text?: string; at?: string; kind?: string; explicit?: boolean; workspaceName?: string }
++type ReplyReceipt = { status?: string; messageId?: string; id?: string; destinationSessionId?: string }
++
++export function NetaMe(props: {
++  client: Pick<NetaClient, "request" | "subscribe">
++  snapshot: Snapshot
++  view: View
++  onClose: () => void
++  onNavigate: (view: View) => void
++}) {
++  const theme = useTheme()
++  const dialog = useDialog()
++  const renderer = useRenderer()
++  const [cards, setCards] = createSignal<MeCard[]>([])
++  const [selectedId, setSelectedId] = createSignal<string>()
++  const [sources, setSources] = createSignal<Source[]>([])
++  const [pending, setPending] = createSignal<Source[]>([])
++  const [suppressed, setSuppressed] = createSignal(false)
++  const [cursor, setCursor] = createSignal<string>()
++  const [loading, setLoading] = createSignal(true)
++  const [error, setError] = createSignal("")
++  const [receipt, setReceipt] = createSignal("")
++  const [sending, setSending] = createSignal(false)
++  const [draft, setDraft] = createSignal("")
++  const [composing, setComposing] = createSignal(false)
++  let composer: TextareaRenderable | undefined
++  let disposed = false
++  let revision = 0
++  let attempt: { cardId: string; text: string; key: string } | undefined
++  const selected = () => cards().find((card) => card.id === selectedId())
++
++  Keymap.createLayer(() => ({
++    priority: 25,
++    enabled: () => dialog.stack.length === 0 && renderer.currentFocusedEditor === null,
++    commands: [
++      { bind: "j", title: "Next Me card", run: () => { const card = cards()[Math.min(cards().length - 1, cards().findIndex((item) => item.id === selectedId()) + 1)]; if (card) void open(card) } },
++      { bind: "k", title: "Previous Me card", run: () => { const card = cards()[Math.max(0, cards().findIndex((item) => item.id === selectedId()) - 1)]; if (card) void open(card) } },
++      { bind: "i", title: "Compose Me reply", run: () => { if (selected()) setComposing(true) } },
++      { bind: "escape", title: "Return to chat", run: props.onClose },
++    ],
++  }))
++
++  async function load(older = false) {
++    const generation = ++revision
++    setLoading(true)
++    setError("")
++    try {
++      const result = await props.client.request<{ cards: MeCard[]; pending?: Source[]; hasMore?: boolean }>("me.list", {
++        includeSuppressed: suppressed(),
++        limit: 50,
++        ...(older && cursor() ? { after: cursor() } : {}),
++      })
++      if (disposed || generation !== revision) return
++      setCards(older ? [...cards(), ...result.cards.filter((card) => !cards().some((old) => old.id === card.id))] : result.cards)
++      setPending(result.pending ?? [])
++      setCursor(result.hasMore ? result.cards.at(-1)?.id : undefined)
++    } catch (cause) {
++      if (!disposed && generation === revision) setError(cause instanceof Error ? cause.message : "Cannot load Me inbox")
++    } finally {
++      if (!disposed && generation === revision) setLoading(false)
++    }
++  }
++
++  onMount(() => void load())
++  const unsubscribe = props.client.subscribe((method) => {
++    if (method === "me.changed" && !disposed) void load()
++  })
++  onCleanup(() => {
++    disposed = true
++    unsubscribe()
++  })
++
++  async function open(card: MeCard) {
++    setComposing(false)
++    if (selectedId() !== card.id) {
++      setDraft("")
++      composer?.setText("")
++      attempt = undefined
++    }
++    setSelectedId(card.id)
++    setSources([])
++    setReceipt("")
++    try {
++      const result = await props.client.request<{ sources: Source[] }>("me.sources", { cardId: card.id })
++      if (!disposed && selectedId() === card.id) setSources(result.sources)
++    } catch (cause) {
++      if (!disposed && selectedId() === card.id) setError(cause instanceof Error ? cause.message : "Cannot load sources")
++    }
++    if (!card.readAt) {
++      try {
++        await props.client.request("me.read", { cardId: card.id })
++        if (!disposed) setCards((old) => old.map((item) => item.id === card.id ? { ...item, readAt: new Date().toISOString() } : item))
++      } catch (cause) {
++        if (!disposed) setError(cause instanceof Error ? cause.message : "Cannot mark card read")
++      }
++    }
++  }
++
++  function sourceView(sessionId: string): View | undefined {
++    const owner = props.snapshot.leaders.find((item) => item.sessionId === sessionId)
++      ?? props.snapshot.agents.find((item) => item.sessionId === sessionId)
++    if (!owner) return
++    const workspace = props.snapshot.workspaces.find((item) => item.id === owner.workspaceId)
++    const path = workspace?.roots.find((root) => root.machineId === props.snapshot.machine.id)?.path
++    if (!path) return
++    const actorId = "id" in owner ? owner.id : "leader"
++    return { ...props.view, workspaceId: owner.workspaceId, path, owner: actorId, tabs: [...new Set(["leader", actorId])] }
++  }
++
++  async function send(destinationSessionId?: string) {
++    const card = selected()
++    const text = draft()
++    if (!card || !text.trim() || sending()) return
++    if (card.destinationSessionIds.length > 1 && !destinationSessionId) {
++      dialog.replace(() => (
++        <DialogSelect
++          title="Choose reply destination"
++          options={card.destinationSessionIds.map((id) => ({
++            value: id,
++            title: props.snapshot.agents.find((actor) => actor.sessionId === id)?.name
++              ?? props.snapshot.leaders.find((leader) => leader.sessionId === id)?.name
++              ?? id,
++            description: id,
++          }))}
++          onSelect={(option) => { dialog.clear(); void send(option.value) }}
++        />
++      ))
++      return
++    }
++    if (!card.destinationSessionIds.length) {
++      setReceipt("No reply destination recorded for this card.")
++      return
++    }
++    attempt = attempt?.cardId === card.id && attempt.text === text
++      ? attempt : { cardId: card.id, text, key: randomUUID() }
++    setSending(true)
++    setReceipt("")
++    try {
++      const result = await props.client.request<ReplyReceipt>("me.reply", {
++        cardId: card.id,
++        text,
++        idempotencyKey: attempt.key,
++        ...(destinationSessionId ? { destinationSessionId } : {}),
++      })
++      if (disposed) return
++      setReceipt(`Reply ${result.status ?? "accepted"}${result.messageId ?? result.id ? ` · ${result.messageId ?? result.id}` : ""} · ${result.destinationSessionId ?? destinationSessionId ?? card.destinationSessionIds[0]}`)
++      setDraft("")
++      if (composer) composer.setText("")
++      attempt = undefined
++    } catch (cause) {
++      if (!disposed) setReceipt(`Reply not confirmed: ${cause instanceof Error ? cause.message : "request failed"}. Retry uses the same receipt key.`)
++    } finally {
++      if (!disposed) setSending(false)
++    }
++  }
++
++  return (
++    <box flexGrow={1} minHeight={0} flexDirection="column" paddingLeft={2} paddingRight={2} paddingTop={1}>
++      <box flexDirection="row" flexShrink={0} justifyContent="space-between" marginBottom={1}>
++        <text fg={theme.text.default}>Me · across workspaces</text>
++        <text fg={theme.text.action.secondary.default} onMouseUp={props.onClose}>[ Back to chat ]</text>
++      </box>
++      <box flexDirection="row" flexShrink={0} gap={2} marginBottom={1}>
++        <text fg={theme.text.action.secondary.default} onMouseUp={() => { setSuppressed(!suppressed()); setSelectedId(undefined); void load() }}>
++          [ {suppressed() ? "Hide suppressed" : "Inspect suppressed"} ]
++        </text>
++        <text fg={theme.text.action.secondary.default} onMouseUp={() => void load()}>[ Refresh ]</text>
++      </box>
++      <Show when={error()}><text fg={theme.text.feedback.error.default}>{error()}</text></Show>
++      <box flexGrow={1} minHeight={0} flexDirection="row" gap={2}>
++        <scrollbox width="40%" minWidth={20} minHeight={0} border={["right"]} borderColor={theme.border.default}>
++          <Show when={!cards().length}><text fg={theme.text.subdued}>{loading() ? "Loading Me…" : "No cards in this view."}</text></Show>
++          <For each={pending().filter((source) => source.kind === "failure" || source.kind === "permission" || (source.kind === "message" && source.explicit)).slice(0, 10)}>{(source) => (
++            <box flexShrink={0} marginBottom={1}>
++              <text fg={theme.text.feedback.warning.default}>Pending classification · {source.workspaceName} · {source.kind}</text>
++              <text fg={theme.text.subdued}>{source.text}</text>
++              <Show when={source.sessionId && sourceView(source.sessionId)}>
++                <text fg={theme.text.action.secondary.default} onMouseUp={() => { const target = sourceView(source.sessionId!); if (target) props.onNavigate(target) }}>[ Open original conversation ]</text>
++              </Show>
++            </box>
++          )}</For>
++          <For each={cards()}>{(card) => (
++            <box flexShrink={0} marginBottom={1} onMouseUp={() => void open(card)}>
++              <text fg={selectedId() === card.id ? theme.text.action.primary.default : theme.text.default}>
++                {card.readAt ? "○" : "●"} {card.headline}
++              </text>
++              <text fg={theme.text.subdued}>{card.workspaceName} · {card.action}{card.needsReply ? " · Reply needed" : ""}{card.resolved ? " · Resolved" : ""}</text>
++            </box>
++          )}</For>
++          <Show when={cursor()}><text fg={theme.text.action.secondary.default} onMouseUp={() => void load(true)}>[ Load older ]</text></Show>
++        </scrollbox>
++        <box flexGrow={1} minWidth={0} flexDirection="column">
++          <Show when={selected()} fallback={<text fg={theme.text.subdued}>Select a card to read its evidence and reply.</text>}>
++            {(card) => <>
++              <text fg={theme.text.default}>{card().headline}</text>
++              <text fg={theme.text.subdued}>{card().workspaceName} · {card().latestAt} · {card().action}</text>
++              <scrollbox flexGrow={1} minHeight={2} marginTop={1}>
++                <text fg={theme.text.default}>{card().summary}</text>
++                <text marginTop={1} fg={theme.text.subdued}>Sources</text>
++                <For each={card().sourceIds}>{(id) => {
++                  const source = () => sources().find((item) => item.id === id)
++                  const view = () => source()?.sessionId ? sourceView(source()!.sessionId!) : undefined
++                  return <box marginBottom={1} flexShrink={0}>
++                    <text fg={view() ? theme.text.action.secondary.default : theme.text.subdued} onMouseUp={() => { const target = view(); if (target) props.onNavigate(target) }}>
++                      {source()?.sessionId ? `[ Open source · ${id} ]` : `Source · ${id}`}
++                    </text>
++                    <Show when={source()?.text}><text fg={theme.text.subdued}>{source()!.text}</text></Show>
++                  </box>
++                }}</For>
++              </scrollbox>
++              <Show when={card().destinationSessionIds.length}>
++                <text fg={theme.text.subdued}>Reply to {card().destinationSessionIds.length === 1 ? card().destinationSessionIds[0] : "chosen destination"} · exact text forwarded</text>
++                <textarea
++                  height={3} wrapMode="word" focused={composing()} placeholder="Reply to this card…"
++                  placeholderColor={theme.text.subdued} textColor={theme.text.formfield.default}
++                  focusedTextColor={theme.text.formfield.default} backgroundColor={theme.background.formfield.default}
++                  focusedBackgroundColor={theme.background.formfield.default} cursorColor={theme.text.default}
++                  ref={(value: TextareaRenderable) => { composer = value; composer.setText(draft()) }}
++                  onContentChange={() => setDraft(composer?.plainText ?? "")}
++                  onMouseDown={() => setComposing(true)}
++                  onKeyDown={(event) => { if (event.name === "escape") setComposing(false) }}
++                  onSubmit={() => void send()}
++                />
++                <text fg={theme.text.action.primary.default} onMouseUp={() => void send()}>
++                  [ {sending() ? "Sending…" : "Send reply ↵"} ]
++                </text>
++              </Show>
++              <Show when={receipt()}><text fg={theme.text.subdued}>{receipt()}</text></Show>
++              <text fg={theme.text.subdued}>j/k cards · i compose · Esc back</text>
++            </>}
++          </Show>
++        </box>
++      </box>
++    </box>
++  )
++}
 diff --git a/packages/tui/src/neta/model-preferences.tsx b/packages/tui/src/neta/model-preferences.tsx
 new file mode 100644
 index 000000000..c209efbb5
@@ -5812,10 +6088,10 @@ index 000000000..1c94b747d
 +}
 diff --git a/packages/tui/src/neta/shell.tsx b/packages/tui/src/neta/shell.tsx
 new file mode 100644
-index 000000000..b9711a6f57
+index 000000000..ecca7c857
 --- /dev/null
 +++ b/packages/tui/src/neta/shell.tsx
-@@ -0,0 +1,834 @@
+@@ -0,0 +1,847 @@
 +import { createEffect, createMemo, createSignal, For, onCleanup, Show, type JSX } from "solid-js"
 +import { TerminalViewport, useTerminalDimensions } from "../ui/terminal-dimensions"
 +import { ownerSession, type Agent, type Mission, type Snapshot, type View } from "@neta/client"
@@ -5833,6 +6109,7 @@ index 000000000..b9711a6f57
 +import { DialogPrompt } from "../ui/dialog-prompt"
 +import { DialogConfirm } from "../ui/dialog-confirm"
 +import { NetaRouting } from "./routing"
++import { NetaMe } from "./me"
 +import { useToast } from "../ui/toast"
 +import { Keymap } from "../context/keymap"
 +import { useAttention } from "../context/attention"
@@ -5869,6 +6146,7 @@ index 000000000..b9711a6f57
 +  const [connected, setConnected] = createSignal(true)
 +  const [busy, setBusy] = createSignal(false)
 +  const [archived, setArchived] = createSignal(false)
++  const [me, setMe] = createSignal(false)
 +  const [collapsed, setCollapsed] = createSignal(
 +    new Set(
 +      state.snapshot.missions
@@ -5993,6 +6271,7 @@ index 000000000..b9711a6f57
 +    }
 +  }
 +  function select(owner: string) {
++    setMe(false)
 +    if (archiveActor()?.id === owner) return
 +    const actor = [...snapshot().agents, ...Object.values(archiveAgents()).flat()].find((one) => one.id === owner)
 +    if (
@@ -6349,6 +6628,7 @@ index 000000000..b9711a6f57
 +        title="Spine help"
 +        placeholder="Find an action…"
 +        options={[
++          { title: "Me · all workspaces", value: "me", description: "Personal attention feed and replies" },
 +          { title: "Switch workspace", value: "workspace", description: "Open another workspace" },
 +          { title: "Switch machine", value: "machine", description: "Open a workspace on another machine" },
 +          { title: "Leader updates", value: "updates", description: "Catch up on workspace leader replies" },
@@ -6358,7 +6638,8 @@ index 000000000..b9711a6f57
 +          { title: "Reset", value: "reset", description: "Start fresh chat or workspace context" },
 +        ]}
 +        onSelect={(option) => {
-+          if (option.value === "workspace") workspaces()
++          if (option.value === "me") { dialog.clear(); setMe(true) }
++          else if (option.value === "workspace") workspaces()
 +          else if (option.value === "machine") machines()
 +          else if (option.value === "updates") void openUpdates()
 +          else if (option.value === "agents") conversations()
@@ -6372,6 +6653,7 @@ index 000000000..b9711a6f57
 +  Keymap.createLayer(() => ({
 +    mode: "global",
 +    commands: [
++      { name: "neta.me", title: "Me · all workspaces", category: "Neta", slashName: "me", run: () => { setArchiveActor(undefined); setMe(true) } },
 +      {
 +        name: "neta.updates",
 +        title: "Catch up on workspace leader replies",
@@ -6593,6 +6875,9 @@ index 000000000..b9711a6f57
 +                Workspace leader
 +              </text>
 +            </box>
++            <box flexDirection="row" flexShrink={0} paddingLeft={8} marginTop={1} onMouseUp={() => { setArchiveActor(undefined); setMe(true) }}>
++              <text fg={me() ? theme.text.action.primary.default : theme.text.action.secondary.default}>● Me · all workspaces</text>
++            </box>
 +            <box
 +              height={1}
 +              flexShrink={0}
@@ -6640,8 +6925,12 @@ index 000000000..b9711a6f57
 +        <box flexGrow={1} minWidth={0} flexDirection="column">
 +          <box flexGrow={1} minHeight={0} backgroundColor={theme.background.default}>
 +            <TerminalViewport value={viewport}>
-+              <Show when={archiveActor()} keyed fallback={props.children}>
-+                {(actor) => <NetaArchive actor={actor} client={state.client} onBack={() => select("leader")} />}
++              <Show when={me()} fallback={
++                <Show when={archiveActor()} keyed fallback={props.children}>
++                  {(actor) => <NetaArchive actor={actor} client={state.client} onBack={() => select("leader")} />}
++                </Show>
++              }>
++                <NetaMe client={state.client} snapshot={snapshot()} view={state.view} onClose={() => setMe(false)} onNavigate={(view) => void navigate(view)} />
 +              </Show>
 +            </TerminalViewport>
 +          </box>
@@ -7579,6 +7868,89 @@ index 000000000..b8dc7ed3a
 +    app.renderer.destroy()
 +  }
 +  expect(calls).toEqual(["conversation.tail", "conversation.untail"])
++})
+diff --git a/packages/tui/test/neta-me.test.tsx b/packages/tui/test/neta-me.test.tsx
+new file mode 100644
+index 000000000..38d6bb8b6
+--- /dev/null
++++ b/packages/tui/test/neta-me.test.tsx
+@@ -0,0 +1,77 @@
++import { expect, test } from "bun:test"
++import { testRender } from "@opentui/solid"
++import type { NetaClient, Snapshot } from "@neta/client"
++import { NetaMe, type MeCard } from "../src/neta/me"
++import { ThemeProvider } from "../src/context/theme"
++import { DialogProvider } from "../src/ui/dialog"
++import { TestTuiContexts } from "./fixture/tui-environment"
++import { ConfigProvider } from "../src/config"
++import { createTuiResolvedConfig } from "./fixture/tui-runtime"
++import { Keymap } from "../src/context/keymap"
++import { ToastProvider } from "../src/ui/toast"
++
++test("Me shows cross-workspace evidence and forwards the exact reply with a stable retry key", async () => {
++  const card: MeCard = {
++    id: "card-1", version: 1, headline: "Deployment needs an answer", summary: "A decision is pending.",
++    workspaceId: "second", workspaceName: "Other workspace", sourceIds: ["source-1"],
++    destinationSessionIds: ["session-2", "session-3"], needsReply: true, resolved: false,
++    latestAt: "2026-09-23T12:00:00Z", action: "surface",
++  }
++  const calls: { method: string; params: Record<string, unknown> | undefined }[] = []
++  let fail = true
++  const client = {
++    subscribe: () => () => {},
++    request: async (method: string, params?: Record<string, unknown>) => {
++      calls.push({ method, params })
++      if (method === "me.list") return { cards: [card], pending: [{ id: "pending-1", kind: "failure", workspaceName: "Third workspace", text: "Runtime failed", sessionId: "session-3" }] }
++      if (method === "me.sources") return { sources: [{ id: "source-1", sessionId: "session-2", text: "Original question" }] }
++      if (method === "me.reply") {
++        if (fail) { fail = false; throw new Error("Connection lost") }
++        return { status: "queued", messageId: "receipt-1", destinationSessionId: "session-2" }
++      }
++      return {}
++    },
++  } as unknown as Pick<NetaClient, "request" | "subscribe">
++  const snapshot: Snapshot = {
++    machine: { id: "local", name: "Local" },
++    workspaces: [{ id: "second", name: "Other workspace", roots: [{ machineId: "local", path: "/other" }] }],
++    leaders: [{ workspaceId: "second", machineId: "local", sessionId: "session-2", name: "Leader", provider: "opencode", model: "fixture", state: "idle", mode: "lead" }],
++    agents: [], missions: [],
++  }
++  const app = await testRender(() => <TestTuiContexts><ConfigProvider config={createTuiResolvedConfig()}><Keymap.Provider><ThemeProvider mode="dark" defaultName="neta" source={{ discover: async () => ({}) }}><ToastProvider><DialogProvider>
++    <NetaMe client={client} snapshot={snapshot} view={{ host: "local", workspaceId: "first", path: "/first", owner: "leader", tabs: ["leader"] }} onClose={() => {}} onNavigate={() => {}} />
++  </DialogProvider></ToastProvider></ThemeProvider></Keymap.Provider></ConfigProvider></TestTuiContexts>, { width: 120, height: 35 })
++  const click = async (text: string) => {
++    const lines = app.captureCharFrame().split("\n")
++    const row = lines.findIndex((line) => line.includes(text))
++    expect(row).toBeGreaterThanOrEqual(0)
++    await app.mockMouse.click(lines[row]!.indexOf(text) + 1, row)
++    await app.waitForVisualIdle()
++  }
++  try {
++    app.renderer.start()
++    await app.waitForFrame((frame) => frame.includes("Deployment needs an answer"))
++    expect(app.captureCharFrame()).toContain("Pending classification")
++    await click("Deployment needs an answer")
++    await app.waitForFrame((frame) => frame.includes("Original question"))
++    app.mockInput.pressKey("i")
++    await app.mockInput.typeText("Yes, proceed exactly as discussed")
++    app.mockInput.pressEnter()
++    await app.waitForFrame((frame) => frame.includes("Choose reply destination"))
++    await click("session-2")
++    await app.waitForFrame((frame) => frame.includes("Reply not confirmed"))
++    await click("Send reply")
++    await app.waitForFrame((frame) => frame.includes("Choose reply destination"))
++    await click("session-2")
++    await app.waitForFrame((frame) => frame.includes("receipt-1"))
++    const replies = calls.filter((call) => call.method === "me.reply")
++    expect(replies).toHaveLength(2)
++    expect(replies[0]?.params?.text).toBe("Yes, proceed exactly as discussed")
++    expect(replies[0]?.params?.idempotencyKey).toBe(replies[1]?.params?.idempotencyKey)
++    expect(replies[0]?.params?.cardId).toBe("card-1")
++    expect(replies[0]?.params?.destinationSessionId).toBe("session-2")
++    expect(calls.some((call) => call.method === "me.read")).toBe(true)
++  } finally {
++    app.renderer.destroy()
++  }
 +})
 diff --git a/packages/tui/test/neta-notifications.test.ts b/packages/tui/test/neta-notifications.test.ts
 new file mode 100644
