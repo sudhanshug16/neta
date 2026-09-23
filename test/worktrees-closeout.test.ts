@@ -310,6 +310,55 @@ describe("mission closeout", () => {
 		}
 	});
 
+	test("abandoned forwards an explicit discard confirmation and closes", async () => {
+		const f = fixture();
+		const start = mission({ provider: "worktrunk", path: "/wt-1", branch: "mission/1-x", base: "main" });
+		const outcome = await closeMission(
+			{ mission: start, disposition: "abandoned", reason: "superseded", discardUncommitted: true },
+			f.deps,
+		);
+		expect(outcome.ok).toBe(true);
+		expect(f.removes).toEqual([
+			{
+				repoRoot: "/wt-1",
+				path: "/wt-1",
+				branch: "mission/1-x",
+				base: "main",
+				abandon: true,
+				discardUncommitted: true,
+			},
+		]);
+	});
+
+	test("abandoned dirty work without confirmation stays open with its work intact", async () => {
+		const f = fixture({
+			remove: (input) =>
+				input.abandon === true && input.discardUncommitted !== true
+					? Promise.resolve({ ok: false, refusal: "dirty" as const, reason: "confirm discardUncommitted" })
+					: Promise.resolve({ ok: true, branchOutcome: "deleted", path: input.path }),
+		});
+		const start = mission({ provider: "worktrunk", path: "/wt-1", branch: "mission/1-x", base: "main" });
+		const refused = await closeMission({ mission: start, disposition: "abandoned", reason: "done" }, f.deps);
+		expect(refused.ok).toBe(false);
+		if (refused.ok) {
+			throw new Error("expected refusal");
+		}
+		expect(refused.attention).toContain("discardUncommitted");
+		expect(refused.mission.state).toBe("running");
+		expect(refused.mission.worktree).toEqual(start.worktree);
+		expect(f.closed).toHaveLength(0);
+		const confirmed = await closeMission(
+			{ mission: refused.mission, disposition: "abandoned", reason: "done", discardUncommitted: true },
+			f.deps,
+		);
+		expect(confirmed.ok).toBe(true);
+		if (!confirmed.ok) {
+			throw new Error("expected close");
+		}
+		expect(confirmed.mission).toMatchObject({ state: "closed", worktree: undefined });
+		expect(f.closed).toHaveLength(1);
+	});
+
 	test("a driver refusal leaves the mission intact with closedAt unset", async () => {
 		const f = fixture({
 			remove: () => Promise.resolve({ ok: false, refusal: "dirty", reason: "worktree is dirty" }),

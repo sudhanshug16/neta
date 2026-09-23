@@ -168,16 +168,20 @@ list.json-schema=1`; `dirty` is true when any of `staged, modified, untracked,
 renamed, deleted` is. 3. `defaultBase` is the `branch` of the `is_main: true`
 row, else `git symbolic-ref --short HEAD`, memoised per `repoRoot`, cleared by
 `forgetBase`. 4. `verify` fails with a reason when the path is missing from disk
-or `list`, or under another branch. 5. `remove` pre-checks before shelling out with `abandon !== true` —
-dirty per `list` refuses `dirty` without running `wt`, so a check never destroys
-anything. There is no merge gate without evidence: a clean committed branch
-removes its directory and keeps its branch, merged or not. When closeout
-supplies `evidenceCommit` (a merged close), `isIntegrated` rechecks it against
-the current branch tip, so stale evidence cannot discard new work. 6. Otherwise
+or `list`, or under another branch. 5. `remove` pre-checks before shelling out — dirty refuses `dirty` without running
+`wt`, so a check never destroys anything, unless the call carries both
+`abandon` and an explicit `discardUncommitted` confirmation. There is no merge
+gate without evidence: a clean committed branch removes its directory and
+keeps its branch, merged or not. When closeout supplies `evidenceCommit` (a
+merged close), `isIntegrated` rechecks it against the current branch tip, so
+stale evidence cannot discard new work. 6. Otherwise
 `remove <branch> --foreground -y --format=json`, adding
 `--force -D` when `abandon` and `--force` when `force`; a non-zero exit is
 `failed` with the first stderr line, and on exit 0 `deleted` and
-`retained_unmerged` verify the path is actually gone before returning `ok:true`
+`retained_unmerged` confirm the path is actually gone via `lstat` before
+returning `ok:true` — only `ENOENT`/`ENOTDIR` prove absence, so a dangling
+symlink still counts as present and any other filesystem error is a retryable
+`failed` rather than a false success —
 (the branch survives `retained_unmerged`), while `deferred` or `not_attempted`
 is `failed` with a retryable reason so the mission stays open and visible,
 `retained_checked_out` is `checkedOut`, and any other
@@ -278,7 +282,9 @@ mission open with `attention`; abandoned with a reason removes the worktree with
 unset; `onMissionClosed` runs once on success, never on refusal; a completed
 close on a clean unmerged worktree succeeds with the branch retained; an
 incomplete (`deferred`/`not_attempted`) removal stays open with a retryable
-reason and the retry closes.
+reason and the retry closes; an abandoned close on a dirty worktree stays open
+unless `discardUncommitted` is explicitly confirmed, and the confirmation is
+forwarded to the driver.
 Done when: `bun run check` and `bun test` pass.
 Commit: `feat(worktrees): mission closeout`
 

@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { WorktrunkDriver } from "../src/worktrees/driver.ts";
+import { removalConfirmed, WorktrunkDriver } from "../src/worktrees/driver.ts";
 import { runGit } from "../src/worktrees/integration.ts";
 import { slugify } from "../src/worktrees/naming.ts";
 import { fakeWtEnv, makeRepo } from "./helpers/git-repo.ts";
@@ -146,12 +146,28 @@ process.exit(r.status ?? 1);
 		// An ordinary close never discards: the untracked draft survives.
 		await expect(stat(worktree.path)).resolves.toBeDefined();
 		await expect(stat(join(worktree.path, "draft.txt"))).resolves.toBeDefined();
+		// Abandoned alone does not authorize the loss: without the explicit
+		// confirmation the dirty worktree is still refused and preserved.
+		const unconfirmed = await driver.remove({
+			repoRoot: root,
+			path: worktree.path,
+			branch: worktree.branch,
+			base: "main",
+			abandon: true,
+		});
+		expect(unconfirmed.ok).toBe(false);
+		if (!unconfirmed.ok) {
+			expect(unconfirmed.refusal).toBe("dirty");
+			expect(unconfirmed.reason).toContain("discardUncommitted");
+		}
+		await expect(stat(join(worktree.path, "draft.txt"))).resolves.toBeDefined();
 		const removed = await driver.remove({
 			repoRoot: root,
 			path: worktree.path,
 			branch: worktree.branch,
 			base: "main",
 			abandon: true,
+			discardUncommitted: true,
 		});
 		expect(removed.ok).toBe(true);
 		// Only the explicit abandoned discard removes untracked content.
@@ -237,6 +253,46 @@ process.exit(r.status ?? 1);
 		if (!failed.ok) {
 			expect(failed.refusal).toBe("failed");
 			expect(failed.reason).toContain("unknown branch");
+		}
+	});
+});
+
+describe("removalConfirmed", () => {
+	test("only absence proves removal: present and dangling links stay unconfirmed", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "neta-removal-proof-"));
+		extraDirs.push(dir);
+		expect(await removalConfirmed(join(dir, "missing"))).toEqual({ gone: true });
+		await writeFile(join(dir, "kept.txt"), "kept\n");
+		const present = await removalConfirmed(join(dir, "kept.txt"));
+		expect(present.gone).toBe(false);
+		if (!present.gone) {
+			expect(present.reason).toContain("still present");
+		}
+		// A dangling symlink is rubble left behind, not a reclaimed path.
+		await symlink(join(dir, "target-missing"), join(dir, "dangling"));
+		const dangling = await removalConfirmed(join(dir, "dangling"));
+		expect(dangling.gone).toBe(false);
+	});
+
+	test("an unreadable path refuses instead of reporting success", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "neta-removal-proof-"));
+		extraDirs.push(dir);
+		const locked = join(dir, "locked");
+		await mkdir(locked);
+		await chmod(locked, 0o000);
+		try {
+			const proof = await removalConfirmed(join(locked, "anything"));
+			// Running with elevated privileges sees through the mode bits;
+			// only assert the refusal where the filesystem enforced it.
+			if (proof.gone) {
+				return;
+			}
+			expect(proof.gone).toBe(false);
+			if (!proof.gone) {
+				expect(proof.reason).toContain("cannot confirm");
+			}
+		} finally {
+			await chmod(locked, 0o755);
 		}
 	});
 });

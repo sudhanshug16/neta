@@ -239,6 +239,12 @@ test("public mission numbers and lead-local references work without guessing int
 		expect(validate("neta_agent", { missionId, task: "check", access: "readOnly", effort: 1 }).ok).toBe(true);
 		expect(validate("neta_ready", { missionId, summary: "checked" }).ok).toBe(true);
 		expect(validate("neta_close", { missionId, disposition: "completed", reason: "checked" }).ok).toBe(true);
+		expect(
+			validate("neta_close", { missionId, disposition: "abandoned", reason: "done", discardUncommitted: true }).ok,
+		).toBe(true);
+		expect(
+			validate("neta_close", { missionId, disposition: "abandoned", reason: "done", discardUncommitted: "yes" }).ok,
+		).toBe(false);
 	}
 	for (const missionId of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, "12"]) {
 		expect(validate("neta_ready", { missionId, summary: "checked" }).ok).toBe(false);

@@ -3,8 +3,8 @@
 // mission open with `attention` set to the refusal reason. There is no
 // retained-but-closed state. A merge is not required to close: a clean
 // committed branch closes with its branch retained, merged or not. A dirty
-// worktree needs a commit or an explicit `abandoned` discard, never a silent
-// one.
+// worktree needs a commit or an explicit `abandoned` discard with
+// `discardUncommitted` confirmed, never a silent one.
 import type { Disposition, EventKind, IsoTime, Mission, MissionId } from "../core/types.ts";
 import type { WorktreeDriver } from "./driver.ts";
 import type { IntegrationResult, isIntegrated } from "./integration.ts";
@@ -15,6 +15,10 @@ export interface CloseMissionInput {
 	disposition: Disposition;
 	reason: string;
 	evidence?: string;
+	// Explicit user confirmation that uncommitted changes may be discarded.
+	// Required with an `abandoned` disposition for a dirty worktree; it never
+	// authorizes silent loss on an ordinary close.
+	discardUncommitted?: boolean;
 	// The live workspace root is retained separately from a mission worktree.
 	// It permits evidence-only recovery when Worktrunk has already removed the
 	// recorded worktree before Neta could persist the closeout.
@@ -81,6 +85,7 @@ export async function closeMission(i: CloseMissionInput, d: CloseoutDeps): Promi
 				base: mission.worktree.base,
 				...(mission.integration === undefined ? {} : { evidenceCommit: mission.integration.commit }),
 				abandon: i.disposition === "abandoned",
+				...(i.discardUncommitted === true ? { discardUncommitted: true as const } : {}),
 			});
 			if (!removed.ok) {
 				return refuse(mission, removed.reason);
