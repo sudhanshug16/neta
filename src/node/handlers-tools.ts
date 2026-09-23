@@ -615,20 +615,27 @@ export function toolMount(o: ToolMountOptions): {
 	async function finishPendingClose(sessionId: string): Promise<CloseOutcome> {
 		const pending = pendingCloses.get(sessionId);
 		if (pending === undefined) throw new NodeError("NOT_FOUND", "no pending close for session");
-		const leader = leaderOf(pending.input.mission.workspaceId);
-		await o.runtime.ensureSession({
-			sessionId,
-			workspaceId: pending.input.mission.workspaceId,
-			cwd: rootFor(pending.input.mission.workspaceId),
-			provider: pending.agent?.provider ?? leader.provider,
-			model: pending.agent?.model ?? leader.model,
-			access: "readOnly",
-			unsandboxed: pending.subject.kind === "lead" || pending.agent === undefined,
-			netaTools: true,
-			...(pending.agent === undefined ? {} : { actorId: pending.agent.id }),
-			forceRelaunch: true,
-			allowFresh: false,
-		});
+		// A completed lead may have no live runtime session, and its historical
+		// OpenCode cwd may no longer exist or match the saved vendor session. A
+		// closeout must not resume that conversation just to archive the mission.
+		// If the session is still attached, relaunch it read-only before persisting
+		// Lead so an extant Lead++ process loses write access.
+		if ((await o.runtime.runtimeDiagnostics?.(sessionId))?.attached === true) {
+			const leader = leaderOf(pending.input.mission.workspaceId);
+			await o.runtime.ensureSession({
+				sessionId,
+				workspaceId: pending.input.mission.workspaceId,
+				cwd: rootFor(pending.input.mission.workspaceId),
+				provider: pending.agent?.provider ?? leader.provider,
+				model: pending.agent?.model ?? leader.model,
+				access: "readOnly",
+				unsandboxed: pending.subject.kind === "lead" || pending.agent === undefined,
+				netaTools: true,
+				...(pending.agent === undefined ? {} : { actorId: pending.agent.id }),
+				forceRelaunch: true,
+				allowFresh: false,
+			});
+		}
 		await modes.requestMode({ subject: pending.subject, mode: "lead" });
 		const outcome = await worktrees.close(pending.input);
 		if (!outcome.ok) {
