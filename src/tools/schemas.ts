@@ -48,6 +48,8 @@ export interface MissionParams {
 	name: string;
 	objective: string;
 	access: Access;
+	// Legacy clients may still send "self"; the published schema excludes it and
+	// both validation and the handler reject it before any side effects.
 	lead: "self" | LeadSpec;
 	agents?: AgentSpec[];
 	continues?: MissionRef;
@@ -269,7 +271,7 @@ export const TOOLS: readonly ToolDef[] = [
 	{
 		name: "neta_mission",
 		description:
-			"create and start a mission, the only way one starts; for sustained work call this promptly before broad exploration or repeated reads",
+			"Create and start a mission with a separate mission lead. Supply the lead's task and effort (1–5 unless a model is explicit); for sustained work call this promptly before broad exploration or repeated reads.",
 		inputSchema: {
 			type: "object",
 			additionalProperties: false,
@@ -278,7 +280,11 @@ export const TOOLS: readonly ToolDef[] = [
 				name: NAME,
 				objective: { type: "string", minLength: 1, maxLength: 32000 },
 				access: ACCESS,
-				lead: { oneOf: [{ const: "self" }, LEAD_SPEC] },
+				lead: {
+					...LEAD_SPEC,
+					description:
+						"Separate mission lead; supply a task and effort (1–5 unless a model is explicit). The workspace leader cannot lead its own mission.",
+				},
 				agents: { type: "array", maxItems: 8, items: AGENT_SPEC },
 				continues: MISSION_REF,
 				recoverWorktree: {
@@ -648,6 +654,13 @@ export function validate<N extends ToolName>(
 	const def = TOOLS.find((tool) => tool.name === name);
 	if (def === undefined) {
 		return { ok: false, message: `unknown tool: ${name}` };
+	}
+	if (name === "neta_mission" && typeof args === "object" && args !== null && "lead" in args && args.lead === "self") {
+		return {
+			ok: false,
+			message:
+				"lead: self is no longer supported. Supply a separate mission lead with a task and effort (1–5 unless a model is explicit).",
+		};
 	}
 	const message = check(def.inputSchema, args, "params");
 	return message === undefined ? { ok: true, value: args as ToolParams[N] } : { ok: false, message };

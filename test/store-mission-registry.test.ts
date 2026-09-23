@@ -31,7 +31,7 @@ function mission(workspaceId: string, number: number, state: Mission["state"] = 
 		name: `mission ${number}`,
 		objective: "Do it.",
 		changes: [],
-		lead: { kind: "leader" },
+		lead: { kind: "agent", agentId: ulid() },
 		agentIds: [],
 		access: "readOnly",
 		state,
@@ -40,6 +40,19 @@ function mission(workspaceId: string, number: number, state: Mission["state"] = 
 }
 
 describe("mission registry", () => {
+	test("refuses a new self-led assignment but loads and closes legacy history", async () => {
+		useTempDir();
+		const ws = "git:github.com/org/repo";
+		const registry = openMissionRegistry();
+		const old = { ...mission(ws, await registry.allocateNumber(ws)), lead: { kind: "leader" as const } };
+		await expect(registry.create(old)).rejects.toThrow("separate mission lead");
+		await appendLine(paths().registryLog(ws), { op: "create", at: old.createdAt, mission: old });
+		const reopened = openMissionRegistry();
+		expect((await reopened.get(ws, old.id))?.lead).toEqual({ kind: "leader" });
+		await reopened.update({ ...old, state: "closed", disposition: "abandoned", closeReason: "legacy cleanup" });
+		expect((await openMissionRegistry().get(ws, old.id))?.state).toBe("closed");
+		await expect(reopened.update(old)).rejects.toThrow("separate mission lead");
+	});
 	test("create then reopen returns the mission with the same number", async () => {
 		useTempDir();
 		const ws = "git:github.com/org/repo";

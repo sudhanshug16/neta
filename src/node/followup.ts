@@ -7,6 +7,7 @@ export function createFollowupSender(ports: {
 	inbox: ConversationInboxStore;
 	getAgent(id: string): Agent | undefined;
 	getMission(id: string): Mission | undefined;
+	validateMission?(mission: Mission): void;
 	putAgent(agent: Agent): Promise<void>;
 	saveMission(mission: Mission): Promise<void>;
 	resume(agent: Agent): Promise<Agent>;
@@ -26,6 +27,7 @@ export function createFollowupSender(ports: {
 			const mission = agent && ports.getMission(agent.missionId);
 			if (!agent || !mission || agent.state === "archived" || mission.state === "closed")
 				throw new Error("The target mission is archived or unavailable; no follow-up was saved.");
+			ports.validateMission?.(mission);
 			const receipt = await ports.inbox.enqueue(agent.sessionId, text, [], { readerDirected: false, sourceId });
 			ports.receipt(receipt);
 			if (receipt.status !== "queued" || agent.state === "queued") return receipt;

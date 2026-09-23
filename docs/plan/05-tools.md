@@ -295,10 +295,12 @@ Writes: `src/tools/handlers/mission.ts`, `test/tools-mission.test.ts`.
 Contract: all exported — `const missionHandlers: Pick<ToolHandlers,
 "neta_mission" | "neta_agent">`; `neta_mission` returns `{number, id, worktree}`
 (`null` in a folder workspace), `neta_agent` `{agentId, name, missionId}`.
-Steps: allocate the next number from the store; create the worktree through 06's
-`WorktreeService.prepare` when the workspace is git; `lead: "self"` sets `lead: { kind:
-"leader" }` and the leader's `activeMissionId`, else starts a lead session with
-`canSpawn: true` at the mission's access; spawn each `agents` entry at its own
+Steps: reject `lead: "self"` before routing or any creation side effects; require
+a separate lead task and effort (unless model is explicit), and persist a lead
+actor/session distinct from the workspace leader. Allocate the next number from
+the store; create the worktree through 06's `WorktreeService.prepare` when the
+workspace is git; start a lead session with `canSpawn: true` in Lead mode;
+spawn each `agents` entry at its own
 access, never above the mission's; append `mission.created` then one
 `agent.spawned` per session; a readWrite mission in a folder workspace that
 cannot take the lease is created and queued as `{ queued: true }`; `continues`

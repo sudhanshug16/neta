@@ -365,7 +365,7 @@ test("session tool wiring and end-to-end mission creation", async () => {
 				name: "lens port",
 				objective: "port the lens",
 				access: "readOnly",
-				lead: "self",
+				lead: { task: "Lead the lens port", model: "test-model" },
 				agents: [
 					{ task: "one", access: "readOnly" },
 					{ task: "two", access: "readOnly" },
@@ -384,20 +384,21 @@ test("session tool wiring and end-to-end mission creation", async () => {
 	expect(typeof payload.id).toBe("string");
 	expect(payload.worktree).toBeNull();
 
-	// The mission is in the snapshot with two agents...
+	// The mission is in the snapshot with its lead and two workers...
 	const client = await connectNode();
 	closers.push(() => client.close());
 	const snapshot = await client.request<{ missions: Mission[]; agents: Agent[] }>("snapshot", {
 		workspaceId: WORKSPACE,
 	});
 	expect(snapshot.missions.map((m) => m.number)).toEqual([1]);
-	expect(snapshot.agents.filter((a) => a.missionId === payload.id)).toHaveLength(2);
+	expect(snapshot.agents.filter((a) => a.missionId === payload.id)).toHaveLength(3);
 	await client.close();
 
-	// ...and the log holds mission.created and two agent.spawned.
+	// ...and the log holds mission.created and three agent.spawned.
 	const page = await real.events.list(WORKSPACE, { limit: 100 });
-	expect(page.events.slice(-3).map((event) => event.kind)).toEqual([
+	expect(page.events.slice(-4).map((event) => event.kind)).toEqual([
 		"mission.created",
+		"agent.spawned",
 		"agent.spawned",
 		"agent.spawned",
 	]);

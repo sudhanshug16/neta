@@ -3,6 +3,19 @@ import { TOOLS, type ToolName, toolsFor, validate } from "../src/tools/schemas.t
 
 const ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
 
+test("old clients receive actionable validation for lead: self", () => {
+	const result = validate("neta_mission", {
+		name: "legacy",
+		objective: "work",
+		access: "readOnly",
+		lead: "self",
+	});
+	expect(result).toMatchObject({ ok: false, message: expect.stringContaining("separate mission lead") });
+	const schema = TOOLS.find((tool) => tool.name === "neta_mission")?.inputSchema.properties?.lead;
+	expect(schema?.oneOf).toBeUndefined();
+	expect(schema?.type).toBe("object");
+});
+
 interface SchemaCase {
 	name: ToolName;
 	valid: unknown;
@@ -14,7 +27,12 @@ interface SchemaCase {
 const CASES: SchemaCase[] = [
 	{
 		name: "neta_mission",
-		valid: { name: "payments retry", objective: "Retry failed payments.", access: "readWrite", lead: "self" },
+		valid: {
+			name: "payments retry",
+			objective: "Retry failed payments.",
+			access: "readWrite",
+			lead: { task: "Lead the retry", effort: 2 },
+		},
 		missing: { name: "x", objective: "y", access: "readOnly" },
 		wrongType: { name: "x", objective: "y", access: "readOnly", lead: 42 },
 	},

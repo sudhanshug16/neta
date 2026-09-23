@@ -113,11 +113,8 @@ function aboveMission(spec: Access, mission: Access): boolean {
 	return spec === "readWrite" && mission === "readOnly";
 }
 
-function allSkills(lead: "self" | LeadSpec, agents: AgentSpec[]): string[] {
-	const names: string[] = [];
-	if (lead !== "self" && lead.skills !== undefined) {
-		names.push(...lead.skills);
-	}
+function allSkills(lead: LeadSpec, agents: AgentSpec[]): string[] {
+	const names: string[] = [...(lead.skills ?? [])];
 	for (const spec of agents) {
 		if (spec.skills !== undefined) {
 			names.push(...spec.skills);
@@ -142,6 +139,7 @@ async function launchAgent(
 		routing?: RoutingDecision;
 	},
 	onReserved?: (agent: Agent) => Promise<void>,
+	identity?: { id: AgentId; sessionId: SessionId },
 ): Promise<Agent> {
 	if (ctx.deps.sessions.selectModel !== undefined) {
 		const provider = input.provider;
@@ -158,8 +156,8 @@ async function launchAgent(
 			fallbackModels,
 		};
 	}
-	const id = ulid();
-	const sessionId = ulid();
+	const id = identity?.id ?? ulid();
+	const sessionId = identity?.sessionId ?? ulid();
 	const name = pickName(input.taken, id);
 	input.taken.add(name);
 	const startedAt = nowIso();
@@ -207,6 +205,8 @@ async function launchAgent(
 		let live = reserved;
 		try {
 			const created = await ctx.deps.sessions.launch(launch);
+			if (input.canSpawn && created.sessionId === ctx.deps.store.getLeader(workspace.id)?.sessionId)
+				throw new Error("Mission lead session aliases the workspace leader; use a separate lead session.");
 			live = created.sessionId === sessionId ? reserved : { ...reserved, sessionId: created.sessionId };
 			if (live.sessionId !== reserved.sessionId) await ctx.deps.store.putAgent(live);
 			await ctx.deps.sessions.brief({ ...launch, sessionId: live.sessionId });
@@ -239,15 +239,19 @@ async function createMissionUnlocked(ctx: MissionToolContext, params: MissionPar
 	if (ctx.actor.kind !== "leader") {
 		return { ok: false, code: "notAuthorised", message: "only the leader starts missions" };
 	}
+	// Old clients can bypass the published schema. Refuse before routing, number
+	// allocation, worktree preparation, reservation or launch.
+	if (params.lead === "self" || typeof params.lead !== "object" || params.lead === null) {
+		return refused(
+			"lead: self is no longer supported. Supply a separate mission lead with a task and effort (1–5 unless a model is explicit).",
+		);
+	}
+	const leadSpec = params.lead;
 	const workspace = ctx.deps.store.getWorkspace(ctx.actor.workspaceId);
 	if (workspace === undefined) {
 		return notFound(`no such workspace: ${ctx.actor.workspaceId}`);
 	}
-	if (
-		[...(params.lead === "self" ? [] : [params.lead]), ...(params.agents ?? [])].some(
-			(spec) => spec.fallbackModels?.length,
-		)
-	)
+	if ([leadSpec, ...(params.agents ?? [])].some((spec) => spec.fallbackModels?.length))
 		return refused("fallbackModels is deprecated: automatic model switching is disabled. Omit it or pass [].");
 	if (params.recoverWorktree !== undefined && workspace.kind !== "git")
 		return refused("worktree recovery is available only for Git workspaces");
@@ -264,7 +268,7 @@ async function createMissionUnlocked(ctx: MissionToolContext, params: MissionPar
 	}
 	const skillCheck = ctx.deps.skills.check({
 		workspaceId: workspace.id,
-		names: allSkills(params.lead, params.agents ?? []),
+		names: allSkills(leadSpec, params.agents ?? []),
 	});
 	if (!skillCheck.ok) {
 		return { ok: false, code: "missingSkill", message: `unknown skill: ${skillCheck.missing}` };
@@ -277,7 +281,7 @@ async function createMissionUnlocked(ctx: MissionToolContext, params: MissionPar
 	// Resolve once before side effects. The launch path only validates the resolved ID.
 	const resolved = new Map<LeadSpec | AgentSpec, { provider: string; model: string; routing?: RoutingDecision }>();
 	if (ctx.deps.sessions.routeModel) {
-		for (const spec of [...(params.lead === "self" ? [] : [params.lead]), ...(params.agents ?? [])]) {
+		for (const spec of [leadSpec, ...(params.agents ?? [])]) {
 			const selection = await ctx.deps.sessions.routeModel({
 				workspaceId: workspace.id,
 				provider: spec.provider ?? leader.provider,
@@ -291,7 +295,7 @@ async function createMissionUnlocked(ctx: MissionToolContext, params: MissionPar
 	}
 	// Validate the entire staffing plan before creating a worktree or mission.
 	if (ctx.deps.sessions.selectModel) {
-		const specs = [...(params.lead === "self" ? [] : [params.lead]), ...(params.agents ?? [])];
+		const specs = [leadSpec, ...(params.agents ?? [])];
 		for (const spec of specs) {
 			await ctx.deps.sessions.selectModel({
 				workspaceId: workspace.id,
@@ -316,6 +320,15 @@ async function createMissionUnlocked(ctx: MissionToolContext, params: MissionPar
 			!(await ctx.deps.numbers.isAllocated(workspace.id, params.recoverWorktree.number)))
 	)
 		return refused(`mission #${params.recoverWorktree.number} is not an unused historical mission number`);
+	const leadIdentity = { id: ulid(), sessionId: ulid() };
+	if (
+		leadIdentity.id === leader.sessionId ||
+		leadIdentity.sessionId === leader.sessionId ||
+		leadIdentity.id === leadIdentity.sessionId
+	)
+		return refused(
+			"Mission lead must have a distinct actor and session from the workspace leader. Retry with a separate lead task and effort.",
+		);
 	const number = params.recoverWorktree?.number ?? (await ctx.deps.numbers.allocateNumber(workspace.id));
 	const createdAt = nowIso();
 	let mission: Mission = {
@@ -326,7 +339,7 @@ async function createMissionUnlocked(ctx: MissionToolContext, params: MissionPar
 		name: params.name,
 		objective: params.objective,
 		changes: [],
-		lead: { kind: "leader" },
+		lead: { kind: "agent", agentId: leadIdentity.id },
 		agentIds: [],
 		access: params.access,
 		state: "running",
@@ -370,53 +383,29 @@ async function createMissionUnlocked(ctx: MissionToolContext, params: MissionPar
 	// and on the spine would name one person twice.
 	const taken = new Set<string>([leader.name]);
 	const launched: Agent[] = [];
-	if (params.lead === "self" && leader.provider === "pi" && ctx.deps.sessions.pi === true) {
+	{
 		const lead = await launchAgent(
 			ctx,
 			mission,
 			workspace,
 			{
-				task: params.objective,
-				access: "readOnly",
-				provider: "pi",
-				model: leader.model,
-				skills: [],
-				canSpawn: true,
-				taken,
-			},
-			async (reserved) => {
-				mission.lead = { kind: "agent", agentId: reserved.id };
-				mission.agentIds.push(reserved.id);
-				await ctx.deps.missions.save(mission);
-			},
-		);
-		launched.push(lead);
-	} else if (params.lead === "self") {
-		mission.lead = { kind: "leader" };
-		await ctx.deps.store.putLeader({ ...leader, activeMissionId: mission.id });
-	} else {
-		const lead = await launchAgent(
-			ctx,
-			mission,
-			workspace,
-			{
-				task: params.lead.task,
+				task: leadSpec.task,
 				// Mission leads begin in Lead. The mission's write allowance is a
 				// ceiling; it does not grant effective writer access until Lead++.
 				access: "readOnly",
-				provider: resolved.get(params.lead)?.provider ?? params.lead.provider ?? leader.provider,
-				model: resolved.get(params.lead)?.model ?? params.lead.model ?? leader.model,
-				routing: resolved.get(params.lead)?.routing,
-				fallbackModels: params.lead.fallbackModels,
-				skills: params.lead.skills ?? [],
+				provider: resolved.get(leadSpec)?.provider ?? leadSpec.provider ?? leader.provider,
+				model: resolved.get(leadSpec)?.model ?? leadSpec.model ?? leader.model,
+				routing: resolved.get(leadSpec)?.routing,
+				fallbackModels: leadSpec.fallbackModels,
+				skills: leadSpec.skills ?? [],
 				canSpawn: true,
 				taken,
 			},
 			async (reserved) => {
-				mission.lead = { kind: "agent", agentId: reserved.id };
 				mission.agentIds.push(reserved.id);
 				await ctx.deps.missions.save(mission);
 			},
+			leadIdentity,
 		);
 		launched.push(lead);
 	}
@@ -495,6 +484,11 @@ async function createAgentUnlocked(ctx: MissionToolContext, params: AgentParams)
 		return refused("fallbackModels is deprecated: automatic model switching is disabled. Omit it or pass [].");
 	if (mission.state === "closed") {
 		return refused("the mission is closed");
+	}
+	if (mission.lead.kind === "leader") {
+		return refused(
+			"This legacy self-led mission cannot resume active work. Close it and create a new mission with a separate lead task and effort.",
+		);
 	}
 	if (aboveMission(params.access, mission.access)) {
 		return refused("a readWrite agent in a readOnly mission");

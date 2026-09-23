@@ -11,6 +11,7 @@
 
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { distinctMissionLead } from "../core/mission-lead.ts";
 import { nowIso } from "../core/time.ts";
 import type {
 	Access,
@@ -402,6 +403,15 @@ export function toolMount(o: ToolMountOptions): {
 	// one 06 call with no announcing follow-up is `refreshIntegration`, which
 	// nothing calls yet; whoever wires it announces its own save.
 	async function saveMission(mission: Mission, announce = true): Promise<void> {
+		if (mission.lead.kind === "agent") {
+			const leader = o.store.getLeader(mission.workspaceId);
+			const lead = o.store.getAgent(mission.lead.agentId);
+			if (!distinctMissionLead(mission, leader, lead)) {
+				throw new Error(
+					"Mission lead must have a distinct actor and session from the workspace leader. Supply a separate lead task and effort.",
+				);
+			}
+		}
 		const existing = await o.real.missions.get(mission.workspaceId, mission.id);
 		if (existing === undefined) {
 			await o.real.missions.create(mission);
@@ -1052,6 +1062,18 @@ export function toolMount(o: ToolMountOptions): {
 				getAgent: (id) => o.store.getAgent(id),
 				getMission: (id) => o.store.getMission(id),
 				putAgent: (agent) => o.store.putAgent(agent),
+				validateMission: (mission) => {
+					if (
+						!distinctMissionLead(
+							mission,
+							o.store.getLeader(mission.workspaceId),
+							mission.lead.kind === "agent" ? o.store.getAgent(mission.lead.agentId) : undefined,
+						)
+					)
+						throw new Error(
+							`Mission #${mission.number} cannot resume: its lead aliases the workspace leader. Close it and create a new mission with a separate lead task and effort.`,
+						);
+				},
 				saveMission: (mission) => missions.save(mission),
 				resume: (agent) => deps.sessions.resume(agent),
 				admit: async (sessionId, text, sourceId) => {
@@ -1284,6 +1306,21 @@ export function toolMount(o: ToolMountOptions): {
 				}
 				if (input.record === undefined)
 					return { approved: false, reason: "incompleteRecord", detail: "record is missing" };
+				const assigned = o.store.getMission(input.record.missionId);
+				if (
+					assigned &&
+					!distinctMissionLead(
+						assigned,
+						o.store.getLeader(assigned.workspaceId),
+						assigned.lead.kind === "agent" ? o.store.getAgent(assigned.lead.agentId) : undefined,
+					)
+				)
+					return {
+						approved: false,
+						reason: "notAuthorised",
+						detail:
+							"Close this legacy self-led mission and create a new mission with a separate lead task and effort.",
+					};
 				const approval = await modes.evaluateLeadPlus(input.subject, input.record);
 				if (!approval.approved) return approval;
 				const mission = o.store.getMission(input.record.missionId);
@@ -1411,6 +1448,19 @@ export function toolMount(o: ToolMountOptions): {
 			const leader = leaderOf(parsed.workspaceId);
 			const missionId = parsed.missionId ?? leader.activeMissionId;
 			const mission = missionId === undefined ? undefined : o.store.getMission(missionId);
+			if (
+				parsed.mode === "leadPlus" &&
+				mission &&
+				!distinctMissionLead(
+					mission,
+					leader,
+					mission.lead.kind === "agent" ? o.store.getAgent(mission.lead.agentId) : undefined,
+				)
+			)
+				throw new NodeError(
+					"INVALID_PARAMS",
+					`Mission #${mission.number} cannot resume self-led work. Close it and create a new mission with a separate lead task and effort.`,
+				);
 			if (parsed.missionId !== undefined && mission === undefined) {
 				throw new NodeError("NOT_FOUND", `no such mission: ${parsed.missionId}`);
 			}

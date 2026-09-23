@@ -6,6 +6,7 @@
 
 import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
+import { distinctMissionLead } from "../core/mission-lead.ts";
 import type { Block, PromptAttachment, Turn } from "../core/types.ts";
 import { startOpenCodeGateway } from "../opencode/gateway.ts";
 import { composeContext, loadCharter, loadSkills } from "../tools/context.ts";
@@ -109,6 +110,26 @@ export async function restoreNativeOwner(ctx: NodeContext, sessionId: string): P
 	const pending = restoringNative.get(sessionId);
 	if (pending) return pending;
 	const restore = (async () => {
+		const savedLeader = ctx.store.listLeaders().find((item) => item.sessionId === sessionId);
+		const savedAgent = ctx.store.listAgents().find((item) => item.sessionId === sessionId);
+		const savedMissionId = savedAgent?.missionId ?? savedLeader?.activeMissionId;
+		const savedMission = savedMissionId ? ctx.store.getMission(savedMissionId) : undefined;
+		const workspaceLeader = savedMission ? ctx.store.getLeader(savedMission.workspaceId) : undefined;
+		if (
+			savedAgent &&
+			savedMission &&
+			savedMission.state !== "closed" &&
+			!distinctMissionLead(
+				savedMission,
+				workspaceLeader,
+				savedMission.lead.kind === "agent" ? ctx.store.getAgent(savedMission.lead.agentId) : undefined,
+			)
+		) {
+			throw new NodeError(
+				"INVALID_PARAMS",
+				`Mission #${savedMission.number} has the workspace leader assigned as mission lead. Close it and create a new mission with a separate lead task and effort; its saved history remains available.`,
+			);
+		}
 		try {
 			if (ctx.runtime.nativeAttachment?.(sessionId)) return;
 		} catch (error) {

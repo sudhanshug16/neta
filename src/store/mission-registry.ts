@@ -138,6 +138,11 @@ export function openMissionRegistry(): MissionRegistry {
 		create: async (mission) => {
 			const state = await ensureLoaded(mission.workspaceId);
 			return state.mutex(async () => {
+				if (mission.lead.kind === "leader") {
+					throw new Error(
+						"A mission needs a separate mission lead. Supply a lead task and effort; the workspace leader cannot lead its own mission.",
+					);
+				}
 				if (state.index.get(mission.id) !== undefined) {
 					throw new Error(`mission ${mission.id} already exists`);
 				}
@@ -154,8 +159,19 @@ export function openMissionRegistry(): MissionRegistry {
 		update: async (mission) => {
 			const state = await ensureLoaded(mission.workspaceId);
 			return state.mutex(async () => {
-				if (state.index.get(mission.id) === undefined) {
+				const previous = state.index.get(mission.id);
+				if (previous === undefined) {
 					throw new Error(`mission ${mission.id} is unknown`);
+				}
+				// Historical self-led records may be updated for closeout, never assigned
+				// afresh or moved back into active operation.
+				if (
+					mission.lead.kind === "leader" &&
+					(previous.lead.kind !== "leader" || (previous.state === "closed" && mission.state !== "closed"))
+				) {
+					throw new Error(
+						"A mission needs a separate mission lead; close the legacy mission and create a delegated mission.",
+					);
 				}
 				await ensureDir(paths().missionsDir(mission.workspaceId));
 				const line: RegistryLine = { op: "update", at: nowIso(), mission };

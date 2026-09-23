@@ -118,9 +118,9 @@ leaders.
 
 A leader stays available for conversation and routes sustained work into
 missions. It may handle a small bounded task itself. Any task that writes is
-still represented by a mission so its isolation, access, and closeout remain
-visible; the workspace leader may act as that mission's lead instead of
-spawning another agent.
+   still represented by a mission so its isolation, access, and closeout remain
+   visible; it requires a separate mission lead. The workspace leader may use
+   Lead++ to review and integrate that mission's work.
 
 The workspace leader's conversation is continuous by default per workspace and
 machine. A person may explicitly reset the selected chat to a fresh provider
@@ -138,7 +138,7 @@ A mission contains:
   changes;
 - one owning workspace and machine;
 - one Worktrunk worktree for a Git workspace;
-- one mission lead, which may be the workspace leader for direct work;
+- one mission lead with an actor and conversation distinct from the workspace leader;
 - its agents and exact OpenCode conversation identifiers;
 - assigned models, skills, access state, progress, blockers, and terminal
   outcomes;

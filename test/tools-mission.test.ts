@@ -156,6 +156,49 @@ function ctx(f: Fixture, actor: Actor): MissionToolContext {
 }
 
 describe("neta_mission", () => {
+	test("old-client self assignment is refused before routing, worktree, number, reservation or launch", async () => {
+		const f = fixture("git");
+		let routed = 0;
+		let numbered = 0;
+		let leased = 0;
+		f.ports.sessions.routeModel = async () => {
+			routed++;
+			return undefined;
+		};
+		f.ports.numbers.allocateNumber = async () => {
+			numbered++;
+			return 1;
+		};
+		f.ports.leases.acquire = async () => {
+			leased++;
+			return "active";
+		};
+		const result = await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+			name: "old client",
+			objective: "reject self",
+			access: "readWrite",
+			lead: "self",
+		});
+		expect(result).toMatchObject({ ok: false, code: "refused" });
+		expect([routed, numbered, leased]).toEqual([0, 0, 0]);
+		expect(f.prepares).toHaveLength(0);
+		expect(f.saved).toHaveLength(0);
+		expect(f.launches).toHaveLength(0);
+	});
+	test("delegation persists a distinct lead from its first save", async () => {
+		const f = fixture("folder");
+		const result = await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+			name: "delegated",
+			objective: "work",
+			access: "readOnly",
+			lead: { task: "lead the work", effort: 2 },
+		});
+		expect(result.ok).toBe(true);
+		const leaderSession = f.store.getLeader("folder-w")?.sessionId;
+		expect(f.saved.every((m) => m.lead.kind === "agent" && m.lead.agentId !== leaderSession)).toBe(true);
+		expect(f.launches[0]?.sessionId).not.toBe(leaderSession);
+		expect(f.saved[0]?.lead).toEqual({ kind: "agent", agentId: f.launches[0]?.agentId });
+	});
 	test("real Worktrunk runs setup in the new worktree, launches the fake agent there, and blocks launch on setup failure", async () => {
 		const repo = await makeRepo();
 		const temp = await mkdtemp(join(tmpdir(), "neta-real-worktrunk-"));
@@ -342,7 +385,7 @@ describe("neta_mission", () => {
 			name: "lens port",
 			objective: "port the lens",
 			access: "readOnly",
-			lead: "self",
+			lead: { task: "port the lens" },
 		});
 		expect(gitResult.ok).toBe(true);
 		expect(git.prepares).toHaveLength(1);
@@ -356,7 +399,7 @@ describe("neta_mission", () => {
 			name: "docs pass",
 			objective: "pass over docs",
 			access: "readOnly",
-			lead: "self",
+			lead: { task: "pass over docs" },
 		});
 		expect(folderResult.ok).toBe(true);
 		expect(folder.prepares).toHaveLength(0);
@@ -410,7 +453,7 @@ describe("neta_mission", () => {
 			name: "legacy",
 			objective: "o",
 			access: "readOnly",
-			lead: "self",
+			lead: { task: "recover work" },
 			recoverWorktree: {
 				number: 4,
 				path: "/x",
@@ -434,7 +477,7 @@ describe("neta_mission", () => {
 			name: "legacy",
 			objective: "o",
 			access: "readOnly",
-			lead: "self",
+			lead: { task: "recover work" },
 			recoverWorktree: {
 				number: 4,
 				path: "/x",
@@ -454,11 +497,11 @@ describe("neta_mission", () => {
 				name,
 				objective: "o",
 				access: "readOnly",
-				lead: "self",
+				lead: { task: "run it" },
 			});
 			expect(result.ok).toBe(true);
 		}
-		expect(f.saved.map((m) => m.number)).toEqual([1, 1, 2, 2]);
+		expect(f.saved.map((m) => m.number)).toEqual([1, 1, 1, 2, 2, 2]);
 	});
 
 	test("mission.created precedes every agent.spawned", async () => {
@@ -482,7 +525,7 @@ describe("neta_mission", () => {
 		expect(mission?.lead).toEqual({ kind: "agent", agentId: mission?.agentIds[0] });
 	});
 
-	test("lead self sets the leader's active mission and launches nothing", async () => {
+	test("old self assignment never sets the leader's active mission", async () => {
 		const f = fixture("folder");
 		const result = await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
 			name: "solo",
@@ -490,14 +533,13 @@ describe("neta_mission", () => {
 			access: "readOnly",
 			lead: "self",
 		});
-		expect(result.ok).toBe(true);
+		expect(result.ok).toBe(false);
 		expect(f.launches).toHaveLength(0);
-		const id = result.ok ? (result.data.id as string) : "";
-		expect(f.store.getLeader("folder-w")?.activeMissionId).toBe(id);
-		expect(f.saved[0]?.lead).toEqual({ kind: "leader" });
+		expect(f.store.getLeader("folder-w")?.activeMissionId).toBeUndefined();
+		expect(f.saved).toHaveLength(0);
 	});
 
-	test("Pi lead self launches one distinct mission lead session", async () => {
+	test("Pi delegates to a distinct mission lead session", async () => {
 		const f = fixture("folder");
 		const leader = f.store.getLeader("folder-w");
 		if (leader === undefined) throw new Error("missing leader fixture");
@@ -507,7 +549,7 @@ describe("neta_mission", () => {
 			name: "pi solo",
 			objective: "run the mission objective",
 			access: "readOnly",
-			lead: "self",
+			lead: { task: "run the mission objective" },
 		});
 		expect(result.ok).toBe(true);
 		expect(f.launches).toHaveLength(1);
@@ -525,7 +567,7 @@ describe("neta_mission", () => {
 			name: "bad mix",
 			objective: "o",
 			access: "readOnly",
-			lead: "self",
+			lead: { task: "lead the work" },
 			agents: [{ task: "sneaky", access: "readWrite" }],
 		});
 		expect(result).toEqual({ ok: false, code: "refused", message: "a readWrite agent in a readOnly mission" });
@@ -556,7 +598,7 @@ describe("neta_mission", () => {
 			name: " sequel",
 			objective: "o",
 			access: "readOnly",
-			lead: "self",
+			lead: { task: "lead the work" },
 			continues: ulid(),
 		});
 		expect(result.ok).toBe(false);
@@ -566,21 +608,21 @@ describe("neta_mission", () => {
 		expect(f.saved).toHaveLength(0);
 	});
 
-	test("a self-led mission does not take writer access before Lead++", async () => {
+	test("a delegated mission lead does not take writer access before Lead++", async () => {
 		const f = fixture("folder", { lease: "queued" });
 		const result = await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
 			name: "queued work",
 			objective: "o",
 			access: "readWrite",
-			lead: "self",
+			lead: { task: "lead queued work" },
 		});
 		expect(result.ok).toBe(true);
 		if (result.ok) {
 			expect(result.data.queued).toBeUndefined();
 			expect(result.data.worktree).toBeNull();
 		}
-		expect(f.saved).toHaveLength(2);
-		expect(f.events).toEqual(["mission.created"]);
+		expect(f.saved).toHaveLength(3);
+		expect(f.events).toEqual(["mission.created", "agent.spawned"]);
 	});
 
 	test("a delegated lead begins readOnly and does not consume the writer lease", async () => {
@@ -686,7 +728,7 @@ describe("neta_agent", () => {
 			name: "read only",
 			objective: "o",
 			access: "readOnly",
-			lead: "self",
+			lead: { task: "lead the work" },
 		});
 		if (!created.ok) {
 			throw new Error("setup failed");
@@ -739,17 +781,17 @@ test("worker model selection is persisted before launch and before writer queue 
 			name: "connected workers",
 			objective: "inspect",
 			access: "readWrite",
-			lead: "self",
+			lead: { task: "lead inspection" },
 			agents: [{ task: "inspect", access: "readWrite", provider: "codex", model: "obsolete" }],
 		});
 		expect(result.ok).toBe(true);
 		const mission = f.store.listMissions(f.leaderActor.workspaceId)[0];
 		if (!mission) throw new Error("missing mission");
-		const agent = f.store.listAgents(mission.id)[0];
+		const agent = f.store.listAgents(mission.id).find((a) => !a.canSpawn);
 		expect(agent?.provider).toBe("opencode");
 		expect(agent?.model).toBe("openai/connected");
-		if (lease === "active") expect(f.launches[0]?.model).toBe("openai/connected");
-		else expect(f.launches).toHaveLength(0);
+		if (lease === "active") expect(f.launches.at(-1)?.model).toBe("openai/connected");
+		else expect(f.launches).toHaveLength(1);
 	}
 });
 
@@ -763,7 +805,7 @@ test("unavailable staffing model leaves no mission or agent behind", async () =>
 			name: "light worker",
 			objective: "inspect branch",
 			access: "readOnly",
-			lead: "self",
+			lead: { task: "lead inspection" },
 			agents: [{ task: "inspect", access: "readOnly", model: "missing-small" }],
 		}),
 	).rejects.toThrow("requested model unavailable");
@@ -777,7 +819,7 @@ test("nonempty legacy fallback lists are rejected before reservation; empty list
 		name: "invalid plan",
 		objective: "inspect",
 		access: "readOnly",
-		lead: "self",
+		lead: { task: "lead inspection" },
 		agents: [{ task: "inspect", access: "readOnly", model: "small", fallbackModels: ["unavailable"] }],
 	});
 	expect(denied).toMatchObject({ ok: false, message: expect.stringContaining("fallbackModels is deprecated") });
@@ -882,7 +924,7 @@ test("adding an agent passes mission context and effort to routing exactly once"
 		name: "check",
 		objective: "Read repository status",
 		access: "readOnly",
-		lead: "self",
+		lead: { task: "lead inspection" },
 	});
 	let calls = 0;
 	f.ports.sessions.routeModel = async (input) => {
@@ -894,8 +936,9 @@ test("adding an agent passes mission context and effort to routing exactly once"
 		task: "inspect branch",
 		access: "readOnly",
 		effort: 2,
+		missionId: f.saved[0]?.number,
 	});
 	expect(response.ok).toBe(true);
 	expect(calls).toBe(1);
-	expect(f.launches[0].model).toBe("openai/luna");
+	expect(f.launches.at(-1)?.model).toBe("openai/luna");
 });

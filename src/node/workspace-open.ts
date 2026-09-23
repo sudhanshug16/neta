@@ -13,6 +13,7 @@ import { execFile } from "node:child_process";
 import { realpath, stat } from "node:fs/promises";
 import { basename } from "node:path";
 import { ulid } from "../core/ids.ts";
+import { distinctMissionLead } from "../core/mission-lead.ts";
 import { pickName } from "../core/names.ts";
 import { nowIso } from "../core/time.ts";
 import type { Leader, Workspace, WorkspaceKind } from "../core/types.ts";
@@ -202,8 +203,26 @@ async function reviveLeader(ctx: NodeContext, leader: Leader, workspace: Workspa
 	let sessionCwd = cwd;
 	if (leader.mode === "leadPlus") {
 		const mission = leader.activeMissionId === undefined ? undefined : ctx.store.getMission(leader.activeMissionId);
-		if (mission === undefined || mission.state === "closed") {
-			effective = { ...leader, mode: "lead", modeSince: nowIso(), modeActiveMs: 0 };
+		if (
+			mission === undefined ||
+			mission.state === "closed" ||
+			!distinctMissionLead(
+				mission,
+				leader,
+				mission.lead.kind === "agent" ? ctx.store.getAgent(mission.lead.agentId) : undefined,
+			)
+		) {
+			effective = {
+				...leader,
+				mode: "lead",
+				modeSince: nowIso(),
+				modeActiveMs: 0,
+				...(mission && mission.state !== "closed"
+					? {
+							startupError: `Mission #${mission.number} cannot resume self-led work. Close it and create a new mission with a separate lead task and effort.`,
+						}
+					: {}),
+			};
 			await ctx.store.putLeader(effective);
 			ctx.hub.broadcast("state", { kind: "leader", record: effective });
 		} else {
