@@ -4,6 +4,7 @@
 // anything is spawned, so a refusal leaves no sessions behind.
 
 import { ulid } from "../../core/ids.ts";
+import { distinctMissionLead } from "../../core/mission-lead.ts";
 import { pickName } from "../../core/names.ts";
 import { nowIso } from "../../core/time.ts";
 import type {
@@ -510,7 +511,13 @@ async function createAgentUnlocked(ctx: MissionToolContext, params: AgentParams)
 	if (mission.state === "closed") {
 		return refused("the mission is closed");
 	}
-	if (mission.lead.kind === "leader") {
+	if (
+		!distinctMissionLead(
+			mission,
+			ctx.deps.store.getLeader(mission.workspaceId),
+			mission.lead.kind === "agent" ? ctx.deps.store.getAgent(mission.lead.agentId) : undefined,
+		)
+	) {
 		return refused(
 			"This legacy self-led mission cannot resume active work. Close it and create a new mission with a separate lead task and effort.",
 		);

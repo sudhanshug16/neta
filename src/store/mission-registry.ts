@@ -188,6 +188,17 @@ export function openMissionRegistry(identities: RegistryIdentityLookup = durable
 				if (previous === undefined) {
 					throw new Error(`mission ${mission.id} is unknown`);
 				}
+				if (
+					previous.state === "closed" &&
+					(previous.lead.kind !== mission.lead.kind ||
+						(previous.lead.kind === "agent" &&
+							mission.lead.kind === "agent" &&
+							previous.lead.agentId !== mission.lead.agentId))
+				) {
+					throw new Error(
+						"A closed mission cannot be reassigned; create a new mission with a separate lead task and effort.",
+					);
+				}
 				// Historical self-led records may be updated for closeout, never assigned
 				// afresh or moved back into active operation.
 				if (

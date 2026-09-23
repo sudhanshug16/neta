@@ -27,6 +27,7 @@ import { connectNode, type NodeClient } from "../src/node/client.ts";
 import { type Node as NetaNode, startNode } from "../src/node/lifecycle.ts";
 import type { ConversationTailResult, StateNotification, TurnNotification } from "../src/node/protocol.ts";
 import { appendLine } from "../src/store/files.ts";
+import { openMissionRegistry } from "../src/store/mission-registry.ts";
 import { paths } from "../src/store/paths.ts";
 import { startLegacySession } from "./fixtures/legacy-acp-runtime.ts";
 
@@ -1420,6 +1421,113 @@ test("a saved self-led mission remains readable and closeable without resuming s
 		await second.client.close();
 	}
 }, 90000);
+
+for (const alias of ["actor", "session"] as const) {
+	test(`normal neta_close preserves a saved agent-led ${alias} alias and the workspace leader session`, async () => {
+		await writeSettings(join(dir, "historical-alias-sessions.json"));
+		node = await startNode({ sessionFactory: startLegacySession });
+		const first = await attach();
+		const leader = first.leader;
+		const id = alias === "actor" ? leader.sessionId : ulid();
+		const agent: Agent = {
+			id,
+			missionId: ulid(),
+			workspaceId: leader.workspaceId,
+			name: "Historical lead",
+			task: "Review historical work",
+			access: "readOnly",
+			provider: leader.provider,
+			model: leader.model,
+			skills: [],
+			sessionId: leader.sessionId,
+			canSpawn: true,
+			state: "completed",
+			startedAt: new Date().toISOString(),
+		};
+		const mission = {
+			id: agent.missionId,
+			number: 1,
+			workspaceId: leader.workspaceId,
+			machineId: leader.machineId,
+			name: "Historical agent lead",
+			objective: "Close saved work",
+			changes: [],
+			lead: { kind: "agent" as const, agentId: agent.id },
+			agentIds: [agent.id],
+			access: "readOnly" as const,
+			state: "readyToClose" as const,
+			createdAt: new Date().toISOString(),
+		};
+		await first.client.close();
+		await node.stop();
+		await writeFile(join(dir, "agents.json"), JSON.stringify({ [agent.id]: agent }));
+		await appendLine(paths().registryLog(leader.workspaceId), { op: "create", at: mission.createdAt, mission });
+		node = await startNode({ sessionFactory: startLegacySession });
+		const second = await attach();
+		try {
+			const before = await second.client.request<{ missions: Array<{ id: string; lead: { agentId: string } }> }>(
+				"snapshot",
+				{},
+			);
+			expect(before.missions.find((one) => one.id === mission.id)?.lead.agentId).toBe(agent.id);
+			const actor = await leaderActor(second);
+			const refused = await second.client.request<{ isError: boolean; content: Array<{ text: string }> }>(
+				"tools.call",
+				{
+					...actor,
+					name: "neta_agent",
+					arguments: { missionId: 1, task: "Resume old work", access: "readOnly" },
+				},
+			);
+			expect(second.leader.sessionId).toBe(leader.sessionId);
+			expect(refused.isError).toBe(true);
+			expect(refused.content[0]?.text).toContain("legacy self-led mission cannot resume");
+			await expect(
+				second.client.request("leader.setMode", {
+					workspaceId: leader.workspaceId,
+					missionId: mission.id,
+					mode: "leadPlus",
+				}),
+			).rejects.toThrow("cannot resume self-led work");
+			const closed = await second.client.request<{ isError: boolean; content: Array<{ text: string }> }>(
+				"tools.call",
+				{
+					...actor,
+					name: "neta_close",
+					arguments: { missionId: 1, disposition: "completed", reason: "Historical review finished" },
+				},
+			);
+			expect(closed.isError).toBe(false);
+			const after = await second.client.request<{
+				missions: Array<{ id: string; state: string; lead: { agentId: string } }>;
+				leaders: Leader[];
+				agents: Agent[];
+			}>("snapshot", {});
+			expect(after.missions.find((one) => one.id === mission.id)).toMatchObject({
+				state: "closed",
+				lead: { kind: "agent", agentId: agent.id },
+			});
+			expect(after.leaders[0]?.sessionId).toBe(leader.sessionId);
+			expect(after.agents.filter((one) => one.missionId === mission.id).map((one) => one.id)).toEqual([agent.id]);
+			const registry = openMissionRegistry();
+			expect((await registry.get(leader.workspaceId, mission.id))?.state).toBe("closed");
+			await expect(registry.update(mission)).rejects.toThrow("must differ");
+			const reassigned = { ...mission, state: "closed" as const, lead: { kind: "agent" as const, agentId: ulid() } };
+			await expect(registry.update(reassigned)).rejects.toThrow("closed mission cannot be reassigned");
+			await second.client.request("conversation.prompt", {
+				sessionId: leader.sessionId,
+				text: "LEADER_AFTER_LEGACY_CLOSE",
+			});
+			await waitFor("workspace leader after historical close", () =>
+				second.turns.find(
+					(turn) => turn.sessionId === leader.sessionId && turn.block?.text?.includes("LEADER_AFTER_LEGACY_CLOSE"),
+				),
+			);
+		} finally {
+			await second.client.close();
+		}
+	}, 90000);
+}
 
 test("the fake ACP creates a mission through the injected MCP stdio proxy", async () => {
 	const control = await shortTempDir("neta-mcp-e2e-");

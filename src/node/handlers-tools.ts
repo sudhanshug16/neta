@@ -407,13 +407,21 @@ export function toolMount(o: ToolMountOptions): {
 		if (mission.lead.kind === "agent") {
 			const leader = o.store.getLeader(mission.workspaceId);
 			const lead = o.store.getAgent(mission.lead.agentId);
+			// Both the worktree close callback and neta_close save the terminal record.
+			// A saved historical alias may pass through those saves without assigning
+			// or reviving its lead; every active save still requires distinct identities.
+			const historicalClose =
+				mission.state === "closed" &&
+				existing?.lead.kind === "agent" &&
+				existing.lead.agentId === mission.lead.agentId;
 			if (
-				!lead ||
-				lead.missionId !== mission.id ||
-				lead.workspaceId !== mission.workspaceId ||
-				!lead.canSpawn ||
-				!mission.agentIds.includes(lead.id) ||
-				!distinctMissionLead(mission, leader, lead)
+				!historicalClose &&
+				(!lead ||
+					lead.missionId !== mission.id ||
+					lead.workspaceId !== mission.workspaceId ||
+					!lead.canSpawn ||
+					!mission.agentIds.includes(lead.id) ||
+					!distinctMissionLead(mission, leader, lead))
 			) {
 				throw new Error(
 					"Mission lead must be a reserved, separate actor and session for this mission. Supply a separate lead task and effort.",
@@ -1029,6 +1037,16 @@ export function toolMount(o: ToolMountOptions): {
 						mission: input.mission,
 					};
 				}
+				// Historical alias closeout must not relaunch the workspace leader's
+				// session as the saved mission lead, even if an old Lead++ mode remains.
+				if (
+					!distinctMissionLead(
+						input.mission,
+						o.store.getLeader(input.mission.workspaceId),
+						input.mission.lead.kind === "agent" ? o.store.getAgent(input.mission.lead.agentId) : undefined,
+					)
+				)
+					return worktrees.close({ ...input, repositoryRoot: rootFor(input.mission.workspaceId) });
 				const subject: ModeSubject =
 					input.mission.lead.kind === "agent"
 						? {
