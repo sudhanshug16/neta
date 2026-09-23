@@ -208,6 +208,8 @@ directory named by `NETA_DIR` when that variable is set
     registry.snapshot.json          periodic compaction of the log
   events/<id>/<yyyy-mm>.ndjson      append-only event lines
   events/<id>/seq                   next event sequence number
+  me/state.json                     machine-global captured sources, cards,
+                                    event checkpoints, and route receipts
   conversations/<session>.ndjson    append-only turn and block lines
   conversations/<session>.meta.json provider, model, vendor session id
   worktrees/<id>.json               lease state and queue
@@ -239,6 +241,14 @@ missing sequence file upward from the newest month file
 block and serve reads by byte-offset cursor, so a client tails a live
 conversation by passing the previous cursor back and the Node never
 loads a whole history into memory (`src/store/conversations.ts`).
+
+The Node captures selected attention-relevant lifecycle events into the
+machine-global Me store. Capture is durable before the per-workspace event
+checkpoint advances. On startup the Node replays events after that checkpoint;
+event identity makes a crash/retry idempotent. This capture path does not start
+the Luna classifier or make a feed visibility decision. Agent turns, permission
+requests, Sol's native session, and route delivery remain separate integration
+work.
 
 ## Missions
 

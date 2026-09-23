@@ -44,6 +44,8 @@ import type {
 	TurnId,
 	WorkspaceId,
 } from "../core/types.ts";
+import { captureMeEvent, replayMeEvents } from "../me/capture.ts";
+import { openMeStore } from "../me/store.ts";
 import { nativeEndpointReady } from "../opencode/attachment.ts";
 import { openCodeInvocation } from "../opencode/runtime.ts";
 import { createPiTerminalManager } from "../pi/manager.ts";
@@ -207,6 +209,21 @@ export async function adaptStore(real: Store): Promise<AdaptedStore> {
 	}
 	const agents = new Map<AgentId, Agent>(Object.entries((await readJson<Record<AgentId, Agent>>(agentsPath())) ?? {}));
 	const agentsMutex = createMutex();
+	const me = openMeStore();
+	const meContext = () => ({
+		workspaces: [...workspaces.values()],
+		leaders: [...leaders.values()],
+		agents: [...agents.values()],
+		missions: [...missions.values()],
+	});
+	const appendEvent = async (input: Omit<Event, "seq" | "at">): Promise<Event> => {
+		const event = await real.events.append(input);
+		await captureMeEvent(me, event, meContext());
+		await me.setCheckpoint({
+			workspaces: [{ workspaceId: event.workspaceId, eventSeq: event.seq, turns: [] }],
+		});
+		return event;
+	};
 
 	// Registry dirs with no workspace record yet (seeded out-of-band): their
 	// missions still belong in the mirror.
@@ -281,7 +298,7 @@ export async function adaptStore(real: Store): Promise<AdaptedStore> {
 				await real.missions.compact(workspaceId);
 			}
 		},
-		appendEvent: (event) => real.events.append(event),
+		appendEvent,
 		listEvents: async (query) => {
 			if (query.cursor !== undefined) {
 				checkEventCursor(query.cursor);
@@ -1835,6 +1852,22 @@ export async function startNode(o?: {
 				kind: "node.restarted",
 				data: { agents: entry.agents },
 			});
+		}
+		if (realStore !== undefined) {
+			const me = openMeStore();
+			for (const workspace of storePort.listWorkspaces()) {
+				await replayMeEvents({
+					store: me,
+					workspaceId: workspace.id,
+					read: (sinceSeq, limit) => realStore?.events.tail(workspace.id, sinceSeq, limit) ?? Promise.resolve([]),
+					context: () => ({
+						workspaces: storePort.listWorkspaces(),
+						leaders: storePort.listLeaders(),
+						agents: storePort.listAgents(),
+						missions: storePort.listMissions(),
+					}),
+				});
+			}
 		}
 		const token = newToken();
 		const descriptor: NodeDescriptor = {
