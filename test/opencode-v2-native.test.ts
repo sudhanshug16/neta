@@ -360,10 +360,12 @@ test.skipIf(!nativeReady)(
 							join(process.env.NETA_TUI_CAPTURE_DIR, "live-narrow.ansi"),
 							await tmux("capture-pane", "-e", "-p", "-t", "migration"),
 						);
-					await tmux("send-keys", "-t", "migration", "-l", "/help");
+					await tmux("send-keys", "-t", "migration", "C-p");
 					await Bun.sleep(250);
-					await tmux("send-keys", "-t", "migration", "Tab");
+					await tmux("send-keys", "-t", "migration", "-l", "Spine help");
+					await tmux("send-keys", "-t", "migration", "Enter");
 					await Bun.sleep(350);
+					expect(await tmux("capture-pane", "-p", "-t", "migration")).toContain("Spine help");
 					expect(await tmux("capture-pane", "-p", "-t", "migration")).toContain("Archived missions");
 					await tmux("send-keys", "-t", "migration", "Escape");
 					await tmux("resize-window", "-t", "migration", "-x", "140", "-y", "44");
@@ -448,8 +450,9 @@ test.skipIf(!nativeReady)(
 							);
 							await tmux("send-keys", "-t", "migration:visual", "Escape");
 							await waitVisual("Commands", false);
-							await tmux("send-keys", "-t", "migration:visual", "-l", "/help");
-							await tmux("send-keys", "-t", "migration:visual", "Tab");
+							await tmux("send-keys", "-t", "migration:visual", "C-p");
+							await tmux("send-keys", "-t", "migration:visual", "-l", "Spine help");
+							await tmux("send-keys", "-t", "migration:visual", "Enter");
 							await waitVisual("Spine help");
 							await tmux("send-keys", "-t", "migration:visual", "-l", "Archived missions");
 							await tmux("send-keys", "-t", "migration:visual", "Enter");
