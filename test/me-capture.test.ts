@@ -4,7 +4,13 @@ import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Agent, Block, Event, Leader, Mission, Turn, Workspace } from "../src/core/types.ts";
-import { captureMeEvent, captureMeLeaderTurn, replayMeEvents, replayMeLeaderTurns } from "../src/me/capture.ts";
+import {
+	captureMeEvent,
+	captureMeLeaderTurn,
+	captureMePermissionRequest,
+	replayMeEvents,
+	replayMeLeaderTurns,
+} from "../src/me/capture.ts";
 import { openMeStore } from "../src/me/store.ts";
 
 const original = process.env.NETA_DIR;
@@ -70,6 +76,50 @@ function fixture() {
 	const context = { workspaces: [workspace], leaders: [leader], agents: [agent], missions: [mission] };
 	return { store: openMeStore(), context, workspace, leader, agent, mission };
 }
+
+test("permission audit capture keeps the native policy outcome visible without turning it into an approval", async () => {
+	const { store, workspace } = fixture();
+	const captured = await captureMePermissionRequest({
+		store,
+		workspace,
+		sessionId: "agent-session-A",
+		actorKind: "agent",
+		missionId: "mission-A",
+		request: {
+			id: "per_fixture",
+			action: "edit",
+			resources: ["src/feature.ts"],
+			message: "The tool requested write access.",
+		},
+		disposition: "reject",
+	});
+	expect(captured).toMatchObject({
+		kind: "permission",
+		explicit: true,
+		forceVisible: true,
+		destinationSessionIds: ["agent-session-A"],
+		missionId: "mission-A",
+	});
+	expect(captured.text).toContain("Existing runtime policy disposition: rejected.");
+	expect(captured.text).toContain("src/feature.ts");
+	expect(
+		(
+			await captureMePermissionRequest({
+				store,
+				workspace,
+				sessionId: "agent-session-A",
+				actorKind: "agent",
+				missionId: "mission-A",
+				request: {
+					id: "per_fixture",
+					action: "edit",
+					resources: ["different-retry-payload"],
+				},
+				disposition: "once",
+			})
+		).id,
+	).toBe(captured.id);
+});
 
 function event(seq: number, overrides: Partial<Event> = {}): Event {
 	return {

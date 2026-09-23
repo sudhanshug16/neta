@@ -473,6 +473,24 @@ export async function startOpenCodeSession(opts: StartOptions): Promise<RuntimeS
 							].includes(action)
 								? "once"
 								: "reject";
+						try {
+							const message = string(data.message);
+							await opts.onPermissionRequest?.(
+								{
+									id: string(data.id) ?? "",
+									action,
+									resources: Array.isArray(data.resources)
+										? data.resources
+												.filter((value): value is string => typeof value === "string")
+												.slice(0, 32)
+										: [],
+									...(message === undefined ? {} : { message }),
+								},
+								reply,
+							);
+						} catch {
+							// Preserve the current native permission policy if Me audit persistence is unavailable.
+						}
 						await api.request(
 							"POST",
 							`${sessionPath(vendorSessionId)}/permission/${encodeURIComponent(string(data.id) ?? "")}/reply`,
@@ -618,11 +636,11 @@ export async function startOpenCodeSession(opts: StartOptions): Promise<RuntimeS
 					? "cancelled"
 					: terminal === "failed"
 						? "error"
-					: finish === "length"
-						? "max_tokens"
-						: finish === "content-filter"
-							? "refusal"
-							: "end_turn";
+						: finish === "length"
+							? "max_tokens"
+							: finish === "content-filter"
+								? "refusal"
+								: "end_turn";
 			push({ type: "turnEnd", turnId, stopReason, cancelled: stopReason === "cancelled" });
 		} catch (error) {
 			if (openTurnId !== turnId || closed) return;

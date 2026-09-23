@@ -259,7 +259,8 @@ the authenticated OpenCode runtime and a persisted read-only session with Neta
 tools disabled. It runs only when `meCurator.enabled` is explicitly set to
 `true` in `~/.neta/settings.json`. It is off by default. Model/transport errors leave
 sources pending for retry on a later relevant event or Node restart.
-Permission-request capture remains separate integration work.
+Permission events are captured with the disposition applied by the existing
+OpenCode/Neta permission policy; Superleader does not grant additional access.
 
 ## Missions
 

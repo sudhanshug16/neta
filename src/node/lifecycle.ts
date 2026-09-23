@@ -44,7 +44,13 @@ import type {
 	TurnId,
 	WorkspaceId,
 } from "../core/types.ts";
-import { captureMeEvent, captureMeLeaderTurn, replayMeEvents, replayMeLeaderTurns } from "../me/capture.ts";
+import {
+	captureMeEvent,
+	captureMeLeaderTurn,
+	captureMePermissionRequest,
+	replayMeEvents,
+	replayMeLeaderTurns,
+} from "../me/capture.ts";
 import { createMeCurator } from "../me/curator.ts";
 import { createRuntimeMeClassifier } from "../me/runtime-curator.ts";
 import { openMeStore } from "../me/store.ts";
@@ -466,6 +472,11 @@ export function adaptRuntime(
 	inboxGuard?: (message: InboxMessage) => Promise<boolean>,
 	sessionFactory: (options: StartOptions) => Promise<RuntimeSession> = startSession,
 	systemContextRole?: (sessionId: string) => "leader" | "lead" | "agent" | "orchestrator" | "curator" | undefined,
+	onPermissionRequest?: (
+		sessionId: string,
+		request: { id: string; action: string; resources: string[]; message?: string },
+		decision: "once" | "reject",
+	) => Promise<void>,
 ): AdaptedRuntime {
 	const makeSession = sessionFactory;
 	const sessionLifecycle = new SessionLifecycle();
@@ -984,6 +995,9 @@ export function adaptRuntime(
 				actorId,
 				sessionId: o.sessionId,
 				steeringSafe: launch.steeringSafe,
+				...(onPermissionRequest === undefined
+					? {}
+					: { onPermissionRequest: (request, decision) => onPermissionRequest(o.sessionId, request, decision) }),
 				...(o.resumeVendorSessionId === undefined ? {} : { resumeVendorSessionId: o.resumeVendorSessionId }),
 			});
 		} catch (error) {
@@ -1860,6 +1874,22 @@ export async function startNode(o?: {
 						: sessionId === curatorSessionId
 							? "curator"
 							: undefined,
+				async (sessionId, request, decision) => {
+					if (realStore === undefined) return;
+					const actor = glanceActorForSession(storePort, sessionId);
+					const workspace = actor ? storePort.getWorkspace(actor.workspaceId) : undefined;
+					if (!actor || !workspace) return;
+					const captured = await captureMePermissionRequest({
+						store: openMeStore(),
+						workspace,
+						sessionId,
+						actorKind: actor.actorKind,
+						...(actor.missionId === undefined ? {} : { missionId: actor.missionId }),
+						request,
+						disposition: decision,
+					});
+					if (captured.id) scheduleMeCurator();
+				},
 			);
 			runtimePort = adaptedRuntime;
 		} else {

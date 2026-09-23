@@ -891,6 +891,7 @@ for await (const line of createInterface({ input: process.stdin })) {
 				text: "Inspect the downloaded evidence read-only.",
 			});
 			const directProvider = { ...legacyProvider, command: "opencode", args: ["serve"] };
+			const permissionRequests: Array<{ id: string; action: string; resources: string[]; decision: string }> = [];
 			const reader = await startSession({
 				settings: {
 					providers: { opencode: directProvider },
@@ -903,6 +904,9 @@ for await (const line of createInterface({ input: process.stdin })) {
 				sessionId: evidenceSession,
 				bindingGeneration: generation,
 				mcpServers: [{ name: "neta", command: process.execPath, args: [fixtureMcp], env: [] }],
+				onPermissionRequest: async (request, decision) => {
+					permissionRequests.push({ ...request, decision });
+				},
 			});
 			try {
 				const endpoint = reader.nativeAttachment;
@@ -960,6 +964,9 @@ for await (const line of createInterface({ input: process.stdin })) {
 					if (event.type === "turnEnd") break;
 				}
 				expect(externalRead).toBe(false);
+				expect(permissionRequests).toContainEqual(
+					expect.objectContaining({ action: "external_directory", decision: "once" }),
+				);
 				expect(events.at(-1)).toMatchObject({ type: "turnEnd", stopReason: "end_turn", cancelled: false });
 				expect(events.some((event) => event.type === "turn" && event.turn.failed)).toBe(false);
 				expect(

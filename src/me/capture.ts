@@ -129,6 +129,41 @@ export async function captureMeLeaderTurn(input: {
 	return captured.id.length > 0;
 }
 
+export async function captureMePermissionRequest(input: {
+	store: MeStore;
+	workspace: Workspace;
+	sessionId: string;
+	actorKind: MeSource["actorKind"];
+	missionId?: string;
+	request: { id: string; action: string; resources: string[]; message?: string };
+	disposition: "once" | "reject";
+}): Promise<MeSource> {
+	const resources = input.request.resources.slice(0, 12).map((resource) => resource.slice(0, 240));
+	const text = [
+		`OpenCode permission request for ${input.request.action}.`,
+		resources.length ? `Resources: ${resources.join(", ")}` : undefined,
+		input.request.message ? `Request message: ${input.request.message.slice(0, 1_000)}` : undefined,
+		`Existing runtime policy disposition: ${input.disposition === "once" ? "accepted once" : "rejected"}.`,
+	]
+		.filter((part): part is string => part !== undefined)
+		.join("\n");
+	return input.store.capture({
+		id: "",
+		workspaceId: input.workspace.id,
+		workspaceName: input.workspace.name,
+		sessionId: input.sessionId,
+		actorKind: input.actorKind,
+		kind: "permission",
+		at: new Date().toISOString(),
+		text: text.slice(0, 8_000),
+		eventId: `permission:${input.request.id}`,
+		explicit: true,
+		forceVisible: true,
+		destinationSessionIds: [input.sessionId],
+		...(input.missionId ? { missionId: input.missionId } : {}),
+	});
+}
+
 /** Replay whole completed turns; leave a split turn buffered until its final block is read. */
 export async function replayMeLeaderTurns(input: {
 	store: MeStore;

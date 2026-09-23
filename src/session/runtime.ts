@@ -19,6 +19,10 @@ export interface StartOptions {
 	actorId?: string;
 	bindingGeneration?: string;
 	fallbackModels?: readonly string[];
+	onPermissionRequest?: (
+		request: { id: string; action: string; resources: string[]; message?: string },
+		decision: "once" | "reject",
+	) => Promise<void>;
 }
 
 export type SessionEvent = (
