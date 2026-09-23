@@ -6448,10 +6448,10 @@ index 0000000..1c94b74
 +}
 diff --git a/packages/tui/src/neta/shell.tsx b/packages/tui/src/neta/shell.tsx
 new file mode 100644
-index 0000000..8c96f6a
+index 0000000..7016c71
 --- /dev/null
 +++ b/packages/tui/src/neta/shell.tsx
-@@ -0,0 +1,848 @@
+@@ -0,0 +1,855 @@
 +import { createEffect, createMemo, createSignal, For, onCleanup, Show, type JSX } from "solid-js"
 +import { TerminalViewport, useTerminalDimensions } from "../ui/terminal-dimensions"
 +import { ownerSession, type Agent, type Mission, type Snapshot, type View } from "@neta/client"
@@ -7221,11 +7221,18 @@ index 0000000..8c96f6a
 +            border={["right"]}
 +            borderColor={theme.border.default}
 +          >
-+            <box height={1} flexShrink={0} marginBottom={1} flexDirection="row" justifyContent="space-between">
-+              <text fg={theme.text.default}>SPINE</text>
-+              <text fg={connected() ? theme.text.subdued : theme.text.feedback.error.default}>
-+                {!connected() ? "OFFLINE" : "LIVE"}
++            <box
++              height={1}
++              flexShrink={0}
++              marginBottom={1}
++              flexDirection="row"
++              gap={1}
++              onMouseUp={workspaces}
++            >
++              <text flexGrow={1} minWidth={0} wrapMode="none" truncate fg={theme.text.subdued}>
++                {state.view.path}
 +              </text>
++              <text fg={theme.text.action.primary.default}>↔</text>
 +            </box>
 +            <box flexDirection="row" flexShrink={0}>
 +              <text width={6} fg={theme.text.subdued}>
@@ -9148,10 +9155,10 @@ index 0000000..a8c28a6
 +}
 diff --git a/packages/tui/test/neta-spine-leads.test.tsx b/packages/tui/test/neta-spine-leads.test.tsx
 new file mode 100644
-index 0000000..5c71831
+index 0000000..a2da1e5
 --- /dev/null
 +++ b/packages/tui/test/neta-spine-leads.test.tsx
-@@ -0,0 +1,74 @@
+@@ -0,0 +1,81 @@
 +import { expect, test } from "bun:test"
 +import { Socket } from "node:net"
 +import { testRender } from "@opentui/solid"
@@ -9209,6 +9216,10 @@ index 0000000..5c71831
 +    app.renderer.start()
 +    await app.waitForFrame((frame) => frame.includes("#2 Delegated"))
 +    const collapsed = app.captureCharFrame()
++    expect(collapsed).toContain("/fixture")
++    expect(collapsed).toContain("↔")
++    expect(collapsed).not.toContain("SPINE")
++    expect(collapsed).not.toContain("LIVE")
 +    expect(collapsed).toContain("Leto · lead")
 +    expect(collapsed).toContain("Asha")
 +    expect(collapsed).not.toContain("Iris")
@@ -9221,6 +9232,9 @@ index 0000000..5c71831
 +    expect(expanded.match(/Leto/g)?.length).toBe(1)
 +    expect(expanded.match(/Asha/g)?.length).toBe(1)
 +    expect(expanded.match(/Iris/g)?.length).toBe(1)
++    await click("/fixture")
++    await app.waitForFrame((frame) => frame.includes("Switch workspace"))
++    expect(app.captureCharFrame()).toContain("Open a project folder…")
 +  } finally {
 +    app.renderer.destroy()
 +    socket.destroy()
