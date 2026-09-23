@@ -141,6 +141,21 @@ export function createModelRouter(options: RouterOptions) {
 		});
 		// Both attempts share one deadline; retrying a classification never extends the total request window.
 		const signal = AbortSignal.timeout(10_000);
+		const withinDeadline = async <T>(operation: Promise<T>): Promise<T> => {
+			if (signal.aborted) throw new Error("Jev deadline elapsed");
+			let onAbort: () => void = () => {};
+			const deadline = new Promise<never>((_, reject) => {
+				onAbort = () => reject(new Error("Jev deadline elapsed"));
+				signal.addEventListener("abort", onAbort, { once: true });
+				if (signal.aborted) onAbort();
+			});
+			try {
+				// Promise.race observes late rejections from an abort-ignoring fetch or JSON parser.
+				return await Promise.race([operation, deadline]);
+			} finally {
+				signal.removeEventListener("abort", onAbort);
+			}
+		};
 		let firstMismatch: string | undefined;
 		let body: Record<string, unknown> = {};
 		let answer: Record<string, unknown> = {};
@@ -150,12 +165,14 @@ export function createModelRouter(options: RouterOptions) {
 			let response: Response;
 			try {
 				if (signal.aborted) throw new Error("deadline elapsed");
-				response = await (options.fetcher ?? fetch)("https://api.typesafe.ai/v1/systemone", {
-					method: "POST",
-					signal,
-					headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-					body: requestBody,
-				});
+				response = await withinDeadline(
+					(options.fetcher ?? fetch)("https://api.typesafe.ai/v1/systemone", {
+						method: "POST",
+						signal,
+						headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+						body: requestBody,
+					}),
+				);
 			} catch {
 				throw new Error(
 					"Jev routing request failed or timed out. Retry later or choose an explicit model; no agent was launched.",
@@ -174,9 +191,15 @@ export function createModelRouter(options: RouterOptions) {
 			}
 			let raw: unknown;
 			try {
-				raw = await response.json();
+				raw = await withinDeadline(response.json());
 			} catch {
-				throw new Error("Jev returned invalid JSON; no agent was launched.");
+				if (signal.aborted)
+					throw new Error(
+						"Jev routing request failed or timed out. Retry later or choose an explicit model; no agent was launched.",
+					);
+				throw new Error(
+					`Jev returned invalid JSON${firstMismatch ? ` after first ranking mismatch (${firstMismatch})` : ""}; no agent was launched.`,
+				);
 			}
 			if (signal.aborted)
 				throw new Error(
@@ -201,7 +224,9 @@ export function createModelRouter(options: RouterOptions) {
 					"probabilities do not sum to one",
 			].filter(Boolean);
 			if (invalid.length || confidence === undefined || typeof body.model !== "string")
-				throw new Error(`Jev returned an invalid model selection: ${invalid.join("; ")}. no agent was launched.`);
+				throw new Error(
+					`Jev returned an invalid model selection: ${invalid.join("; ")}${firstMismatch ? `; first ranking mismatch: ${firstMismatch}` : ""}. no agent was launched.`,
+				);
 			const highest = entries.reduce((best, entry) => (Number(entry[1]) > Number(best[1]) ? entry : best));
 			if (Number(highest[1]) > Number(probabilities[choice]) + 1e-9) {
 				// Map only known eligible IDs, never include upstream strings or raw response content.

@@ -273,6 +273,65 @@ test("diagnostics discard unsafe eligible IDs and untrusted classifier model str
 	expect(error).not.toContain("raw");
 });
 
+test("an abort-ignoring first fetch is bounded without a retry", async () => {
+	let calls = 0;
+	let rejectLate: ((reason: Error) => void) | undefined;
+	const route = createModelRouter({
+		apiKey: () => "test-only",
+		catalog: { load: async () => ({ snapshot, warnings: [] }) },
+		fetcher: fakeFetch(() => {
+			calls++;
+			return new Promise<Response>((_, reject) => {
+				rejectLate = reject;
+			});
+		}),
+	});
+	await expect(route(task, models)).rejects.toThrow("failed or timed out");
+	expect(calls).toBe(1);
+	rejectLate?.(new Error("late upstream rejection must remain observed"));
+	await Promise.resolve();
+}, 15_000);
+
+test("an abort-ignoring second JSON parser is bounded without a third request", async () => {
+	let calls = 0;
+	const route = createModelRouter({
+		apiKey: () => "test-only",
+		catalog: { load: async () => ({ snapshot, warnings: [] }) },
+		fetcher: fakeFetch((_url, init) => {
+			calls++;
+			const keys = Object.keys(JSON.parse(String(init?.body)).questions.model.criteria);
+			if (calls === 1) return Response.json(mismatched(keys));
+			const response = Response.json(result(keys));
+			Object.defineProperty(response, "json", { value: () => new Promise<unknown>(() => {}) });
+			return response;
+		}),
+	});
+	await expect(route(task, models)).rejects.toThrow("failed or timed out");
+	expect(calls).toBe(2);
+}, 15_000);
+
+test("a malformed second response retains only the sanitized first mismatch facts", async () => {
+	let calls = 0;
+	const route = createModelRouter({
+		apiKey: () => "secret-key",
+		catalog: { load: async () => ({ snapshot, warnings: [] }) },
+		fetcher: fakeFetch((_url, init) => {
+			calls++;
+			const keys = Object.keys(JSON.parse(String(init?.body)).questions.model.criteria);
+			return Response.json(calls === 1 ? mismatched(keys) : { model: "secret-body" });
+		}),
+	});
+	let error = "";
+	try {
+		await route(task, models);
+	} catch (cause) {
+		error = String(cause);
+	}
+	expect(calls).toBe(2);
+	expect(error).toContain("first ranking mismatch: chosen openai/astra (0.100000), highest openai/luna (0.700000)");
+	expect(error).not.toContain("secret-");
+});
+
 test("abstention, excluded choices, malformed probabilities and HTTP errors never retry", async () => {
 	for (const answer of [
 		(keys: string[]) => result(keys, "none"),
