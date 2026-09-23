@@ -167,6 +167,25 @@ test("long leader turns retain bounded previews and exact transcript pointers", 
 	});
 });
 
+test("failed reader-directed turns are captured even with no transcript blocks", async () => {
+	const { store, workspace } = fixture();
+	const turn: Turn = {
+		id: "turn-failed",
+		sessionId: "leader-A",
+		startedAt: "2026-09-23T10:00:00.000Z",
+		endedAt: "2026-09-23T10:01:00.000Z",
+		role: "user",
+		readerDirected: true,
+		failed: true,
+	};
+	await captureMeLeaderTurn({ store, workspace, sessionId: turn.sessionId, turn, blocks: [] });
+	expect((await store.pendingSources())[0]).toMatchObject({
+		kind: "failure",
+		text: "Workspace leader runtime turn failed.",
+	});
+	expect((await store.pendingSources())[0]?.transcriptPointer).toBeUndefined();
+});
+
 test("turn replay buffers a page-split turn and checkpoints only after its final block", async () => {
 	const { store, workspace } = fixture();
 	const turn: Turn = {

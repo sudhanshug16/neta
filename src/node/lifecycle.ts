@@ -719,7 +719,7 @@ export function adaptRuntime(
 		emit({ sessionId, bindingGeneration: closed.bindingGeneration, turn: closed });
 		const readerBlocks = [...(state.readerText?.values() ?? [])].sort((a, b) => a.seq - b.seq);
 		state.readerText = undefined;
-		if (closed.readerDirected === true && readerBlocks.length > 0) {
+		if (closed.readerDirected === true && (readerBlocks.length > 0 || closed.failed === true)) {
 			try {
 				await onReaderTurn(sessionId, closed, readerBlocks);
 			} catch {

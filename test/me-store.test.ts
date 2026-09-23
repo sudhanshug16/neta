@@ -213,7 +213,9 @@ test("Sol transcript and routes stay separate from card replies and do not alias
 	isolated();
 	const store = openMeStore();
 	const sol = await store.solIdentity();
-	expect(sol).toMatchObject({ id: "sol", role: SOL_ROLE, sessionId: SOL_SESSION_ID, title: "Sol" });
+	expect(sol).toMatchObject({ id: "sol", role: SOL_ROLE, title: "Sol" });
+	expect(sol.sessionId).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/);
+	expect(sol.sessionId).not.toBe(SOL_SESSION_ID);
 	expect(sol.role).not.toBe("leader");
 	expect(await openMeStore().solIdentity()).toEqual(sol);
 	const user = await store.appendSolTurn({
@@ -285,4 +287,33 @@ test("version 1 documents gain checkpoint and Sol fields without dropping pendin
 	await store.markRead(card.id);
 	expect((await openMeStore().getCard(card.id))?.needsReply).toBe(true);
 	expect(await store.getCheckpoint()).toEqual({ workspaces: [] });
+});
+
+test("legacy logical Sol ids are replaced by a real session id", async () => {
+	const root = isolated();
+	await mkdir(join(root, "me"), { recursive: true });
+	await writeFile(
+		join(root, "me", "state.json"),
+		`${JSON.stringify({
+			version: 2,
+			sources: [],
+			decidedSourceIds: [],
+			cards: [],
+			replies: [],
+			checkpoint: { workspaces: [] },
+			sol: {
+				id: "sol",
+				role: SOL_ROLE,
+				title: "Sol",
+				sessionId: SOL_SESSION_ID,
+				createdAt: "2026-09-23T10:00:00.000Z",
+			},
+			solTurns: [],
+			routes: [],
+		})}\n`,
+	);
+	const sol = await openMeStore().solIdentity();
+	expect(sol.sessionId).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/);
+	expect(sol.sessionId).not.toBe(SOL_SESSION_ID);
+	expect(await openMeStore().solIdentity()).toEqual(sol);
 });

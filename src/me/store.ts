@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
+import { ulid } from "../core/ids.ts";
+import type { SessionId } from "../core/types.ts";
 import { createMutex, readJson, writeJsonAtomic } from "../store/files.ts";
 import { paths } from "../store/paths.ts";
 
@@ -79,7 +81,7 @@ export interface SolIdentity {
 	id: typeof SOL_ID;
 	role: typeof SOL_ROLE;
 	title: "Sol";
-	sessionId: typeof SOL_SESSION_ID;
+	sessionId: SessionId;
 	createdAt: string;
 }
 export interface SolTurn {
@@ -299,8 +301,9 @@ function validatedDecision(source: MeSource, doc: Document, result: MeDecision):
 function normalize(raw: (Omit<Partial<Document>, "version"> & { version?: 1 | 2 }) | undefined): Document {
 	if (!raw) return empty();
 	if (raw.version !== 1 && raw.version !== 2) throw new Error("unsupported Me store version");
-	if (raw.sol && (raw.sol.id !== SOL_ID || raw.sol.role !== SOL_ROLE || raw.sol.sessionId !== SOL_SESSION_ID))
+	if (raw.sol && (raw.sol.id !== SOL_ID || raw.sol.role !== SOL_ROLE || typeof raw.sol.sessionId !== "string"))
 		throw new Error("Sol identity cannot alias a workspace leader");
+	const sol = raw.sol?.sessionId === SOL_SESSION_ID ? undefined : raw.sol;
 	return {
 		version: 2,
 		sources: raw.sources ?? [],
@@ -308,7 +311,7 @@ function normalize(raw: (Omit<Partial<Document>, "version"> & { version?: 1 | 2 
 		cards: raw.cards ?? [],
 		replies: raw.replies ?? [],
 		checkpoint: raw.checkpoint ?? emptyCheckpoint(),
-		...(raw.sol ? { sol: raw.sol } : {}),
+		...(sol ? { sol } : {}),
 		solTurns: raw.solTurns ?? [],
 		routes: raw.routes ?? [],
 	};
@@ -509,7 +512,7 @@ export function openMeStore(): MeStore {
 						id: SOL_ID,
 						role: SOL_ROLE,
 						title: "Sol",
-						sessionId: SOL_SESSION_ID,
+						sessionId: ulid() as SessionId,
 						createdAt: new Date().toISOString(),
 					};
 					await save(doc);
