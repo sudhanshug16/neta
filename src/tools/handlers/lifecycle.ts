@@ -44,7 +44,7 @@ export type ModeSubject =
 // error. `unavailable` is the sixth and different in kind — the Node cannot
 // answer the request at all — so it leaves this tool as an error instead.
 export type ModeApproval =
-	| { approved: true }
+	| { approved: true; recovered?: { missionId: number; promoted?: string } }
 	| {
 			approved: false;
 			reason:

@@ -156,6 +156,28 @@ export class LeaseManager {
 		});
 	}
 
+	// Unlike `release`, this affects one known lease key only. Recovery uses it
+	// for a stale workspace-leader reservation so an unrelated lease held by the
+	// same mission id cannot be released incidentally.
+	releaseKey(w: WorkspaceId, a: AgentId, key: string): Promise<{ released: boolean; promoted?: AgentId }> {
+		return this.enqueue(w, async () => {
+			const state = await this.store.read(w);
+			const record = state.leases[key];
+			if (record?.holder !== a) return { released: false };
+			const promoted = record.queue.shift();
+			if (promoted === undefined) {
+				delete record.holder;
+				delete record.since;
+			} else {
+				record.holder = promoted;
+				record.since = nowIso();
+			}
+			await this.store.write(state);
+			this.emit(w, record);
+			return promoted === undefined ? { released: true } : { released: true, promoted };
+		});
+	}
+
 	// A restarted process is no longer a live writer. Clear its ownership
 	// without starting or promoting queued work; recovery remains an explicit
 	// leader decision and the FIFO queue stays intact.

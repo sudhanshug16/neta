@@ -53,6 +53,8 @@ export interface WorktreeService {
 	): Promise<Mission>;
 	acquireWriter(m: Mission, w: Workspace, a: AgentId): Promise<LeaseOutcome>;
 	releaseWriter(workspaceId: WorkspaceId, a: AgentId): Promise<Array<{ key: string; promoted?: AgentId }>>;
+	holdsWriter(m: Mission, w: Workspace, a: AgentId): Promise<boolean>;
+	releaseWriterKey(m: Mission, w: Workspace, a: AgentId): Promise<Array<{ key: string; promoted?: AgentId }>>;
 	refreshIntegration(mission: Mission): Promise<Mission>;
 	close(input: CloseMissionInput): Promise<CloseOutcome>;
 }
@@ -186,6 +188,19 @@ export function createWorktreeService(deps: WorktreeServiceDeps): WorktreeServic
 
 		async releaseWriter(workspaceId, a) {
 			return deps.leases.release(workspaceId, a);
+		},
+
+		async holdsWriter(m, w, a) {
+			const root = await rootFor(w);
+			const key = leaseKeyFor({ kind: w.kind, worktreePath: m.worktree?.path, root });
+			return (await deps.leases.holder(w.id, key)) === a;
+		},
+
+		async releaseWriterKey(m, w, a) {
+			const root = await rootFor(w);
+			const key = leaseKeyFor({ kind: w.kind, worktreePath: m.worktree?.path, root });
+			const released = await deps.leases.releaseKey(w.id, a, key);
+			return released.promoted === undefined ? [] : [{ key, promoted: released.promoted }];
 		},
 
 		async refreshIntegration(mission) {

@@ -82,6 +82,17 @@ describe("writer leases", () => {
 		expect(await manager.acquire(W, "a2" as AgentId, "/wt-2")).toBe("active");
 	});
 
+	test("keyed recovery releases only the identified stale reservation", async () => {
+		const manager = new LeaseManager(memoryStore());
+		await manager.acquire(W, "mission" as AgentId, "/wt-1");
+		await manager.acquire(W, "queued" as AgentId, "/wt-1");
+		await manager.acquire(W, "mission" as AgentId, "/wt-2");
+		const released = await manager.releaseKey(W, "mission" as AgentId, "/wt-1");
+		expect(released).toEqual({ released: true, promoted: "queued" });
+		expect(await manager.holder(W, "/wt-1")).toBe("queued");
+		expect(await manager.holder(W, "/wt-2")).toBe("mission");
+	});
+
 	test("a folder workspace keys on its root; read-only missions take no lease", async () => {
 		expect(leaseKeyFor({ kind: "folder", root: "/ws" })).toBe("/ws");
 		expect(leaseKeyFor({ kind: "git", worktreePath: "/wt-1", root: "/ws" })).toBe("/wt-1");

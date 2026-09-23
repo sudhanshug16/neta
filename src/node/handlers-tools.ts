@@ -558,6 +558,33 @@ export function toolMount(o: ToolMountOptions): {
 			leave?.();
 		}
 	}
+	async function recoverStaleWorkspaceLeaderLease(
+		workspaceId: WorkspaceId,
+	): Promise<{ missionId: number; promoted?: string } | undefined> {
+		const leader = o.store.getLeader(workspaceId);
+		const workspace = o.store.getWorkspace(workspaceId);
+		if (leader?.mode !== "lead" || leader.activeMissionId !== undefined || workspace === undefined) return undefined;
+
+		const candidates: Mission[] = [];
+		for (const mission of o.store.listMissions(workspaceId)) {
+			if (
+				mission.state === "closed" ||
+				mission.lead.kind !== "agent" ||
+				o.store.listAgents(mission.id).some((agent) => agent.state === "starting" || agent.state === "running")
+			)
+				continue;
+			if (await worktrees.holdsWriter(mission, workspace, mission.id)) candidates.push(mission);
+		}
+		// A no-active-mission leader cannot identify which reservation to return.
+		// Refuse ambiguity rather than releasing more than one worktree lease.
+		if (candidates.length !== 1) return undefined;
+		const mission = candidates[0];
+		if (mission === undefined) return undefined;
+		const changed = await worktrees.releaseWriterKey(mission, workspace, mission.id);
+		await promote(changed);
+		const promoted = changed[0]?.promoted;
+		return promoted === undefined ? { missionId: mission.number } : { missionId: mission.number, promoted };
+	}
 	async function finishPendingClose(sessionId: string): Promise<CloseOutcome> {
 		const pending = pendingCloses.get(sessionId);
 		if (pending === undefined) throw new NodeError("NOT_FOUND", "no pending close for session");
@@ -1229,8 +1256,13 @@ export function toolMount(o: ToolMountOptions): {
 							? input.subject.missionId
 							: o.store.getLeader(input.subject.workspaceId)?.activeMissionId;
 					const mission = missionId === undefined ? undefined : o.store.getMission(missionId);
-					if (sessionId === undefined || mission === undefined)
+					if (sessionId === undefined || mission === undefined) {
+						if (input.subject.kind === "leader") {
+							const recovered = await recoverStaleWorkspaceLeaderLease(input.subject.workspaceId);
+							if (recovered !== undefined) return { approved: true, recovered };
+						}
 						return { approved: false, reason: "unavailable", detail: "active mission session is unavailable" };
+					}
 					const holder = input.subject.kind === "lead" ? input.subject.agentId : mission.id;
 					pendingModes.set(sessionId, { subject: input.subject, mode: "lead", mission, holder });
 					if (o.acp.isTurnActive?.(sessionId) === true) return { approved: true };
