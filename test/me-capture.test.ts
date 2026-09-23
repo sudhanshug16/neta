@@ -99,6 +99,18 @@ test("event capture uses current session provenance and only explicit escalation
 		destinationSessionIds: ["agent-session-A", "leader-A"],
 		text: "mission.failed · Mission #4: Release gate · Agent: Cedar",
 	});
+	await expect(
+		store.decide(source.id, {
+			action: "suppress",
+			concernKey: "deployment",
+			headline: "Deployment",
+			summary: "Suppressed",
+			evidenceSourceIds: [source.id],
+			needsReply: false,
+			resolved: false,
+			destinationSessionIds: [],
+		}),
+	).rejects.toThrow("explicit user escalation");
 	await captureMeEvent(store, event(2, { data: {} }), context);
 	expect((await store.pendingSources()).map((source) => source.explicit)).toEqual([true, false]);
 });

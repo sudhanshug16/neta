@@ -51,6 +51,7 @@ export async function captureMeEvent(store: MeStore, event: Event, context: MeEv
 		text,
 		eventId: `${event.workspaceId}:${event.seq}`,
 		explicit,
+		...(explicit ? { forceVisible: true } : {}),
 		destinationSessionIds: destinations,
 		...(event.missionId ? { missionId: event.missionId } : {}),
 	});

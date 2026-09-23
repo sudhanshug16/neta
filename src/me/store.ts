@@ -20,6 +20,7 @@ export interface MeSource {
 	eventId?: string;
 	missionId?: string;
 	explicit: boolean;
+	forceVisible?: boolean;
 	destinationSessionIds: string[];
 }
 
@@ -212,6 +213,7 @@ function validatedSource(input: MeSource): MeSource {
 		throw new Error("invalid Me source kind");
 	if (
 		typeof input.explicit !== "boolean" ||
+		(input.forceVisible !== undefined && typeof input.forceVisible !== "boolean") ||
 		(input.actorKind === "agent" && input.kind === "message" && !input.explicit)
 	)
 		throw new Error("unrelated agent messages cannot enter Me");
@@ -231,6 +233,7 @@ function validatedSource(input: MeSource): MeSource {
 		at: input.at,
 		text: bounded(input.text, "source text", 8_000),
 		explicit: input.explicit,
+		...(input.forceVisible === true ? { forceVisible: true } : {}),
 		destinationSessionIds,
 		...(input.turnId === undefined ? {} : { turnId: bounded(input.turnId, "turnId", 256) }),
 		...(input.eventId === undefined ? {} : { eventId: bounded(input.eventId, "eventId", 256) }),
@@ -261,6 +264,8 @@ function validatedDecision(source: MeSource, doc: Document, result: MeDecision):
 		throw new Error("invalid Me decision flags");
 	if (result.needsReply && (result.resolved || !destinationSessionIds.length || result.action === "suppress"))
 		throw new Error("a pending question requires a visible reply destination");
+	if (source.forceVisible && result.action === "suppress")
+		throw new Error("an explicit user escalation must remain visible");
 	return {
 		action: result.action,
 		concernKey: bounded(result.concernKey, "concernKey", 160),
