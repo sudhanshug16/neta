@@ -293,8 +293,18 @@ export class WorktrunkDriver implements WorktreeDriver {
 			}
 		}
 		const argv = ["remove", input.branch, "--foreground", "--format=json"];
-		if (input.abandon === true) {
-			argv.push("--force", "-D");
+		// Branch fate is never decided by the discard flag: `wt remove`
+		// deletes a merged branch by default, so every non-merged close
+		// passes `--no-delete-branch` and keeps committed history on its
+		// named branch. Deleting an unmerged branch (`-D`) needs a separate
+		// explicit authorization that does not exist yet, so it is never
+		// passed. `--force` removes a dirty tree only after the explicit
+		// `discardUncommitted` confirmation enforced above.
+		if (input.abandon === true || input.evidenceCommit === undefined) {
+			argv.push("--no-delete-branch");
+		}
+		if (input.abandon === true && entry?.dirty === true) {
+			argv.push("--force");
 		} else if (input.force === true) {
 			argv.push("--force");
 		}
@@ -323,12 +333,21 @@ export class WorktrunkDriver implements WorktreeDriver {
 			return { ok: false, refusal: "failed", reason: confirmed.reason };
 		}
 		if (outcome === "deferred" || outcome === "not_attempted") {
-			// The checkout was not removed: closing now would strand storage
-			// behind a closed mission, so stay open with a retryable reason.
+			// The label describes the postponed branch operation, not the
+			// directory: confirm the path independently instead of inventing
+			// a retention fact from it. A reclaimed directory closes; a
+			// remaining one stays open with a retryable reason. This is safe
+			// by construction: non-merged closes always pass
+			// `--no-delete-branch`, so a reclaimed directory leaves its
+			// committed history on the retained branch.
+			const confirmed = await removalConfirmed(input.path);
+			if (confirmed.gone) {
+				return { ok: true, branchOutcome: outcome, path: input.path };
+			}
 			return {
 				ok: false,
 				refusal: "failed",
-				reason: `worktree removal for ${input.branch} did not complete (${outcome}); worktree retained at ${input.path}, retry the close`,
+				reason: `worktree removal for ${input.branch} did not complete (${outcome}); worktree still present at ${input.path}, retry the close`,
 			};
 		}
 		if (outcome === "retained_checked_out") {

@@ -175,8 +175,12 @@ gate without evidence: a clean committed branch removes its directory and
 keeps its branch, merged or not. When closeout supplies `evidenceCommit` (a
 merged close), `isIntegrated` rechecks it against the current branch tip, so
 stale evidence cannot discard new work. 6. Otherwise
-`remove <branch> --foreground -y --format=json`, adding
-`--force -D` when `abandon` and `--force` when `force`; a non-zero exit is
+`remove <branch> --foreground -y --format=json`, adding `--no-delete-branch`
+for every non-merged close (completed, and abandoned with or without evidence)
+so committed history always stays on its named branch, plus `--force` only for
+a dirty tree with an explicit `discardUncommitted` confirmation; `-D` is never
+passed — deleting an unmerged branch needs a separate explicit authorization
+that does not exist yet; a non-zero exit is
 `failed` with the first stderr line, and on exit 0 `deleted` and
 `retained_unmerged` confirm the path is actually gone via `lstat` before
 returning `ok:true` — only `ENOENT`/`ENOTDIR` prove absence, so a dangling

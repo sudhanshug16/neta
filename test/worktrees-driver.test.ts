@@ -106,7 +106,7 @@ process.exit(r.status ?? 1);
 		expect(missing.reason).toContain("gone");
 	});
 
-	test("a clean merged worktree removes with branchOutcome deleted", async () => {
+	test("a clean merged worktree removes its directory and keeps the branch without evidence", async () => {
 		useShim();
 		const { root, cleanup } = await makeRepo();
 		cleanups.push(cleanup);
@@ -114,14 +114,38 @@ process.exit(r.status ?? 1);
 		const worktree = await driver.create({ repoRoot: root, number: 7, slug: "merged" });
 		await commitIn(worktree.path, "w.txt");
 		expect((await runGit(["merge", "--no-ff", worktree.branch, "-m", "merge"], root)).code).toBe(0);
+		// No merge evidence is supplied, so the driver keeps the branch: only
+		// a merged close with confirmed evidence may let `wt` delete one.
 		const removed = await driver.remove({
 			repoRoot: root,
 			path: worktree.path,
 			branch: worktree.branch,
 			base: "main",
 		});
-		expect(removed).toEqual({ ok: true, branchOutcome: "deleted", path: worktree.path });
+		expect(removed).toEqual({ ok: true, branchOutcome: "retained_unmerged", path: worktree.path });
 		expect((await driver.verify(worktree)).ok).toBe(false);
+		expect((await runGit(["rev-parse", "--verify", worktree.branch], root)).code).toBe(0);
+	});
+
+	test("a merged removal with confirmed evidence lets Worktrunk delete the branch", async () => {
+		useShim();
+		const { root, cleanup } = await makeRepo();
+		cleanups.push(cleanup);
+		const driver = new WorktrunkDriver();
+		const worktree = await driver.create({ repoRoot: root, number: 71, slug: "merged-evidence" });
+		await commitIn(worktree.path, "w.txt");
+		expect((await runGit(["merge", "--no-ff", worktree.branch, "-m", "merge"], root)).code).toBe(0);
+		const tip = (await runGit(["rev-parse", worktree.branch], root)).stdout.trim();
+		const removed = await driver.remove({
+			repoRoot: root,
+			path: worktree.path,
+			branch: worktree.branch,
+			base: "main",
+			evidenceCommit: tip,
+		});
+		expect(removed).toEqual({ ok: true, branchOutcome: "deleted", path: worktree.path });
+		await expect(stat(worktree.path)).rejects.toThrow();
+		expect((await runGit(["rev-parse", "--verify", worktree.branch], root)).code).not.toBe(0);
 	});
 
 	test("a dirty worktree is refused dirty and still exists, then removes with abandon:true", async () => {
@@ -131,6 +155,7 @@ process.exit(r.status ?? 1);
 		const driver = new WorktrunkDriver();
 		const worktree = await driver.create({ repoRoot: root, number: 8, slug: "dirty" });
 		extraDirs.push(worktree.path);
+		await commitIn(worktree.path, "kept.txt");
 		await writeFile(join(worktree.path, "draft.txt"), "uncommitted\n");
 		const refused = await driver.remove({
 			repoRoot: root,
@@ -170,8 +195,11 @@ process.exit(r.status ?? 1);
 			discardUncommitted: true,
 		});
 		expect(removed.ok).toBe(true);
-		// Only the explicit abandoned discard removes untracked content.
+		// Only the explicit abandoned discard removes untracked content, and
+		// even then the committed branch and its contents are preserved.
 		await expect(stat(worktree.path)).rejects.toThrow();
+		expect((await runGit(["rev-parse", "--verify", worktree.branch], root)).code).toBe(0);
+		expect((await runGit(["show", `${worktree.branch}:kept.txt`], root)).stdout).toBe("kept.txt\n");
 	});
 
 	test("a clean unmerged branch removes its directory and retains the branch", async () => {
@@ -196,6 +224,7 @@ process.exit(r.status ?? 1);
 		expect(removed.branchOutcome).toBe("retained_unmerged");
 		await expect(stat(worktree.path)).rejects.toThrow();
 		expect((await runGit(["rev-parse", "--verify", worktree.branch], root)).code).toBe(0);
+		expect((await runGit(["show", `${worktree.branch}:w.txt`], root)).stdout).toBe("w.txt\n");
 	});
 
 	test("a deferred removal fails retryably and the retry reclaims the directory", async () => {
@@ -230,7 +259,35 @@ process.exit(r.status ?? 1);
 				branch: worktree.branch,
 				base: "main",
 			});
-			expect(retried).toEqual({ ok: true, branchOutcome: "deleted", path: worktree.path });
+			expect(retried).toEqual({ ok: true, branchOutcome: "retained_unmerged", path: worktree.path });
+			await expect(stat(worktree.path)).rejects.toThrow();
+			expect((await runGit(["rev-parse", "--verify", worktree.branch], root)).code).toBe(0);
+		} finally {
+			delete process.env.FAKE_WT_REMOVE_OUTCOME;
+		}
+	});
+
+	test("a deferred label with a reclaimed directory closes on verified absence", async () => {
+		savedWtBin = process.env.NETA_WT_BIN;
+		process.env.NETA_WT_BIN = fakeWtEnv().NETA_WT_BIN;
+		process.env.FAKE_WT_REMOVE_OUTCOME = "deferred-gone";
+		const { root, cleanup } = await makeRepo();
+		cleanups.push(cleanup);
+		const driver = new WorktrunkDriver();
+		try {
+			const worktree = await driver.create({ repoRoot: root, number: 11, slug: "deferred-gone" });
+			await commitIn(worktree.path, "w.txt");
+			expect((await runGit(["merge", "--no-ff", worktree.branch, "-m", "merge"], root)).code).toBe(0);
+			const removed = await driver.remove({
+				repoRoot: root,
+				path: worktree.path,
+				branch: worktree.branch,
+				base: "main",
+			});
+			// The label reports a postponed branch operation, but the
+			// independently confirmed absence of the directory is what the
+			// close is based on.
+			expect(removed).toEqual({ ok: true, branchOutcome: "deferred", path: worktree.path });
 			await expect(stat(worktree.path)).rejects.toThrow();
 		} finally {
 			delete process.env.FAKE_WT_REMOVE_OUTCOME;
