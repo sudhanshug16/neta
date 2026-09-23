@@ -207,6 +207,14 @@ if (command === "remove") {
 	if (status.porcelain.trim() !== "" && !force) {
 		fail(`Cannot remove worktree: ${branch} has uncommitted changes`);
 	}
+	// Test hook for deferred cleanup: report Worktrunk's `deferred` outcome
+	// without removing anything, so closeout must stay open and retryable.
+	if (process.env.FAKE_WT_REMOVE_OUTCOME === "deferred") {
+		process.stdout.write(
+			`${JSON.stringify([{ kind: "worktree", branch, path: entry.path, branch_outcome: "deferred", branch_checked_out_at: null }])}\n`,
+		);
+		process.exit(0);
+	}
 	// Removal may be invoked from the worktree being removed. Keep subsequent
 	// git commands anchored in the primary worktree, as real Worktrunk does.
 	const primary = listWorktrees()[0].path;

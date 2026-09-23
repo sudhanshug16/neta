@@ -1,7 +1,10 @@
 // The one place a mission may be closed, with evidence or a reason. Only
 // closeout passes `abandon` to the driver; a refused removal leaves the
 // mission open with `attention` set to the refusal reason. There is no
-// retained-but-closed state.
+// retained-but-closed state. A merge is not required to close: a clean
+// committed branch closes with its branch retained, merged or not. A dirty
+// worktree needs a commit or an explicit `abandoned` discard, never a silent
+// one.
 import type { Disposition, EventKind, IsoTime, Mission, MissionId } from "../core/types.ts";
 import type { WorktreeDriver } from "./driver.ts";
 import type { IntegrationResult, isIntegrated } from "./integration.ts";

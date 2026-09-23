@@ -406,7 +406,7 @@ export const TOOLS: readonly ToolDef[] = [
 	{
 		name: "neta_close",
 		description:
-			"Close and archive a mission: completed for successful work without a merge; merged requires commit evidence; abandoned explicitly discards the work. Completed still refuses dirty or unmerged worktrees.",
+			"Close and archive a mission: completed for work with a committed branch (no merge required; the branch is retained even when unmerged); merged requires commit evidence; abandoned explicitly discards the work including untracked content. A dirty worktree must be committed first or closed as abandoned.",
 		inputSchema: {
 			type: "object",
 			additionalProperties: false,

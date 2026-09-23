@@ -141,8 +141,11 @@ process.exit(r.status ?? 1);
 		expect(refused.ok).toBe(false);
 		if (!refused.ok) {
 			expect(refused.refusal).toBe("dirty");
+			expect(refused.reason).toContain("abandoned");
 		}
+		// An ordinary close never discards: the untracked draft survives.
 		await expect(stat(worktree.path)).resolves.toBeDefined();
+		await expect(stat(join(worktree.path, "draft.txt"))).resolves.toBeDefined();
 		const removed = await driver.remove({
 			repoRoot: root,
 			path: worktree.path,
@@ -151,27 +154,71 @@ process.exit(r.status ?? 1);
 			abandon: true,
 		});
 		expect(removed.ok).toBe(true);
+		// Only the explicit abandoned discard removes untracked content.
+		await expect(stat(worktree.path)).rejects.toThrow();
 	});
 
-	test("a clean unmerged branch is refused unmerged", async () => {
+	test("a clean unmerged branch removes its directory and retains the branch", async () => {
 		useShim();
 		const { root, cleanup } = await makeRepo();
 		cleanups.push(cleanup);
 		const driver = new WorktrunkDriver();
 		const worktree = await driver.create({ repoRoot: root, number: 9, slug: "unmerged" });
-		extraDirs.push(worktree.path);
 		await commitIn(worktree.path, "w.txt");
-		const refused = await driver.remove({
+		const removed = await driver.remove({
 			repoRoot: root,
 			path: worktree.path,
 			branch: worktree.branch,
 			base: "main",
 		});
-		expect(refused.ok).toBe(false);
-		if (!refused.ok) {
-			expect(refused.refusal).toBe("unmerged");
+		expect(removed.ok).toBe(true);
+		if (!removed.ok) {
+			throw new Error("expected removal");
 		}
-		await expect(stat(worktree.path)).resolves.toBeDefined();
+		// The directory (with its ignored runtime trees) is reclaimed while
+		// the committed source stays on its named branch.
+		expect(removed.branchOutcome).toBe("retained_unmerged");
+		await expect(stat(worktree.path)).rejects.toThrow();
+		expect((await runGit(["rev-parse", "--verify", worktree.branch], root)).code).toBe(0);
+	});
+
+	test("a deferred removal fails retryably and the retry reclaims the directory", async () => {
+		savedWtBin = process.env.NETA_WT_BIN;
+		process.env.NETA_WT_BIN = fakeWtEnv().NETA_WT_BIN;
+		process.env.FAKE_WT_REMOVE_OUTCOME = "deferred";
+		const { root, cleanup } = await makeRepo();
+		cleanups.push(cleanup);
+		const driver = new WorktrunkDriver();
+		try {
+			const worktree = await driver.create({ repoRoot: root, number: 10, slug: "deferred" });
+			extraDirs.push(worktree.path);
+			await commitIn(worktree.path, "w.txt");
+			expect((await runGit(["merge", "--no-ff", worktree.branch, "-m", "merge"], root)).code).toBe(0);
+			const deferred = await driver.remove({
+				repoRoot: root,
+				path: worktree.path,
+				branch: worktree.branch,
+				base: "main",
+			});
+			expect(deferred.ok).toBe(false);
+			if (deferred.ok) {
+				throw new Error("expected a retryable failure");
+			}
+			expect(deferred.reason).toContain("deferred");
+			expect(deferred.reason).toContain("retry the close");
+			await expect(stat(worktree.path)).resolves.toBeDefined();
+			delete process.env.FAKE_WT_REMOVE_OUTCOME;
+			const retried = await driver.remove({
+				repoRoot: root,
+				path: worktree.path,
+				branch: worktree.branch,
+				base: "main",
+			});
+			expect(retried).toEqual({ ok: true, branchOutcome: "deleted", path: worktree.path });
+			await expect(stat(worktree.path)).rejects.toThrow();
+		} finally {
+			delete process.env.FAKE_WT_REMOVE_OUTCOME;
+		}
 	});
 
 	test("a non-zero exit gives failed with the stderr line", async () => {

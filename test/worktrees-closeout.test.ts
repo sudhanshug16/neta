@@ -451,14 +451,61 @@ test("completed inspection closes cleanly without invented merge evidence or for
 	expect(f.removes[0]?.abandon).toBe(false);
 });
 
-for (const refusal of ["dirty", "unmerged"] as const) {
-	test(`completed keeps a ${refusal} worktree open`, async () => {
-		const f = fixture({ remove: async () => ({ ok: false, refusal, reason: `worktree is ${refusal}` }) });
+test("completed keeps a dirty worktree open until it is committed or explicitly discarded", async () => {
+	const f = fixture({ remove: async () => ({ ok: false, refusal: "dirty", reason: "worktree is dirty" }) });
+	const start = mission({ provider: "worktrunk", path: "/wt-1", branch: "mission/check", base: "main" });
+	const result = await closeMission({ mission: start, disposition: "completed", reason: "checked" }, f.deps);
+	expect(result.ok).toBe(false);
+	expect(result.mission.worktree).toEqual(start.worktree);
+	expect(result.mission.state).toBe("running");
+	expect(f.closed).toHaveLength(0);
+});
+
+test("completed closes a clean unmerged worktree and retains its branch", async () => {
+	const f = fixture();
+	const start = mission({ provider: "worktrunk", path: "/wt-1", branch: "mission/check", base: "main" });
+	const result = await closeMission({ mission: start, disposition: "completed", reason: "checked" }, f.deps);
+	expect(result.ok).toBe(true);
+	if (!result.ok) {
+		throw new Error("expected close");
+	}
+	expect(result.mission).toMatchObject({ state: "closed", disposition: "completed", worktree: undefined });
+	expect(result.mission.integration).toBeUndefined();
+	expect(f.removes[0]?.abandon).toBe(false);
+	expect(f.closed).toHaveLength(1);
+});
+
+for (const outcome of ["deferred", "not_attempted"] as const) {
+	test(`an incomplete ${outcome} removal stays open and the retry closes`, async () => {
+		let calls = 0;
+		const f = fixture({
+			remove: async (input) => {
+				calls += 1;
+				return calls === 1
+					? {
+							ok: false,
+							refusal: "failed" as const,
+							reason: `removal did not complete (${outcome}), retry the close`,
+						}
+					: { ok: true, branchOutcome: "deleted", path: input.path };
+			},
+		});
 		const start = mission({ provider: "worktrunk", path: "/wt-1", branch: "mission/check", base: "main" });
-		const result = await closeMission({ mission: start, disposition: "completed", reason: "checked" }, f.deps);
-		expect(result.ok).toBe(false);
-		expect(result.mission.worktree).toEqual(start.worktree);
-		expect(result.mission.state).toBe("running");
+		const first = await closeMission({ mission: start, disposition: "completed", reason: "checked" }, f.deps);
+		expect(first.ok).toBe(false);
+		if (first.ok) {
+			throw new Error("expected refusal");
+		}
+		expect(first.attention).toContain("retry the close");
+		expect(first.mission.state).toBe("running");
+		expect(first.mission.worktree).toEqual(start.worktree);
 		expect(f.closed).toHaveLength(0);
+		const retry = await closeMission({ mission: first.mission, disposition: "completed", reason: "checked" }, f.deps);
+		expect(retry.ok).toBe(true);
+		if (!retry.ok) {
+			throw new Error("expected close");
+		}
+		expect(retry.mission).toMatchObject({ state: "closed", worktree: undefined });
+		expect(f.closed).toHaveLength(1);
 	});
 }

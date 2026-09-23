@@ -11,7 +11,7 @@ import { openStore } from "../src/store/index.ts";
 import { createTokenTable, type McpToolResponse } from "../src/tools/router.ts";
 import { createFileLeaseStore, LeaseManager } from "../src/worktrees/leases.ts";
 
-test("a delayed Lead++ restore cannot reopen a closed self-led mission", async () => {
+test("a delayed Lead++ restore cannot reopen a closed delegated mission", async () => {
 	const previous = process.env.NETA_DIR;
 	const directory = await mkdtemp(join(tmpdir(), "neta-deferred-closeout-"));
 	process.env.NETA_DIR = directory;
@@ -34,8 +34,8 @@ test("a delayed Lead++ restore cannot reopen a closed self-led mission", async (
 			name: "Close race",
 			objective: "close safely",
 			changes: [],
-			lead: { kind: "leader" },
-			agentIds: [],
+			lead: { kind: "agent", agentId: "mission-lead" },
+			agentIds: ["mission-lead"],
 			access: "readWrite",
 			state: "running",
 			createdAt: new Date(0).toISOString(),
@@ -55,6 +55,21 @@ test("a delayed Lead++ restore cannot reopen a closed self-led mission", async (
 			state: "idle",
 		});
 		const store = await adaptStore(real);
+		await store.putAgent({
+			id: "mission-lead",
+			missionId: "mission",
+			workspaceId: "workspace",
+			name: "Iris",
+			task: "coordinate closeout",
+			access: "readOnly",
+			provider: "fake",
+			model: "fake",
+			skills: [],
+			sessionId: "lead-session",
+			canSpawn: true,
+			state: "completed",
+			startedAt: new Date(0).toISOString(),
+		});
 		const listeners: Array<(notification: TurnNotification) => void> = [];
 		const tokens = createTokenTable();
 		let active = true;

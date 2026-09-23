@@ -115,6 +115,9 @@ test("workspace reset archives all work before releasing queues and preserves ot
 	expect(f.agents.find((a) => a.id === "unrelated")?.state).toBe("running");
 	expect(f.calls).not.toContain("stop:other");
 	expect(f.missions[0]?.worktree?.path).toBe("/worktrees/one");
+	// Retained worktrees are recorded on the closed record, never silent.
+	expect(f.missions[0]?.closeReason).toContain("worktree retained at /worktrees/one");
+	expect(f.missions[0]?.attention).toContain("Worktree retained at /worktrees/one");
 	expect(f.leader().activeMissionId).toBeUndefined();
 	expect(f.leader().mode).toBe("lead");
 	expect(f.leader().sessionId).toBe("new");

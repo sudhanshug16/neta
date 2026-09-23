@@ -1,7 +1,10 @@
 // Mission worktrees through Worktrunk (`wt`): create, describe, verify and
 // remove. Only closeout passes `abandon`; `force` is always false in practice
 // (kept for the flag mapping). Removal pre-checks run before shelling out so
-// a check never destroys anything.
+// a check never destroys anything. A merge is not a close prerequisite: a
+// clean unmerged branch removes its directory and keeps its branch. Merge
+// evidence, when closeout supplies it, is still rechecked against the current
+// branch tip so stale evidence cannot discard new work.
 import { realpath, stat } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import type { Worktree } from "../core/types.ts";
@@ -232,20 +235,30 @@ export class WorktrunkDriver implements WorktreeDriver {
 			const entries = await this.list(input.repoRoot);
 			const entry = entries.find((candidate) => candidate.branch === input.branch);
 			if (entry?.dirty) {
-				return { ok: false, refusal: "dirty", reason: `worktree ${input.branch} has uncommitted changes` };
-			}
-			const integrated = await isIntegrated({
-				repoRoot: input.repoRoot,
-				branch: input.branch,
-				base: input.base,
-				evidenceCommit: input.evidenceCommit,
-			});
-			if (!integrated.merged) {
 				return {
 					ok: false,
-					refusal: "unmerged",
-					reason: `branch ${input.branch} is not merged into ${input.base}`,
+					refusal: "dirty",
+					reason: `worktree ${input.branch} has uncommitted changes; commit them or close as abandoned to explicitly discard`,
 				};
+			}
+			// No merge gate when closeout supplies no evidence: a clean
+			// committed branch closes with its branch retained, merged or
+			// not. With evidence (a merged close), the branch must contain
+			// nothing beyond it.
+			if (input.evidenceCommit !== undefined) {
+				const integrated = await isIntegrated({
+					repoRoot: input.repoRoot,
+					branch: input.branch,
+					base: input.base,
+					evidenceCommit: input.evidenceCommit,
+				});
+				if (!integrated.merged) {
+					return {
+						ok: false,
+						refusal: "unmerged",
+						reason: `branch ${input.branch} has work beyond the merge evidence into ${input.base}`,
+					};
+				}
 			}
 		}
 		const argv = ["remove", input.branch, "--foreground", "--format=json"];
@@ -266,8 +279,31 @@ export class WorktrunkDriver implements WorktreeDriver {
 		if (outcome === undefined) {
 			return { ok: false, refusal: "failed", reason: "wt remove returned no branch outcome" };
 		}
-		if (outcome === "deleted" || outcome === "deferred" || outcome === "not_attempted") {
-			return { ok: true, branchOutcome: outcome, path: input.path };
+		if (outcome === "deleted" || outcome === "retained_unmerged") {
+			// `retained_unmerged` keeps the branch and removes the checkout:
+			// the committed source survives while the directory (including
+			// ignored runtime trees) is reclaimed. Either way a successful
+			// close must actually reclaim the path, so verify it is gone
+			// instead of trusting the label alone.
+			try {
+				await stat(input.path);
+			} catch {
+				return { ok: true, branchOutcome: outcome, path: input.path };
+			}
+			return {
+				ok: false,
+				refusal: "failed",
+				reason: `worktree ${input.branch} is still present at ${input.path} after removal (${outcome}); retry the close`,
+			};
+		}
+		if (outcome === "deferred" || outcome === "not_attempted") {
+			// The checkout was not removed: closing now would strand storage
+			// behind a closed mission, so stay open with a retryable reason.
+			return {
+				ok: false,
+				refusal: "failed",
+				reason: `worktree removal for ${input.branch} did not complete (${outcome}); worktree retained at ${input.path}, retry the close`,
+			};
 		}
 		if (outcome === "retained_checked_out") {
 			return {
