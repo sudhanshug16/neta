@@ -1,17 +1,13 @@
 #!/usr/bin/env bash
 # T12.4 end-to-end smoke: the built bundle opens a workspace and yields one
-# mission, with no real provider. Needs only `node`, `git` and a built
-# `dist/main.js`. Takes no arguments, exits 0 only on success, and prints
+# mission, with no real provider. Needs `node`, `bun`, `git`, the managed
+# OpenCode runtime and a built `dist/main.js`. It exits 0 only on success and prints
 # `smoke: ok` as its last line.
 #
-# The node is started explicitly: on-demand autostart shells out to an
-# installed `neta` on PATH, which a release tarball cannot assume.
+# The node is started explicitly so the bundle is the process under test.
 #
-# Honest note on the mission step. The released bundle has no protocol path
-# that creates missions (production serves no tools.* methods; the MCP proxy
-# plus router stay test-local), and test/fixtures/fake-acp-agent.mjs has no
-# directive that calls neta_mission. So after one real chat prompt through
-# the fake agent, this script persists exactly what a leader-led
+# The fake model does not call neta_mission. After one real chat prompt
+# through OpenCode, this script persists exactly what a leader-led
 # neta_mission with no agents would have written (mission row #1 plus one
 # mission.created event) while the node is stopped, restarts the node, and
 # proves the bundle serves it back via `neta missions` and the event log.
@@ -24,17 +20,27 @@ fi
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUNDLE="$ROOT/dist/main.js"
-FIXTURE="$ROOT/test/fixtures/fake-acp-agent.mjs"
+FIXTURE="$ROOT/test/fixtures/fake-openai-server.mjs"
 TIMEOUT_SECS="${SMOKE_TIMEOUT_SECS:-120}"
 
 command -v node >/dev/null 2>&1 || { echo "smoke: node is required" >&2; exit 1; }
+command -v bun >/dev/null 2>&1 || { echo "smoke: bun is required" >&2; exit 1; }
 command -v git >/dev/null 2>&1 || { echo "smoke: git is required" >&2; exit 1; }
 [ -f "$BUNDLE" ] || { echo "smoke: $BUNDLE is missing (run bun run build first)" >&2; exit 1; }
 [ -f "$FIXTURE" ] || { echo "smoke: $FIXTURE is missing" >&2; exit 1; }
+[ -f "$ROOT/vendor/opencode/runtime/neta-fork.json" ] || { echo "smoke: managed OpenCode runtime is missing (run bun run setup:opencode)" >&2; exit 1; }
 
 WORK="$(mktemp -d)"
 export NETA_DIR="$WORK/neta"
-trap 'node "$BUNDLE" node stop >/dev/null 2>&1 || true; rm -rf "$WORK"' EXIT
+PROVIDER_PID=""
+WATCHDOG_PID=""
+cleanup() {
+	node "$BUNDLE" node stop >/dev/null 2>&1 || true
+	[ -z "$PROVIDER_PID" ] || kill "$PROVIDER_PID" >/dev/null 2>&1 || true
+	[ -z "$WATCHDOG_PID" ] || kill "$WATCHDOG_PID" >/dev/null 2>&1 || true
+	rm -rf "$WORK"
+}
+trap cleanup EXIT
 
 fail() {
 	echo "smoke: $*" >&2
@@ -51,24 +57,78 @@ fail() {
 ) &
 WATCHDOG_PID=$!
 
-PROMPT="please create a smoke mission named smoke-mission via neta_mission"
+PROMPT="Give a smoke response."
 MISSION_NAME="smoke mission"
 MISSION_OBJECTIVE="prove the released bundle end to end"
 
 mkdir -p "$NETA_DIR" "$WORK/repo"
-cat >"$NETA_DIR/settings.json" <<EOF
-{
-	"providers": {
-		"fake": {
-			"command": "node",
-			"args": ["$FIXTURE"],
-			"resume": true,
-			"defaultModel": "test-model"
-		}
-	},
-	"leader": { "provider": "fake", "model": "test-model" },
-	"forbiddenModels": []
-}
+node "$FIXTURE" >"$WORK/provider.url" 2>"$WORK/provider.err" &
+PROVIDER_PID=$!
+for _ in {1..100}; do
+	[ -s "$WORK/provider.url" ] && break
+	if ! kill -0 "$PROVIDER_PID" >/dev/null 2>&1; then
+		cat "$WORK/provider.err" >&2
+		fail "fake model failed to start"
+	fi
+	sleep 0.1
+done
+PROVIDER_URL="$(head -n 1 "$WORK/provider.url")"
+[ -n "$PROVIDER_URL" ] || fail "fake model did not report its endpoint"
+SMOKE_MODEL_URL="$PROVIDER_URL" SMOKE_WORK="$WORK" node --input-type=module <<'EOF'
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+const work = process.env.SMOKE_WORK;
+const env = {
+	XDG_DATA_HOME: join(work, "data"),
+	XDG_CONFIG_HOME: join(work, "config"),
+	XDG_CACHE_HOME: join(work, "cache"),
+	XDG_STATE_HOME: join(work, "state"),
+	OPENCODE_TEST_HOME: join(work, "home"),
+	OPENCODE_TEST_MANAGED_CONFIG_DIR: join(work, "managed"),
+	OPENCODE_DISABLE_MODELS_FETCH: "true",
+	OPENCODE_DISABLE_AUTOUPDATE: "true",
+	OPENCODE_DISABLE_DEFAULT_PLUGINS: "true",
+	OPENCODE_DISABLE_PROJECT_CONFIG: "true",
+	OPENCODE_CONFIG_CONTENT: JSON.stringify({
+		model: "test/test-model",
+		small_model: "test/test-model",
+		enabled_providers: ["test"],
+		formatter: false,
+		lsp: false,
+		provider: {
+			test: {
+				name: "Smoke Fixture",
+				npm: "@ai-sdk/openai-compatible",
+				env: [],
+				options: { apiKey: "fixture", baseURL: `${process.env.SMOKE_MODEL_URL}/v1` },
+				models: {
+					"test-model": {
+						name: "Fixture",
+						limit: { context: 100000, output: 10000 },
+						cost: { input: 0, output: 0 },
+					},
+				},
+			},
+		},
+	}),
+};
+writeFileSync(
+	join(process.env.NETA_DIR, "settings.json"),
+	JSON.stringify({
+		providers: {
+			opencode: {
+				command: "opencode",
+				args: ["serve"],
+				resume: true,
+				defaultModel: "test/test-model",
+				env,
+			},
+		},
+		leader: { provider: "opencode", model: "test/test-model" },
+		forbiddenModels: [],
+	}),
+);
 EOF
 
 git -C "$WORK/repo" init -q
@@ -82,10 +142,10 @@ node "$BUNDLE" node start --detach || fail "node start --detach failed"
 OPEN_OUT="$(node "$BUNDLE" open "$WORK/repo")" || fail "neta open failed"
 echo "$OPEN_OUT" | head -n 1
 
-# One prompt through the CLI chat; the fake agent echoes it back.
+# One prompt through the CLI chat and the pinned OpenCode runtime.
 (cd "$WORK/repo" && printf '%s\n' "$PROMPT" | node "$BUNDLE" >"$WORK/chat.log" 2>"$WORK/chat.err") \
 	|| { cat "$WORK/chat.err" >&2; fail "chat prompt failed"; }
-grep -Fq "echo:$PROMPT" "$WORK/chat.log" || fail "chat reply never arrived"
+grep -Fq "smoke native reply" "$WORK/chat.log" || fail "chat reply never arrived"
 
 # The mission write the released bundle cannot take itself (see header):
 # stop the node (its mission mirror is in memory), persist the row plus the
@@ -176,5 +236,4 @@ if (!Array.isArray(missions) || missions.length !== 1 || missions[0].number !== 
 }
 ' "$MISSIONS_JSON" || fail "expected exactly one mission, numbered 1"
 
-kill "$WATCHDOG_PID" >/dev/null 2>&1 || true
 echo "smoke: ok"

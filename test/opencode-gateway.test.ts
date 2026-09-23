@@ -184,7 +184,9 @@ test("V2 gateway admits once through Node and preserves V2 settings and permissi
 	expect((await request(`${route}/neta-prompt`, message)).status).toBe(200);
 	expect((await request(`${route}/neta-prompt`, message)).status).toBe(200);
 	expect(sends).toBe(1);
-	expect(JSON.parse(Buffer.from(prompts[0]!.attachments[0]!.dataBase64, "base64").toString())).toEqual(message);
+	const payload = prompts[0]?.attachments[0]?.dataBase64;
+	expect(payload).toBeDefined();
+	expect(JSON.parse(Buffer.from(payload ?? "", "base64").toString())).toEqual(message);
 	expect((await request(`${route}/neta-prompt`, { ...message, text: "different" })).status).toBe(400);
 	expect(
 		(await request(`${route}/model`, { model: { providerID: "test", id: "model", variant: "high" } })).status,

@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { basename, extname } from "node:path";
+import { basename } from "node:path";
 import { Readable } from "node:stream";
 import type { PromptAttachment } from "../core/types.ts";
 import type { OpenCodeAttachment } from "./attachment.ts";

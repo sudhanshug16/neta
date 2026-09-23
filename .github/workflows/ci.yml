@@ -25,6 +25,7 @@ jobs:
       - run: bun test
       - run: bun run build
       - run: node dist/main.js --version
+      - run: bun run setup:opencode
       - run: bun run smoke
 
   macos:
@@ -35,6 +36,7 @@ jobs:
         with:
           bun-version: 1.3.14
       - run: bun install --frozen-lockfile
+      - run: bun run setup:opencode
       - run: bun run build
       - run: bun run smoke
 
