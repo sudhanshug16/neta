@@ -4,7 +4,7 @@
   "commit": "7a31b5c0f76ce1c06befacc09b47b4fc3c71c408",
   "bun": "1.4.2",
   "integrationVersion": 2,
-  "overlaySha256": "e70a4bb5a6d77ca19e36297f1f9a8d943ad3461c1137949c6555786932d21457",
+  "overlaySha256": "d5714449ca789d66db59ab71c354999651c9be39f60fd51f497cc5550c027537",
   "lockSha256": "1eede033cd5ffbe7d4d5994d0e4b4bfb72948d8fc27e2343cf220e8d5d277764",
   "files": {
     "NETA.md": "aa2832348726029679205dadf7d63063c82b518df16fb325ba45efb4d20c11a8",
@@ -103,7 +103,7 @@
     "packages/tui/src/neta/reconnect.ts": "521b798555007c1c46ed6a9a199bf7bc01d351918644b87e605fafe860c7296f",
     "packages/tui/src/neta/recovery.ts": "993e311efeae3c17aa921b2a91ec53dac181ba715a2ad115a0d4dd2ecbe4d38d",
     "packages/tui/src/neta/routing.tsx": "2e8fbdf673d8ec80203a4abc9c32005b34bd0fc0ac9276d7a54da31484f74998",
-    "packages/tui/src/neta/shell.tsx": "a19d89a39109b1e9ab341085c12d13bfb45ffae5bac4848244ab257fda4e3cd5",
+    "packages/tui/src/neta/shell.tsx": "b0118cca97a7140c4973ef3054c7c80e3a086e55255e041199b98795a84d9bc8",
     "packages/tui/src/neta/status.tsx": "d55ddd872ddbec61640bdee84b70766a68135936423568fb39bb4a9680c026e8",
     "packages/tui/src/neta/updates-context.tsx": "783a2c6abd6748251345cf529e7185c82de2b864c4e553fa38ee5e501ce29134",
     "packages/tui/src/neta/updates-model.ts": "6c160635bbeec882aac5d0103e9bab2e3ee2bd1ccf424412b298b6ca37b9e976",
