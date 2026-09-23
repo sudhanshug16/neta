@@ -129,6 +129,11 @@ candidate count, benchmark coverage and confidence.
 The routing instructions treat missing benchmark scores as unknown and permit
 Jev to choose among several adequate models; neither condition alone calls for
 abstention.
+Only an otherwise well-formed, non-abstaining Jev choice that disagrees with its
+highest probability is classified once more with the identical request, within
+the original 10-second deadline. A valid second answer proceeds with a warning;
+a repeated mismatch refuses launch with bounded candidate/probability diagnostics.
+No other invalid response, abstention, transport failure or HTTP error is retried.
 HTTP 429/529 responses back off, honoring `Retry-After` when supplied; there is
 no automatic retry that can duplicate a launch. There is no local-policy or
 parent-model fallback. Choose a model explicitly, repair the connection, or

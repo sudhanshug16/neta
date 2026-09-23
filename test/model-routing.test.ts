@@ -191,6 +191,137 @@ test("Jev receives the previous model and direction when adjusting existing effo
 	expect(f.requests).toHaveLength(1);
 });
 
+function mismatched(keys: string[], choice = "candidate_0") {
+	const value = result(keys, choice);
+	value.answers.model.probabilities = { candidate_0: 0.1, candidate_1: 0.7, candidate_2: 0.2, none: 0 };
+	return value;
+}
+
+test("only an otherwise valid ranking mismatch retries the identical request and records recovery", async () => {
+	const requests: { body: string; signal: AbortSignal; authorization: string }[] = [];
+	const route = createModelRouter({
+		apiKey: () => "secret-key",
+		catalog: { load: async () => ({ snapshot, warnings: [] }) },
+		fetcher: fakeFetch((_url, init) => {
+			const body = String(init?.body);
+			requests.push({
+				body,
+				signal: init?.signal as AbortSignal,
+				authorization: String(new Headers(init?.headers).get("Authorization")),
+			});
+			const keys = Object.keys(JSON.parse(body).questions.model.criteria);
+			return Response.json(requests.length === 1 ? mismatched(keys) : result(keys, "candidate_2"));
+		}),
+	});
+	const selected = await route(task, models);
+	expect(selected.model).toBe("openai/terra");
+	expect(requests).toHaveLength(2);
+	expect(requests[0].body).toBe(requests[1].body);
+	expect(requests[0].signal).toBe(requests[1].signal);
+	expect(requests[0].authorization).toBe(requests[1].authorization);
+	expect(selected.routing?.warnings.join(" ")).toContain("first choice disagreed with its probability ranking");
+	expect(selected.routing?.warnings.join(" ")).toContain("second identical classification request");
+});
+
+test("two ranking mismatches refuse launch with mapped bounded diagnostics, never raw response data", async () => {
+	let calls = 0;
+	const route = createModelRouter({
+		apiKey: () => "secret-key",
+		catalog: { load: async () => ({ snapshot, warnings: [] }) },
+		fetcher: fakeFetch((_url, init) => {
+			calls++;
+			const keys = Object.keys(JSON.parse(String(init?.body)).questions.model.criteria);
+			return Response.json({ ...mismatched(keys), model: "secret-upstream-model", raw: "secret-raw-payload" });
+		}),
+	});
+	let error = "";
+	try {
+		await route(task, models);
+	} catch (cause) {
+		error = String(cause);
+	}
+	expect(calls).toBe(2);
+	expect(error).toContain("first: chosen openai/astra (0.100000), highest openai/luna (0.700000)");
+	expect(error).toContain("second: chosen openai/astra (0.100000), highest openai/luna (0.700000)");
+	expect(error).toContain("requested classifier model jev-1.13.0");
+	expect(error).toContain("no agent was launched");
+	expect(error).not.toContain("secret-");
+	expect(error).not.toContain(task.task);
+});
+
+test("diagnostics discard unsafe eligible IDs and untrusted classifier model strings", async () => {
+	const unsafe = [{ ...models[0], id: "openai/secret-key\nraw" }, models[1], models[2]];
+	let calls = 0;
+	const route = createModelRouter({
+		apiKey: () => "secret-key",
+		catalog: { load: async () => ({ snapshot: { ...snapshot, models: unsafe }, warnings: [] }) },
+		fetcher: fakeFetch((_url, init) => {
+			calls++;
+			const keys = Object.keys(JSON.parse(String(init?.body)).questions.model.criteria);
+			return Response.json({ ...mismatched(keys), model: "secret-model\nraw", extra: "secret-body" });
+		}),
+	});
+	let error = "";
+	try {
+		await route(task, unsafe);
+	} catch (cause) {
+		error = String(cause);
+	}
+	expect(calls).toBe(2);
+	expect(error).toContain("highest candidate_1 (0.700000)");
+	expect(error).not.toContain("secret-");
+	expect(error).not.toContain("raw");
+});
+
+test("abstention, excluded choices, malformed probabilities and HTTP errors never retry", async () => {
+	for (const answer of [
+		(keys: string[]) => result(keys, "none"),
+		(keys: string[]) => mismatched(keys, "none"),
+		(keys: string[]) => mismatched(keys, "excluded/model"),
+		(keys: string[]) => ({
+			...mismatched(keys),
+			answers: { model: { ...mismatched(keys).answers.model, probabilities: { candidate_0: 0.1 } } },
+		}),
+	]) {
+		let calls = 0;
+		const route = createModelRouter({
+			apiKey: () => "test-only",
+			catalog: { load: async () => ({ snapshot, warnings: [] }) },
+			fetcher: fakeFetch((_url, init) => {
+				calls++;
+				return Response.json(answer(Object.keys(JSON.parse(String(init?.body)).questions.model.criteria)));
+			}),
+		});
+		await expect(route(task, models)).rejects.toThrow("no agent was launched");
+		expect(calls).toBe(1);
+	}
+	for (const status of [401, 429]) {
+		let calls = 0;
+		const route = createModelRouter({
+			apiKey: () => "test-only",
+			catalog: { load: async () => ({ snapshot, warnings: [] }) },
+			fetcher: fakeFetch(() => {
+				calls++;
+				return new Response("secret-raw", { status });
+			}),
+		});
+		await expect(route(task, models)).rejects.toThrow(`HTTP ${status}`);
+		expect(calls).toBe(1);
+	}
+});
+
+test("near ties within epsilon and low-confidence valid choices do not retry", async () => {
+	const f = routerFixture((keys) => {
+		const value = result(keys, "candidate_0", 0.2);
+		value.answers.model.probabilities = { candidate_0: 0.3, candidate_1: 0.3000000005, candidate_2: 0.2, none: 0.2 };
+		return value;
+	});
+	const selected = await f.route(task, models);
+	expect(selected.model).toBe("openai/astra");
+	expect(selected.routing?.warnings.join(" ")).toContain("low classification confidence");
+	expect(f.requests).toHaveLength(1);
+});
+
 test("classifier sees all eligible models, not only the five cheapest", async () => {
 	let count = 0;
 	const many = Array.from({ length: 8 }, (_, i) => ({ ...models[0], id: `openai/model-${i}` }));
