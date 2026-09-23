@@ -76,6 +76,7 @@ import {
 } from "./handlers-conversation.ts";
 import { diagnosticsHandlers } from "./handlers-diagnostics.ts";
 import { glanceHandlers } from "./handlers-glance.ts";
+import { meHandlers } from "./handlers-me.ts";
 import { registryHandlers } from "./handlers-registry.ts";
 import { routingHandlers } from "./handlers-routing.ts";
 import { terminalHandlers } from "./handlers-terminal.ts";
@@ -1739,6 +1740,7 @@ export const allHandlers: NodeHandlers = {
 	...registryHandlers,
 	...conversationHandlers,
 	...glanceHandlers,
+	...meHandlers,
 	...workspaceHandlers,
 	...terminalHandlers,
 	...diagnosticsHandlers,

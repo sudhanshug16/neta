@@ -45,7 +45,7 @@ export interface MeCard extends MeDecision {
 	readAt?: string;
 }
 
-export type MeReplyStatus = "queued" | "delivering" | "delivered" | "uncertain" | "rejected";
+export type MeReplyStatus = "queued" | "delivering" | "accepted" | "delivered" | "uncertain" | "rejected";
 export interface MeReply {
 	id: string;
 	idempotencyKey: string;
@@ -166,7 +166,8 @@ const empty = (): Document => ({
 const digest = (parts: unknown[]): string => createHash("sha256").update(JSON.stringify(parts)).digest("hex");
 const replyTransitions: Record<MeReplyStatus, MeReplyStatus[]> = {
 	queued: ["delivering", "rejected"],
-	delivering: ["delivered", "uncertain", "rejected"],
+	delivering: ["accepted", "delivered", "uncertain", "rejected"],
+	accepted: [],
 	delivered: [],
 	uncertain: [],
 	rejected: [],
