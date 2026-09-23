@@ -182,7 +182,7 @@ const FALLBACK_MODELS: JsonSchema = {
 	maxItems: 8,
 	items: { type: "string", minLength: 1, maxLength: 200 },
 	description:
-		"Ordered exact connected model IDs permitted if the requested model fails before execution. Omit or use [] to prohibit substitution. Match the user's cost and capability requirements.",
+		"Deprecated compatibility field. Automatic model switching is disabled; nonempty lists are rejected. Omit or pass [].",
 };
 const EFFORT: JsonSchema = {
 	type: "integer",

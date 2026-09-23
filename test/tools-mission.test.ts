@@ -771,38 +771,41 @@ test("unavailable staffing model leaves no mission or agent behind", async () =>
 	expect(f.launches).toHaveLength(0);
 });
 
-test("staffing preserves ordered permitted fallback models and rejects unavailable alternatives before reservation", async () => {
+test("nonempty legacy fallback lists are rejected before reservation; empty lists cannot switch models", async () => {
 	const f = fixture("folder");
-	f.ports.sessions.selectModel = async ({ provider, model }) => {
-		if (model === "unavailable") throw new Error("alternative unavailable");
-		return { provider, model };
-	};
-	await expect(
-		missionHandlers.neta_mission(ctx(f, f.leaderActor), {
-			name: "invalid plan",
-			objective: "inspect",
-			access: "readOnly",
-			lead: "self",
-			agents: [{ task: "inspect", access: "readOnly", model: "small", fallbackModels: ["unavailable"] }],
-		}),
-	).rejects.toThrow("alternative unavailable");
+	const denied = await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+		name: "invalid plan",
+		objective: "inspect",
+		access: "readOnly",
+		lead: "self",
+		agents: [{ task: "inspect", access: "readOnly", model: "small", fallbackModels: ["unavailable"] }],
+	});
+	expect(denied).toMatchObject({ ok: false, message: expect.stringContaining("fallbackModels is deprecated") });
 	expect(f.store.listMissions(f.leaderActor.workspaceId)).toHaveLength(0);
 	const result = await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
 		name: "small models",
 		objective: "inspect",
 		access: "readOnly",
-		lead: { task: "lead", model: "small", fallbackModels: ["second", "third"] },
+		lead: { task: "lead", model: "small", fallbackModels: [] },
 		agents: [{ task: "inspect", access: "readOnly", model: "small" }],
 	});
 	expect(result.ok).toBe(true);
-	expect(f.launches[0]?.fallbackModels).toEqual(["second", "third"]);
+	expect(f.launches[0]?.fallbackModels).toEqual([]);
 	expect(f.launches[1]?.fallbackModels).toEqual([]);
 	const mission = f.store.listMissions(f.leaderActor.workspaceId)[0];
 	if (mission === undefined) throw new Error("missing mission");
 	expect(f.store.listAgents(mission.id)[0]).toMatchObject({
 		requestedModel: "small",
-		fallbackModels: ["second", "third"],
+		fallbackModels: [],
 	});
+	const deniedAgent = await missionHandlers.neta_agent(ctx(f, f.leaderActor), {
+		missionId: mission.number,
+		task: "inspect",
+		access: "readOnly",
+		fallbackModels: ["second"],
+	});
+	expect(deniedAgent).toMatchObject({ ok: false, message: expect.stringContaining("fallbackModels is deprecated") });
+	expect(f.launches).toHaveLength(2);
 });
 
 test("effort routing happens once per child before mission side effects and persists through writer queues", async () => {
