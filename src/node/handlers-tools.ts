@@ -580,9 +580,10 @@ export function toolMount(o: ToolMountOptions): {
 		if (candidates.length !== 1) return undefined;
 		const mission = candidates[0];
 		if (mission === undefined) return undefined;
-		const changed = await worktrees.releaseWriterKey(mission, workspace, mission.id);
-		await promote(changed);
-		const promoted = changed[0]?.promoted;
+		const release = await worktrees.releaseWriterKey(mission, workspace, mission.id);
+		if (!release.released) return undefined;
+		await promote(release.changed);
+		const promoted = release.changed[0]?.promoted;
 		return promoted === undefined ? { missionId: mission.number } : { missionId: mission.number, promoted };
 	}
 	async function finishPendingClose(sessionId: string): Promise<CloseOutcome> {
@@ -661,6 +662,14 @@ export function toolMount(o: ToolMountOptions): {
 			});
 			if (pending.mode === "leadPlus" && pending.record !== undefined) {
 				await modes.applyApprovedLeadPlus(pending.subject, pending.record);
+				if (pending.subject.kind === "leader") {
+					const leader = leaderOf(pending.subject.workspaceId);
+					await o.store.putLeader({ ...leader, activeMissionId: pending.mission.id });
+					o.hub().broadcast("state", {
+						kind: "leader",
+						record: { ...leader, activeMissionId: pending.mission.id },
+					});
+				}
 			} else {
 				await modes.requestMode({ subject: pending.subject, mode: "lead" });
 				await releaseHolder(pending.subject.workspaceId, pending.holder);

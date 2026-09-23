@@ -91,6 +91,7 @@ describe("writer leases", () => {
 		expect(released).toEqual({ released: true, promoted: "queued" });
 		expect(await manager.holder(W, "/wt-1")).toBe("queued");
 		expect(await manager.holder(W, "/wt-2")).toBe("mission");
+		expect(await manager.releaseKey(W, "mission" as AgentId, "/wt-1")).toEqual({ released: false });
 	});
 
 	test("a folder workspace keys on its root; read-only missions take no lease", async () => {

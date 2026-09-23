@@ -252,6 +252,7 @@ test("Lead returns one stale workspace-leader reservation and promotes its queue
 			},
 		});
 		expect(granted.isError).toBe(false);
+		expect(store.getLeader("workspace")?.activeMissionId).toBe(mission.id);
 		const leases = new LeaseManager(createFileLeaseStore(directory));
 		expect(await leases.holder("workspace", directory)).toBe(mission.id);
 		expect(await leases.acquire("workspace", queued.id, directory)).toBe("queued");
