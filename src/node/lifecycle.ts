@@ -44,7 +44,7 @@ import type {
 	TurnId,
 	WorkspaceId,
 } from "../core/types.ts";
-import { captureMeEvent, replayMeEvents } from "../me/capture.ts";
+import { captureMeEvent, captureMeLeaderTurn, replayMeEvents, replayMeLeaderTurns } from "../me/capture.ts";
 import { openMeStore } from "../me/store.ts";
 import { nativeEndpointReady } from "../opencode/attachment.ts";
 import { openCodeInvocation } from "../opencode/runtime.ts";
@@ -1792,6 +1792,10 @@ export async function startNode(o?: {
 				if (realStore === undefined) return;
 				const actor = glanceActorForSession(storePort, sessionId);
 				if (actor === undefined) return;
+				const leader = storePort.listLeaders().find((item) => item.sessionId === sessionId);
+				const workspace = storePort.getWorkspace(actor.workspaceId);
+				if (leader && workspace)
+					await captureMeLeaderTurn({ store: openMeStore(), workspace, sessionId, turn, blocks });
 				const source = blocks
 					.map((block) => block.text.trim())
 					.filter(Boolean)
@@ -1856,6 +1860,7 @@ export async function startNode(o?: {
 			});
 		}
 		if (realStore !== undefined) {
+			const durableStore = realStore;
 			const me = openMeStore();
 			for (const workspace of storePort.listWorkspaces()) {
 				await replayMeEvents({
@@ -1868,6 +1873,17 @@ export async function startNode(o?: {
 						agents: storePort.listAgents(),
 						missions: storePort.listMissions(),
 					}),
+				});
+			}
+			for (const leader of storePort.listLeaders()) {
+				const workspace = storePort.getWorkspace(leader.workspaceId);
+				if (!workspace) continue;
+				await replayMeLeaderTurns({
+					store: me,
+					workspace,
+					sessionId: leader.sessionId,
+					read: (cursor) => durableStore.conversations.tail({ sessionId: leader.sessionId, cursor, limit: 500 }),
+					getTurn: async (turnId) => (await durableStore.conversations.turnRange(leader.sessionId, turnId))?.turn,
 				});
 			}
 		}

@@ -1,4 +1,5 @@
-import type { Agent, Event, Leader, Mission, Workspace } from "../core/types.ts";
+import { createHash } from "node:crypto";
+import type { Agent, Block, Event, Leader, Mission, Turn, Workspace } from "../core/types.ts";
 import type { MeSource, MeStore } from "./store.ts";
 
 export interface MeEventSourceContext {
@@ -83,4 +84,119 @@ export async function replayMeEvents(input: {
 		}
 		if (events.length < 200) return captured;
 	}
+}
+
+export async function captureMeLeaderTurn(input: {
+	store: MeStore;
+	workspace: Workspace;
+	sessionId: string;
+	turn: Turn;
+	blocks: readonly Block[];
+}): Promise<void> {
+	if (
+		!input.turn.endedAt ||
+		input.turn.readerDirected !== true ||
+		input.turn.cancelled ||
+		input.turn.sessionId !== input.sessionId
+	)
+		return;
+	const blocks = input.blocks.filter(
+		(block) => block.turnId === input.turn.id && block.role === "agent" && block.kind === "text",
+	);
+	const text = blocks.map((block) => block.text).join("\n\n");
+	if (!text.trim() && !input.turn.failed) return;
+	const firstSeq = blocks[0]?.seq;
+	const lastSeq = blocks.at(-1)?.seq;
+	const sourceText = text || "Workspace leader runtime turn failed.";
+	const sourceHash = createHash("sha256").update(sourceText).digest("hex");
+	await input.store.capture({
+		id: "",
+		workspaceId: input.workspace.id,
+		workspaceName: input.workspace.name,
+		sessionId: input.sessionId,
+		actorKind: "leader",
+		kind: input.turn.failed ? "failure" : "message",
+		at: input.turn.endedAt,
+		text: sourceText.slice(0, 8_000),
+		turnId: input.turn.id,
+		explicit: false,
+		destinationSessionIds: [input.sessionId],
+		...(firstSeq === undefined || lastSeq === undefined
+			? {}
+			: { transcriptPointer: { sessionId: input.sessionId, turnId: input.turn.id, firstSeq, lastSeq, sourceHash } }),
+	});
+}
+
+/** Replay whole completed turns; leave a split turn buffered until its final block is read. */
+export async function replayMeLeaderTurns(input: {
+	store: MeStore;
+	workspace: Workspace;
+	sessionId: string;
+	read: (byteCursor: number) => Promise<{ blocks: Block[]; cursor: number; more: boolean }>;
+	getTurn: (turnId: string) => Promise<Turn | undefined>;
+}): Promise<number> {
+	const cursors =
+		(await input.store.getCheckpoint()).workspaces.find((item) => item.workspaceId === input.workspace.id)?.turns ??
+		[];
+	let cursor = Math.max(
+		0,
+		...cursors.filter((item) => item.sessionId === input.sessionId).map((item) => item.blockSeq ?? 0),
+	);
+	let pageCursor = 0;
+	let pending: Block[] = [];
+	let pendingTurn: Turn | undefined;
+	let captured = 0;
+	for (;;) {
+		const page = await input.read(pageCursor);
+		for (const block of page.blocks) {
+			if (block.seq <= cursor) continue;
+			if (pendingTurn && pendingTurn.id !== block.turnId) {
+				await captureMeLeaderTurn({
+					store: input.store,
+					workspace: input.workspace,
+					sessionId: input.sessionId,
+					turn: pendingTurn,
+					blocks: pending,
+				});
+				cursor = pending.at(-1)?.seq ?? cursor;
+				await input.store.setCheckpoint({
+					workspaces: [
+						{
+							workspaceId: input.workspace.id,
+							eventSeq: 0,
+							turns: [{ sessionId: input.sessionId, turnId: pendingTurn.id, blockSeq: cursor }],
+						},
+					],
+				});
+				captured++;
+				pending = [];
+				pendingTurn = undefined;
+			}
+			if (!pendingTurn) pendingTurn = await input.getTurn(block.turnId);
+			if (pendingTurn) pending.push(block);
+		}
+		if (!page.more) break;
+		pageCursor = page.cursor;
+	}
+	if (pendingTurn && pending.length) {
+		await captureMeLeaderTurn({
+			store: input.store,
+			workspace: input.workspace,
+			sessionId: input.sessionId,
+			turn: pendingTurn,
+			blocks: pending,
+		});
+		cursor = pending.at(-1)?.seq ?? cursor;
+		await input.store.setCheckpoint({
+			workspaces: [
+				{
+					workspaceId: input.workspace.id,
+					eventSeq: 0,
+					turns: [{ sessionId: input.sessionId, turnId: pendingTurn.id, blockSeq: cursor }],
+				},
+			],
+		});
+		captured++;
+	}
+	return captured;
 }

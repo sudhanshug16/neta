@@ -21,6 +21,7 @@ export interface MeSource {
 	missionId?: string;
 	explicit: boolean;
 	forceVisible?: boolean;
+	transcriptPointer?: { sessionId: string; turnId: string; firstSeq: number; lastSeq: number; sourceHash: string };
 	destinationSessionIds: string[];
 }
 
@@ -62,6 +63,7 @@ export interface MeReply {
 export interface MeTurnCursor {
 	sessionId: string;
 	turnId: string;
+	blockSeq?: number;
 }
 export interface MeWorkspaceCheckpoint {
 	workspaceId: string;
@@ -238,6 +240,22 @@ function validatedSource(input: MeSource): MeSource {
 		...(input.turnId === undefined ? {} : { turnId: bounded(input.turnId, "turnId", 256) }),
 		...(input.eventId === undefined ? {} : { eventId: bounded(input.eventId, "eventId", 256) }),
 		...(input.missionId === undefined ? {} : { missionId: bounded(input.missionId, "missionId", 256) }),
+		...(input.transcriptPointer === undefined
+			? {}
+			: (() => {
+					const pointer = input.transcriptPointer;
+					if (
+						pointer.sessionId !== sessionId ||
+						pointer.turnId !== input.turnId ||
+						!Number.isSafeInteger(pointer.firstSeq) ||
+						!Number.isSafeInteger(pointer.lastSeq) ||
+						pointer.firstSeq < 1 ||
+						pointer.lastSeq < pointer.firstSeq ||
+						!/^[a-f0-9]{64}$/.test(pointer.sourceHash)
+					)
+						throw new Error("invalid transcript pointer");
+					return { transcriptPointer: { ...pointer } };
+				})()),
 	};
 	const id = meSourceId(source);
 	if (input.id && input.id !== id) throw new Error("Me source id does not match its origin");
@@ -307,15 +325,24 @@ function mergeCheckpoint(current: MeCheckpoint, incoming: MeCheckpoint): MeCheck
 		const turns = item.turns.map((turn) => ({
 			sessionId: bounded(turn.sessionId, "checkpoint session", 256),
 			turnId: bounded(turn.turnId, "checkpoint turn", 256),
+			...(turn.blockSeq === undefined ? {} : { blockSeq: turn.blockSeq }),
 		}));
-		if (turns.some((turn) => turn.sessionId === SOL_SESSION_ID)) throw new Error("Sol is not a workspace session");
+		if (
+			turns.some(
+				(turn) =>
+					turn.sessionId === SOL_SESSION_ID ||
+					(turn.blockSeq !== undefined && (!Number.isSafeInteger(turn.blockSeq) || turn.blockSeq < 0)),
+			)
+		)
+			throw new Error("invalid Me turn checkpoint");
 		if (new Set(turns.map((turn) => `${turn.sessionId}\u0000${turn.turnId}`)).size !== turns.length)
 			throw new Error("duplicate Me turn cursor");
 		const previous = merged.get(workspaceId) ?? { workspaceId, eventSeq: 0, turns: [] };
-		const seen = new Set(previous.turns.map((turn) => `${turn.sessionId}\u0000${turn.turnId}`));
 		for (const turn of turns) {
 			const key = `${turn.sessionId}\u0000${turn.turnId}`;
-			if (!seen.has(key)) previous.turns.push(turn);
+			const existing = previous.turns.find((item) => `${item.sessionId}\u0000${item.turnId}` === key);
+			if (!existing) previous.turns.push(turn);
+			else if (turn.blockSeq !== undefined) existing.blockSeq = Math.max(existing.blockSeq ?? 0, turn.blockSeq);
 		}
 		previous.turns = previous.turns.slice(-1_000);
 		previous.eventSeq = Math.max(previous.eventSeq, item.eventSeq);

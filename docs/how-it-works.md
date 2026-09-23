@@ -242,13 +242,15 @@ block and serve reads by byte-offset cursor, so a client tails a live
 conversation by passing the previous cursor back and the Node never
 loads a whole history into memory (`src/store/conversations.ts`).
 
-The Node captures selected attention-relevant lifecycle events into the
-machine-global Me store. Capture is durable before the per-workspace event
-checkpoint advances. On startup the Node replays events after that checkpoint;
-event identity makes a crash/retry idempotent. This capture path does not start
-the Luna classifier or make a feed visibility decision. Agent turns, permission
-requests, Sol's native session, and route delivery remain separate integration
-work.
+The Node captures selected attention-relevant lifecycle events and completed
+workspace-leader turns into the machine-global Me store. Turn capture stores a
+bounded preview and a session/turn/block-range/hash pointer to the original
+transcript. Capture is durable before event or block-sequence checkpoints
+advance. On startup the Node replays after those checkpoints; source identity
+makes crash/retry idempotent, and a page-split turn stays buffered until its
+final block. This capture path does not start the Luna classifier or make a
+feed visibility decision. Permission requests, Sol's native session, and
+authorized route delivery remain separate integration work.
 
 ## Missions
 

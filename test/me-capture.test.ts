@@ -3,8 +3,8 @@ import { mkdtempSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Agent, Event, Leader, Mission, Workspace } from "../src/core/types.ts";
-import { captureMeEvent, replayMeEvents } from "../src/me/capture.ts";
+import type { Agent, Block, Event, Leader, Mission, Turn, Workspace } from "../src/core/types.ts";
+import { captureMeEvent, captureMeLeaderTurn, replayMeEvents, replayMeLeaderTurns } from "../src/me/capture.ts";
 import { openMeStore } from "../src/me/store.ts";
 
 const original = process.env.NETA_DIR;
@@ -141,4 +141,67 @@ test("capture failure leaves event cursor behind for replay", async () => {
 	expect(
 		await replayMeEvents({ store, workspaceId: "workspace-A", read: async () => [event(1)], context: () => context }),
 	).toBe(1);
+});
+
+test("long leader turns retain bounded previews and exact transcript pointers", async () => {
+	const { store, workspace } = fixture();
+	const turn: Turn = {
+		id: "turn-long",
+		sessionId: "leader-A",
+		startedAt: "2026-09-23T10:00:00.000Z",
+		endedAt: "2026-09-23T10:01:00.000Z",
+		role: "user",
+		readerDirected: true,
+	};
+	const at = "2026-09-23T10:01:00.000Z";
+	const blocks: Block[] = [{ turnId: turn.id, seq: 2, at, role: "agent", kind: "text", text: "x".repeat(9_000) }];
+	await captureMeLeaderTurn({ store, workspace, sessionId: turn.sessionId, turn, blocks });
+	const source = (await store.pendingSources())[0];
+	expect(source?.text).toHaveLength(8_000);
+	expect(source?.transcriptPointer).toMatchObject({
+		sessionId: "leader-A",
+		turnId: "turn-long",
+		firstSeq: 2,
+		lastSeq: 2,
+		sourceHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+	});
+});
+
+test("turn replay buffers a page-split turn and checkpoints only after its final block", async () => {
+	const { store, workspace } = fixture();
+	const turn: Turn = {
+		id: "turn-split",
+		sessionId: "leader-A",
+		startedAt: "2026-09-23T10:00:00.000Z",
+		endedAt: "2026-09-23T10:01:00.000Z",
+		role: "user",
+		readerDirected: true,
+	};
+	const at = "2026-09-23T10:01:00.000Z";
+	const block = (seq: number): Block => ({
+		turnId: turn.id,
+		seq,
+		at,
+		role: "agent",
+		kind: "text",
+		text: `part-${seq}`,
+	});
+	let reads = 0;
+	const captured = await replayMeLeaderTurns({
+		store,
+		workspace,
+		sessionId: turn.sessionId,
+		read: async (cursor) => {
+			reads++;
+			if (cursor === 0) return { blocks: [block(1), block(2)], cursor: 10, more: true };
+			return { blocks: [block(3)], cursor: 20, more: false };
+		},
+		getTurn: async (turnId) => (turnId === turn.id ? turn : undefined),
+	});
+	expect(captured).toBe(1);
+	expect(reads).toBe(2);
+	expect((await store.pendingSources())[0]?.text).toBe("part-1\n\npart-2\n\npart-3");
+	expect((await store.getCheckpoint()).workspaces[0]?.turns).toEqual([
+		{ sessionId: "leader-A", turnId: "turn-split", blockSeq: 3 },
+	]);
 });
