@@ -56,7 +56,7 @@ function mission(id: string, workspaceId: string, state: MissionState): Mission 
 		name: "m",
 		objective: "o",
 		changes: [],
-		lead: { kind: "leader" },
+		lead: { kind: "agent", agentId: `fixture-lead-${id}` },
 		agentIds: [],
 		access: "readOnly",
 		state,

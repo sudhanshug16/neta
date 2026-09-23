@@ -69,7 +69,7 @@ async function seed(dir: string, workspace: string): Promise<void> {
 					name: spec.name,
 					objective: spec.objective,
 					changes: [],
-					lead: { kind: "leader" },
+					lead: { kind: "agent", agentId: `fixture-lead-${ulid()}` },
 					agentIds: [],
 					access: "readOnly",
 					state: spec.state,

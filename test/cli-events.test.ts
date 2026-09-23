@@ -81,7 +81,7 @@ async function seed(dir: string, workspace: string): Promise<void> {
 				name: MISSION_NAME,
 				objective: "Port the lens to the new runtime.",
 				changes: [],
-				lead: { kind: "leader" },
+				lead: { kind: "agent", agentId: `fixture-lead-${workspace}` },
 				agentIds: [],
 				access: "readOnly",
 				state: "running",

@@ -52,7 +52,7 @@ test.each([
 			name: "Test",
 			objective: "Test",
 			changes: [],
-			lead: { kind: "leader" },
+			lead: { kind: "agent", agentId: "fixture-mission-lead" },
 			agentIds: ["first", "second"],
 			access: "readWrite",
 			state: "running",
