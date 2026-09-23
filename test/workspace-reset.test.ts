@@ -1,15 +1,15 @@
 import { expect, test } from "bun:test";
 import type { Agent, Leader, Mission, Workspace } from "../src/core/types.ts";
+import type { CloseMissionInput, CloseOutcome } from "../src/tools/handlers/lifecycle.ts";
 import type { NodeContext } from "../src/node/server.ts";
 import { archiveWorkspace } from "../src/node/workspace-reset.ts";
-import type { RemoveResult } from "../src/worktrees/driver.ts";
 
 function fixture(
-	failClose = false,
-	removeWorktree?: (mission: Mission, repoRoot: string) => Promise<RemoveResult>,
+	close?: (input: CloseMissionInput) => Promise<CloseOutcome>,
+	turnActive?: (sessionId: string) => boolean,
 ) {
 	const calls: string[] = [];
-	const removals: string[] = [];
+	const closes: CloseMissionInput[] = [];
 	let leader = {
 		workspaceId: "w",
 		machineId: "m",
@@ -83,13 +83,12 @@ function fixture(
 			},
 		},
 		runtime: {
-			isTurnActive: () => true,
+			isTurnActive: (sessionId: string) => (turnActive === undefined ? sessionId === "leader" : turnActive(sessionId)),
 			cancel: async () => {
 				calls.push("cancel");
 			},
 			close: async (id: string) => {
 				calls.push(`stop:${id}`);
-				if (failClose) throw new Error("stop failed");
 			},
 			ensureSession: async (input: { access: string; cwd: string }) => {
 				expect(input.access).toBe("readOnly");
@@ -107,60 +106,115 @@ function fixture(
 		release: async (_workspace: string, holder: string) => {
 			calls.push(`release:${holder}`);
 		},
-		removeWorktree:
-			removeWorktree ??
-			(async (mission: Mission, repoRoot: string) => {
-				removals.push(`${mission.id}:${repoRoot}`);
-				return { ok: true, branchOutcome: "retained_unmerged", path: mission.worktree?.path ?? "" };
+		close:
+			close ??
+			(async (input: CloseMissionInput) => {
+				closes.push(input);
+				return {
+					ok: true,
+					mission: {
+						...input.mission,
+						worktree: undefined,
+						state: "closed" as const,
+						closedAt: "0",
+						disposition: "abandoned" as const,
+						closeReason: `Archived by workspace reset; worktree reclaimed, branch ${input.mission.worktree?.branch} retained`,
+					},
+				};
 			}),
 	};
-	return { context, ports, missions, agents, calls, removals, leader: () => leader };
+	return { context, ports, missions, agents, calls, closes, leader: () => leader };
 }
 
-test("reset reclaims clean inactive worktrees and leaves active ones open with a visible reason", async () => {
+test("reset quiesces actors before closing, reclaims clean inactive worktrees, leaves active ones open", async () => {
 	const f = fixture();
 	await archiveWorkspace(f.context, "w", f.ports);
-	// Mission one still has running and queued agents: it stays open with its
-	// worktree intact and a retryable reason instead of a fabricated success.
-	expect(f.missions[0]).toMatchObject({ id: "one", state: "running" });
-	expect(f.missions[0]?.worktree?.path).toBe("/worktrees/one");
-	expect(f.missions[0]?.attention).toContain("agents still active");
-	expect(f.removals).not.toContain("one:/workspace");
-	// Mission two is inactive and clean: its directory is reclaimed with the
-	// branch retained, and only then is it closed.
-	expect(f.missions[1]).toMatchObject({
-		id: "two",
-		state: "closed",
-		disposition: "abandoned",
-		worktree: undefined,
-	});
-	expect(f.missions[1]?.closeReason).toContain("worktree reclaimed at /worktrees/two");
-	expect(f.missions[1]?.closeReason).toContain("branch two retained");
-	expect(f.removals).toContain("two:/workspace");
+	// Actors were stopped and archived before any removal ran.
+	expect(f.calls).toContain("stop:session-0");
 	expect(f.agents.filter((a) => a.workspaceId === "w").every((a) => a.state === "archived")).toBe(true);
 	expect(f.agents.find((a) => a.id === "unrelated")?.state).toBe("running");
 	expect(f.calls).not.toContain("stop:other");
+	// Mission one had running and queued agents (and the leader's active
+	// mission): it stays open with its worktree intact and a retryable reason,
+	// and the authoritative close was never invoked for it.
+	expect(f.missions[0]).toMatchObject({ id: "one", state: "running" });
+	expect(f.missions[0]?.worktree?.path).toBe("/worktrees/one");
+	expect(f.missions[0]?.attention).toContain("agents were active");
+	expect(f.closes.map((input) => input.mission.id)).not.toContain("one");
+	// Mission two was inactive: it closed through the pipeline with its
+	// branch retained.
+	expect(f.missions[1]).toMatchObject({ id: "two", state: "closed", worktree: undefined });
+	expect(f.missions[1]?.closeReason).toContain("branch two retained");
+	expect(f.closes.map((input) => input.mission.id)).toEqual(["two"]);
 	expect(f.leader().activeMissionId).toBeUndefined();
 	expect(f.leader().mode).toBe("lead");
 	expect(f.leader().sessionId).toBe("new");
 });
 
 test("a refused removal stays open with the refusal reason and keeps its work", async () => {
-	const f = fixture(false, async () => ({
+	const f = fixture(async (input) => ({
 		ok: false,
-		refusal: "dirty" as const,
-		reason: "worktree two has uncommitted changes",
+		attention: "worktree two has uncommitted changes",
+		mission: { ...input.mission, attention: "worktree two has uncommitted changes" },
 	}));
 	await archiveWorkspace(f.context, "w", f.ports);
-	// The inactive mission stays open: reset never discards dirty data.
 	expect(f.missions[1]).toMatchObject({ id: "two", state: "running" });
 	expect(f.missions[1]?.worktree?.path).toBe("/worktrees/two");
 	expect(f.missions[1]?.attention).toContain("worktree two has uncommitted changes");
 	expect(f.missions[1]?.closedAt).toBeUndefined();
 });
 
+test("a throwing removal is contained per mission and persisted retryably", async () => {
+	const f = fixture(async () => {
+		throw new Error("wt list failed: I/O error");
+	});
+	await archiveWorkspace(f.context, "w", f.ports);
+	expect(f.missions[1]).toMatchObject({ id: "two", state: "running" });
+	expect(f.missions[1]?.worktree?.path).toBe("/worktrees/two");
+	expect(f.missions[1]?.attention).toContain("Reset cleanup failed: wt list failed: I/O error");
+	expect(f.missions[1]?.attention).toContain("retry the close");
+});
+
+test("the leader's active mission stays open even with no stored active agents", async () => {
+	const f = fixture();
+	for (const agent of f.agents) {
+		if (agent.workspaceId === "w") agent.state = "completed";
+	}
+	await archiveWorkspace(f.context, "w", f.ports);
+	// activeMissionId still names mission one: Lead++-held work is active.
+	expect(f.missions[0]).toMatchObject({ id: "one", state: "running" });
+	expect(f.missions[0]?.worktree?.path).toBe("/worktrees/one");
+	expect(f.missions[1]).toMatchObject({ id: "two", state: "closed", worktree: undefined });
+});
+
+test("a runtime-executing idle session counts as active", async () => {
+	const f = fixture(undefined, (sessionId) => sessionId === "leader" || sessionId === "session-9");
+	f.agents.push({
+		id: "agent-9",
+		sessionId: "session-9",
+		workspaceId: "w",
+		missionId: "two",
+		name: "Worker",
+		task: "test",
+		access: "readWrite",
+		provider: "fake",
+		model: "test",
+		skills: [],
+		canSpawn: false,
+		startedAt: "0",
+		state: "idle",
+	} as Agent);
+	await archiveWorkspace(f.context, "w", f.ports);
+	expect(f.missions[1]).toMatchObject({ id: "two", state: "running" });
+	expect(f.missions[1]?.worktree?.path).toBe("/worktrees/two");
+	expect(f.missions[1]?.attention).toContain("agents were active");
+});
+
 test("stop failure does not report a worker archived or release its lease", async () => {
-	const f = fixture(true);
+	const f = fixture();
+	(f.context.runtime as unknown as { close: (id: string) => Promise<void> }).close = async () => {
+		throw new Error("stop failed");
+	};
 	await expect(archiveWorkspace(f.context, "w", f.ports)).rejects.toThrow("stop failed");
 	expect(f.agents[0]?.state).toBe("running");
 	expect(f.calls.some((call) => call.startsWith("release:"))).toBe(false);
