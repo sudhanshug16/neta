@@ -66,6 +66,7 @@ interface Fixture {
 	store: NodeStore;
 	agents: Map<string, Agent>;
 	events: EventKind[];
+	eventData: unknown[];
 	calls: string[];
 	sessions: CoordinationPorts["sessions"];
 	missions: { save(mission: Mission): Promise<void> };
@@ -80,6 +81,7 @@ function fixture(): Fixture {
 	};
 	const agents = new Map<string, Agent>();
 	const events: EventKind[] = [];
+	const eventData: unknown[] = [];
 	const calls: string[] = [];
 	const sessions: CoordinationPorts["sessions"] = {
 		cancel: async (sessionId) => {
@@ -108,6 +110,7 @@ function fixture(): Fixture {
 		compact: () => Promise.resolve(),
 		appendEvent: async (event) => {
 			events.push(event.kind);
+			eventData.push(event.data);
 			return { seq: events.length, at: new Date(0).toISOString(), ...event };
 		},
 		listEvents: () => Promise.reject(new Error("unused")),
@@ -118,6 +121,7 @@ function fixture(): Fixture {
 		store,
 		agents,
 		events,
+		eventData,
 		calls,
 		sessions,
 		missions,
@@ -223,6 +227,7 @@ test("the workspace leader can ask for a delegated mission without activeMission
 	expect(result).toEqual({ ok: true, data: { missionId: 1 } });
 	expect(f.agents.get(lead.id)?.pendingQuestion).toBe("Apply to production?");
 	expect(f.agents.get(lead.id)?.state).toBe("blocked");
+	expect(f.eventData).toContainEqual({ question: "Apply to production?", userEscalation: true, needsReply: true });
 });
 test("asking about an invalid or another mission cannot redirect a lead's question", async () => {
 	const f = fixture();

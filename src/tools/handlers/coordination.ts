@@ -104,7 +104,7 @@ async function askUser(ctx: CoordinationToolContext, params: AskParams): Promise
 			workspaceId: ctx.actor.workspaceId,
 			kind: "mission.blocked",
 			missionId: mission.id,
-			data: { question: params.question },
+			data: { question: params.question, userEscalation: true, needsReply: true },
 		});
 		return { ok: true, data: { missionId: mission.number } };
 	}
