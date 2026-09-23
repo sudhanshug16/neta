@@ -1,5 +1,5 @@
 // Private, bounded evidence for a Worktrunk setup failure. It is deliberately
-// separate from provider failures: a failed setup has no ACP session to resume.
+// separate from provider failures: a failed setup has no runtime session to resume.
 import { readdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { stripVTControlCharacters } from "node:util";

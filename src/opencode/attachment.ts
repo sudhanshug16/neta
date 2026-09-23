@@ -1,4 +1,4 @@
-import { openCodeExecutionContract, type OpenCodeExecutionContract } from "./contract.ts";
+import { type OpenCodeExecutionContract, openCodeExecutionContract } from "./contract.ts";
 
 /** The private native renderer endpoint advertised by the Neta OpenCode fork. */
 export interface OpenCodeEndpoint {
@@ -32,7 +32,7 @@ export function openCodeEndpoint(meta: unknown): OpenCodeEndpoint | undefined {
 	};
 }
 
-/** A view must not receive an endpoint which only survives in ACP metadata. */
+/** A view must not receive an endpoint without a live private OpenCode server. */
 export async function nativeEndpointReady(attachment: OpenCodeAttachment): Promise<boolean> {
 	try {
 		const url = new URL(

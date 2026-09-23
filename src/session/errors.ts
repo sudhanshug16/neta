@@ -1,5 +1,3 @@
-import { RequestError } from "@agentclientprotocol/sdk";
-
 export function redactProviderText(text: string): string {
 	return text
 		.replace(/(Bearer|Basic)\s+[^\s"']+/gi, "$1 [redacted]")
@@ -7,10 +5,11 @@ export function redactProviderText(text: string): string {
 		.replace(/sk-[a-zA-Z0-9_-]+/g, "[redacted]");
 }
 
-/** Preserve diagnostic text from ACP errors without dumping arbitrary payloads. */
+/** Preserve bounded provider diagnostics without dumping arbitrary payloads. */
 export function providerErrorMessage(error: unknown): string {
 	const message = error instanceof Error ? error.message : String(error);
-	if (!(error instanceof RequestError)) return message;
+	if (!(error instanceof Error) || error.name !== "RequestError" || !("data" in error) || !("code" in error))
+		return message;
 	const details: string[] = [];
 	const visit = (value: unknown, depth: number): void => {
 		if (depth > 3) return;
@@ -23,7 +22,7 @@ export function providerErrorMessage(error: unknown): string {
 		}
 	};
 	visit(error.data, 0);
-	return `${message} (ACP ${error.code})${details.length ? `\n${details.join("\n").slice(0, 8000)}` : "\nThe provider returned no additional error details."}`;
+	return `${message} (provider ${String(error.code)})${details.length ? `\n${details.join("\n").slice(0, 8000)}` : "\nThe provider returned no additional error details."}`;
 }
 
 /** Only surface recent diagnostic lines, with common credential forms removed. */

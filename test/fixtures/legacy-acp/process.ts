@@ -10,9 +10,9 @@ import {
 	type RequestPermissionResponse,
 	type SessionNotification,
 } from "@agentclientprotocol/sdk";
-import { nowIso } from "../core/time.ts";
-import type { Access, IsoTime } from "../core/types.ts";
-import { launchArgs, launchEnvironment, type ProviderSettings, providerPath } from "./settings.ts";
+import { nowIso } from "../../../src/core/time.ts";
+import type { Access, IsoTime } from "../../../src/core/types.ts";
+import { launchArgs, launchEnvironment, type ProviderSettings, providerPath } from "../../../src/session/settings.ts";
 
 export interface ExitInfo {
 	code: number | null;

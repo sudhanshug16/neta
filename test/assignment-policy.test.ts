@@ -2,9 +2,9 @@ import { expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadSettings } from "../src/acp/settings.ts";
-import { adaptAcp } from "../src/node/lifecycle.ts";
+import { loadSettings } from "../src/session/settings.ts";
 import { openStore } from "../src/store/index.ts";
+import { adaptLegacyAcp as adaptRuntime } from "./fixtures/legacy-acp-runtime.ts";
 
 for (const alternatives of [[], ["allowed-small-model"]]) {
 	test(`assignment alternatives ${JSON.stringify(alternatives)} survive cold resume, reset, and crash recovery`, async () => {
@@ -28,7 +28,7 @@ for (const alternatives of [[], ["allowed-small-model"]]) {
 			defaultModel: "test-model",
 		};
 		const store = await openStore();
-		let runtime = adaptAcp(settings, store.conversations);
+		let runtime = adaptRuntime(settings, store.conversations);
 		try {
 			const request = {
 				workspaceId: "fixture",
@@ -42,7 +42,7 @@ for (const alternatives of [[], ["allowed-small-model"]]) {
 			const created = await runtime.createSession({ ...request, fallbackModels: alternatives });
 			expect((await store.conversations.meta(created.sessionId))?.fallbackModels).toEqual(alternatives);
 			await runtime.closeAll();
-			runtime = adaptAcp(settings, store.conversations);
+			runtime = adaptRuntime(settings, store.conversations);
 			const resumed = await runtime.ensureSession({ ...request, sessionId: created.sessionId, allowFresh: false });
 			expect(resumed.sessionId).toBe(created.sessionId);
 			expect((await store.conversations.meta(resumed.sessionId))?.fallbackModels).toEqual(alternatives);
@@ -62,7 +62,7 @@ for (const alternatives of [[], ["allowed-small-model"]]) {
 			});
 			runtime.onTurn((notification) => {
 				if (notification.sessionId !== reset.sessionId || !notification.turn?.endedAt) return;
-				if (notification.turn.cancelled) interrupted();
+				if (notification.turn.cancelled || notification.turn.failed) interrupted();
 				else completed();
 			});
 			await runtime.prompt(reset.sessionId, "EXIT_MID_TURN");

@@ -2,10 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AccessSwitchUnsupported, planAccessSwitch, quirkValue, switchAccess } from "../src/acp/access.ts";
-import { startSession } from "../src/acp/session.ts";
-import type { ProviderSettings } from "../src/acp/settings.ts";
 import type { Access } from "../src/core/types.ts";
+import type { ProviderSettings } from "../src/session/settings.ts";
+import { AccessSwitchUnsupported, planAccessSwitch, quirkValue, switchAccess } from "./fixtures/legacy-acp/access.ts";
+import { startSession } from "./fixtures/legacy-acp/session.ts";
 
 const FIXTURE = new URL("./fixtures/fake-acp-agent.mjs", import.meta.url).pathname;
 

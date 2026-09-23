@@ -1,5 +1,5 @@
 // The listening server: authentication, dispatch and fan-out. This file
-// declares the `NodeStore` and `NodeAcp` ports; only `lifecycle.ts` adapts
+// declares the `NodeStore` and `NodeRuntime` ports; only `lifecycle.ts` adapts
 // the real 02 and 03 modules to them, so handlers stub against these.
 import { chmod, unlink } from "node:fs/promises";
 import { createServer as createNetServer, type Server as NetServer, type Socket } from "node:net";
@@ -88,7 +88,7 @@ export interface SessionRequest {
 	fallbackModels?: string[];
 }
 
-export interface NodeAcp {
+export interface NodeRuntime {
 	hasActiveWork?(): boolean;
 	nativeAttachment?(id: SessionId): OpenCodeAttachment | undefined;
 	ensureNativeAttachment?(id: SessionId): Promise<OpenCodeAttachment | undefined>;
@@ -172,7 +172,7 @@ export interface Connection {
 export interface NodeContext {
 	runtimeAdmission?: RuntimeAdmission;
 	store: NodeStore;
-	acp: NodeAcp;
+	runtime: NodeRuntime;
 	hub: Hub;
 	nodeVersion: string;
 	stop(): Promise<void>;

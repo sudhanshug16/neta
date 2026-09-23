@@ -1,17 +1,16 @@
 // `tools.list` and `tools.call` on the socket: the Node half of 05. The stdio
-// proxy one ACP session holds forwards every MCP call here with the actor id
+// proxy one OpenCode actor holds forwards every MCP call here with the actor id
 // and the token this Node minted when it launched that session, so the tools
 // are reachable from a leader, a lead and an agent and from nowhere else.
 //
 // This module is the only place the tool handlers' ports meet the real
 // modules: 02's registry for numbers and mission records, 03 (through the
-// adapted ACP port) for sessions, 05's context builders for what a new agent
+// runtime port) for sessions, 05's context builders for what a new agent
 // is told, and 06's worktree service and leases. Everything stateful still
 // comes in through `lifecycle.ts`.
 
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { Settings } from "../acp/settings.ts";
 import { nowIso } from "../core/time.ts";
 import type {
 	Access,
@@ -42,6 +41,7 @@ import { createCatalog } from "../routing/catalog.ts";
 import { loadRoutingConfig } from "../routing/config.ts";
 import { loadModelPreferences, requireAllowedModel } from "../routing/preferences.ts";
 import { createModelRouter } from "../routing/router.ts";
+import type { Settings } from "../session/settings.ts";
 import type { Store } from "../store/index.ts";
 import { openParentReportStore } from "../store/parent-reports.ts";
 import { composeContext, loadCharter, loadSkills } from "../tools/context.ts";
@@ -57,7 +57,7 @@ import { createFollowupSender } from "./followup.ts";
 import { conversationHandlers } from "./handlers-conversation.ts";
 import { asOptionalBoolean, asOptionalString, asString, parseParams } from "./handlers-registry.ts";
 import { recordLeaderRuntime } from "./leader-runtime.ts";
-import type { AdaptedAcp, AdaptedStore } from "./lifecycle.ts";
+import type { AdaptedRuntime, AdaptedStore } from "./lifecycle.ts";
 import { netaDir } from "./lockfile.ts";
 import { ParentDispatcher } from "./parent-dispatcher.ts";
 import { NodeError, type TurnNotification } from "./protocol.ts";
@@ -70,7 +70,7 @@ import { archiveWorkspace } from "./workspace-reset.ts";
 export interface ToolMountOptions {
 	real: Store;
 	store: AdaptedStore;
-	acp: AdaptedAcp;
+	runtime: AdaptedRuntime;
 	settings: Settings;
 	runtimeAdmission?: RuntimeAdmission;
 	hub(): Hub;
@@ -523,13 +523,13 @@ export function toolMount(o: ToolMountOptions): {
 				};
 				const created =
 					next.stateBefore === "interrupted"
-						? await o.acp.ensureSession({ ...request, allowFresh: false })
-						: await o.acp.createSession(request);
+						? await o.runtime.ensureSession({ ...request, allowFresh: false })
+						: await o.runtime.createSession(request);
 				sessionId = created.sessionId;
 				const starting = { ...next, sessionId, state: "starting" as const };
 				await o.store.putAgent(starting);
 				o.hub().broadcast("state", { kind: "agent", record: starting });
-				await o.acp.prompt(
+				await o.runtime.prompt(
 					sessionId,
 					next.provider === "opencode"
 						? next.task
@@ -542,7 +542,7 @@ export function toolMount(o: ToolMountOptions): {
 							}),
 				);
 			} catch (error) {
-				await o.acp.close(sessionId).catch(() => undefined);
+				await o.runtime.close(sessionId).catch(() => undefined);
 				const failed = { ...next, sessionId, state: "failed" as const, endedAt: nowIso(), outcome: String(error) };
 				await o.store.putAgent(failed);
 				o.hub().broadcast("state", { kind: "agent", record: failed });
@@ -590,7 +590,7 @@ export function toolMount(o: ToolMountOptions): {
 		const pending = pendingCloses.get(sessionId);
 		if (pending === undefined) throw new NodeError("NOT_FOUND", "no pending close for session");
 		const leader = leaderOf(pending.input.mission.workspaceId);
-		await o.acp.ensureSession({
+		await o.runtime.ensureSession({
 			sessionId,
 			workspaceId: pending.input.mission.workspaceId,
 			cwd: rootFor(pending.input.mission.workspaceId),
@@ -647,7 +647,7 @@ export function toolMount(o: ToolMountOptions): {
 		}
 		try {
 			const agent = pending.subject.kind === "lead" ? o.store.getAgent(pending.subject.agentId) : undefined;
-			await o.acp.ensureSession({
+			await o.runtime.ensureSession({
 				sessionId,
 				workspaceId: pending.subject.workspaceId,
 				cwd: pending.mission.worktree?.path ?? rootFor(pending.subject.workspaceId),
@@ -676,7 +676,7 @@ export function toolMount(o: ToolMountOptions): {
 			}
 			return;
 		} catch (error) {
-			await o.acp.close(sessionId).catch(() => undefined);
+			await o.runtime.close(sessionId).catch(() => undefined);
 			await releaseHolder(pending.subject.workspaceId, pending.holder);
 			// Do not resurrect a closed mission if session restoration lost a race
 			// with closeout. For non-terminal missions, preserve any fields written
@@ -700,7 +700,7 @@ export function toolMount(o: ToolMountOptions): {
 		const leave = o.runtimeAdmission?.enter();
 		try {
 			if (agent.provider === "pi" && o.pi !== undefined) o.pi.close(agent.sessionId);
-			else await o.acp.close(agent.sessionId);
+			else await o.runtime.close(agent.sessionId);
 			await releaseHolder(agent.workspaceId, agent.id);
 		} finally {
 			leave?.();
@@ -714,7 +714,7 @@ export function toolMount(o: ToolMountOptions): {
 		parentSessionId: string,
 	): Promise<"accepted" | "pending" | "uncertain"> {
 		let pending = false;
-		for (const item of (await o.acp.listInbox?.(parentSessionId)) ?? []) {
+		for (const item of (await o.runtime.listInbox?.(parentSessionId)) ?? []) {
 			if (item.readerDirected !== false || !item.sourceId || !/^[a-f0-9]{64}$/.test(item.sourceId)) continue;
 			if ((await resultStore.get(item.sourceId))?.actorId !== actorId) continue;
 			if (item.status === "uncertain") return "uncertain";
@@ -733,7 +733,7 @@ export function toolMount(o: ToolMountOptions): {
 		changed: (agent) => o.hub().broadcast("state", { kind: "agent", record: agent }),
 		send: async (sessionId, text, sourceId) => {
 			if (runtimeStopped) throw new Error("Runtime is stopping");
-			if (!o.acp.send) throw new Error("Parent inbox is unavailable");
+			if (!o.runtime.send) throw new Error("Parent inbox is unavailable");
 			const parentAgent = o.store.listAgents().find((item) => item.sessionId === sessionId);
 			const parentLeader = o.store.listLeaders().find((item) => item.sessionId === sessionId);
 			const parent = parentAgent ?? parentLeader;
@@ -749,7 +749,7 @@ export function toolMount(o: ToolMountOptions): {
 						}
 					: { kind: "leader", workspaceId: parent.workspaceId },
 			);
-			const selected = await o.acp.ensureSession({
+			const selected = await o.runtime.ensureSession({
 				sessionId,
 				workspaceId: parent.workspaceId,
 				cwd: parentMission?.worktree?.path ?? rootFor(parent.workspaceId),
@@ -764,7 +764,7 @@ export function toolMount(o: ToolMountOptions): {
 			});
 			sessionId = selected.sessionId;
 			// The durable inbox queues while the parent is busy and wakes it when idle.
-			return await o.acp.send(sessionId, text, [], { readerDirected: false, sourceId });
+			return await o.runtime.send(sessionId, text, [], { readerDirected: false, sourceId });
 		},
 	};
 	const dispatcher = new ParentDispatcher(reportPorts, (report, error) => {
@@ -801,7 +801,7 @@ export function toolMount(o: ToolMountOptions): {
 			.catch(() => undefined);
 		return operation;
 	}
-	o.acp.onTurn((notification) => {
+	o.runtime.onTurn((notification) => {
 		const receipt = notification.inbox;
 		if (receipt?.status === "uncertain") {
 			o.hub().broadcast("error", {
@@ -841,7 +841,7 @@ export function toolMount(o: ToolMountOptions): {
 			});
 	});
 
-	o.acp.onTurn((notification) => {
+	o.runtime.onTurn((notification) => {
 		if (runtimeStopped || notification.turn?.endedAt === undefined) return;
 		if (pendingCloses.has(notification.sessionId)) {
 			void finishPendingClose(notification.sessionId).catch((error) =>
@@ -867,7 +867,7 @@ export function toolMount(o: ToolMountOptions): {
 				(!notification.bindingGeneration ||
 					!stopped.bindingGeneration ||
 					notification.bindingGeneration === stopped.bindingGeneration) &&
-				o.acp.isTurnActive?.(notification.sessionId) !== true
+				o.runtime.isTurnActive?.(notification.sessionId) !== true
 			)
 				pendingReleases.set(notification.sessionId, stopped);
 		}
@@ -919,7 +919,7 @@ export function toolMount(o: ToolMountOptions): {
 				apply: async (agent, model) => {
 					const mission = o.store.getMission(agent.missionId);
 					if (!mission) throw new NodeError("NOT_FOUND", "No mission for this agent.");
-					const live = await o.acp.ensureSession({
+					const live = await o.runtime.ensureSession({
 						sessionId: agent.sessionId,
 						workspaceId: agent.workspaceId,
 						cwd: mission.worktree?.path ?? rootFor(agent.workspaceId),
@@ -934,14 +934,14 @@ export function toolMount(o: ToolMountOptions): {
 					});
 					if (live.sessionId !== agent.sessionId)
 						throw new NodeError("PROVIDER_ERROR", "Model changes must keep the original conversation.");
-					await o.acp.setModel(agent.sessionId, model);
+					await o.runtime.setModel(agent.sessionId, model);
 				},
 				publish: (agent) => o.hub().broadcast("state", { kind: "agent", record: agent }),
 			}),
 		},
 		modelCatalog: async (workspaceId) => {
 			const leader = leaderOf(workspaceId);
-			return (await o.acp.listModels({ sessionId: leader.sessionId })).filter(
+			return (await o.runtime.listModels({ sessionId: leader.sessionId })).filter(
 				(model) =>
 					!o.settings.forbiddenModels.includes(model.id) &&
 					(leader.provider !== "opencode" || model.provider === "opencode"),
@@ -1029,7 +1029,7 @@ export function toolMount(o: ToolMountOptions): {
 						subject,
 						...(agent === undefined ? {} : { agent }),
 					});
-					if (o.acp.isTurnActive?.(sessionId) === true) {
+					if (o.runtime.isTurnActive?.(sessionId) === true) {
 						return { ok: false, attention: "close scheduled after the active turn", mission: input.mission };
 					}
 					try {
@@ -1055,8 +1055,8 @@ export function toolMount(o: ToolMountOptions): {
 				saveMission: (mission) => missions.save(mission),
 				resume: (agent) => deps.sessions.resume(agent),
 				admit: async (sessionId, text, sourceId) => {
-					if (!o.acp.send) throw new Error("Durable follow-up inbox admission is unavailable");
-					return o.acp.send(sessionId, text, [], { readerDirected: false, sourceId });
+					if (!o.runtime.send) throw new Error("Durable follow-up inbox admission is unavailable");
+					return o.runtime.send(sessionId, text, [], { readerDirected: false, sourceId });
 				},
 				receipt: (inbox) => o.hub().broadcast("turn", { sessionId: inbox.sessionId, inbox }),
 				failed: (item, error) =>
@@ -1089,13 +1089,13 @@ export function toolMount(o: ToolMountOptions): {
 					};
 					const created =
 						agent.stateBefore === "interrupted"
-							? await o.acp.ensureSession({ ...request, allowFresh: false })
-							: await o.acp.createSession(request);
+							? await o.runtime.ensureSession({ ...request, allowFresh: false })
+							: await o.runtime.createSession(request);
 					sessionId = created.sessionId;
 					const starting = { ...agent, sessionId, state: "starting" as const };
 					await o.store.putAgent(starting);
 					o.hub().broadcast("state", { kind: "agent", record: starting });
-					await o.acp.prompt(
+					await o.runtime.prompt(
 						sessionId,
 						agent.provider === "opencode"
 							? text
@@ -1103,7 +1103,7 @@ export function toolMount(o: ToolMountOptions): {
 					);
 					return starting;
 				} catch (error) {
-					await o.acp.close(sessionId).catch(() => undefined);
+					await o.runtime.close(sessionId).catch(() => undefined);
 					await releaseAndPromote({ ...agent, sessionId });
 					throw error;
 				}
@@ -1123,7 +1123,7 @@ export function toolMount(o: ToolMountOptions): {
 					}
 				}
 				try {
-					const live = await o.acp.ensureSession({
+					const live = await o.runtime.ensureSession({
 						sessionId: agent.sessionId,
 						workspaceId: agent.workspaceId,
 						cwd: mission.worktree?.path ?? rootFor(agent.workspaceId),
@@ -1143,7 +1143,7 @@ export function toolMount(o: ToolMountOptions): {
 				}
 			},
 			release: async (agent) => {
-				if (o.acp.isTurnActive?.(agent.sessionId) === true) pendingReleases.set(agent.sessionId, agent);
+				if (o.runtime.isTurnActive?.(agent.sessionId) === true) pendingReleases.set(agent.sessionId, agent);
 				else await releaseAndPromote(agent);
 			},
 			// The session only: 05 writes the Agent record next, and `brief`
@@ -1202,7 +1202,7 @@ export function toolMount(o: ToolMountOptions): {
 					});
 					return { sessionId: input.sessionId };
 				}
-				const created = await o.acp.createSession({
+				const created = await o.runtime.createSession({
 					sessionId: input.sessionId,
 					workspaceId: input.workspaceId,
 					cwd: input.worktreePath ?? rootFor(input.workspaceId),
@@ -1229,7 +1229,7 @@ export function toolMount(o: ToolMountOptions): {
 					}
 					return;
 				}
-				await o.acp.prompt(
+				await o.runtime.prompt(
 					input.sessionId,
 					input.provider === "opencode"
 						? input.task
@@ -1243,10 +1243,10 @@ export function toolMount(o: ToolMountOptions): {
 								})),
 				);
 			},
-			close: (sessionId) => o.acp.close(sessionId),
-			cancel: (sessionId) => o.acp.cancel(sessionId),
+			close: (sessionId) => o.runtime.close(sessionId),
+			cancel: (sessionId) => o.runtime.cancel(sessionId),
 			prompt: async (sessionId, text) => {
-				await o.acp.prompt(sessionId, text);
+				await o.runtime.prompt(sessionId, text);
 			},
 		},
 		modes: {
@@ -1274,7 +1274,7 @@ export function toolMount(o: ToolMountOptions): {
 					}
 					const holder = input.subject.kind === "lead" ? input.subject.agentId : mission.id;
 					pendingModes.set(sessionId, { subject: input.subject, mode: "lead", mission, holder });
-					if (o.acp.isTurnActive?.(sessionId) === true) return { approved: true };
+					if (o.runtime.isTurnActive?.(sessionId) === true) return { approved: true };
 					try {
 						await applyPendingMode(sessionId);
 						return { approved: true };
@@ -1312,7 +1312,7 @@ export function toolMount(o: ToolMountOptions): {
 					mission,
 					holder,
 				});
-				if (o.acp.isTurnActive?.(sessionId) === true) return { approved: true };
+				if (o.runtime.isTurnActive?.(sessionId) === true) return { approved: true };
 				try {
 					await applyPendingMode(sessionId);
 					return { approved: true };
@@ -1324,7 +1324,7 @@ export function toolMount(o: ToolMountOptions): {
 		},
 	};
 
-	const router = createRouter(deps, toolHandlers(), o.acp.tokens);
+	const router = createRouter(deps, toolHandlers(), o.runtime.tokens);
 
 	const resetting = new Set<string>();
 	const creating = new Map<string, Set<Promise<unknown>>>();
@@ -1432,7 +1432,7 @@ export function toolMount(o: ToolMountOptions): {
 			if (parsed.mode === "lead") pendingModes.delete(sessionId);
 			if (mission === undefined) {
 				if (parsed.mode === "leadPlus") throw new NodeError("INVALID_PARAMS", "Lead++ requires an active mission");
-				await o.acp.ensureSession({
+				await o.runtime.ensureSession({
 					sessionId,
 					workspaceId: parsed.workspaceId,
 					cwd: rootFor(parsed.workspaceId),
@@ -1454,7 +1454,7 @@ export function toolMount(o: ToolMountOptions): {
 				throw new NodeError("BUSY", "writer access is queued");
 			}
 			try {
-				await o.acp.ensureSession({
+				await o.runtime.ensureSession({
 					sessionId,
 					workspaceId: mission.workspaceId,
 					cwd: mission.worktree?.path ?? rootFor(mission.workspaceId),
@@ -1484,7 +1484,7 @@ export function toolMount(o: ToolMountOptions): {
 				throw new NodeError("CONFIRMATION_REQUIRED", "archiving a live agent needs confirm: true");
 			}
 			if (agent.provider === "pi" && o.pi !== undefined) o.pi.close(agent.sessionId);
-			else await o.acp.close(agent.sessionId);
+			else await o.runtime.close(agent.sessionId);
 			const archived = { ...agent, state: "archived" as const };
 			await o.store.putAgent(archived);
 			await deps.sessions.release(archived);

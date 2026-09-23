@@ -8,7 +8,7 @@
 // Every place that hands this Neta's own argv to something else goes through
 // here: the detached `node start` child (`src/cli/commands/node.ts`), the
 // on-demand autostart (`src/node/client.ts`) and the `neta mcp` server entry
-// an ACP session is launched with (`src/acp/mcp.ts`). `src/cli/main.ts`
+// an OpenCode actor receives (`src/session/mcp.ts`). `src/cli/main.ts`
 // recognises the same shape by the basename of `execPath`.
 import { basename } from "node:path";
 

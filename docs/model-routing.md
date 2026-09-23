@@ -14,7 +14,7 @@ leader's selected model does not become the default worker model.
 
 Choose the lowest adequate effort. A startup response check is effort 1.
 Explicit model selections bypass routing but must still be connected and
-allowed. They do not need effort. Other ACP runtimes keep their existing behavior.
+allowed. They do not need effort.
 
 ## Fixed routing
 

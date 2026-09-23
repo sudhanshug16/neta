@@ -9,7 +9,7 @@
 // through 03's `loadSettings` (provider `defaultModel`, exact `forbiddenModels`
 // match). The forbidden check therefore happens client-side and exits 3
 // without calling the Node.
-import { loadSettings } from "../../acp/settings.ts";
+
 import type { Leader } from "../../core/types.ts";
 import { netaDir } from "../../node/lockfile.ts";
 import type {
@@ -20,6 +20,7 @@ import type {
 	ModelsListResult,
 	WorkspaceOpenResult,
 } from "../../node/protocol.ts";
+import { loadSettings } from "../../session/settings.ts";
 import { CliError, type NodeClient } from "../client.ts";
 
 const COUNT_RE = /^[1-9][0-9]*$/;
@@ -160,12 +161,20 @@ export async function modelsCommand(client: NodeClient, flags: Record<string, st
 	}
 }
 
-// `provider/model` names one entry exactly; a bare id must be unique across
-// providers. Anything else is exit 1; forbidden is decided by the caller.
+// Model ids may themselves contain a slash (OpenCode's provider/model id).
+// Match an advertised id first, then accept Neta's provider/id qualifier.
 export function resolveModel(models: ModelInfo[], id: string): { provider: string; id: string } {
 	if (id.length === 0) {
 		throw new CliError(1, `bad model id: ${id}`);
 	}
+	const matches = models.filter((entry) => entry.id === id);
+	if (matches.length > 1) {
+		throw new CliError(
+			1,
+			`ambiguous model id: ${id} (${matches.map((entry) => `${entry.provider}/${entry.id}`).join(", ")})`,
+		);
+	}
+	if (matches[0] !== undefined) return { provider: matches[0].provider, id: matches[0].id };
 	const slash = id.indexOf("/");
 	if (slash >= 0) {
 		const provider = id.slice(0, slash);
@@ -176,21 +185,7 @@ export function resolveModel(models: ModelInfo[], id: string): { provider: strin
 		}
 		return { provider: found.provider, id: found.id };
 	}
-	const matches = models.filter((entry) => entry.id === id);
-	if (matches.length === 0) {
-		throw new CliError(1, `unknown model: ${id}`);
-	}
-	if (matches.length > 1) {
-		throw new CliError(
-			1,
-			`ambiguous model id: ${id} (${matches.map((entry) => `${entry.provider}/${entry.id}`).join(", ")})`,
-		);
-	}
-	const only = matches[0];
-	if (only === undefined) {
-		throw new CliError(1, `unknown model: ${id}`);
-	}
-	return { provider: only.provider, id: only.id };
+	throw new CliError(1, `unknown model: ${id}`);
 }
 
 export async function modelCommand(client: NodeClient, id: string): Promise<number> {

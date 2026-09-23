@@ -1,11 +1,11 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, mkdir, open, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { type FileHandle, lstat, mkdir, open, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { basename, join, relative, resolve, sep } from "node:path";
 import { ulid } from "../core/ids.ts";
-import { readAppliedSystemContext } from "../acp/system-context.ts";
-import { openCodeExecutionContract } from "../opencode/contract.ts";
 import { recordTerminalTelemetry } from "../diagnostics/telemetry.ts";
+import { openCodeExecutionContract } from "../opencode/contract.ts";
+import { readAppliedSystemContext } from "../session/system-context.ts";
 import {
 	asNumber,
 	asOptionalBoolean,
@@ -252,8 +252,8 @@ export const diagnosticsHandlers: NodeHandlers = {
 			agent === undefined ? ctx.store.listLeaders().find((item) => item.sessionId === sessionId) : undefined;
 		if (!agent && !leader) throw new NodeError("NOT_FOUND", "This session has no current actor");
 		const [runtime, inbox] = await Promise.all([
-			ctx.acp.runtimeDiagnostics?.(sessionId).catch(() => undefined),
-			ctx.acp.listInbox?.(sessionId).catch(() => undefined),
+			ctx.runtime.runtimeDiagnostics?.(sessionId).catch(() => undefined),
+			ctx.runtime.listInbox?.(sessionId).catch(() => undefined),
 		]);
 		const generation = runtime?.bindingGeneration ?? agent?.bindingGeneration;
 		const applied = generation === undefined ? undefined : await readAppliedSystemContext(sessionId, generation);
@@ -265,7 +265,7 @@ export const diagnosticsHandlers: NodeHandlers = {
 			},
 			{ queued: 0, delivering: 0, uncertain: 0 },
 		);
-		let contract;
+		let contract: ReturnType<typeof openCodeExecutionContract>;
 		try {
 			contract = openCodeExecutionContract(runtime?.contract);
 		} catch {
@@ -296,7 +296,7 @@ export const diagnosticsHandlers: NodeHandlers = {
 				runtime?.attached === false
 					? "unattached"
 					: runtime?.attached === true
-						? ctx.acp.isTurnActive?.(sessionId)
+						? ctx.runtime.isTurnActive?.(sessionId)
 							? "running"
 							: "idle"
 						: "unknown",
@@ -387,7 +387,7 @@ export const diagnosticsHandlers: NodeHandlers = {
 		const file = prepared.files.get(p.fileId);
 		if (file === undefined) throw new NodeError("NOT_FOUND", "diagnostic export file is unavailable");
 		if (offset > file.bytes) throw new NodeError("INVALID_PARAMS", "offset exceeds diagnostic export file size");
-		let input;
+		let input: FileHandle | undefined;
 		try {
 			input = await open(file.path, constants.O_RDONLY | constants.O_NOFOLLOW);
 			const info = await input.stat();

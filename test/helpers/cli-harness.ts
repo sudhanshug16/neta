@@ -1,14 +1,19 @@
-// Test rig for workstream 08 (built in T8.2, reused through T8.8): a temp
-// `NETA_DIR` whose `settings.json` has one provider running the fake ACP
-// agent, plus a `run`/`spawn` front for the built CLI bundle.
+// A temp Neta directory, a pinned OpenCode V2 process, and a local fake
+// OpenAI-compatible model for the built CLI bundle.
 //
 // `startNode` prepares the directory and the bundle but starts no Node
 // itself: tests start one through the bundle (`node start --detach`, T8.3).
 // `stop` kills anything still running and removes the directory.
 import { type ChildProcess, spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { managedOpenCodeDir } from "../../scripts/opencode-pin.ts";
+
+export const nativeHarnessReady = process.env.NETA_OPENCODE_BIN
+	? existsSync(process.env.NETA_OPENCODE_BIN)
+	: existsSync(join(managedOpenCodeDir(), "node_modules"));
 
 export interface CliRunResult {
 	code: number;
@@ -25,10 +30,6 @@ export interface Harness {
 
 function repoRoot(): string {
 	return dirname(new URL("../../package.json", import.meta.url).pathname);
-}
-
-function fixturePath(): string {
-	return new URL("../fixtures/fake-acp-agent.mjs", import.meta.url).pathname;
 }
 
 // The CLI bundle, built once per test file and reused by every harness in
@@ -68,18 +69,57 @@ async function buildBundleOnce(): Promise<string> {
 	}
 }
 
-function settingsJson(): string {
+function settingsJson(dir: string, modelUrl: string): string {
 	return JSON.stringify(
 		{
 			providers: {
-				fake: {
-					command: "node",
-					args: [fixturePath()],
+				opencode: {
+					command: "opencode",
+					args: ["serve"],
 					resume: true,
-					defaultModel: "test-model",
+					defaultModel: "test/test-model",
+					env: {
+						XDG_DATA_HOME: join(dir, "data"),
+						XDG_CONFIG_HOME: join(dir, "config"),
+						XDG_CACHE_HOME: join(dir, "cache"),
+						XDG_STATE_HOME: join(dir, "state"),
+						OPENCODE_TEST_HOME: join(dir, "home"),
+						OPENCODE_TEST_MANAGED_CONFIG_DIR: join(dir, "managed"),
+						OPENCODE_DISABLE_MODELS_FETCH: "true",
+						OPENCODE_DISABLE_AUTOUPDATE: "true",
+						OPENCODE_DISABLE_DEFAULT_PLUGINS: "true",
+						OPENCODE_DISABLE_PROJECT_CONFIG: "true",
+						OPENCODE_CONFIG_CONTENT: JSON.stringify({
+							model: "test/test-model",
+							small_model: "test/test-model",
+							enabled_providers: ["test"],
+							formatter: false,
+							lsp: false,
+							provider: {
+								test: {
+									name: "Fixture",
+									npm: "@ai-sdk/openai-compatible",
+									env: [],
+									options: { apiKey: "fixture", baseURL: modelUrl },
+									models: {
+										"test-model": {
+											name: "Fixture model",
+											limit: { context: 100000, output: 10000 },
+											cost: { input: 0, output: 0 },
+										},
+										"legacy-other": {
+											name: "Other fixture model",
+											limit: { context: 100000, output: 10000 },
+											cost: { input: 0, output: 0 },
+										},
+									},
+								},
+							},
+						}),
+					},
 				},
 			},
-			leader: { provider: "fake", model: "test-model" },
+			leader: { provider: "opencode", model: "test/test-model" },
 			forbiddenModels: [],
 		},
 		null,
@@ -89,14 +129,67 @@ function settingsJson(): string {
 
 export async function startNode(): Promise<Harness> {
 	const dir = await mkdtemp(join(tmpdir(), "neta-cli-"));
-	await writeFile(join(dir, "settings.json"), settingsJson());
+	const native = process.env.NETA_OPENCODE_BIN ?? join(dir, "opencode");
+	if (!process.env.NETA_OPENCODE_BIN) {
+		const fork = managedOpenCodeDir();
+		await writeFile(
+			native,
+			`#!/bin/sh\nexec '${process.execPath}' run --cwd '${join(fork, "packages/cli")}' ./src/index.ts "$@"\n`,
+		);
+		await chmod(native, 0o700);
+		await writeFile(join(dir, "neta-fork.json"), '{"integrationVersion":2}\n');
+	}
+	const model = Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		idleTimeout: 0,
+		async fetch(request) {
+			const body = (await request.json()) as { messages?: Array<{ role?: string; content?: unknown }> };
+			const content = body.messages?.filter((message) => message.role === "user").at(-1)?.content;
+			const userText =
+				typeof content === "string"
+					? content
+					: Array.isArray(content)
+						? content
+								.flatMap((part) =>
+									part && typeof part === "object" && "text" in part && typeof part.text === "string"
+										? [part.text]
+										: [],
+								)
+								.join("\n")
+						: "";
+			if (userText.includes("HOLD_FOREVER")) {
+				return new Response(new ReadableStream({ start() {} }), {
+					headers: { "content-type": "text/event-stream" },
+				});
+			}
+			const reply = userText.includes("STREAM")
+				? "First paragraph continues.\n\nSecond paragraph."
+				: `echo:${userText}`;
+			const chunks = [
+				{ choices: [{ index: 0, delta: { role: "assistant", content: reply } }] },
+				{ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] },
+			];
+			return new Response(
+				`${chunks
+					.map(
+						(chunk) =>
+							`data: ${JSON.stringify({ id: "fixture", object: "chat.completion.chunk", created: 1, model: "test-model", ...chunk })}\n\n`,
+					)
+					.join("")}data: [DONE]\n\n`,
+				{ headers: { "content-type": "text/event-stream" } },
+			);
+		},
+	});
+	await writeFile(join(dir, "settings.json"), settingsJson(dir, model.url.href));
 	const bundle = await buildBundleOnce();
 	const children = new Set<ChildProcess>();
+	const environment = { ...process.env, NETA_DIR: dir, NETA_OPENCODE_BIN: native };
 
 	function run(args: string[]): Promise<CliRunResult> {
 		return new Promise<CliRunResult>((resolve, reject) => {
 			const child = spawn("node", [bundle, ...args], {
-				env: { ...process.env, NETA_DIR: dir },
+				env: environment,
 				stdio: ["ignore", "pipe", "pipe"],
 			});
 			children.add(child);
@@ -121,7 +214,7 @@ export async function startNode(): Promise<Harness> {
 
 	function spawnCli(args: string[], opts?: { cwd?: string }): ChildProcess {
 		const child = spawn("node", [bundle, ...args], {
-			env: { ...process.env, NETA_DIR: dir },
+			env: environment,
 			cwd: opts?.cwd,
 			// stdin stays a pipe so chat tests (T8.4) can drive the prompt
 			// loop and signal the process.
@@ -156,6 +249,7 @@ export async function startNode(): Promise<Harness> {
 		} catch {
 			// No descriptor: nothing to stop.
 		}
+		await model.stop(true);
 		await rm(dir, { recursive: true, force: true });
 	}
 

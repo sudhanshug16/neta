@@ -1,4 +1,4 @@
-import type { Access } from "../core/types.ts";
+import type { Access } from "../../../src/core/types.ts";
 import type { AcpSession } from "./session.ts";
 
 export interface ConfigQuirk {

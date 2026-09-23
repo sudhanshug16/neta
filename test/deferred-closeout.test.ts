@@ -2,11 +2,11 @@ import { expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadSettings } from "../src/acp/settings.ts";
 import type { Agent, Mission } from "../src/core/types.ts";
 import { toolMount } from "../src/node/handlers-tools.ts";
-import { type AdaptedAcp, adaptStore } from "../src/node/lifecycle.ts";
+import { type AdaptedRuntime, adaptStore } from "../src/node/lifecycle.ts";
 import type { TurnNotification } from "../src/node/protocol.ts";
+import { loadSettings } from "../src/session/settings.ts";
 import { openStore } from "../src/store/index.ts";
 import { createTokenTable, type McpToolResponse } from "../src/tools/router.ts";
 import { createFileLeaseStore, LeaseManager } from "../src/worktrees/leases.ts";
@@ -70,11 +70,11 @@ test("a delayed Lead++ restore cannot reopen a closed self-led mission", async (
 			},
 			close: async () => undefined,
 			listInbox: async () => [],
-		} as unknown as AdaptedAcp;
+		} as unknown as AdaptedRuntime;
 		mount = toolMount({
 			real,
 			store,
-			acp,
+			runtime: acp,
 			settings: loadSettings({ netaDir: directory }).settings,
 			hub: () => ({ connections: () => [], broadcast: () => undefined, toTail: () => undefined }),
 		});
@@ -221,11 +221,11 @@ test("Lead returns one stale workspace-leader reservation and promotes its queue
 			prompt: async () => undefined,
 			close: async () => undefined,
 			listInbox: async () => [],
-		} as unknown as AdaptedAcp;
+		} as unknown as AdaptedRuntime;
 		mount = toolMount({
 			real,
 			store,
-			acp,
+			runtime: acp,
 			settings: loadSettings({ netaDir: directory }).settings,
 			hub: () => ({ connections: () => [], broadcast: () => undefined, toTail: () => undefined }),
 		});

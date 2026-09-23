@@ -30,12 +30,12 @@ export async function archiveWorkspace(
 		await ports.save(closed);
 		ctx.hub.broadcast("state", { kind: "mission", record: closed });
 	}
-	if (ctx.acp.isTurnActive?.(leader.sessionId)) await ctx.acp.cancel(leader.sessionId);
+	if (ctx.runtime.isTurnActive?.(leader.sessionId)) await ctx.runtime.cancel(leader.sessionId);
 	for (const agent of ctx.store
 		.listAgents()
 		.filter((item) => item.workspaceId === workspaceId && item.state !== "archived")) {
 		if (agent.provider === "pi" && ctx.pi) ctx.pi.closeSession(agent.sessionId);
-		else await ctx.acp.close(agent.sessionId);
+		else await ctx.runtime.close(agent.sessionId);
 		const archived = { ...agent, state: "archived" as const, endedAt: agent.endedAt ?? nowIso() };
 		await ctx.store.putAgent(archived);
 		await ports.release(workspaceId, agent.id);
@@ -44,7 +44,7 @@ export async function archiveWorkspace(
 	for (const mission of missions) await ports.release(workspaceId, mission.id);
 	const root = workspace.roots.find((item) => item.machineId === leader.machineId)?.path;
 	if (!root) throw new NodeError("NOT_FOUND", "workspace path not found");
-	const fresh = await ctx.acp.ensureSession({
+	const fresh = await ctx.runtime.ensureSession({
 		sessionId: leader.sessionId,
 		workspaceId,
 		cwd: root,

@@ -12,10 +12,10 @@ import { ulid } from "../src/core/ids.ts";
 import type { Event, Mission } from "../src/core/types.ts";
 import { newToken, writeDescriptor } from "../src/node/lockfile.ts";
 import { PROTOCOL_VERSION } from "../src/node/protocol.ts";
-import { createServer, type Hub, type NodeAcp, type NodeStore } from "../src/node/server.ts";
+import { createServer, type Hub, type NodeRuntime, type NodeStore } from "../src/node/server.ts";
 import { openStore } from "../src/store/index.ts";
 import { paths } from "../src/store/paths.ts";
-import { type Harness, startNode as startHarness } from "./helpers/cli-harness.ts";
+import { type Harness, nativeHarnessReady, startNode as startHarness } from "./helpers/cli-harness.ts";
 
 const MISSION_NAME = "lens port";
 const AGENT_NAME = "bruno";
@@ -191,52 +191,64 @@ describe("formatEvent", () => {
 });
 
 describe("events list", () => {
-	test("events --json returns the default window in ascending seq", async () => {
-		const h = await ensureSetup();
-		const result = await h.run(["events", "--json"]);
-		expect(result.code).toBe(0);
-		const parsed = JSON.parse(result.stdout) as Event[];
-		expect(Array.isArray(parsed)).toBe(true);
-		// The default window is the last 24 hours, so the 25-hour-old
-		// mission.closed is excluded.
-		expect(parsed.map((event) => event.kind)).toEqual([
-			"mission.created",
-			"agent.spawned",
-			"user.pinned",
-			"leader.modeChanged",
-		]);
-		const seqs = parsed.map((event) => event.seq);
-		expect([...seqs].sort((a, b) => a - b)).toEqual(seqs);
-		expect(parsed[0]?.data.name).toBe(MISSION_NAME);
-	}, 120000);
+	test.skipIf(!nativeHarnessReady)(
+		"events --json returns the default window in ascending seq",
+		async () => {
+			const h = await ensureSetup();
+			const result = await h.run(["events", "--json"]);
+			expect(result.code).toBe(0);
+			const parsed = JSON.parse(result.stdout) as Event[];
+			expect(Array.isArray(parsed)).toBe(true);
+			// The default window is the last 24 hours, so the 25-hour-old
+			// mission.closed is excluded.
+			expect(parsed.map((event) => event.kind)).toEqual([
+				"mission.created",
+				"agent.spawned",
+				"user.pinned",
+				"leader.modeChanged",
+			]);
+			const seqs = parsed.map((event) => event.seq);
+			expect([...seqs].sort((a, b) => a - b)).toEqual(seqs);
+			expect(parsed[0]?.data.name).toBe(MISSION_NAME);
+		},
+		120000,
+	);
 
-	test("text output shows numbers and summaries", async () => {
-		const h = await ensureSetup();
-		const result = await h.run(["events"]);
-		expect(result.code).toBe(0);
-		expect(result.stdout).toContain("mission.created");
-		expect(result.stdout).toContain("#1");
-		expect(result.stdout).toContain(MISSION_NAME);
-		expect(result.stdout).toContain(AGENT_NAME);
-		expect(result.stdout).toContain(PIN_TEXT);
-		expect(result.stdout).toContain("leader.modeChanged");
-		expect(result.stdout).not.toContain(OLD_REASON);
-	}, 120000);
+	test.skipIf(!nativeHarnessReady)(
+		"text output shows numbers and summaries",
+		async () => {
+			const h = await ensureSetup();
+			const result = await h.run(["events"]);
+			expect(result.code).toBe(0);
+			expect(result.stdout).toContain("mission.created");
+			expect(result.stdout).toContain("#1");
+			expect(result.stdout).toContain(MISSION_NAME);
+			expect(result.stdout).toContain(AGENT_NAME);
+			expect(result.stdout).toContain(PIN_TEXT);
+			expect(result.stdout).toContain("leader.modeChanged");
+			expect(result.stdout).not.toContain(OLD_REASON);
+		},
+		120000,
+	);
 
-	test("--since 1m excludes the older event, --since 3d keeps it", async () => {
-		const h = await ensureSetup();
-		const narrow = await h.run(["events", "--since", "1m", "--json"]);
-		expect(narrow.code).toBe(0);
-		const recent = JSON.parse(narrow.stdout) as Event[];
-		expect(recent).toHaveLength(4);
-		expect(recent.some((event) => event.data.reason === OLD_REASON)).toBe(false);
-		const wide = await h.run(["events", "--since", "3d", "--json"]);
-		expect(wide.code).toBe(0);
-		const all = JSON.parse(wide.stdout) as Event[];
-		expect(all).toHaveLength(5);
-		expect(all[all.length - 1]?.kind).toBe("mission.closed");
-		expect(all[all.length - 1]?.data.reason).toBe(OLD_REASON);
-	}, 120000);
+	test.skipIf(!nativeHarnessReady)(
+		"--since 1m excludes the older event, --since 3d keeps it",
+		async () => {
+			const h = await ensureSetup();
+			const narrow = await h.run(["events", "--since", "1m", "--json"]);
+			expect(narrow.code).toBe(0);
+			const recent = JSON.parse(narrow.stdout) as Event[];
+			expect(recent).toHaveLength(4);
+			expect(recent.some((event) => event.data.reason === OLD_REASON)).toBe(false);
+			const wide = await h.run(["events", "--since", "3d", "--json"]);
+			expect(wide.code).toBe(0);
+			const all = JSON.parse(wide.stdout) as Event[];
+			expect(all).toHaveLength(5);
+			expect(all[all.length - 1]?.kind).toBe("mission.closed");
+			expect(all[all.length - 1]?.data.reason).toBe(OLD_REASON);
+		},
+		120000,
+	);
 });
 
 interface Capture {
@@ -290,101 +302,109 @@ function kill(child: ChildProcess): void {
 }
 
 describe("events follow", () => {
-	test("a spawned events --follow prints the window and exits 0 on SIGINT", async () => {
-		const h = await ensureSetup();
-		const child = h.spawn(["events", "--follow"]);
-		const cap = capture(child);
-		try {
-			await waitFor(() => cap.stdout.includes("mission.created"), 5000, "the mission.created line");
-			expect(cap.stdout).toContain("#1");
-			child.kill("SIGINT");
-			expect(await waitExit(child, 15000)).toBe(0);
-		} finally {
-			kill(child);
-		}
-	}, 120000);
-
-	test("follow prints live event notifications for this workspace only", async () => {
-		// A test-local server speaking the 04 protocol: the bundle under test
-		// is real, only the Node side is doubled, so the subscription,
-		// workspace filter and SIGINT shutdown run for real.
-		const live = await startHarness();
-		let hub: Hub | undefined;
-		let server: { close(): Promise<void> } | undefined;
-		const saved = process.env.NETA_DIR;
-		try {
-			process.env.NETA_DIR = live.dir;
-			const socketPath = join(live.dir, "node.sock");
-			const token = newToken();
-			const workspace = "test-events-ws";
-			const created = await createServer({
-				socketPath,
-				token,
-				handlers: {
-					"workspace.open": () => Promise.resolve({ workspace: { id: workspace }, leader: {} }),
-					"missions.list": () => Promise.resolve({ missions: [] }),
-					"events.list": () => Promise.resolve({ events: [] }),
-				},
-				ctx: {
-					store: { machine: () => ({}) } as unknown as NodeStore,
-					acp: {} as unknown as NodeAcp,
-					nodeVersion: "0.0.0-test",
-					stop: () => Promise.resolve(),
-				},
-			});
-			server = created;
-			hub = created.hub;
-			await writeDescriptor({
-				socket: socketPath,
-				token,
-				pid: process.pid,
-				protocolVersion: PROTOCOL_VERSION,
-				startedAt: new Date().toISOString(),
-			});
-			const child = live.spawn(["events", "--follow"]);
+	test.skipIf(!nativeHarnessReady)(
+		"a spawned events --follow prints the window and exits 0 on SIGINT",
+		async () => {
+			const h = await ensureSetup();
+			const child = h.spawn(["events", "--follow"]);
 			const cap = capture(child);
 			try {
-				// Give the CLI a moment to subscribe before broadcasting.
-				await new Promise((done) => setTimeout(done, 1000));
-				expect(child.exitCode).toBeNull();
-				hub.broadcast("event", {
-					event: {
-						seq: 7,
-						at: new Date().toISOString(),
-						workspaceId: "another-workspace",
-						kind: "mission.created",
-						data: { number: 9, name: "foreign mission" },
-					},
-				});
-				hub.broadcast("event", {
-					event: {
-						seq: 8,
-						at: new Date().toISOString(),
-						workspaceId: workspace,
-						kind: "mission.created",
-						missionId: "m-live",
-						data: { number: 7, name: "live mission" },
-					},
-				});
-				await waitFor(() => cap.stdout.includes("live mission"), 5000, "the live mission.created line");
-				expect(cap.stdout).toContain("mission.created");
-				expect(cap.stdout).toContain("#7");
-				expect(cap.stdout).not.toContain("foreign mission");
+				await waitFor(() => cap.stdout.includes("mission.created"), 5000, "the mission.created line");
+				expect(cap.stdout).toContain("#1");
 				child.kill("SIGINT");
 				expect(await waitExit(child, 15000)).toBe(0);
 			} finally {
 				kill(child);
 			}
-		} finally {
-			await server?.close();
-			// The harness stops whatever `node.json` names: never ourselves.
-			await rm(join(live.dir, "node.json"), { force: true });
-			if (saved === undefined) {
-				delete process.env.NETA_DIR;
-			} else {
-				process.env.NETA_DIR = saved;
+		},
+		120000,
+	);
+
+	test.skipIf(!nativeHarnessReady)(
+		"follow prints live event notifications for this workspace only",
+		async () => {
+			// A test-local server speaking the 04 protocol: the bundle under test
+			// is real, only the Node side is doubled, so the subscription,
+			// workspace filter and SIGINT shutdown run for real.
+			const live = await startHarness();
+			let hub: Hub | undefined;
+			let server: { close(): Promise<void> } | undefined;
+			const saved = process.env.NETA_DIR;
+			try {
+				process.env.NETA_DIR = live.dir;
+				const socketPath = join(live.dir, "node.sock");
+				const token = newToken();
+				const workspace = "test-events-ws";
+				const created = await createServer({
+					socketPath,
+					token,
+					handlers: {
+						"workspace.open": () => Promise.resolve({ workspace: { id: workspace }, leader: {} }),
+						"missions.list": () => Promise.resolve({ missions: [] }),
+						"events.list": () => Promise.resolve({ events: [] }),
+					},
+					ctx: {
+						store: { machine: () => ({}) } as unknown as NodeStore,
+						runtime: {} as unknown as NodeRuntime,
+						nodeVersion: "0.0.0-test",
+						stop: () => Promise.resolve(),
+					},
+				});
+				server = created;
+				hub = created.hub;
+				await writeDescriptor({
+					socket: socketPath,
+					token,
+					pid: process.pid,
+					protocolVersion: PROTOCOL_VERSION,
+					startedAt: new Date().toISOString(),
+				});
+				const child = live.spawn(["events", "--follow"]);
+				const cap = capture(child);
+				try {
+					// Give the CLI a moment to subscribe before broadcasting.
+					await new Promise((done) => setTimeout(done, 1000));
+					expect(child.exitCode).toBeNull();
+					hub.broadcast("event", {
+						event: {
+							seq: 7,
+							at: new Date().toISOString(),
+							workspaceId: "another-workspace",
+							kind: "mission.created",
+							data: { number: 9, name: "foreign mission" },
+						},
+					});
+					hub.broadcast("event", {
+						event: {
+							seq: 8,
+							at: new Date().toISOString(),
+							workspaceId: workspace,
+							kind: "mission.created",
+							missionId: "m-live",
+							data: { number: 7, name: "live mission" },
+						},
+					});
+					await waitFor(() => cap.stdout.includes("live mission"), 5000, "the live mission.created line");
+					expect(cap.stdout).toContain("mission.created");
+					expect(cap.stdout).toContain("#7");
+					expect(cap.stdout).not.toContain("foreign mission");
+					child.kill("SIGINT");
+					expect(await waitExit(child, 15000)).toBe(0);
+				} finally {
+					kill(child);
+				}
+			} finally {
+				await server?.close();
+				// The harness stops whatever `node.json` names: never ourselves.
+				await rm(join(live.dir, "node.json"), { force: true });
+				if (saved === undefined) {
+					delete process.env.NETA_DIR;
+				} else {
+					process.env.NETA_DIR = saved;
+				}
+				await live.stop();
 			}
-			await live.stop();
-		}
-	}, 120000);
+		},
+		120000,
+	);
 });

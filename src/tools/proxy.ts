@@ -1,4 +1,4 @@
-// `neta mcp --actor <id> --token <t>`: the stdio MCP server one ACP session
+// `neta mcp --actor <id> --token <t>`: the stdio MCP server one OpenCode actor
 // holds. It keeps no state and decides nothing: `initialize` is answered
 // locally, every `tools/list` and `tools/call` is forwarded to the Node over
 // the socket with the actor's token. Both sides speak NDJSON JSON-RPC 2.0.
@@ -158,7 +158,7 @@ export async function runProxy(options: ProxyOptions): Promise<number> {
 	if (options.socketPath !== undefined) {
 		// `NETA_SOCKET` is all `netaMcpServer` puts in a session's
 		// environment, so the node token is read from beside that socket,
-		// not from `netaDir()` — an ACP session's proxy has no `NETA_DIR`.
+		// not from `netaDir()` — an OpenCode actor's proxy has no `NETA_DIR`.
 		clientToken = (await readDescriptorIn(dirname(options.socketPath)).catch(() => undefined))?.token ?? "";
 	}
 	const pending = new Set<Promise<void>>();

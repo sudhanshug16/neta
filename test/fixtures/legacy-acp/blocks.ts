@@ -1,13 +1,8 @@
 import type { SessionUpdate, ToolCallContent } from "@agentclientprotocol/sdk";
-import type { BlockKind, Role } from "../core/types.ts";
+import type { BlockKind, Role } from "../../../src/core/types.ts";
+import type { BlockDraft } from "../../../src/session/block-draft.ts";
 
-export interface BlockDraft {
-	role: Role;
-	kind: BlockKind;
-	text: string;
-	data?: Record<string, string | number | boolean | null>;
-	key?: string;
-}
+export { type BlockDraft, canCoalesce } from "../../../src/session/block-draft.ts";
 
 export type SessionSignal = { kind: "model"; model: string } | { kind: "mode"; modeId: string };
 
@@ -139,13 +134,6 @@ export function signalFromUpdate(update: SessionUpdate): SessionSignal | undefin
 }
 
 // Only two text or two thought drafts merge, same role, neither carrying data.
-export function canCoalesce(prev: BlockDraft, next: BlockDraft): boolean {
-	if (prev.role !== next.role || prev.data !== undefined || next.data !== undefined) {
-		return false;
-	}
-	return (prev.kind === "text" && next.kind === "text") || (prev.kind === "thought" && next.kind === "thought");
-}
-
 // `<path> (+<added> −<removed>)` from an LCS line comparison.
 export function diffSummary(path: string, oldText: string, newText: string): string {
 	const oldLines = splitLines(oldText);

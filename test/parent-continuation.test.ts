@@ -2,17 +2,18 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { TurnInProgressError } from "../src/acp/session.ts";
-import { loadSettings } from "../src/acp/settings.ts";
 import type { InboxMessage } from "../src/core/types.ts";
-import { type AdaptedAcp, adaptAcp } from "../src/node/lifecycle.ts";
+import type { AdaptedRuntime } from "../src/node/lifecycle.ts";
 import type { TurnNotification } from "../src/node/protocol.ts";
+import { loadSettings } from "../src/session/settings.ts";
 import { openStore, type Store } from "../src/store/index.ts";
+import { TurnInProgressError } from "./fixtures/legacy-acp/session.ts";
+import { adaptLegacyAcp as adaptRuntime } from "./fixtures/legacy-acp-runtime.ts";
 
 let dir: string;
 let previousDirectory: string | undefined;
 let store: Store;
-let acp: AdaptedAcp | undefined;
+let acp: AdaptedRuntime | undefined;
 
 beforeEach(async () => {
 	previousDirectory = process.env.NETA_DIR;
@@ -52,7 +53,7 @@ async function parent(
 		durableTurn?: (notification: TurnNotification) => Promise<void>;
 		guard?: (message: InboxMessage) => Promise<boolean>;
 	} = {},
-): Promise<{ runtime: AdaptedAcp; sessionId: string }> {
+): Promise<{ runtime: AdaptedRuntime; sessionId: string }> {
 	const settings = loadSettings({ netaDir: dir }).settings;
 	settings.providers.fake = {
 		command: process.execPath,
@@ -68,7 +69,7 @@ async function parent(
 		resume: true,
 		defaultModel: "test-model",
 	};
-	acp = adaptAcp(
+	acp = adaptRuntime(
 		settings,
 		store.conversations,
 		undefined,

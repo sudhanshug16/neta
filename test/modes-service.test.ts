@@ -2,13 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type SessionEvent, startSession } from "../src/acp/session.ts";
-import type { ProviderSettings } from "../src/acp/settings.ts";
 import type { AgentId, DecisionRecord, Event, Leader, Mission, SessionId } from "../src/core/types.ts";
 import { ActiveClock } from "../src/modes/clock.ts";
 import { type LeaderFile, type ModeSubject, subjectKey } from "../src/modes/records.ts";
 import { ReminderTracker } from "../src/modes/reminders.ts";
 import { ModeService, type ModeServiceDeps } from "../src/modes/service.ts";
+import type { ProviderSettings } from "../src/session/settings.ts";
+import { type SessionEvent, startSession } from "./fixtures/legacy-acp/session.ts";
 
 const FIXTURE = new URL("./fixtures/fake-acp-agent.mjs", import.meta.url).pathname;
 const WORKSPACE = "w";

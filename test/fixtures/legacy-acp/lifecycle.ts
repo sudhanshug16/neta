@@ -1,8 +1,8 @@
-import type { Access, SessionId } from "../core/types.ts";
-import type { ConversationStore } from "../store/conversations.ts";
-import type { McpServerSpec } from "./mcp.ts";
+import type { Access, SessionId } from "../../../src/core/types.ts";
+import type { McpServerSpec } from "../../../src/session/mcp.ts";
+import { isForbiddenModel, type Settings } from "../../../src/session/settings.ts";
+import type { ConversationStore } from "../../../src/store/conversations.ts";
 import { type AcpSession, startSession } from "./session.ts";
-import { isForbiddenModel, type Settings } from "./settings.ts";
 
 export interface LifecycleOptions {
 	settings: Settings;

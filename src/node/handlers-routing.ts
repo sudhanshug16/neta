@@ -54,7 +54,7 @@ export const routingHandlers: NodeHandlers = {
 		const leader = ctx.store.getLeader(workspaceId);
 		if (!leader) throw new NodeError("NOT_FOUND", "Workspace leader is unavailable.");
 		const preferences = loadModelPreferences(netaDir());
-		const connected = await ctx.acp.listModels({ sessionId: leader.sessionId });
+		const connected = await ctx.runtime.listModels({ sessionId: leader.sessionId });
 		const ids = new Set([...connected.map((model) => model.id), ...Object.keys(preferences.models)]);
 		return {
 			models: [...ids].sort().map((id) => ({

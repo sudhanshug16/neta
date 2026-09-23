@@ -216,8 +216,8 @@ export const registryHandlers: NodeHandlers = {
 		if ((agent.state === "starting" || agent.state === "running") && parsed.confirm !== true) {
 			throw new NodeError("CONFIRMATION_REQUIRED", "archiving a live agent needs confirm: true");
 		}
-		// The ACP session closes before the agent is archived.
-		await ctx.acp.close(agent.sessionId);
+		// The runtime session closes before the agent is archived.
+		await ctx.runtime.close(agent.sessionId);
 		const archived = { ...agent, state: "archived" as const };
 		await ctx.store.putAgent(archived);
 		await ctx.store.appendEvent({
@@ -258,9 +258,9 @@ export const registryHandlers: NodeHandlers = {
 		const { instanceId } = parseParams({ instanceId: asString, desiredBuild: asOptionalString }, params);
 		if (!ctx.runtimeAdmission) throw new NodeError("METHOD_NOT_FOUND", "Conditional upgrade is unavailable.");
 		const active =
-			ctx.acp.hasActiveWork?.() ??
+			ctx.runtime.hasActiveWork?.() ??
 			[...ctx.store.listLeaders(), ...ctx.store.listAgents()].some((actor) =>
-				ctx.acp.isTurnActive?.(actor.sessionId),
+				ctx.runtime.isTurnActive?.(actor.sessionId),
 			);
 		return ctx.runtimeAdmission.prepare(instanceId, active);
 	},
@@ -272,9 +272,9 @@ export const registryHandlers: NodeHandlers = {
 	"runtime.upgrade.commit": async (ctx, params) => {
 		const { instanceId, token } = parseParams({ instanceId: asString, token: asString }, params);
 		const active =
-			ctx.acp.hasActiveWork?.() ??
+			ctx.runtime.hasActiveWork?.() ??
 			[...ctx.store.listLeaders(), ...ctx.store.listAgents()].some((actor) =>
-				ctx.acp.isTurnActive?.(actor.sessionId),
+				ctx.runtime.isTurnActive?.(actor.sessionId),
 			);
 		const stopping = ctx.runtimeAdmission?.commit(instanceId, token, active) ?? false;
 		if (stopping)

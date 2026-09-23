@@ -32,6 +32,7 @@ async function fixture(): Promise<{ root: string; fork: string; shell: string }>
 	await git(fork, ["config", "user.email", "fixture@example.invalid"]);
 	await git(fork, ["commit", "--allow-empty", "--no-gpg-sign", "-m", "fixture"]);
 	await mkdir(join(fork, "packages/cli/src/acp"), { recursive: true });
+	await writeFile(join(fork, "packages/cli/src/index.ts"), "export {};\n");
 	await mkdir(join(fork, "packages/tui/src/neta"), { recursive: true });
 	await writeFile(join(fork, "bun.lock"), lock);
 	await writeFile(join(fork, "neta-fork.json"), marker);
@@ -50,6 +51,7 @@ async function fixture(): Promise<{ root: string; fork: string; shell: string }>
 			files: {
 				"bun.lock": sha256(lock),
 				"neta-fork.json": sha256(marker),
+				"packages/cli/src/index.ts": sha256("export {};\n"),
 				"packages/cli/src/acp/service.ts": sha256("export {};\n"),
 				"packages/tui/src/neta/shell.tsx": sha256(shell),
 			},
@@ -62,6 +64,7 @@ async function copyReviewedFixtureSources(source: string, target: string): Promi
 	for (const path of [
 		"bun.lock",
 		"neta-fork.json",
+		"packages/cli/src/index.ts",
 		"packages/cli/src/acp/service.ts",
 		"packages/tui/src/neta/shell.tsx",
 	]) {

@@ -6,8 +6,7 @@ export interface McpEnvVar {
 }
 
 // The stdio MCP server descriptor handed to `session/new`: one `neta mcp`
-// proxy per ACP session that needs tools. Its shape matches what ACP expects,
-// so 05 passes it through untouched.
+// proxy per OpenCode actor that needs tools.
 export interface McpServerSpec {
 	name: string;
 	command: string;

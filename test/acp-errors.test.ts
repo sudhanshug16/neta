@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { RequestError } from "@agentclientprotocol/sdk";
-import { providerErrorMessage, providerFailureDetails, redactProviderText } from "../src/acp/errors.ts";
+import { providerErrorMessage, providerFailureDetails, redactProviderText } from "../src/session/errors.ts";
 
 test("retains nested provider causes and RPC code without dumping unrelated fields", () => {
 	const error = new RequestError(-32603, "Internal error", {
@@ -9,7 +9,7 @@ test("retains nested provider causes and RPC code without dumping unrelated fiel
 		accessToken: "private-value",
 	});
 	const text = providerErrorMessage(error);
-	expect(text).toContain("ACP -32603");
+	expect(text).toContain("provider -32603");
 	expect(text).toContain("Provider request failed");
 	expect(text).toContain("OAuth session expired");
 	expect(text).not.toContain("private-value");

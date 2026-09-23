@@ -13,18 +13,19 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Settings } from "../src/acp/settings.ts";
 import type { Agent, Mission } from "../src/core/types.ts";
 import { connectNode } from "../src/node/client.ts";
-import { type AdaptedAcp, adaptAcp, adaptStore, allHandlers } from "../src/node/lifecycle.ts";
+import { type AdaptedRuntime, adaptStore, allHandlers } from "../src/node/lifecycle.ts";
 import { writeDescriptor } from "../src/node/lockfile.ts";
 import { NodeError, PROTOCOL_VERSION, type TurnNotification } from "../src/node/protocol.ts";
 import type { NodeStore } from "../src/node/server.ts";
 import { createServer } from "../src/node/server.ts";
+import type { Settings } from "../src/session/settings.ts";
 import { openStore, type Store } from "../src/store/index.ts";
 import type { SessionLaunch } from "../src/tools/handlers/mission.ts";
 import { toolHandlers } from "../src/tools/launch.ts";
 import { createRouter, type TokenTable } from "../src/tools/router.ts";
+import { adaptLegacyAcp as adaptRuntime } from "./fixtures/legacy-acp-runtime.ts";
 
 const FAKE = new URL("./fixtures/fake-acp-agent.mjs", import.meta.url).pathname;
 const RUNNER = new URL("./fixtures/mcp-proxy-runner.mjs", import.meta.url).pathname;
@@ -37,6 +38,7 @@ const LEADER_TOOLS = [
 	"neta_history",
 	"neta_mission",
 	"neta_mode",
+	"neta_model",
 	"neta_pin",
 	"neta_ready",
 	"neta_scope",
@@ -152,11 +154,11 @@ async function spawnProxy(actorId: string, token: string, socketPath: string): P
 test("session tool wiring and end-to-end mission creation", async () => {
 	const real: Store = await openStore();
 	closers.push(() => real.close());
-	const acp: AdaptedAcp = adaptAcp(settings());
+	const acp: AdaptedRuntime = adaptRuntime(settings());
 	closers.push(() => acp.closeAll());
 
 	// The leader session first: its session id becomes the leader's actor id,
-	// and adaptAcp mints the actor token at launch.
+	// and adaptRuntime mints the actor token at launch.
 	const created = await acp.createSession({
 		workspaceId: WORKSPACE,
 		cwd: folderCwd,
@@ -333,7 +335,7 @@ test("session tool wiring and end-to-end mission creation", async () => {
 				return router.call(actorId, token, name, args);
 			},
 		},
-		ctx: { store, acp, nodeVersion: "0.0.0-test", stop: () => Promise.resolve() },
+		ctx: { store, runtime: acp, nodeVersion: "0.0.0-test", stop: () => Promise.resolve() },
 	});
 	closers.push(close);
 	await writeDescriptor({

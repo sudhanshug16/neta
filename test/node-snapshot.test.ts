@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { ulid } from "../src/core/ids.ts";
 import type { Agent, AgentState, Event, IsoTime, Leader, Mission, MissionState, Workspace } from "../src/core/types.ts";
 import { NodeError, PROTOCOL_VERSION } from "../src/node/protocol.ts";
-import type { NodeAcp, NodeContext, NodeStore } from "../src/node/server.ts";
+import type { NodeContext, NodeRuntime, NodeStore } from "../src/node/server.ts";
 import { buildSnapshot, snapshotHandlers } from "../src/node/snapshot.ts";
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -184,7 +184,7 @@ function stubStore(): NodeStore {
 	};
 }
 
-function deadAcp(): NodeAcp {
+function deadAcp(): NodeRuntime {
 	return {
 		createSession: () => Promise.reject(new Error("not implemented in this test")),
 		ensureSession: () => Promise.reject(new Error("not implemented in this test")),
@@ -203,7 +203,7 @@ function deadAcp(): NodeAcp {
 function testCtx(): NodeContext {
 	return {
 		store: stubStore(),
-		acp: deadAcp(),
+		runtime: deadAcp(),
 		hub: {
 			broadcast: () => undefined,
 			toTail: () => undefined,

@@ -5,20 +5,20 @@
 //
 // One narrow exception to the ports rule lives here: the leader needs the
 // settings provider and model, which do not fit through
-// `NodeStore`/`NodeAcp`, so this module imports two leaf builders from 03
+// `NodeStore`/`NodeRuntime`, so this module imports two leaf builders from 03
 // (`loadSettings`, `providerFor`). They start no process, open no store and
 // hold no state — `lifecycle.ts` still owns every stateful adaptation, and
 // tests still stub the ports.
 import { execFile } from "node:child_process";
 import { realpath, stat } from "node:fs/promises";
 import { basename } from "node:path";
-import { providerErrorMessage, redactProviderText } from "../acp/errors.ts";
-import { loadSettings, providerFor } from "../acp/settings.ts";
 import { ulid } from "../core/ids.ts";
 import { pickName } from "../core/names.ts";
 import { nowIso } from "../core/time.ts";
 import type { Leader, Workspace, WorkspaceKind } from "../core/types.ts";
 import { canonicalRemote, workspaceIdFor } from "../core/workspace-id.ts";
+import { providerErrorMessage, redactProviderText } from "../session/errors.ts";
+import { loadSettings, providerFor } from "../session/settings.ts";
 import { createFileLeaseStore, LeaseManager, leaseKeyFor } from "../worktrees/index.ts";
 import { asOptionalString, asString, parseParams } from "./handlers-registry.ts";
 import { netaDir } from "./lockfile.ts";
@@ -146,7 +146,7 @@ async function createLeader(
 	};
 	let leader = candidate;
 	if (ctx.pi !== undefined && providerName === "pi") {
-		ctx.acp.prepareExternalActor?.(sessionId);
+		ctx.runtime.prepareExternalActor?.(sessionId);
 		leader = { ...candidate, state: "idle" };
 		await ctx.store.putLeader(leader);
 		ctx.hub.broadcast("state", { kind: "leader", record: leader });
@@ -154,7 +154,7 @@ async function createLeader(
 	}
 	try {
 		providerFor(settings, providerName);
-		const created = await ctx.acp.createSession({
+		const created = await ctx.runtime.createSession({
 			sessionId,
 			workspaceId,
 			cwd,
@@ -183,7 +183,7 @@ async function createLeader(
 	return leader;
 }
 
-// A leader outlives the Node, its ACP session does not: after a restart the
+// A leader outlives the Node, its private OpenCode process does not: after a restart the
 // stored `sessionId` names a session no provider has any more, and every
 // prompt fails with `no such session`. Opening the workspace brings the
 // session back — resumed through the provider when the vendor session allows
@@ -192,7 +192,7 @@ async function createLeader(
 async function reviveLeader(ctx: NodeContext, leader: Leader, workspace: Workspace, cwd: string): Promise<Leader> {
 	let effective = leader;
 	if (leader.provider === "pi" && ctx.pi !== undefined) {
-		ctx.acp.prepareExternalActor?.(leader.sessionId);
+		ctx.runtime.prepareExternalActor?.(leader.sessionId);
 		if (leader.state === "idle") return leader;
 		const revived = { ...leader, state: "idle" as const };
 		await ctx.store.putLeader(revived);
@@ -220,7 +220,7 @@ async function reviveLeader(ctx: NodeContext, leader: Leader, workspace: Workspa
 	}
 	let live: { sessionId: string; provider: string; model: string };
 	try {
-		live = await ctx.acp.ensureSession({
+		live = await ctx.runtime.ensureSession({
 			sessionId: effective.sessionId,
 			workspaceId: effective.workspaceId,
 			cwd: sessionCwd,

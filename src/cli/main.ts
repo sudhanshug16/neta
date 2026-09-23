@@ -54,7 +54,7 @@ const COMMAND_TABLE = `usage: neta [command] [options]
   neta mode [lead | lead++] [--mission <n>]
   neta models [--json]                   providers and their models
   neta model <id>                        set the model of the attached conversation
-  neta mcp --actor <id> --token <t>      stdio MCP server for one ACP session
+  neta mcp --actor <id> --token <t>      stdio MCP server for one OpenCode actor
   neta tui [path] [--migrate] [--host id]  open native OpenCode chat and the Neta spine
   neta version                            print the version from package.json
 

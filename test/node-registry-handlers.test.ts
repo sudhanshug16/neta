@@ -3,7 +3,7 @@ import { ulid } from "../src/core/ids.ts";
 import type { Agent, Event, Leader, Mission, Workspace } from "../src/core/types.ts";
 import { asOptionalString, asString, parseParams, registryHandlers } from "../src/node/handlers-registry.ts";
 import { NodeError } from "../src/node/protocol.ts";
-import type { NodeAcp, NodeContext, NodeStore } from "../src/node/server.ts";
+import type { NodeContext, NodeRuntime, NodeStore } from "../src/node/server.ts";
 
 const W1 = ulid();
 const W2 = ulid();
@@ -132,7 +132,7 @@ function testCtx(world: World): NodeContext {
 		},
 		tailConversation: () => Promise.reject(new Error("not implemented in this test")),
 	};
-	const acp: NodeAcp = {
+	const acp: NodeRuntime = {
 		createSession: () => Promise.reject(new Error("not implemented in this test")),
 		ensureSession: () => Promise.reject(new Error("not implemented in this test")),
 		prompt: () => Promise.reject(new Error("not implemented in this test")),
@@ -151,7 +151,7 @@ function testCtx(world: World): NodeContext {
 	};
 	return {
 		store,
-		acp,
+		runtime: acp,
 		hub: {
 			broadcast: (method, params) => {
 				world.ops.push(`hub.${method}`);

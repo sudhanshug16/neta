@@ -1,9 +1,8 @@
 import { execFileSync } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ProviderSettings } from "../acp/settings.ts";
 
 function managedOpenCodeDir(root: string): string {
 	return resolve(root, "vendor/opencode/runtime");
@@ -104,7 +103,7 @@ export function openCodeInvocation(options: OpenCodeRuntimeOptions = {}): {
 	const root = options.root ?? (here.endsWith("/dist") ? dirname(here) : resolve(here, "../.."));
 	const explicitOverride = environment.NETA_OPENCODE_DIR !== undefined;
 	const fork = environment.NETA_OPENCODE_DIR ?? managedOpenCodeDir(root);
-	const v2 = existsSync(join(fork, "packages/cli/src/acp/service.ts")) && !existsSync(join(fork, "packages/opencode"));
+	const v2 = existsSync(join(fork, "packages/cli/src/index.ts")) && !existsSync(join(fork, "packages/opencode"));
 	const binary = join(
 		root,
 		"dist",
@@ -131,29 +130,5 @@ export function openCodeInvocation(options: OpenCodeRuntimeOptions = {}): {
 		command: environment.NETA_BUN ?? "bun",
 		...(v2 ? { apiVersion: 2 as const } : {}),
 		args: ["run", "--cwd", join(fork, v2 ? "packages/cli" : "packages/opencode"), "./src/index.ts"],
-	};
-}
-
-export function managedOpenCodeProvider(provider: ProviderSettings, cwd = process.cwd()): ProviderSettings | undefined {
-	if (provider.command !== "opencode" || provider.args.join(" ") !== "acp") return undefined;
-	let invocation: ReturnType<typeof openCodeInvocation>;
-	try {
-		invocation = openCodeInvocation();
-	} catch (error) {
-		if (error instanceof OpenCodeSourceDriftError) throw error;
-		return undefined;
-	}
-	return {
-		...provider,
-		command: invocation.command,
-		args: [...invocation.args, "acp", ...(invocation.apiVersion === 2 ? [] : ["--cwd", cwd])],
-		processGroup: true,
-		env: {
-			...provider.env,
-			NETA_MANAGED_OPENCODE: "1",
-			OPENCODE_DISABLE_AUTOUPDATE: "true",
-			NETA_RUNTIME_CWD: cwd,
-			OPENCODE_SERVER_PASSWORD: randomBytes(32).toString("hex"),
-		},
 	};
 }

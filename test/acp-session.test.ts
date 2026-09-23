@@ -2,11 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { UnknownModelError } from "../src/acp/models.ts";
-import type { SessionEvent } from "../src/acp/session.ts";
-import { ResumeFailedError, startSession, TurnInProgressError } from "../src/acp/session.ts";
-import type { ProviderSettings } from "../src/acp/settings.ts";
 import type { Access } from "../src/core/types.ts";
+import { UnknownModelError } from "../src/session/models.ts";
+import type { ProviderSettings } from "../src/session/settings.ts";
+import type { SessionEvent } from "./fixtures/legacy-acp/session.ts";
+import { ResumeFailedError, startSession, TurnInProgressError } from "./fixtures/legacy-acp/session.ts";
 
 const FIXTURE = new URL("./fixtures/fake-acp-agent.mjs", import.meta.url).pathname;
 

@@ -10,8 +10,8 @@ import {
 	type Connection,
 	createServer,
 	type Hub,
-	type NodeAcp,
 	type NodeContext,
+	type NodeRuntime,
 	type NodeStore,
 } from "../src/node/server.ts";
 
@@ -47,7 +47,7 @@ function stubStore(): NodeStore {
 	};
 }
 
-function stubAcp(): NodeAcp {
+function stubAcp(): NodeRuntime {
 	return {
 		createSession: () => Promise.reject(new Error("not implemented in this test")),
 		ensureSession: () => Promise.reject(new Error("not implemented in this test")),
@@ -105,7 +105,7 @@ async function startNode(handlers: Record<string, Handler>): Promise<{ hub: Hub;
 		socketPath,
 		token: TOKEN,
 		handlers,
-		ctx: { store: stubStore(), acp: stubAcp(), nodeVersion: "0.0.0-test", stop: () => Promise.resolve() },
+		ctx: { store: stubStore(), runtime: stubAcp(), nodeVersion: "0.0.0-test", stop: () => Promise.resolve() },
 	});
 	closers.push(close);
 	return { hub, socketPath };

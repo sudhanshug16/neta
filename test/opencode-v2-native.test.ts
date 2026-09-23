@@ -1,10 +1,9 @@
 import { expect, test } from "bun:test";
+import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { spawnProvider } from "../src/acp/process.ts";
-import { type SessionEvent, startSession } from "../src/acp/session.ts";
-import { writeSystemContext } from "../src/acp/system-context.ts";
+import { managedOpenCodeDir } from "../scripts/opencode-pin.ts";
 import { ulid } from "../src/core/ids.ts";
 import type { Leader, Workspace } from "../src/core/types.ts";
 import { connectNode, type NodeClient } from "../src/node/client.ts";
@@ -12,8 +11,11 @@ import { type Node as NetaNode, startNode } from "../src/node/lifecycle.ts";
 import type { SnapshotResult } from "../src/node/protocol.ts";
 import type { OpenCodeAttachment } from "../src/opencode/attachment.ts";
 import { openCodeEndpoint } from "../src/opencode/attachment.ts";
-import { managedOpenCodeProvider } from "../src/opencode/runtime.ts";
-import { managedOpenCodeDir } from "../scripts/opencode-pin.ts";
+import { openCodeInvocation } from "../src/opencode/runtime.ts";
+import { type RuntimeSession, type SessionEvent, type StartOptions, startSession } from "../src/session/runtime.ts";
+import { writeSystemContext } from "../src/session/system-context.ts";
+import { spawnProvider } from "./fixtures/legacy-acp/process.ts";
+import { startLegacySession } from "./fixtures/legacy-acp-runtime.ts";
 import { visualProxy } from "./fixtures/neta-visual-proxy.ts";
 
 const fork = process.env.NETA_OPENCODE_DIR ?? managedOpenCodeDir();
@@ -182,71 +184,82 @@ test.skipIf(!nativeReady)(
 				join(process.env.NETA_DIR, "settings.json"),
 				JSON.stringify({
 					providers: {
-						opencode: { command: "opencode", args: ["acp"], resume: true, defaultModel: "test/test-model", env },
+						opencode: {
+							command: "opencode",
+							args: ["serve"],
+							resume: true,
+							defaultModel: "test/test-model",
+							env,
+						},
 					},
 					leader: { provider: "opencode", model: "test/test-model" },
 					forbiddenModels: [],
 				}),
 			);
-			let legacySession: string | undefined;
-			let legacyBytes: Buffer | undefined;
-			const legacyFork = resolve(import.meta.dir, "../../neta-opencode");
-			const nativeBinary = process.env.NETA_OPENCODE_BIN;
-			if (!process.env.NETA_REQUIRED_CONFORMANCE && existsSync(join(legacyFork, "node_modules"))) {
-				process.env.NETA_OPENCODE_DIR = legacyFork;
-				delete process.env.NETA_OPENCODE_BIN;
-				node = await startNode();
-				client = await connectNode();
-				const old = await client.request<{ leader: Leader }>("workspace.open", {
-					path: work,
-					provider: "opencode",
+			const legacyFactory = (options: StartOptions): Promise<RuntimeSession> => {
+				const invocation = openCodeInvocation();
+				const provider = options.settings.providers.opencode;
+				if (!provider) throw new Error("OpenCode settings are missing");
+				return startLegacySession({
+					...options,
+					settings: {
+						...options.settings,
+						providers: {
+							...options.settings.providers,
+							opencode: {
+								...provider,
+								command: invocation.command,
+								args: [...invocation.args, "acp"],
+								processGroup: true,
+								env: {
+									...provider.env,
+									NETA_MANAGED_OPENCODE: "1",
+									OPENCODE_SERVER_PASSWORD: randomBytes(32).toString("hex"),
+								},
+							},
+						},
+					},
 				});
-				const oldNative = await client.request<OpenCodeAttachment>("conversation.native", {
-					sessionId: old.leader.sessionId,
-				});
-				legacySession = oldNative.sessionId;
-				await client.request("conversation.prompt", {
-					sessionId: old.leader.sessionId,
-					text: "V1 history to preserve",
-				});
-				const until = Date.now() + 20000;
-				while (Date.now() < until) {
-					if (
-						JSON.stringify(
-							await client.request("conversation.tail", { sessionId: old.leader.sessionId }),
-						).includes("Native fixture reply")
-					)
-						break;
-					await Bun.sleep(100);
-				}
-				await client.close();
-				await node.stop();
-				legacyBytes = await readFile(join(env.XDG_DATA_HOME, "opencode", "opencode-local.db"));
-				process.env.NETA_OPENCODE_DIR = fork;
-				if (nativeBinary) process.env.NETA_OPENCODE_BIN = nativeBinary;
-			}
+			};
+			node = await startNode({ sessionFactory: legacyFactory });
+			client = await connectNode();
+			const old = await client.request<{ leader: Leader }>("workspace.open", { path: work, provider: "opencode" });
+			const oldNative = await client.request<OpenCodeAttachment>("conversation.native", {
+				sessionId: old.leader.sessionId,
+			});
+			const legacySession = oldNative.sessionId;
+			await client.request("conversation.prompt", {
+				sessionId: old.leader.sessionId,
+				text: "ACP history to preserve",
+			});
+			const until = Date.now() + 20_000;
+			while (
+				Date.now() < until &&
+				!JSON.stringify(await client.request("conversation.tail", { sessionId: old.leader.sessionId })).includes(
+					"Native fixture reply",
+				)
+			)
+				await Bun.sleep(100);
+			await client.close();
+			await node.stop();
 			node = await startNode();
 			client = await connectNode();
 			const opened = await client.request<{ workspace: Workspace; leader: Leader }>("workspace.open", {
 				path: work,
 				provider: "opencode",
 			});
-			expect(opened.leader.state).toBe("idle");
+			if (opened.leader.state !== "idle")
+				throw new Error(opened.leader.startupError ?? "OpenCode leader did not start");
 			const native = await client.request<OpenCodeAttachment>("conversation.native", {
 				sessionId: opened.leader.sessionId,
 			});
 			const headers = { Authorization: native.authorization, "content-type": "application/json" };
 
 			expect(native.apiVersion).toBe(2);
-			if (legacySession) {
-				expect(native.sessionId).toBe(legacySession);
-				expect(
-					await (await fetch(`${native.url}/api/session/${native.sessionId}/message`, { headers })).text(),
-				).toContain("V1 history to preserve");
-				expect((await readFile(join(env.XDG_DATA_HOME, "opencode", "opencode-local.db"))).toString("base64")).toBe(
-					legacyBytes?.toString("base64") ?? "missing V1 snapshot",
-				);
-			}
+			expect(native.sessionId).toBe(legacySession);
+			expect(
+				await (await fetch(`${native.url}/api/session/${native.sessionId}/message`, { headers })).text(),
+			).toContain("ACP history to preserve");
 			const initial = await fetch(`${native.url}/api/session/${native.sessionId}`, { headers });
 			expect(initial.status).toBe(200);
 			const setting = await fetch(`${native.url}/api/session/${native.sessionId}/model`, {
@@ -731,11 +744,20 @@ test.skipIf(!nativeReady)(
 			// Reproduce a still-running older Node launching the new native
 			// executable after reset: plaintext file and no generation identity.
 			const legacyFile = join(dir, "legacy-reset-context.txt");
-			const legacyProvider = managedOpenCodeProvider(
-				{ command: "opencode", args: ["acp"], resume: true, defaultModel: "test/test-model", env },
-				work,
-			);
-			if (!legacyProvider) throw new Error("Native legacy fixture provider unavailable");
+			const invocation = openCodeInvocation();
+			const legacyProvider = {
+				command: invocation.command,
+				args: [...invocation.args, "acp"],
+				resume: true,
+				defaultModel: "test/test-model",
+				processGroup: true,
+				env: {
+					...env,
+					NETA_MANAGED_OPENCODE: "1",
+					OPENCODE_DISABLE_AUTOUPDATE: "true",
+					OPENCODE_SERVER_PASSWORD: randomBytes(32).toString("hex"),
+				},
+			};
 			for (const agreement of ["Legacy workspace agreement", "Fresh legacy reset agreement"]) {
 				const requestStart = modelInputs.length;
 				await writeFile(legacyFile, agreement);
@@ -781,6 +803,20 @@ test.skipIf(!nativeReady)(
 			await writeFile(evidence, "Downloaded evidence read successfully");
 			const evidenceSession = ulid();
 			const generation = "read-only-evidence";
+			const fixtureMcp = join(dir, "fixture-mcp.mjs");
+			await writeFile(
+				fixtureMcp,
+				`import { createInterface } from "node:readline";
+for await (const line of createInterface({ input: process.stdin })) {
+  const request = JSON.parse(line);
+  if (request.id === undefined) continue;
+  const result = request.method === "initialize"
+    ? { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "neta-test", version: "1" } }
+    : request.method === "tools/list" ? { tools: [] } : {};
+  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\\n");
+}
+`,
+			);
 			await writeSystemContext({
 				sessionId: evidenceSession,
 				actorId: evidenceSession,
@@ -788,9 +824,10 @@ test.skipIf(!nativeReady)(
 				role: "agent",
 				text: "Inspect the downloaded evidence read-only.",
 			});
+			const directProvider = { ...legacyProvider, command: "opencode", args: ["serve"] };
 			const reader = await startSession({
 				settings: {
-					providers: { opencode: legacyProvider },
+					providers: { opencode: directProvider },
 					leader: { provider: "opencode" },
 					forbiddenModels: [],
 				},
@@ -799,8 +836,55 @@ test.skipIf(!nativeReady)(
 				cwd: work,
 				sessionId: evidenceSession,
 				bindingGeneration: generation,
+				mcpServers: [{ name: "neta", command: process.execPath, args: [fixtureMcp], env: [] }],
 			});
 			try {
+				const endpoint = reader.nativeAttachment;
+				if (!endpoint) throw new Error("Direct OpenCode session has no endpoint");
+				const mcpUrl = `${endpoint.url}/api/mcp?location%5Bdirectory%5D=${encodeURIComponent(work)}`;
+				const mcpHeaders = { Authorization: endpoint.authorization };
+				const mcpState = async () =>
+					(await (await fetch(mcpUrl, { headers: mcpHeaders })).json()) as {
+						data: Array<{ name: string; status: { status: string } }>;
+					};
+				await reader.setConfigOption("neta_refresh_tools", "");
+				expect((await mcpState()).data.find((item) => item.name === "neta")?.status.status).toBe("connected");
+				const other = await startSession({
+					settings: {
+						providers: { opencode: directProvider },
+						leader: { provider: "opencode" },
+						forbiddenModels: [],
+					},
+					provider: "opencode",
+					access: "readOnly",
+					cwd: work,
+					sessionId: ulid(),
+				});
+				try {
+					const otherEndpoint = other.nativeAttachment;
+					if (!otherEndpoint) throw new Error("Second OpenCode session has no endpoint");
+					expect(otherEndpoint.url).not.toBe(endpoint.url);
+					const otherMcp = await fetch(
+						`${otherEndpoint.url}/api/mcp?location%5Bdirectory%5D=${encodeURIComponent(work)}`,
+						{
+							headers: { Authorization: otherEndpoint.authorization },
+						},
+					);
+					expect(JSON.stringify(await otherMcp.json())).not.toContain('"name":"neta"');
+				} finally {
+					await other.close();
+				}
+				const evict = await fetch(
+					`${endpoint.url}/api/debug/location?location%5Bdirectory%5D=${encodeURIComponent(work)}`,
+					{
+						method: "DELETE",
+						headers: mcpHeaders,
+					},
+				);
+				expect(evict.status).toBe(204);
+				expect((await mcpState()).data.find((item) => item.name === "neta")).toBeUndefined();
+				await reader.setConfigOption("neta_refresh_tools", "");
+				expect((await mcpState()).data.find((item) => item.name === "neta")?.status.status).toBe("connected");
 				const requestStart = modelInputs.length;
 				externalRead = true;
 				reader.prompt("Read the downloaded evidence");

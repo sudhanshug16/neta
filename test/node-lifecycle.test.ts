@@ -3,13 +3,10 @@ import { readFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadSettings } from "../src/acp/settings.ts";
-import { systemContextPath } from "../src/acp/system-context.ts";
 import { ulid } from "../src/core/ids.ts";
 import type { Agent, AgentState, Event, Leader, Mission, MissionState, Workspace } from "../src/core/types.ts";
 import { connectNode, type NodeClient, startNode } from "../src/node/index.ts";
 import {
-	adaptAcp,
 	adaptStore,
 	allHandlers,
 	glanceActorForSession,
@@ -18,9 +15,12 @@ import {
 } from "../src/node/lifecycle.ts";
 import { readDescriptor } from "../src/node/lockfile.ts";
 import { PROTOCOL_VERSION } from "../src/node/protocol.ts";
-import type { NodeAcp, NodeStore } from "../src/node/server.ts";
+import type { NodeRuntime, NodeStore } from "../src/node/server.ts";
+import { loadSettings } from "../src/session/settings.ts";
+import { systemContextPath } from "../src/session/system-context.ts";
 import type { ConversationStore } from "../src/store/conversations.ts";
 import { openStore } from "../src/store/index.ts";
+import { adaptLegacyAcp as adaptRuntime } from "./fixtures/legacy-acp-runtime.ts";
 
 const FIXTURE = new URL("./fixtures/fake-acp-agent.mjs", import.meta.url).pathname;
 const MACHINE = { id: "01ARZ3NDEKTSV4RRFFQ69G5FAV", name: "test", createdAt: "2026-01-01T00:00:00.000Z" };
@@ -121,7 +121,7 @@ function stubStore(world: StubWorld): NodeStore {
 	};
 }
 
-function stubAcp(world: StubWorld): NodeAcp {
+function stubAcp(world: StubWorld): NodeRuntime {
 	return {
 		createSession: () => Promise.reject(new Error("not implemented in this test")),
 		ensureSession: () => Promise.reject(new Error("not implemented in this test")),
@@ -223,7 +223,7 @@ describe("markInterrupted", () => {
 describe("startNode and stop", () => {
 	test("restart events, descriptor, double start, idempotent stop clearing everything", async () => {
 		const world = runningWorld();
-		const node: NetaNode = await startNode({ store: stubStore(world), acp: stubAcp(world) });
+		const node: NetaNode = await startNode({ store: stubStore(world), runtime: stubAcp(world) });
 		try {
 			expect(world.events).toEqual([
 				{ workspaceId: "w1", kind: "node.restarted", data: { agents: 2 } },
@@ -234,7 +234,7 @@ describe("startNode and stop", () => {
 			expect(node.descriptor.protocolVersion).toBe(PROTOCOL_VERSION);
 			let second: unknown;
 			try {
-				await startNode({ store: stubStore(world), acp: stubAcp(world) });
+				await startNode({ store: stubStore(world), runtime: stubAcp(world) });
 			} catch (error) {
 				second = error;
 			}
@@ -264,7 +264,7 @@ describe("startNode and stop", () => {
 			compacted: false,
 			closedAll: false,
 		};
-		const started = startNode({ store: stubStore(world), acp: stubAcp(world) });
+		const started = startNode({ store: stubStore(world), runtime: stubAcp(world) });
 		let client: NodeClient | undefined;
 		const deadline = Date.now() + 5000;
 		for (;;) {
@@ -309,7 +309,7 @@ describe("startNode and stop", () => {
 		};
 		const world = runningWorld();
 		const before = handlesByKind();
-		const node = await startNode({ store: stubStore(world), acp: stubAcp(world) });
+		const node = await startNode({ store: stubStore(world), runtime: stubAcp(world) });
 		const client = await connectNode();
 		await client.close();
 		await node.stop();
@@ -520,7 +520,7 @@ describe("startNode on an unusable NETA_DIR", () => {
 	});
 });
 
-describe("adaptAcp against the fake provider", () => {
+describe("adaptRuntime against the fake provider", () => {
 	test("lists resolved adapters and session-relative custom commands accurately", async () => {
 		const workspace = await mkdtemp(join(tmpdir(), "neta-provider-workspace-"));
 		const relative = join(workspace, "relative-acp");
@@ -530,11 +530,9 @@ describe("adaptAcp against the fake provider", () => {
 		configured.providers.fake = { command: process.execPath, args: [FIXTURE], resume: true, defaultModel: "" };
 		configured.providers.relative = { command: "./relative-acp", args: [], resume: true, defaultModel: "" };
 		configured.providers.missing = { command: "missing-custom-acp", args: [], resume: true, defaultModel: "" };
-		const acp = adaptAcp(configured, undefined, () => configured);
+		const acp = adaptRuntime(configured, undefined, () => configured);
 		try {
-			const noSessionClaude = acp.listProviders?.().find((provider) => provider.id === "claude");
-			expect(noSessionClaude).toMatchObject({ available: true });
-			expect(noSessionClaude?.note).toBeUndefined();
+			expect(acp.listProviders?.().map((provider) => provider.id)).toEqual(["opencode"]);
 			const created = await acp.createSession({
 				workspaceId: "w1",
 				cwd: workspace,
@@ -543,12 +541,9 @@ describe("adaptAcp against the fake provider", () => {
 				access: "readOnly",
 				netaTools: false,
 			});
-			const providers = acp.listProviders?.({ sessionId: created.sessionId });
-			expect(providers?.find((provider) => provider.id === "relative")).toMatchObject({ available: true });
-			expect(providers?.find((provider) => provider.id === "missing")).toMatchObject({
-				available: false,
-				unavailableReason: "Command not found: missing-custom-acp",
-			});
+			expect(acp.listProviders?.({ sessionId: created.sessionId }).map((provider) => provider.id)).toEqual([
+				"opencode",
+			]);
 		} finally {
 			await acp.closeAll();
 			await rm(workspace, { recursive: true, force: true });
@@ -560,7 +555,7 @@ describe("adaptAcp against the fake provider", () => {
 		configured.providers.fake = { command: process.execPath, args: [FIXTURE], resume: true, defaultModel: "" };
 		configured.leader.provider = "fake";
 		const real = await openStore();
-		const acp = adaptAcp(configured, real.conversations);
+		const acp = adaptRuntime(configured, real.conversations);
 		try {
 			const created = await acp.createSession({
 				workspaceId: "w1",
@@ -592,7 +587,7 @@ describe("adaptAcp against the fake provider", () => {
 			}),
 		);
 		const real = await openStore();
-		const acp = adaptAcp(
+		const acp = adaptRuntime(
 			loadSettings({ netaDir: dir }).settings,
 			real.conversations,
 			undefined,
@@ -647,7 +642,7 @@ describe("adaptAcp against the fake provider", () => {
 		good.leader.provider = "fake";
 		let current = good;
 		const real = await openStore();
-		const acp = adaptAcp(good, real.conversations, () => current, undefined, undefined, real.inbox);
+		const acp = adaptRuntime(good, real.conversations, () => current, undefined, undefined, real.inbox);
 		try {
 			const created = await acp.createSession({
 				workspaceId: "w1",
@@ -698,7 +693,7 @@ describe("adaptAcp against the fake provider", () => {
 		};
 		configured.leader.provider = "fake";
 		const real = await openStore();
-		const first = adaptAcp(configured, real.conversations, undefined, undefined, undefined, real.inbox);
+		const first = adaptRuntime(configured, real.conversations, undefined, undefined, undefined, real.inbox);
 		const created = await first.createSession({
 			workspaceId: "w1",
 			cwd: dir,
@@ -710,7 +705,7 @@ describe("adaptAcp against the fake provider", () => {
 		await first.send(created.sessionId, "HOLD_FOREVER", [], { readerDirected: true });
 		const queued = await first.send(created.sessionId, "after rejected resume", [], { readerDirected: true });
 		await first.closeAll();
-		const second = adaptAcp(configured, real.conversations, undefined, undefined, undefined, real.inbox);
+		const second = adaptRuntime(configured, real.conversations, undefined, undefined, undefined, real.inbox);
 		try {
 			const recovered = await second.ensureSession({
 				sessionId: created.sessionId,
@@ -773,7 +768,7 @@ describe("adaptAcp against the fake provider", () => {
 				return real.conversations.meta(id);
 			},
 		};
-		const acp = adaptAcp(configured, conversations, undefined, undefined, undefined, real.inbox);
+		const acp = adaptRuntime(configured, conversations, undefined, undefined, undefined, real.inbox);
 		try {
 			const created = await acp.createSession({
 				workspaceId: "w1",
@@ -819,7 +814,7 @@ describe("adaptAcp against the fake provider", () => {
 			turn: { readerDirected?: boolean; cancelled?: boolean };
 			blocks: Array<{ role: string; kind: string; text: string }>;
 		}> = [];
-		const acp = adaptAcp(
+		const acp = adaptRuntime(
 			loadSettings({ netaDir: dir }).settings,
 			undefined,
 			undefined,
@@ -901,7 +896,7 @@ describe("adaptAcp against the fake provider", () => {
 				leader: { provider: "fake" },
 			}),
 		);
-		const acp = adaptAcp(loadSettings({ netaDir: dir }).settings);
+		const acp = adaptRuntime(loadSettings({ netaDir: dir }).settings);
 		try {
 			const agentId = ulid();
 			const created = await acp.createSession({
@@ -943,7 +938,7 @@ describe("adaptAcp against the fake provider", () => {
 		const captured: Array<{ id: string; cancelled?: boolean; failed?: boolean }> = [];
 		let recoveryCalls = 0;
 		const conversationStore = (await openStore()).conversations;
-		const acp = adaptAcp(
+		const acp = adaptRuntime(
 			loadSettings({ netaDir: dir }).settings,
 			conversationStore,
 			undefined,
@@ -1016,7 +1011,7 @@ test("OpenCode main-agent system context is refreshed separately from user input
 	const configured = loadSettings({ netaDir: dir }).settings;
 	configured.providers.opencode = { command: process.execPath, args: [FIXTURE], resume: true, defaultModel: "" };
 	let instruction = "You are the workspace leader. Charter A.";
-	const acp = adaptAcp(
+	const acp = adaptRuntime(
 		configured,
 		undefined,
 		() => configured,
@@ -1055,7 +1050,7 @@ test("shared cold restore serializes mixed ensure callers without a second provi
 		defaultModel: "test-model",
 	};
 	const real = await openStore();
-	const first = adaptAcp(configured, real.conversations);
+	const first = adaptRuntime(configured, real.conversations);
 	const request = {
 		workspaceId: "w1",
 		cwd: dir,
@@ -1085,7 +1080,7 @@ test("shared cold restore serializes mixed ensure callers without a second provi
 			return real.conversations.meta(id);
 		},
 	};
-	const restored = adaptAcp(configured, conversations);
+	const restored = adaptRuntime(configured, conversations);
 	try {
 		const one = restored.ensureSession({ ...request, sessionId: created.sessionId, allowFresh: false });
 		await observed;
@@ -1113,7 +1108,7 @@ test("a resume queued behind reset cannot resurrect the retired conversation", a
 		defaultModel: "test-model",
 	};
 	const real = await openStore();
-	const acp = adaptAcp(configured, real.conversations);
+	const acp = adaptRuntime(configured, real.conversations);
 	const request = {
 		workspaceId: "w1",
 		cwd: dir,
@@ -1175,7 +1170,7 @@ test("conditional upgrade checks actual admission and refuses late work on the r
 			return "fixture-turn";
 		},
 	};
-	const node = await startNode({ store: stubStore(world), acp });
+	const node = await startNode({ store: stubStore(world), runtime: acp });
 	const client = await connectNode();
 	try {
 		const caps = await client.request<{ instanceId: string; runtimeUpgrade: number }>("runtime.capabilities");

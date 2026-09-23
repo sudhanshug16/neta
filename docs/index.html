@@ -172,7 +172,7 @@
     </div>
     <div class="two-col">
       <div>
-        <p>Every leader, mission lead, and agent holds a real ACP conversation owned by the Node. Selecting it — in the terminal or on the canvas — opens that exact session with its full history. No dummy surfaces, no second orchestration path.</p>
+        <p>Every leader, mission lead, and agent holds a real OpenCode conversation owned by the Node. Selecting it — in the terminal or on the canvas — opens that exact session with its full history. No dummy surfaces, no second orchestration path.</p>
         <p>The desktop draws the spine with its missions, the mission bar with the workspace leader and every open mission that needs a person, and a navigator that jumps anywhere. The terminal attaches to the same leader conversation the desktop shows, so both views see each other's turns.</p>
         <div class="cmdlist">
           <div class="cmd-row"><span class="cmd">neta</span><span class="what">attach to the leader, starting the Node if needed</span></div>
@@ -216,17 +216,17 @@
   <div class="wrap">
     <div class="sec-head">
       <h2>Providers &amp; skills</h2>
-      <span class="sec-label">one ACP path, every agent</span>
+      <span class="sec-label">one OpenCode path, every agent</span>
     </div>
     <div class="card-grid-2">
       <div class="card">
-        <h3>Every agent runs over ACP</h3>
+        <h3>Every agent runs in OpenCode</h3>
         <div class="card-list">
           <div>One transport for the workspace leader, mission leads, and agents — clicking any of them opens that exact session.</div>
           <div>Each provider has a configured default model; the mission lead may override it for an individual agent.</div>
           <div>Provider, model, access, and conversation identity persist with the session. Interrupted work is marked honestly, never replayed.</div>
         </div>
-        <p class="card-foot">Driven over ACP through one internal transport — one code path, not one conditional per vendor. Each agent launches with that provider's own login.</p>
+        <p class="card-foot">Neta controls private OpenCode servers through their native API. Each server uses the operator's OpenCode provider connections.</p>
       </div>
       <div class="card">
         <h3>Skills, not fixed identities</h3>
@@ -251,7 +251,7 @@
       <div class="card">
         <div class="card-label phosphor">The Node owns</div>
         <div class="card-list">
-          <div>Workspaces, leaders, missions, agents, ACP sessions, the event log, and conversation history under ~/.neta — written atomically, files only.</div>
+          <div>Workspaces, leaders, missions, agents, OpenCode session identities, the event log, and conversation history under ~/.neta — written atomically, files only.</div>
           <div>One complete snapshot on connect, then live push on the same connection — no client ever merges a delta into a stale base.</div>
           <div>Restart restores the recorded conversations and marks interrupted work, with the prior state preserved for the leader to decide on.</div>
         </div>
@@ -273,7 +273,7 @@
     <div class="cta-panel">
       <div>
         <h2>Run it in a workspace you know</h2>
-        <p>Neta needs Node 22+ and at least one ACP provider. The first <code>neta open</code> starts the Node; everything after that is conversation.</p>
+        <p>Neta needs Node 22+ and a connected OpenCode model provider. The first <code>neta open</code> starts the Node; everything after that is conversation.</p>
         <div class="cta-links">
           <a href="https://github.com/sudhanshug16/neta#readme">Read the docs</a>
           <a class="link-muted" href="https://github.com/sudhanshug16/neta/blob/main/MANIFESTO.md">The manifesto</a>

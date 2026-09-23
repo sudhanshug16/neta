@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { renderBlock } from "../src/cli/chat.ts";
 import { NodeClient } from "../src/cli/client.ts";
 import type { Block } from "../src/core/types.ts";
-import { type Harness, startNode as startHarness } from "./helpers/cli-harness.ts";
+import { type Harness, nativeHarnessReady, startNode as startHarness } from "./helpers/cli-harness.ts";
 
 function block(over: Partial<Block>): Block {
 	return {
@@ -132,192 +132,215 @@ async function withChat(fn: (harness: Harness, work: string) => Promise<void>): 
 }
 
 describe("attached chat", () => {
-	test("a piped prompt reaches the fake agent and its reply appears on stdout", async () => {
-		await withChat(async (harness, work) => {
-			const child = harness.spawn([], { cwd: work });
-			const cap = capture(child);
-			try {
-				child.stdin?.write("hello chat\n");
-				await waitFor(() => cap.stdout.includes("echo:hello chat"), 20000, "the agent reply");
-				child.stdin?.end();
-				expect(await waitExit(child, 20000)).toBe(0);
-			} finally {
-				if (child.exitCode === null) {
-					child.kill("SIGKILL");
-				}
-			}
-		});
-	}, 90000);
-
-	test("a streamed reply prints once, not once per delta", async () => {
-		await withChat(async (harness, work) => {
-			const child = harness.spawn([], { cwd: work });
-			const cap = capture(child);
-			try {
-				// The fake agent streams this reply in three overlapping
-				// chunks under one seq; each one carries the whole text so
-				// far, so writing them verbatim printed the reply three times.
-				child.stdin?.write("STREAM please\n");
-				await waitFor(() => cap.stdout.includes("Second paragraph."), 20000, "the streamed reply");
-				child.stdin?.end();
-				expect(await waitExit(child, 20000)).toBe(0);
-				const whole = "First paragraph continues.\n\nSecond paragraph.";
-				expect(cap.stdout).toContain(whole);
-				expect(cap.stdout.split("First paragraph").length - 1).toBe(1);
-				expect(cap.stdout.split("Second paragraph.").length - 1).toBe(1);
-			} finally {
-				if (child.exitCode === null) {
-					child.kill("SIGKILL");
-				}
-			}
-		});
-	}, 90000);
-
-	test("replayed history keeps one turn per line instead of running them together", async () => {
-		await withChat(async (harness, work) => {
-			const first = harness.spawn([], { cwd: work });
-			const firstCap = capture(first);
-			try {
-				first.stdin?.write("one\ntwo\n");
-				await waitFor(() => firstCap.stdout.includes("echo:two"), 30000, "both replies");
-				first.stdin?.end();
-				expect(await waitExit(first, 20000)).toBe(0);
-			} finally {
-				if (first.exitCode === null) {
-					first.kill("SIGKILL");
-				}
-			}
-			// Re-attach: `conversation.tail` replays both turns, and a text
-			// block carries no terminator of its own, so without the turn
-			// boundary the reply and the next prompt land on one line.
-			const second = harness.spawn([], { cwd: work });
-			const cap = capture(second);
-			try {
-				second.stdin?.end();
-				expect(await waitExit(second, 20000)).toBe(0);
-				expect(cap.stdout).toContain("> one\necho:one\n");
-				expect(cap.stdout).toContain("> two\necho:two\n");
-				expect(cap.stdout).not.toContain("echo:one> two");
-			} finally {
-				if (second.exitCode === null) {
-					second.kill("SIGKILL");
-				}
-			}
-		});
-	}, 120000);
-
-	test("a second client on the same session sees the first client's user turn", async () => {
-		await withChat(async (harness, work) => {
-			const saved = process.env.NETA_DIR;
-			process.env.NETA_DIR = harness.dir;
-			let second: NodeClient | undefined;
-			try {
-				// Open before spawning the chat: two concurrent `workspace.open`
-				// calls can each mint a leader, so the session must exist first
-				// for both clients to share it.
-				second = await NodeClient.connect();
-				const opened = await second.request<{ workspace: { id: string }; leader: { sessionId: string } }>(
-					"workspace.open",
-					{ path: work },
-				);
-				const seen: unknown[] = [];
-				const off = second.on("turn", (params: unknown) => {
-					seen.push(params);
-				});
+	test.skipIf(!nativeHarnessReady)(
+		"a piped prompt reaches the fake agent and its reply appears on stdout",
+		async () => {
+			await withChat(async (harness, work) => {
+				const child = harness.spawn([], { cwd: work });
+				const cap = capture(child);
 				try {
-					await second.request("conversation.tail", { sessionId: opened.leader.sessionId, limit: 20 });
-					const child = harness.spawn([], { cwd: work });
-					const cap = capture(child);
+					child.stdin?.write("hello chat\n");
+					await waitFor(() => cap.stdout.includes("echo:hello chat"), 20000, "the agent reply");
+					child.stdin?.end();
+					expect(await waitExit(child, 20000)).toBe(0);
+				} finally {
+					if (child.exitCode === null) {
+						child.kill("SIGKILL");
+					}
+				}
+			});
+		},
+		90000,
+	);
+
+	test.skipIf(!nativeHarnessReady)(
+		"a streamed reply prints once, not once per delta",
+		async () => {
+			await withChat(async (harness, work) => {
+				const child = harness.spawn([], { cwd: work });
+				const cap = capture(child);
+				try {
+					// The fake agent streams this reply in three overlapping
+					// chunks under one seq; each one carries the whole text so
+					// far, so writing them verbatim printed the reply three times.
+					child.stdin?.write("STREAM please\n");
+					await waitFor(() => cap.stdout.includes("Second paragraph."), 20000, "the streamed reply");
+					child.stdin?.end();
+					expect(await waitExit(child, 20000)).toBe(0);
+					const whole = "First paragraph continues.\n\nSecond paragraph.";
+					expect(cap.stdout).toContain(whole);
+					expect(cap.stdout.split("First paragraph").length - 1).toBe(1);
+					expect(cap.stdout.split("Second paragraph.").length - 1).toBe(1);
+				} finally {
+					if (child.exitCode === null) {
+						child.kill("SIGKILL");
+					}
+				}
+			});
+		},
+		90000,
+	);
+
+	test.skipIf(!nativeHarnessReady)(
+		"replayed history keeps one turn per line instead of running them together",
+		async () => {
+			await withChat(async (harness, work) => {
+				const first = harness.spawn([], { cwd: work });
+				const firstCap = capture(first);
+				try {
+					first.stdin?.write("one\ntwo\n");
+					await waitFor(() => firstCap.stdout.includes("echo:two"), 30000, "both replies");
+					first.stdin?.end();
+					expect(await waitExit(first, 20000)).toBe(0);
+				} finally {
+					if (first.exitCode === null) {
+						first.kill("SIGKILL");
+					}
+				}
+				// Re-attach: `conversation.tail` replays both turns, and a text
+				// block carries no terminator of its own, so without the turn
+				// boundary the reply and the next prompt land on one line.
+				const second = harness.spawn([], { cwd: work });
+				const cap = capture(second);
+				try {
+					second.stdin?.end();
+					expect(await waitExit(second, 20000)).toBe(0);
+					expect(cap.stdout).toContain("> one\necho:one\n");
+					expect(cap.stdout).toContain("> two\necho:two\n");
+					expect(cap.stdout).not.toContain("echo:one> two");
+				} finally {
+					if (second.exitCode === null) {
+						second.kill("SIGKILL");
+					}
+				}
+			});
+		},
+		120000,
+	);
+
+	test.skipIf(!nativeHarnessReady)(
+		"a second client on the same session sees the first client's user turn",
+		async () => {
+			await withChat(async (harness, work) => {
+				const saved = process.env.NETA_DIR;
+				process.env.NETA_DIR = harness.dir;
+				let second: NodeClient | undefined;
+				try {
+					// Open before spawning the chat: two concurrent `workspace.open`
+					// calls can each mint a leader, so the session must exist first
+					// for both clients to share it.
+					second = await NodeClient.connect();
+					const opened = await second.request<{ workspace: { id: string }; leader: { sessionId: string } }>(
+						"workspace.open",
+						{ path: work },
+					);
+					const seen: unknown[] = [];
+					const off = second.on("turn", (params: unknown) => {
+						seen.push(params);
+					});
 					try {
-						child.stdin?.write("hello other\n");
-						await waitFor(
-							() =>
-								seen.some(
-									(n) =>
-										typeof n === "object" &&
-										n !== null &&
-										(n as { turn?: { role?: string } }).turn?.role === "user",
-								),
-							20000,
-							"the first client's user turn",
-						);
-						await waitFor(
-							() =>
-								seen.some(
-									(n) =>
-										typeof n === "object" &&
-										n !== null &&
-										typeof (n as { block?: { text?: string } }).block?.text === "string" &&
-										(n as { block: { text: string } }).block.text.includes("echo:hello other"),
-								),
-							20000,
-							"the shared agent reply",
-						);
-						// The attached chat streams its own turn too.
-						await waitFor(() => cap.stdout.includes("echo:hello other"), 20000, "the chat reply");
+						await second.request("conversation.tail", { sessionId: opened.leader.sessionId, limit: 20 });
+						const child = harness.spawn([], { cwd: work });
+						const cap = capture(child);
+						try {
+							child.stdin?.write("hello other\n");
+							await waitFor(
+								() =>
+									seen.some(
+										(n) =>
+											typeof n === "object" &&
+											n !== null &&
+											(n as { turn?: { role?: string } }).turn?.role === "user",
+									),
+								20000,
+								"the first client's user turn",
+							);
+							await waitFor(
+								() =>
+									seen.some(
+										(n) =>
+											typeof n === "object" &&
+											n !== null &&
+											typeof (n as { block?: { text?: string } }).block?.text === "string" &&
+											(n as { block: { text: string } }).block.text.includes("echo:hello other"),
+									),
+								20000,
+								"the shared agent reply",
+							);
+							// The attached chat streams its own turn too.
+							await waitFor(() => cap.stdout.includes("echo:hello other"), 20000, "the chat reply");
+						} finally {
+							child.stdin?.end();
+							if (child.exitCode === null) {
+								await waitExit(child, 20000).catch(() => null);
+							}
+							if (child.exitCode === null) {
+								child.kill("SIGKILL");
+							}
+						}
 					} finally {
-						child.stdin?.end();
-						if (child.exitCode === null) {
-							await waitExit(child, 20000).catch(() => null);
-						}
-						if (child.exitCode === null) {
-							child.kill("SIGKILL");
-						}
+						off();
 					}
 				} finally {
-					off();
+					second?.close();
+					if (saved === undefined) {
+						delete process.env.NETA_DIR;
+					} else {
+						process.env.NETA_DIR = saved;
+					}
 				}
-			} finally {
-				second?.close();
-				if (saved === undefined) {
-					delete process.env.NETA_DIR;
-				} else {
-					process.env.NETA_DIR = saved;
-				}
-			}
-		});
-	}, 120000);
+			});
+		},
+		120000,
+	);
 
-	test("SIGINT mid-turn cancels and stays alive, a second SIGINT exits 0", async () => {
-		await withChat(async (harness, work) => {
-			const saved = process.env.NETA_DIR;
-			process.env.NETA_DIR = harness.dir;
-			const observer = await NodeClient.connect();
-			const opened = await observer.request<{ leader: { sessionId: string } }>("workspace.open", { path: work });
-			const seen: Array<{ turn?: { id: string; endedAt?: string }; block?: { role?: string; text?: string } }> = [];
-			observer.on("turn", (value) =>
-				seen.push(value as { turn?: { id: string; endedAt?: string }; block?: { role?: string; text?: string } }),
-			);
-			await observer.request("conversation.tail", { sessionId: opened.leader.sessionId, limit: 20 });
-			const child = harness.spawn([], { cwd: work });
-			const cap = capture(child);
-			try {
-				// HOLD_FOREVER keeps the turn streaming until the cancel lands.
-				child.stdin?.write("HOLD_FOREVER\n");
-				await waitFor(
-					() =>
-						seen.some(
-							(notification) =>
-								notification.block?.role === "user" && notification.block.text === "HOLD_FOREVER",
-						),
-					20000,
-					"active held prompt",
+	test.skipIf(!nativeHarnessReady)(
+		"SIGINT mid-turn cancels and stays alive, a second SIGINT exits 0",
+		async () => {
+			await withChat(async (harness, work) => {
+				const saved = process.env.NETA_DIR;
+				process.env.NETA_DIR = harness.dir;
+				const observer = await NodeClient.connect();
+				const opened = await observer.request<{ leader: { sessionId: string } }>("workspace.open", { path: work });
+				const seen: Array<{ turn?: { id: string; endedAt?: string }; block?: { role?: string; text?: string } }> =
+					[];
+				observer.on("turn", (value) =>
+					seen.push(
+						value as { turn?: { id: string; endedAt?: string }; block?: { role?: string; text?: string } },
+					),
 				);
-				expect(child.exitCode).toBeNull();
-				child.kill("SIGINT");
-				await waitFor(() => cap.stdout.includes("^C cancelled"), 15000, "^C cancelled");
-				await new Promise((done) => setTimeout(done, 500));
-				expect(child.exitCode).toBeNull();
-				child.kill("SIGINT");
-				expect(await waitExit(child, 15000)).toBe(0);
-			} finally {
-				observer.close();
-				if (saved === undefined) delete process.env.NETA_DIR;
-				else process.env.NETA_DIR = saved;
-				if (child.exitCode === null) {
-					child.kill("SIGKILL");
+				await observer.request("conversation.tail", { sessionId: opened.leader.sessionId, limit: 20 });
+				const child = harness.spawn([], { cwd: work });
+				const cap = capture(child);
+				try {
+					// HOLD_FOREVER keeps the turn streaming until the cancel lands.
+					child.stdin?.write("HOLD_FOREVER\n");
+					await waitFor(
+						() =>
+							seen.some(
+								(notification) =>
+									notification.block?.role === "user" && notification.block.text === "HOLD_FOREVER",
+							),
+						20000,
+						"active held prompt",
+					);
+					expect(child.exitCode).toBeNull();
+					child.kill("SIGINT");
+					await waitFor(() => cap.stdout.includes("^C cancelled"), 15000, "^C cancelled");
+					await new Promise((done) => setTimeout(done, 500));
+					expect(child.exitCode).toBeNull();
+					child.kill("SIGINT");
+					expect(await waitExit(child, 15000)).toBe(0);
+				} finally {
+					observer.close();
+					if (saved === undefined) delete process.env.NETA_DIR;
+					else process.env.NETA_DIR = saved;
+					if (child.exitCode === null) {
+						child.kill("SIGKILL");
+					}
 				}
-			}
-		});
-	}, 120000);
+			});
+		},
+		120000,
+	);
 });

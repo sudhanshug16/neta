@@ -40,7 +40,7 @@ The toolchain is [Bun](https://bun.sh):
 
 ```
 bun install
-bun test            # tests talk only to the fake ACP agent fixture
+bun test            # tests use fake providers and no paid APIs
 bun run check       # biome + tsc --noEmit
 bun run build       # dist/main.js — one file, targets Node
 ```

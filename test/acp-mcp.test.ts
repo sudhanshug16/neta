@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { NETA_MCP_SERVER_NAME, netaBin, netaMcpServer } from "../src/acp/mcp.ts";
+import { NETA_MCP_SERVER_NAME, netaBin, netaMcpServer } from "../src/session/mcp.ts";
 
 describe("neta tool proxy server spec", () => {
 	test("NETA_BIN wins over process.execPath", () => {

@@ -12,12 +12,12 @@ import { execFile } from "node:child_process";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadSettings } from "../../src/acp/settings.ts";
 import { ulid } from "../../src/core/ids.ts";
 import { pickName } from "../../src/core/names.ts";
 import type { Agent, EventKind, Mission, Workspace } from "../../src/core/types.ts";
 import { connectNode } from "../../src/node/client.ts";
-import { type AdaptedStore, adaptAcp, adaptStore, startNode } from "../../src/node/lifecycle.ts";
+import { type AdaptedStore, adaptRuntime, adaptStore, startNode } from "../../src/node/lifecycle.ts";
+import { loadSettings } from "../../src/session/settings.ts";
 import { openStore, type Store } from "../../src/store/index.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -98,8 +98,8 @@ async function main(): Promise<void> {
 
 	const real = await openStore();
 	const port = await adaptStore(real);
-	const acp = adaptAcp(loadSettings({ netaDir: NETA }).settings);
-	const node = await startNode({ store: port, acp });
+	const acp = adaptRuntime(loadSettings({ netaDir: NETA }).settings);
+	const node = await startNode({ store: port, runtime: acp });
 	const client = await connectNode();
 	try {
 		const opened = await client.request<{ workspace: Workspace }>("workspace.open", { path: REPO_DIR });

@@ -9,8 +9,8 @@ import {
 	type Connection,
 	createServer,
 	type Hub,
-	type NodeAcp,
 	type NodeContext,
+	type NodeRuntime,
 	type NodeStore,
 } from "../src/node/server.ts";
 
@@ -41,7 +41,7 @@ function stubStore(): NodeStore {
 	};
 }
 
-function stubAcp(): NodeAcp {
+function stubAcp(): NodeRuntime {
 	const missing = (): never => {
 		throw new Error("not implemented in this test");
 	};
@@ -73,7 +73,7 @@ async function startTestServer(
 		socketPath,
 		token: TOKEN,
 		handlers,
-		ctx: { store: stubStore(), acp: stubAcp(), nodeVersion: "0.0.0-test", stop: () => Promise.resolve() },
+		ctx: { store: stubStore(), runtime: stubAcp(), nodeVersion: "0.0.0-test", stop: () => Promise.resolve() },
 	});
 	return { hub, close, socketPath };
 }

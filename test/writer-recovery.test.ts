@@ -2,11 +2,11 @@ import { expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadSettings } from "../src/acp/settings.ts";
 import type { Agent, Mission } from "../src/core/types.ts";
 import { toolMount } from "../src/node/handlers-tools.ts";
-import { type AdaptedAcp, adaptStore } from "../src/node/lifecycle.ts";
+import { type AdaptedRuntime, adaptStore } from "../src/node/lifecycle.ts";
 import type { TurnNotification } from "../src/node/protocol.ts";
+import { loadSettings } from "../src/session/settings.ts";
 import { openStore } from "../src/store/index.ts";
 import { createTokenTable } from "../src/tools/router.ts";
 import { createFileLeaseStore, LeaseManager } from "../src/worktrees/leases.ts";
@@ -99,11 +99,11 @@ test.each([
 				return "turn2";
 			},
 			listInbox: async () => [],
-		} as unknown as AdaptedAcp;
+		} as unknown as AdaptedRuntime;
 		mount = toolMount({
 			real,
 			store,
-			acp,
+			runtime: acp,
 			settings: loadSettings({ netaDir: dir }).settings,
 			hub: () => ({ connections: () => [], broadcast: () => {}, toTail: () => {} }),
 		});

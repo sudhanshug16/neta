@@ -77,7 +77,7 @@ function fixture(failClose = false) {
 				calls.push("leader");
 			},
 		},
-		acp: {
+		runtime: {
 			isTurnActive: () => true,
 			cancel: async () => {
 				calls.push("cancel");

@@ -4,7 +4,7 @@ export type MachineId = Ulid;
 export type WorkspaceId = string; // see workspace identity below
 export type MissionId = Ulid;
 export type AgentId = Ulid;
-export type SessionId = Ulid; // Neta's id for one ACP conversation
+export type SessionId = Ulid; // Neta's id for one conversation
 export type TurnId = Ulid;
 export type IsoTime = string; // ISO 8601, UTC, milliseconds
 

@@ -1,5 +1,5 @@
 // `neta mcp --actor <id> --token <t>` (08, T8.8): the stdio MCP server one
-// ACP session holds. A thin route to `runProxy` from `src/tools/proxy.ts`
+// OpenCode actor holds. A thin route to `runProxy` from `src/tools/proxy.ts`
 // (05, T5.4) and nothing else: both flags are required (missing either is
 // exit 1), the Node must be reachable first — unreachable is exit 2, a
 // refused hello exit 3, the same mapping every other command uses — and then
@@ -29,7 +29,7 @@ export async function mcpCommand(flags: Record<string, string | true>): Promise<
 		process.stderr.write("neta: neta mcp needs --token <t>\n");
 		return 1;
 	}
-	// `NETA_SOCKET` is the only variable `netaMcpServer` puts in an ACP
+	// `NETA_SOCKET` is the only variable `netaMcpServer` puts in an OpenCode
 	// session's environment, so it has to be enough on its own: the node
 	// descriptor is read from beside that socket rather than from
 	// `netaDir()`, which an agent's proxy has no `NETA_DIR` to point at.

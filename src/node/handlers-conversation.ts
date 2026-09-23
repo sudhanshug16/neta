@@ -110,7 +110,7 @@ export async function restoreNativeOwner(ctx: NodeContext, sessionId: string): P
 	if (pending) return pending;
 	const restore = (async () => {
 		try {
-			if (ctx.acp.nativeAttachment?.(sessionId)) return;
+			if (ctx.runtime.nativeAttachment?.(sessionId)) return;
 		} catch (error) {
 			if (!(error instanceof NodeError) || error.symbol !== "NOT_FOUND") throw error;
 		}
@@ -141,7 +141,7 @@ export async function restoreNativeOwner(ctx: NodeContext, sessionId: string): P
 					`${owner.name}'s worktree is no longer available: ${cwd}. Its saved conversation has been retained.`,
 				);
 		}
-		await ctx.acp.ensureSession({
+		await ctx.runtime.ensureSession({
 			sessionId,
 			workspaceId: owner.workspaceId,
 			cwd,
@@ -299,7 +299,7 @@ export const conversationHandlers: NodeHandlers = {
 		runtimeBuild: netaBuildId(),
 		...(ctx.runtimeAdmission ? { instanceId: ctx.runtimeAdmission.instanceId, runtimeUpgrade: 1 } : {}),
 		activeSessionIds: [...ctx.store.listLeaders(), ...ctx.store.listAgents()]
-			.filter((actor) => ctx.acp.isTurnActive?.(actor.sessionId))
+			.filter((actor) => ctx.runtime.isTurnActive?.(actor.sessionId))
 			.map((actor) => actor.sessionId),
 		nativeOpenCode: 1,
 		nativeOpenCodeVersions: [1, 2],
@@ -310,9 +310,9 @@ export const conversationHandlers: NodeHandlers = {
 		const leader = ctx.store.listLeaders().find((one) => one.sessionId === parsed.sessionId);
 		if (leader?.state === "failed" && leader.startupError) throw new NodeError("PROVIDER_ERROR", leader.startupError);
 		await restoreNativeOwner(ctx, parsed.sessionId);
-		const attachment = ctx.acp.ensureNativeAttachment
-			? await ctx.acp.ensureNativeAttachment(parsed.sessionId)
-			: ctx.acp.nativeAttachment?.(parsed.sessionId);
+		const attachment = ctx.runtime.ensureNativeAttachment
+			? await ctx.runtime.ensureNativeAttachment(parsed.sessionId)
+			: ctx.runtime.nativeAttachment?.(parsed.sessionId);
 		if (attachment === undefined)
 			throw new NodeError(
 				"PROVIDER_ERROR",
@@ -327,7 +327,7 @@ export const conversationHandlers: NodeHandlers = {
 			attachment,
 			isCurrent: () => {
 				try {
-					return ctx.acp.nativeAttachment?.(parsed.sessionId)?.url === attachment.url;
+					return ctx.runtime.nativeAttachment?.(parsed.sessionId)?.url === attachment.url;
 				} catch {
 					return false;
 				}
@@ -340,8 +340,8 @@ export const conversationHandlers: NodeHandlers = {
 						ctx.store.listAgents().find((one) => one.sessionId === parsed.sessionId);
 					if (current?.model !== model) await setModel(ctx, { sessionId: parsed.sessionId, model }, conn);
 				}
-				if (input.model) await ctx.acp.setNativeVariant?.(parsed.sessionId, input.variant);
-				if (input.agent) await ctx.acp.setNativeAgent?.(parsed.sessionId, input.agent);
+				if (input.model) await ctx.runtime.setNativeVariant?.(parsed.sessionId, input.variant);
+				if (input.agent) await ctx.runtime.setNativeAgent?.(parsed.sessionId, input.agent);
 			},
 			prompt: async (input) => {
 				if (attachment.apiVersion !== 2) {
@@ -352,8 +352,8 @@ export const conversationHandlers: NodeHandlers = {
 							ctx.store.listAgents().find((one) => one.sessionId === parsed.sessionId);
 						if (current?.model !== model) await setModel(ctx, { sessionId: parsed.sessionId, model }, conn);
 					}
-					await ctx.acp.setNativeVariant?.(parsed.sessionId, input.variant);
-					if (input.agent) await ctx.acp.setNativeAgent?.(parsed.sessionId, input.agent);
+					await ctx.runtime.setNativeVariant?.(parsed.sessionId, input.variant);
+					if (input.agent) await ctx.runtime.setNativeAgent?.(parsed.sessionId, input.agent);
 				}
 				return send(
 					ctx,
@@ -448,14 +448,14 @@ export const conversationHandlers: NodeHandlers = {
 		const attachments = parsed.attachments ?? [];
 		if (parsed.text.trim() === "" && attachments.length === 0)
 			throw new NodeError("INVALID_PARAMS", "prompt needs text or an attachment");
-		const capabilities = ctx.acp.capabilities?.(parsed.sessionId) ?? { image: false, embeddedContext: false };
+		const capabilities = ctx.runtime.capabilities?.(parsed.sessionId) ?? { image: false, embeddedContext: false };
 		if (attachments.some((item) => item.kind === "image") && !capabilities.image)
 			throw new NodeError("PROVIDER_ERROR", "this provider does not support image prompts");
 		if (attachments.some((item) => item.kind === "file") && !capabilities.embeddedContext)
 			throw new NodeError("PROVIDER_ERROR", "this provider does not support embedded file prompts");
 		try {
-			if (ctx.acp.send !== undefined) {
-				const message = await ctx.acp.send(parsed.sessionId, parsed.text, attachments, {
+			if (ctx.runtime.send !== undefined) {
+				const message = await ctx.runtime.send(parsed.sessionId, parsed.text, attachments, {
 					readerDirected: conn.client === "desktop" || conn.client === "cli",
 					...(parsed.messageId ? { sourceId: `user:${parsed.messageId}`, sourceHash: parsed.messageHash } : {}),
 				});
@@ -466,7 +466,7 @@ export const conversationHandlers: NodeHandlers = {
 				};
 			}
 			// Returns the turnId at once; blocks arrive only as notifications.
-			const turnId = await ctx.acp.prompt(parsed.sessionId, parsed.text, attachments, {
+			const turnId = await ctx.runtime.prompt(parsed.sessionId, parsed.text, attachments, {
 				readerDirected: conn.client === "desktop" || conn.client === "cli",
 			});
 			return { turnId };
@@ -477,18 +477,18 @@ export const conversationHandlers: NodeHandlers = {
 
 	"conversation.inbox": async (ctx, params) => {
 		const parsed = parseParams({ sessionId: asString }, params);
-		return { sessionId: parsed.sessionId, messages: (await ctx.acp.listInbox?.(parsed.sessionId)) ?? [] };
+		return { sessionId: parsed.sessionId, messages: (await ctx.runtime.listInbox?.(parsed.sessionId)) ?? [] };
 	},
 
 	"conversation.capabilities": async (ctx, params) => {
 		const parsed = parseParams({ sessionId: asString }, params);
-		return ctx.acp.capabilities?.(parsed.sessionId) ?? { image: false, embeddedContext: false };
+		return ctx.runtime.capabilities?.(parsed.sessionId) ?? { image: false, embeddedContext: false };
 	},
 
 	"conversation.cancel": async (ctx, params) => {
 		const parsed = parseParams({ sessionId: asString }, params);
 		try {
-			await ctx.acp.cancel(parsed.sessionId);
+			await ctx.runtime.cancel(parsed.sessionId);
 			return { sessionId: parsed.sessionId };
 		} catch (error) {
 			throw asProviderError(error);
@@ -498,7 +498,7 @@ export const conversationHandlers: NodeHandlers = {
 	"conversation.setModel": async (ctx, params) => {
 		const parsed = parseParams({ sessionId: asString, model: asString }, params);
 		try {
-			await ctx.acp.setModel(parsed.sessionId, parsed.model);
+			await ctx.runtime.setModel(parsed.sessionId, parsed.model);
 			const leader = ctx.store.listLeaders().find((one) => one.sessionId === parsed.sessionId);
 			if (leader !== undefined) {
 				const updated = { ...leader, model: parsed.model };
@@ -520,7 +520,7 @@ export const conversationHandlers: NodeHandlers = {
 
 	"providers.list": async (ctx, params) => {
 		const parsed = parseParams({ sessionId: asOptionalString }, params);
-		return { providers: ctx.acp.listProviders?.(parsed) ?? [] };
+		return { providers: ctx.runtime.listProviders?.(parsed) ?? [] };
 	},
 
 	"conversation.prepareHandoff": async (ctx, params) => {
@@ -551,7 +551,7 @@ export const conversationHandlers: NodeHandlers = {
 			const cwd = workspace?.roots.find((root) => root.machineId === ctx.store.machine().id)?.path;
 			if (workspace === undefined || cwd === undefined)
 				throw new NodeError("NOT_FOUND", "Pi leader has no workspace root on this machine");
-			const target = ctx.acp
+			const target = ctx.runtime
 				.listProviders?.({ sessionId: parsed.sessionId })
 				.find((one) => one.id === parsed.provider);
 			if (target === undefined || !target.available)
@@ -559,7 +559,7 @@ export const conversationHandlers: NodeHandlers = {
 					"PROVIDER_ERROR",
 					target?.unavailableReason ?? `provider ${parsed.provider} is unavailable`,
 				);
-			const selected = await ctx.acp.createSession({
+			const selected = await ctx.runtime.createSession({
 				sessionId: parsed.sessionId,
 				workspaceId: leader.workspaceId,
 				cwd,
@@ -570,24 +570,24 @@ export const conversationHandlers: NodeHandlers = {
 				netaTools: true,
 			});
 			try {
-				await ctx.acp.setPendingHandoff?.(parsed.sessionId, parsed.handoff ?? "");
+				await ctx.runtime.setPendingHandoff?.(parsed.sessionId, parsed.handoff ?? "");
 				const updated = { ...leader, ...selected, state: "idle" as const };
 				await ctx.store.putLeader(updated);
 				ctx.hub.broadcast("state", { kind: "leader", record: updated });
 			} catch (error) {
-				await ctx.acp.close(parsed.sessionId).catch(() => undefined);
+				await ctx.runtime.close(parsed.sessionId).catch(() => undefined);
 				throw error;
 			}
 			ctx.pi.closeSession(parsed.sessionId);
 			return { ...selected, contextReset: true as const };
 		}
-		if (ctx.acp.switchProvider === undefined)
+		if (ctx.runtime.switchProvider === undefined)
 			throw new NodeError("PROVIDER_ERROR", "provider switching is unavailable");
 		let switchAttempted = false;
 		try {
 			const handoff = parsed.handoff === undefined ? await prepareHandoff(ctx, parsed.sessionId) : parsed.handoff;
 			switchAttempted = true;
-			const selected = await ctx.acp.switchProvider(parsed.sessionId, parsed.provider, parsed.model, handoff);
+			const selected = await ctx.runtime.switchProvider(parsed.sessionId, parsed.provider, parsed.model, handoff);
 			const leader = ctx.store.listLeaders().find((one) => one.sessionId === parsed.sessionId);
 			if (leader !== undefined) {
 				const updated = { ...leader, provider: selected.provider, model: selected.model };
@@ -609,7 +609,7 @@ export const conversationHandlers: NodeHandlers = {
 				failedLeader.mode === "lead" &&
 				failedLeader.activeMissionId === undefined
 			) {
-				const target = ctx.acp
+				const target = ctx.runtime
 					.listProviders?.({ sessionId: parsed.sessionId })
 					.find((one) => one.id === parsed.provider);
 				if (target === undefined || !target.available) {
@@ -625,7 +625,7 @@ export const conversationHandlers: NodeHandlers = {
 					throw new NodeError("NOT_FOUND", "failed leader has no workspace root on this machine");
 				}
 				try {
-					const selected = await ctx.acp.ensureSession({
+					const selected = await ctx.runtime.ensureSession({
 						sessionId: failedLeader.sessionId,
 						workspaceId: failedLeader.workspaceId,
 						cwd,
@@ -654,10 +654,10 @@ export const conversationHandlers: NodeHandlers = {
 		const agent = ctx.store.listAgents().find((one) => one.sessionId === parsed.sessionId);
 		if (agent !== undefined && (agent.state === "queued" || agent.state === "archived"))
 			throw new NodeError("INVALID_PARAMS", `cannot reset chat for ${agent.state} agent`);
-		if (ctx.acp.resetSession === undefined) throw new NodeError("PROVIDER_ERROR", "chat reset is unavailable");
+		if (ctx.runtime.resetSession === undefined) throw new NodeError("PROVIDER_ERROR", "chat reset is unavailable");
 		try {
 			const leader = ctx.store.listLeaders().find((one) => one.sessionId === parsed.sessionId);
-			const selected = await ctx.acp.resetSession(
+			const selected = await ctx.runtime.resetSession(
 				parsed.sessionId,
 				sessionSystemContext(ctx, parsed.sessionId),
 				async (next) => {
@@ -681,7 +681,7 @@ export const conversationHandlers: NodeHandlers = {
 	"models.list": async (ctx, params) => {
 		const parsed = parseParams({ sessionId: asOptionalString, provider: asOptionalString }, params);
 		try {
-			const models = await ctx.acp.listModels({ sessionId: parsed.sessionId, provider: parsed.provider });
+			const models = await ctx.runtime.listModels({ sessionId: parsed.sessionId, provider: parsed.provider });
 			return { models };
 		} catch (error) {
 			throw asProviderError(error);
@@ -690,7 +690,7 @@ export const conversationHandlers: NodeHandlers = {
 };
 
 export function wireTurnStream(ctx: NodeContext): void {
-	ctx.acp.onTurn((notification) => {
+	ctx.runtime.onTurn((notification) => {
 		ctx.hub.toTail(notification.sessionId, notification);
 		// Completion metadata must reach clients viewing another conversation too.
 		if (notification.turn?.endedAt)

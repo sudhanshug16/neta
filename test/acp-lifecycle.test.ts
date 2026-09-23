@@ -2,10 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { closeAll, SessionTable, switchProvider } from "../src/acp/lifecycle.ts";
-import { startSession } from "../src/acp/session.ts";
-import type { ProviderSettings } from "../src/acp/settings.ts";
+import type { ProviderSettings } from "../src/session/settings.ts";
 import { openConversationStore } from "../src/store/conversations.ts";
+import { closeAll, SessionTable, switchProvider } from "./fixtures/legacy-acp/lifecycle.ts";
+import { startSession } from "./fixtures/legacy-acp/session.ts";
 
 const FIXTURE = new URL("./fixtures/fake-acp-agent.mjs", import.meta.url).pathname;
 

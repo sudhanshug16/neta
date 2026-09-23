@@ -1,6 +1,6 @@
 // The Node lifecycle: exclusive lock, store load, restart marking, the
 // descriptor, then listen. This is the only file that adapts the real 02
-// and 03 modules to the `NodeStore`/`NodeAcp` ports; handlers only ever see
+// and 03 modules to the `NodeStore`/`NodeRuntime` ports; handlers only ever see
 // the ports, so their tests keep stubbing.
 //
 // Two gap-fills live here, both forced by the ports and documented for the
@@ -25,21 +25,7 @@
 import { createHash } from "node:crypto";
 import { accessSync, constants, statSync } from "node:fs";
 import { readdir } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { SessionTable } from "../acp/lifecycle.ts";
-import { type McpServerSpec, netaMcpServer } from "../acp/mcp.ts";
-import type { AcpSession, SessionEvent } from "../acp/session.ts";
-import { SessionClosedError, startSession } from "../acp/session.ts";
-import {
-	installedClaudeAcpProvider,
-	installedCodexAcpProvider,
-	installedOpenCodeAcpProvider,
-	loadSettings,
-	providerCommandAvailable,
-	type Settings,
-	stagedCodexAcpProvider,
-} from "../acp/settings.ts";
-import { writeSystemContext } from "../acp/system-context.ts";
+import { join } from "node:path";
 import { ulid } from "../core/ids.ts";
 import { nowIso } from "../core/time.ts";
 import type {
@@ -59,8 +45,20 @@ import type {
 	WorkspaceId,
 } from "../core/types.ts";
 import { nativeEndpointReady } from "../opencode/attachment.ts";
-import { managedOpenCodeProvider } from "../opencode/runtime.ts";
+import { openCodeInvocation } from "../opencode/runtime.ts";
 import { createPiTerminalManager } from "../pi/manager.ts";
+import { type McpServerSpec, netaMcpServer } from "../session/mcp.ts";
+import type { RuntimeSession, SessionEvent, StartOptions } from "../session/runtime.ts";
+import { SessionClosedError, startSession } from "../session/runtime.ts";
+import {
+	loadSettings,
+	providerCommandAvailable,
+	providerFor,
+	requireManagedOpenCode,
+	type Settings,
+} from "../session/settings.ts";
+import { writeSystemContext } from "../session/system-context.ts";
+import { SessionTable } from "../session/table.ts";
 import type { ConversationStore } from "../store/conversations.ts";
 import { createMutex, readJson, writeJsonAtomic } from "../store/files.ts";
 import { openStore, type Store } from "../store/index.ts";
@@ -91,7 +89,14 @@ import {
 } from "./lockfile.ts";
 import { type ConversationTailResult, NodeError, PROTOCOL_VERSION, type TurnNotification } from "./protocol.ts";
 import { RuntimeAdmission } from "./runtime-admission.ts";
-import { createServer, type Hub, type NodeAcp, type NodeContext, type NodeHandlers, type NodeStore } from "./server.ts";
+import {
+	createServer,
+	type Hub,
+	type NodeContext,
+	type NodeHandlers,
+	type NodeRuntime,
+	type NodeStore,
+} from "./server.ts";
 import { SessionLifecycle } from "./session-lifecycle.ts";
 import { snapshotHandlers } from "./snapshot.ts";
 import { workspaceHandlers } from "./workspace-open.ts";
@@ -376,7 +381,7 @@ export async function adaptStore(real: Store): Promise<AdaptedStore> {
 	};
 }
 
-export interface AdaptedAcp extends NodeAcp {
+export interface AdaptedRuntime extends NodeRuntime {
 	send(
 		id: SessionId,
 		text: string,
@@ -427,7 +432,7 @@ interface PumpState {
 // stream; without it (stubbed tests) session creation touches no store.
 class SuppressedInboxError extends Error {}
 
-export function adaptAcp(
+export function adaptRuntime(
 	settings: Settings,
 	conversations?: ConversationStore,
 	settingsForCwd: (cwd: string) => Settings = () => settings,
@@ -438,11 +443,13 @@ export function adaptAcp(
 	durableTurn?: (notification: TurnNotification) => Promise<void>,
 	runtimeAdmission?: RuntimeAdmission,
 	inboxGuard?: (message: InboxMessage) => Promise<boolean>,
-): AdaptedAcp {
+	sessionFactory: (options: StartOptions) => Promise<RuntimeSession> = startSession,
+): AdaptedRuntime {
+	const makeSession = sessionFactory;
 	const sessionLifecycle = new SessionLifecycle();
 	let closing = false;
 	let pumpOperations = 0;
-	const pumpPromises = new Map<AcpSession, Promise<void>>();
+	const pumpPromises = new Map<RuntimeSession, Promise<void>>();
 	const guarded = async <T>(id: string, operation: () => Promise<T>): Promise<T> => {
 		if (closing) throw new NodeError("BUSY", "Neta is stopping; reconnect before retrying.");
 		const leave = runtimeAdmission?.enter();
@@ -490,7 +497,7 @@ export function adaptAcp(
 		}
 	>();
 	const inboxPromptIds = new Map<SessionId, string[]>();
-	let adapted: AdaptedAcp;
+	let adapted: AdaptedRuntime;
 	const switching = new Set<SessionId>();
 
 	function emit(notification: TurnNotification): void {
@@ -703,7 +710,7 @@ export function adaptAcp(
 		}
 	}
 
-	async function handle(session: AcpSession, state: PumpState, event: SessionEvent): Promise<void> {
+	async function handle(session: RuntimeSession, state: PumpState, event: SessionEvent): Promise<void> {
 		const sessionId = session.sessionId;
 		if (event.type === "turn") {
 			// Claimed before any await. The desktop and the terminal are both
@@ -818,7 +825,7 @@ export function adaptAcp(
 		emit({ sessionId });
 	}
 
-	function pump(session: AcpSession): void {
+	function pump(session: RuntimeSession): void {
 		const run = async (): Promise<void> => {
 			const state: PumpState = { base: await baseSeqOf(session.sessionId), injected: 0, lastSeq: 0 };
 			try {
@@ -842,7 +849,7 @@ export function adaptAcp(
 		void operation.finally(() => pumpPromises.delete(session)).catch(() => undefined);
 	}
 
-	function live(sessionId: SessionId): AcpSession {
+	function live(sessionId: SessionId): RuntimeSession {
 		const record = table.get(sessionId);
 		if (record === undefined) {
 			throw new NodeError("NOT_FOUND", `no such session: ${sessionId}`);
@@ -863,7 +870,7 @@ export function adaptAcp(
 	}
 
 	async function register(
-		session: AcpSession,
+		session: RuntimeSession,
 		provider: string,
 		netaTools: boolean,
 		reconcileInbox = true,
@@ -911,93 +918,11 @@ export function adaptAcp(
 		provider: string,
 		settingsAtCwd: Settings = settingsForCwd(cwd),
 	): { settings: Settings; steeringSafe: boolean } {
-		let effectiveSettings = settingsAtCwd;
-		let stagedCodex = false;
-		let installedClaude = false;
-		const configured = effectiveSettings.providers[provider];
-		let bundledCodex = false;
-		if (
-			provider === "codex" &&
-			configured?.command === "npx" &&
-			configured.args.join("\u0000") === ["-y", "@agentclientprotocol/codex-acp@1.10.0"].join("\u0000")
-		) {
-			const resources = dirname(process.execPath);
-			const adapter = join(resources, "codex-acp-neta");
-			const codex = join(resources, "codex-runtime", "bin", "codex");
-			try {
-				accessSync(adapter, constants.X_OK);
-				accessSync(codex, constants.X_OK);
-				bundledCodex = true;
-				effectiveSettings = {
-					...effectiveSettings,
-					providers: {
-						...effectiveSettings.providers,
-						codex: {
-							...configured,
-							command: adapter,
-							args: [],
-							codexAcp: true,
-							env: {
-								...configured.env,
-								...(configured.env?.CODEX_PATH === undefined ? { CODEX_PATH: codex } : {}),
-							},
-						},
-					},
-				};
-			} catch {
-				// Desktop resources are absent for standalone launches.
-			}
+		if (provider === "opencode" && makeSession === startSession) {
+			requireManagedOpenCode(providerFor(settingsAtCwd, provider));
+			openCodeInvocation();
 		}
-		if (!bundledCodex && provider === "codex" && configured !== undefined) {
-			const staged = stagedCodexAcpProvider(configured);
-			stagedCodex = staged !== undefined;
-			const installed = staged ?? installedCodexAcpProvider(configured);
-			if (installed !== undefined) {
-				effectiveSettings = {
-					...effectiveSettings,
-					providers: { ...effectiveSettings.providers, codex: installed },
-				};
-			}
-		}
-		if (provider === "claude" && configured !== undefined) {
-			const installed = installedClaudeAcpProvider(configured);
-			installedClaude = installed !== undefined;
-			if (installed !== undefined) {
-				effectiveSettings = {
-					...effectiveSettings,
-					providers: { ...effectiveSettings.providers, claude: installed },
-				};
-			}
-		}
-		if (provider === "opencode" && configured !== undefined) {
-			const installed = managedOpenCodeProvider(configured, cwd) ?? installedOpenCodeAcpProvider(configured);
-			if (installed !== undefined) {
-				effectiveSettings = {
-					...effectiveSettings,
-					providers: {
-						...effectiveSettings.providers,
-						opencode: {
-							...installed,
-							env: {
-								...installed.env,
-								NETA_OPENCODE_FORBIDDEN_MODELS: JSON.stringify(effectiveSettings.forbiddenModels),
-							},
-						},
-					},
-				};
-			}
-		}
-		return {
-			settings: effectiveSettings,
-			steeringSafe:
-				bundledCodex ||
-				stagedCodex ||
-				installedClaude ||
-				(provider === "claude" &&
-					configured?.command === "npx" &&
-					configured.args.join("\u0000") ===
-						["-y", "@agentclientprotocol/claude-agent-acp@0.74.0"].join("\u0000")),
-		};
+		return { settings: settingsAtCwd, steeringSafe: false };
 	}
 
 	async function start(o: {
@@ -1022,10 +947,10 @@ export function adaptAcp(
 		// A provider that will not launch must not leave its token behind:
 		// the actor it names has no session, and until `closeAll` nothing
 		// else would ever revoke it.
-		let session: Awaited<ReturnType<typeof startSession>>;
+		let session: RuntimeSession;
 		try {
 			const launch = launchSettings(o.cwd, o.provider);
-			session = await startSession({
+			session = await makeSession({
 				settings: launch.settings,
 				provider: o.provider,
 				access: o.access,
@@ -1167,10 +1092,10 @@ export function adaptAcp(
 					// token it minted for the attempt.
 				}
 			}
-			if (o.allowFresh === false) {
+			if (o.allowFresh === false || (o.provider === "opencode" && vendor !== undefined && vendor !== "")) {
 				throw new NodeError(
 					"PROVIDER_ERROR",
-					`Could not restore saved conversation ${o.sessionId}: ${resumeError instanceof Error ? resumeError.message : "no resumable provider session is recorded"}`,
+					`Could not restore saved conversation ${o.sessionId}: ${resumeError instanceof Error ? resumeError.message : "no resumable OpenCode session is recorded"}`,
 				);
 			}
 			const pendingInbox =
@@ -1248,7 +1173,7 @@ export function adaptAcp(
 					}
 					turnId = await session.prompt(delivered, attachments);
 				} catch (error) {
-					if (!(error instanceof SessionClosedError)) throw error;
+					if (!(error instanceof Error && error.name === SessionClosedError.name)) throw error;
 					// A provider may disappear while the Node and desktop remain
 					// connected. Relaunch this exact Neta session on the next prompt;
 					// otherwise every later Send fails permanently with "session is
@@ -1276,14 +1201,20 @@ export function adaptAcp(
 						sessionId: id,
 					};
 					const meta = conversations === undefined ? undefined : await conversations.meta(id);
-					let relaunched: AcpSession;
+					let relaunched: RuntimeSession;
 					try {
-						relaunched = await startSession({
+						relaunched = await makeSession({
 							...options,
 							...(meta?.vendorSessionId === undefined ? {} : { resumeVendorSessionId: meta.vendorSessionId }),
 						});
-					} catch {
-						relaunched = await startSession(options);
+					} catch (resumeError) {
+						if (record.provider === "opencode" && meta?.vendorSessionId) {
+							throw new NodeError(
+								"PROVIDER_ERROR",
+								`Could not restore saved OpenCode session ${meta.vendorSessionId}: ${resumeError instanceof Error ? resumeError.message : String(resumeError)}`,
+							);
+						}
+						relaunched = await makeSession(options);
 						const recap = await recoveryHandoff?.(id).catch(() => "");
 						if (recap !== undefined && recap.trim() !== "") {
 							delivered = `${recap}\n\n---\n\n## Current user message\n\n${text}`;
@@ -1413,10 +1344,10 @@ export function adaptAcp(
 			switching.add(id);
 			const old = record.session;
 			const targetAccess = old.access;
-			let candidate: AcpSession;
+			let candidate: RuntimeSession;
 			try {
 				const targetLaunch = launchSettings(old.cwd, provider);
-				candidate = await startSession({
+				candidate = await makeSession({
 					settings: targetLaunch.settings,
 					steeringSafe: targetLaunch.steeringSafe,
 					provider,
@@ -1467,7 +1398,7 @@ export function adaptAcp(
 				table.delete(id);
 				try {
 					const restoreLaunch = launchSettings(old.cwd, record.provider);
-					const restored = await startSession({
+					const restored = await makeSession({
 						settings: restoreLaunch.settings,
 						steeringSafe: restoreLaunch.steeringSafe,
 						provider: record.provider,
@@ -1522,10 +1453,10 @@ export function adaptAcp(
 				releaseSwitch(id);
 				throw new NodeError("UNAUTHORIZED", "session actor token is unavailable");
 			}
-			let candidate: AcpSession;
+			let candidate: RuntimeSession;
 			try {
 				const resetLaunch = launchSettings(old.cwd, record.provider);
-				candidate = await startSession({
+				candidate = await makeSession({
 					settings: resetLaunch.settings,
 					steeringSafe: resetLaunch.steeringSafe,
 					provider: record.provider,
@@ -1590,16 +1521,26 @@ export function adaptAcp(
 			const effectiveSettings = session === undefined ? settings : settingsForCwd(session.cwd);
 			const cwd = session?.cwd ?? process.cwd();
 			return Object.entries(effectiveSettings.providers)
-				.filter(([, provider]) => provider.disabled !== true)
+				.filter(([id, provider]) => id === "opencode" && provider.disabled !== true)
 				.map(([id, provider]) => {
 					const resolved = launchSettings(cwd, id, effectiveSettings).settings.providers[id] ?? provider;
-					const available = providerCommandAvailable(resolved, cwd);
+					let available = providerCommandAvailable(resolved, cwd);
+					let unavailableReason = `Command not found: ${resolved.command}`;
+					if (id === "opencode") {
+						try {
+							requireManagedOpenCode(resolved);
+							available = openCodeInvocation().apiVersion === 2;
+						} catch (error) {
+							available = false;
+							unavailableReason = error instanceof Error ? error.message : String(error);
+						}
+					}
 					return {
 						id,
 						label: id.charAt(0).toUpperCase() + id.slice(1),
 						defaultModel: provider.defaultModel,
 						available,
-						...(available ? {} : { unavailableReason: `Command not found: ${resolved.command}` }),
+						...(available ? {} : { unavailableReason }),
 						...(resolved.command === "npx" ? { note: "Adapter may download on first launch" } : {}),
 					};
 				});
@@ -1757,7 +1698,7 @@ export function adaptAcp(
 // and no events are appended here: `startNode` writes one `node.restarted`
 // per affected workspace afterwards.
 export async function markInterrupted(store: NodeStore): Promise<Array<{ workspaceId: WorkspaceId; agents: number }>> {
-	// ACP turns do not survive a Node restart. Clear stale leader activity
+	// Active turns do not survive a Node restart. Clear stale leader activity
 	// before clients can read the first snapshot, including unopened workspaces.
 	for (const leader of store.listLeaders()) {
 		if (leader.state !== "running") continue;
@@ -1797,7 +1738,11 @@ export interface Node {
 // The six lifecycle steps in order — lock, stores, restart marking,
 // restart events, descriptor, listen — so no client sees half-restored
 // state. A failure after the lock releases everything it took and rethrows.
-export async function startNode(o?: { store?: NodeStore; acp?: NodeAcp }): Promise<Node> {
+export async function startNode(o?: {
+	store?: NodeStore;
+	runtime?: NodeRuntime;
+	sessionFactory?: (options: StartOptions) => Promise<RuntimeSession>;
+}): Promise<Node> {
 	// Before the lock and before the store: an unusable socket path fails the
 	// start whatever else happens, and taking the lock or creating the store
 	// directories first would leave them behind in a directory the Node
@@ -1821,9 +1766,9 @@ export async function startNode(o?: { store?: NodeStore; acp?: NodeAcp }): Promi
 			storePort = adapted;
 		}
 		const settings = loadSettings({ netaDir: netaDir() }).settings;
-		let adaptedAcp: AdaptedAcp | undefined;
-		let acpPort: NodeAcp;
-		if (o?.acp === undefined) {
+		let adaptedRuntime: AdaptedRuntime | undefined;
+		let runtimePort: NodeRuntime;
+		if (o?.runtime === undefined) {
 			const captureGlance = async (sessionId: SessionId, turn: Turn, blocks: Block[]): Promise<void> => {
 				if (realStore === undefined) return;
 				const actor = glanceActorForSession(storePort, sessionId);
@@ -1853,7 +1798,7 @@ export async function startNode(o?: { store?: NodeStore; acp?: NodeAcp }): Promi
 				const { source: _source, ...visible } = card;
 				hub.broadcast("glance.changed", { card: visible });
 			};
-			adaptedAcp = adaptAcp(
+			adaptedRuntime = adaptRuntime(
 				settings,
 				realStore?.conversations,
 				(cwd) => loadSettings({ netaDir: netaDir(), workspaceRoot: cwd }).settings,
@@ -1864,10 +1809,11 @@ export async function startNode(o?: { store?: NodeStore; acp?: NodeAcp }): Promi
 				(notification) => mounted?.recordTurn(notification) ?? Promise.resolve(),
 				runtimeAdmission,
 				(message) => mounted?.canDeliverInbox(message) ?? Promise.resolve(true),
+				o?.sessionFactory,
 			);
-			acpPort = adaptedAcp;
+			runtimePort = adaptedRuntime;
 		} else {
-			acpPort = o.acp;
+			runtimePort = o.runtime;
 		}
 		const restartLeases = new LeaseManager(createFileLeaseStore(netaDir()));
 		for (const mission of storePort.listMissions()) {
@@ -1948,7 +1894,7 @@ export async function startNode(o?: { store?: NodeStore; acp?: NodeAcp }): Promi
 							return {
 								NETA_DESCRIPTOR: join(netaDir(), "node.json"),
 								NETA_ACTOR_ID: actor.actorId,
-								NETA_ACTOR_TOKEN: acpPort.prepareExternalActor?.(sessionId, actor.actorId) ?? "",
+								NETA_ACTOR_TOKEN: runtimePort.prepareExternalActor?.(sessionId, actor.actorId) ?? "",
 								...(actor.prompt === undefined ? {} : { NETA_INITIAL_PROMPT: actor.prompt }),
 							};
 						},
@@ -1968,7 +1914,7 @@ export async function startNode(o?: { store?: NodeStore; acp?: NodeAcp }): Promi
 					hub.broadcast("node", { phase: "stopping" });
 					await server.close();
 					pi?.closeAll();
-					await acpPort.closeAll();
+					await runtimePort.closeAll();
 					await storePort.compact();
 					if (realStore !== undefined) {
 						await realStore.close();
@@ -1983,7 +1929,7 @@ export async function startNode(o?: { store?: NodeStore; acp?: NodeAcp }): Promi
 		};
 		const ctx: Omit<NodeContext, "hub"> = {
 			store: storePort,
-			acp: acpPort,
+			runtime: runtimePort,
 			nodeVersion: netaVersion(),
 			runtimeAdmission,
 			stop,
@@ -1993,11 +1939,11 @@ export async function startNode(o?: { store?: NodeStore; acp?: NodeAcp }): Promi
 		// registry for numbers and records, which the ports do not carry, so a
 		// stubbed store (handler tests) serves the rest and no tools.
 		const mounted =
-			realStore !== undefined && adapted !== undefined && adaptedAcp !== undefined
+			realStore !== undefined && adapted !== undefined && adaptedRuntime !== undefined
 				? toolMount({
 						real: realStore,
 						store: adapted,
-						acp: adaptedAcp,
+						runtime: adaptedRuntime,
 						settings,
 						runtimeAdmission,
 						hub: () => hub,

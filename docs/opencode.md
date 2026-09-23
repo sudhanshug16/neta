@@ -113,11 +113,13 @@ produce an error without closing the current chat. No remote install occurs.
 
 ## Integration contract, version 2
 
-1. The Node starts one managed OpenCode ACP process per actor. ACP controls the
-   **same native OpenCode session** rendered by the TUI; it does not forward
-   turns to Codex CLI or a second model loop.
-2. The fork advertises a private, authenticated native HTTP endpoint in ACP
-   initialize metadata. The Node keeps provider credentials out of snapshots.
+1. The Node starts one private managed OpenCode V2 server per actor using
+   `serve --stdio --port 0`, authenticated on loopback and leased through stdin.
+   It controls the same native OpenCode session rendered by the TUI through
+   V2 session, prompt, model, permission, MCP, and event APIs.
+2. Each conversation retains its exact OpenCode session ID. The Node verifies
+   that ID and workspace directory when it restores an actor; a failed resume
+   leaves the saved conversation and mission records intact.
 3. `conversation.native` creates an authenticated view gateway. Native reads and
    events use the V2 `/api` routes; the composer uses the private `neta-prompt`
    route so Neta owns message admission. Cancel and model changes also enter
@@ -128,8 +130,7 @@ produce an error without closing the current chat. No remote install occurs.
    actor record. This avoids a tools/list race during leader creation and reset.
    Each process has its own MCP configuration, so actors sharing a worktree do
    not overwrite one another's Neta credentials.
-5. Native delegation is denied. Read-only Neta actors also cannot edit files or
-   execute shell commands through OpenCode. Neta mission tools remain available
+5. Native delegation is denied. Read-only Neta actors cannot edit files through OpenCode; shell, read, search, and fetch permissions remain available. Neta mission tools remain available
    and enforce their own scope/lease rules. An authorized Neta access change
    relaunches the runtime; native plan/build selection does not change that access.
 6. Duplicate message IDs are deduplicated within a gateway attachment. This is
@@ -261,9 +262,8 @@ the evidence for the remaining platforms.
 
 The V2 composer payload crosses Neta unchanged in one durable opaque envelope.
 Neta owns admission, deduplication, and delivery receipts; it does not reconstruct
-OpenCode text, file mentions, or skill selections. The ACP adapter unwraps the
+OpenCode text, file mentions, or skill selections. The direct adapter unwraps the
 payload and invokes OpenCode's prompt, command, or skill API. The adapter pins the
 session and admission ID to the owning actor; OpenCode validates the native
 payload and loads skills. Neta-owned delegation restrictions remain in force.
-Legacy ACP prompts retain their existing conversion. Native skill/command/file
-requests are not automatically replayed through model fallback.
+Native skill, command, and file requests are not automatically replayed through model fallback.

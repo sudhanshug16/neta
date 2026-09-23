@@ -2,9 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startSession, TurnInProgressError } from "../src/acp/session.ts";
-import type { ProviderSettings } from "../src/acp/settings.ts";
-import { steerProvider } from "../src/acp/steer.ts";
+import type { ProviderSettings } from "../src/session/settings.ts";
+import { startSession, TurnInProgressError } from "./fixtures/legacy-acp/session.ts";
+import { steerProvider } from "./fixtures/legacy-acp/steer.ts";
 
 const FIXTURE = new URL("./fixtures/fake-acp-agent.mjs", import.meta.url).pathname;
 

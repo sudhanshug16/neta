@@ -10,6 +10,11 @@ The current code (npm `@intervene/neta` 2.2.x and `src/`) is retired. It is
 tagged `v2-final` and stays readable in Git history and in the two appendices
 in this directory. Nothing from it is imported; ideas are.
 
+The ACP workstream below records the original v3 implementation plan. OpenCode
+direct control supersedes its runtime transport; see
+[direct OpenCode control](opencode-direct-control.md). The manifesto defines the
+current product direction.
+
 ## Current client scope
 
 The native Swift/macOS client has been retired. Desktop workstreams 09–11,

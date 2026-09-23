@@ -21,7 +21,7 @@ function ctx(): NodeContext {
 				id === card.id && hash === "hash" ? { ...card, result } : undefined,
 			glanceMarkReviewed: async (_w: string, n: number) => n,
 		} as unknown as NodeContext["store"],
-		acp: {} as NodeContext["acp"],
+		runtime: {} as NodeContext["runtime"],
 		hub: { broadcast() {} } as unknown as NodeContext["hub"],
 		nodeVersion: "test",
 		stop: async () => {},

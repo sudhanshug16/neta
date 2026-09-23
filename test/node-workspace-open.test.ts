@@ -8,7 +8,7 @@ import { NAME_POOL } from "../src/core/names.ts";
 import type { Leader, Workspace } from "../src/core/types.ts";
 import { canonicalRemote } from "../src/core/workspace-id.ts";
 import { adaptStore } from "../src/node/lifecycle.ts";
-import type { NodeAcp, NodeContext, NodeStore } from "../src/node/server.ts";
+import type { NodeContext, NodeRuntime, NodeStore } from "../src/node/server.ts";
 import { detectWorkspace, openWorkspace, workspaceHandlers } from "../src/node/workspace-open.ts";
 import { openStore, paths, readJson, type Store } from "../src/store/index.ts";
 
@@ -109,7 +109,7 @@ function testCtx(world: World): NodeContext {
 		listEvents: () => Promise.reject(new Error("not implemented in this test")),
 		tailConversation: () => Promise.reject(new Error("not implemented in this test")),
 	};
-	const acp: NodeAcp = {
+	const acp: NodeRuntime = {
 		createSession: (o) => {
 			world.sessions.push({ ...o });
 			const sessionId = ulid();
@@ -137,7 +137,7 @@ function testCtx(world: World): NodeContext {
 	};
 	return {
 		store,
-		acp,
+		runtime: acp,
 		hub: {
 			broadcast: (method, params) => {
 				world.broadcasts.push({ method, params });
@@ -335,8 +335,8 @@ describe("openWorkspace", () => {
 		const base = testCtx(world);
 		const failedCtx = {
 			...base,
-			acp: {
-				...base.acp,
+			runtime: {
+				...base.runtime,
 				createSession: () => Promise.reject(new Error("adapter did not start")),
 			},
 		};
@@ -377,7 +377,7 @@ describe("openWorkspace", () => {
 		);
 	});
 
-	test("opening twice returns the same leader and creates one ACP session carrying the tools entry", async () => {
+	test("opening twice returns the same leader and creates one runtime session carrying the tools entry", async () => {
 		const repo = join(dir, "repo");
 		await initRepo(repo, "git@github.com:acme/widget.git");
 		const world = emptyWorld();
@@ -386,13 +386,13 @@ describe("openWorkspace", () => {
 		const second = await openWorkspace(ctx, repo);
 		expect(second.leader.sessionId).toBe(first.leader.sessionId);
 		expect(world.sessions).toHaveLength(1);
-		// Defaults from an empty temp NETA_DIR: claude and its default model.
-		expect(first.leader.provider).toBe("claude");
-		expect(first.leader.model).toBe("sonnet");
+		// Defaults from an empty temp NETA_DIR: OpenCode with its model selected at launch.
+		expect(first.leader.provider).toBe("opencode");
+		expect(first.leader.model).toBe("");
 		expect(first.leader.mode).toBe("lead");
 		const session = world.sessions[0];
 		if (session === undefined) {
-			throw new Error("expected one ACP session");
+			throw new Error("expected one runtime session");
 		}
 		expect(session.workspaceId).toBe(first.workspace.id);
 		expect(session.cwd).toBe(await realpath(repo));
@@ -404,15 +404,15 @@ describe("openWorkspace", () => {
 		expect(world.broadcasts).toEqual([{ method: "state", params: { kind: "leader", record: first.leader } }]);
 	});
 
-	test("leader ownership records the model resolved by ACP", async () => {
+	test("leader ownership records the model resolved by the runtime", async () => {
 		const repo = join(dir, "resolved-model");
 		await initRepo(repo, "git@github.com:acme/resolved-model.git");
 		const world = emptyWorld();
 		const base = testCtx(world);
 		const ctx: NodeContext = {
 			...base,
-			acp: {
-				...base.acp,
+			runtime: {
+				...base.runtime,
 				createSession: (o) => {
 					world.sessions.push({ ...o });
 					return Promise.resolve({ sessionId: ulid(), provider: o.provider, model: "provider-current" });
@@ -420,7 +420,7 @@ describe("openWorkspace", () => {
 			},
 		};
 		const opened = await openWorkspace(ctx, repo);
-		expect(world.sessions[0]?.model).toBe("sonnet");
+		expect(world.sessions[0]?.model).toBe("");
 		expect(opened.leader.model).toBe("provider-current");
 		expect(world.leaders.get(opened.workspace.id)?.model).toBe("provider-current");
 	});

@@ -13,7 +13,13 @@ import type { Machine } from "../src/core/types.ts";
 import { startNode as startLifecycleNode } from "../src/node/lifecycle.ts";
 import { readDescriptor, writeDescriptor } from "../src/node/lockfile.ts";
 import { NodeError, PROTOCOL_VERSION } from "../src/node/protocol.ts";
-import { type Connection, createServer, type NodeAcp, type NodeContext, type NodeStore } from "../src/node/server.ts";
+import {
+	type Connection,
+	createServer,
+	type NodeContext,
+	type NodeRuntime,
+	type NodeStore,
+} from "../src/node/server.ts";
 
 const TOKEN = "cli-client-test-token";
 const MACHINE: Machine = { id: "01ARZ3NDEKTSV4RRFFQ69G5FAV", name: "test", createdAt: new Date(0).toISOString() };
@@ -39,7 +45,7 @@ function stubStore(): NodeStore {
 	};
 }
 
-function stubAcp(): NodeAcp {
+function stubAcp(): NodeRuntime {
 	return {
 		createSession: () => Promise.reject(new Error("not implemented in this test")),
 		ensureSession: () => Promise.reject(new Error("not implemented in this test")),
@@ -105,7 +111,7 @@ async function startTestServer(handlers: Record<string, Handler>): Promise<void>
 		socketPath,
 		token: TOKEN,
 		handlers,
-		ctx: { store: stubStore(), acp: stubAcp(), nodeVersion: "0.0.0-test", stop: () => Promise.resolve() },
+		ctx: { store: stubStore(), runtime: stubAcp(), nodeVersion: "0.0.0-test", stop: () => Promise.resolve() },
 	});
 	closers.push(close);
 }
@@ -194,7 +200,7 @@ async function startRawServer(o: {
 
 describe("connect", () => {
 	test("round-trip hello against a running Node", async () => {
-		const node = await startLifecycleNode({ store: stubStore(), acp: stubAcp() });
+		const node = await startLifecycleNode({ store: stubStore(), runtime: stubAcp() });
 		closers.push(() => node.stop());
 		const client = await NodeClient.connect();
 		try {

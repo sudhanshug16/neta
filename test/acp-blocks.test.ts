@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
-import { blocksFromUpdate, canCoalesce, diffSummary, signalFromUpdate } from "../src/acp/blocks.ts";
+import { blocksFromUpdate, canCoalesce, diffSummary, signalFromUpdate } from "./fixtures/legacy-acp/blocks.ts";
 
 describe("blocksFromUpdate", () => {
 	test("agent_message_chunk becomes text", () => {

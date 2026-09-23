@@ -1,4 +1,4 @@
-import type { AgentId, MissionId } from "../core/types.ts";
+import type { AgentId, MissionId } from "../../../src/core/types.ts";
 import type { AcpSession } from "./session.ts";
 
 export type SteerTarget = { kind: "leader" } | { kind: "mission"; missionId: MissionId; agentId: AgentId };

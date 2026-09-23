@@ -1,7 +1,7 @@
 # How Neta works
 
 One long-lived process, the Node, owns every workspace, leader, mission,
-agent, ACP session, worktree record, event, and stored conversation on a
+agent, OpenCode session, worktree record, event, and stored conversation on a
 machine. The terminal client and the per-session tool
 proxy all speak to that Node and own nothing themselves. Direction lives
 in [MANIFESTO.md](../MANIFESTO.md); install and build in [README.md](../README.md).
@@ -11,12 +11,11 @@ in [MANIFESTO.md](../MANIFESTO.md); install and build in [README.md](../README.m
 The development terminal client is the Neta OpenCode V2 fork (2.0.3). Its OpenTUI/SolidJS
 shell adds machine/workspace navigation and agent tabs around native OpenCode
 chat. The Node starts one OpenCode process per actor and controls its native
-session through ACP. An authenticated, per-view HTTP gateway lets the renderer
+session through OpenCode V2 APIs. An authenticated, per-view HTTP gateway lets the renderer
 read that same session while routing sends and cancellation through the Node.
 Closing the gateway leaves the runtime alive. This is native OpenCode execution,
 not a Codex CLI renderer. See [the integration contract](opencode.md) for setup,
-reset, compatibility and validation boundaries. The Claude SDK migration is
-deferred.
+reset, compatibility and validation boundaries. OpenCode is the supported agent runtime.
 
 Startup restores the last workspace and selected actor. The client starts a missing
 Node and compares the running Node's build identity with its own; an idle service
@@ -42,7 +41,7 @@ without replacing its session or transcript. See
 
 ```text
 neta-node                           one per machine, long-lived
-  owns: workspaces, leaders, missions, agents, ACP sessions,
+  owns: workspaces, leaders, missions, agents, OpenCode sessions,
         event log, conversation store, access state, writer leases
   listens: ~/.neta/node.sock        Unix socket, JSON-RPC 2.0 NDJSON
     |
@@ -51,19 +50,19 @@ neta-node                           one per machine, long-lived
     |     lists missions and events, sets access state, stops the Node
     |
     +-- neta mcp --actor <id>      stdio proxy (src/tools/proxy.ts),
-          one per ACP session that needs tools; the provider launches
+          one per OpenCode session that needs tools; OpenCode launches
           it, and every tool call travels to the Node over the socket
 ```
 
 The tree starts in `src/node/lifecycle.ts`, which adapts `src/store/` and
-`src/acp/` to the ports in `src/node/server.ts`. No client imports those
+`src/session/` and `src/opencode/` to the ports in `src/node/server.ts`. No client imports those
 stores: the terminal renders only and the proxy forwards
 only. Authority sits in exactly one place, so two clients attached at once
 always read the same state.
 
 ## Why the Node is long-lived, and what happens when a client dies
 
-The Node holds the ACP sessions, and ACP sessions outlive any single
+The Node holds the OpenCode sessions, and OpenCode sessions outlive any single
 view of them. A leader conversation continues while nobody looks at it,
 an agent keeps running while the person who launched it closes the
 laptop lid, and a mission stays open across restarts of every client.
@@ -111,7 +110,7 @@ workspace, and only then binds the socket (`src/node/lifecycle.ts`).
 Interrupted work never replays and never gains a replacement session;
 the leader sees the interruption event and decides how to continue.
 On stop the Node broadcasts its `node` lifecycle notification, closes
-every ACP session it owns, compacts the registries, removes `node.json`
+every OpenCode session it owns, compacts the registries, removes `node.json`
 and the socket, releases the lock, and exits (`src/node/lifecycle.ts`).
 
 ## The socket protocol
@@ -152,10 +151,10 @@ symbolic name in `error.data` so clients switch on the name
 (`src/node/protocol.ts`).
 
 Protocol version 2 adds structured `plan` and `usage` conversation blocks
-and attachments. `conversation.capabilities` reports whether the active ACP
+and attachments. `conversation.capabilities` reports whether the active OpenCode
 session accepts images or embedded files. `conversation.prompt` accepts text
 plus up to ten attachments, capped at 4 MiB each and 5 MiB total. Images map
-to ACP image content and files to embedded resources only when the provider
+to OpenCode files and images when the runtime
 advertises the matching capability. Conversation history stores attachment
 id, kind, name, MIME type, and size, never the base64 payload. Tool updates
 reuse their tool-call identity, and usage updates merge into one compact block
@@ -290,7 +289,7 @@ position, marked archived, opening read-only
 ## Agents and the name pool
 
 Agents do the work inside a mission. An agent record carries its
-mission, its ACP conversation id, its provider and model, its access
+mission, its OpenCode conversation id, its provider and model, its access
 (read-only or read-write), its task, and its state
 (`src/core/types.ts`). The states are `starting`, `running`,
 `idle`, `blocked`, `failed`, `completed`, `interrupted`, and `archived`
@@ -309,7 +308,7 @@ non-archived, non-completed agent of the missions in scope, plus the
 eight most recently ended completed agents per mission, with
 `completedCounts` counting all unarchived completed agents; archived
 agents never appear (`src/node/snapshot.ts`). Archiving a `starting`
-or `running` agent requires explicit confirmation, closes its ACP
+or `running` agent requires explicit confirmation, closes its OpenCode
 session first, and only then archives it; every other state archives
 at once (`src/node/handlers-registry.ts`). When the Node restarts,
 agents left in `starting`, `running`, or `blocked` return as
@@ -371,9 +370,8 @@ lead. Ordinary agents receive fixed read-only or read-write access
 from their lead and never change it. The two modes are `lead` —
 coordination without a Neta writer lease — and `lead++`, which adds build and
 write authority ([MANIFESTO.md](../MANIFESTO.md), `src/modes/switch.ts`).
-Both workspace and mission leaders select the provider's advertised
-unrestricted ACP mode in either leadership mode. Ordinary agents keep the
-provider sandbox implied by their assigned access.
+The Node relaunches a leader's private OpenCode server when access changes,
+keeping the saved session ID. Ordinary agents keep their assigned access.
 
 OpenCode read-only agents may read, search, fetch, and run shell commands,
 including reading downloaded evidence outside the worktree. Neta still denies
@@ -417,10 +415,9 @@ charter stays prose for the model (`src/modes/approval.ts`).
 
 Every change travels one switch path: cancel the active turn at the
 steering boundary, switch Neta session access (`lead++` maps to
-read-write, `lead` to read-only), preserve the leader's unrestricted provider
-mode, then re-prompt the same session
+read-write, `lead` to read-only), then re-prompt the same session
 with a short access-change message (`src/modes/switch.ts`,
-`src/acp/steer.ts`, `src/acp/access.ts`). With no active turn the
+`src/opencode/direct-session.ts`). With no active turn the
 cancel is a no-op and the re-prompt still lands. `lead++` grants no
 writer lease by itself — a `lead++` leader that writes acquires one
 from the lease manager like any other writer (`src/worktrees/leases.ts`).
@@ -452,9 +449,9 @@ events, reads and sets access state, and stops the Node. Only `neta`
 with no command and `neta open` start a Node; `neta node status`
 reports without starting anything, and `neta node stop` is the single
 operation that stops one (`src/cli/commands/node.ts`). The terminal
-chat opens the same exact ACP session as other attached clients, so all
+chat opens the same exact OpenCode session as other attached clients, so all
 views see each other's turns (`src/cli/chat.ts`). The CLI owns no
-sessions, no store, and no ACP runtime — every command is a protocol
+sessions, no store, and no OpenCode runtime — every command is a protocol
 call plus formatting. Setting `lead++` from the CLI is always the
 manual path, a person's own choice with no decision record; records
 belong to the leader's own tool requests, never to a client
@@ -473,13 +470,12 @@ call to the Node over the socket. It parses no MCP traffic and adds
 no behavior of its own; its stdout carries MCP framing only. Provider
 settings, leader defaults, and forbidden models live in
 `$NETA_DIR/settings.json` with per-project overrides, described in
-[settings](settings.md) (`src/acp/settings.ts`).
+[settings](settings.md) (`src/session/settings.ts`).
 
 Workspace overrides are loaded for the actual session working directory, so
 provider launch, availability, and model selection use the same effective
-settings. Live model options come from ACP session configuration and are
-replaced when `config_option_update` arrives; before launch, only a configured
-non-empty default can be shown.
+settings. Live model options come from OpenCode's connected model catalog;
+before launch, only a configured non-empty default can be shown.
 
 `conversation.reset` replaces the selected owner session atomically with a
 fresh provider and vendor conversation. It keeps provider, model, access,
@@ -491,7 +487,7 @@ old session is retired, and a candidate launch or rebind failure leaves the old
 chat usable. Old conversation files remain stored. Queued and archived agents
 cannot be reset.
 
-When an ACP actor ends a turn, the runtime sends an automatic report to its parent: workers to their mission lead, mission leads to the workspace leader (self-led mission workers go directly to the workspace leader). The report includes the actual model and final transcript excerpt. It uses the durable inbox to wake an idle parent or queue behind active work. Unacknowledged deliveries persist on the actor and retry; duplicate turn reports are suppressed. A normal turn ending without explicit completion marks the actor idle and resumable; cancellation marks it interrupted. Neither marks the mission complete. A mission lead calls `neta_ready` without an ID to record its own completed handoff; the workspace leader uses the public mission number to close it. Successful checks close as `completed`, merges require commit evidence, and abandonment is reserved for intentionally discarded work. Repeating the same close is idempotent. Closed missions and archived actors do not wake parents. Model fallback updates the stored actor model and conversation metadata.
+When an OpenCode actor ends a turn, the runtime sends an automatic report to its parent: workers to their mission lead, mission leads to the workspace leader (self-led mission workers go directly to the workspace leader). The report includes the actual model and final transcript excerpt. It uses the durable inbox to wake an idle parent or queue behind active work. Unacknowledged deliveries persist on the actor and retry; duplicate turn reports are suppressed. A normal turn ending without explicit completion marks the actor idle and resumable; cancellation marks it interrupted. Neither marks the mission complete. A mission lead calls `neta_ready` without an ID to record its own completed handoff; the workspace leader uses the public mission number to close it. Successful checks close as `completed`, merges require commit evidence, and abandonment is reserved for intentionally discarded work. Repeating the same close is idempotent. Closed missions and archived actors do not wake parents. Model fallback updates the stored actor model and conversation metadata.
 
 Workspace leader activity follows runtime turns too: running from turn start,
 including thinking before the first response, idle after completion or cancellation,

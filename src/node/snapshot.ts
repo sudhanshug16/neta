@@ -1,5 +1,5 @@
 // The one payload that replaces a client's cache. Pure selection over the
-// `NodeStore`/`NodeAcp` ports: missions (every open one plus closed ones
+// `NodeStore`/`NodeRuntime` ports: missions (every open one plus closed ones
 // inside the window or among the 8 newest per workspace), agents (all live ones plus the 8 most recently ended
 // completed per mission), the last 200 events per workspace, and the
 // attention inbox newest first.

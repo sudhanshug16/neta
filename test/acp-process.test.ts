@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import type { RequestPermissionResponse } from "@agentclientprotocol/sdk";
-import { spawnProvider } from "../src/acp/process.ts";
-import type { ProviderSettings } from "../src/acp/settings.ts";
+import type { ProviderSettings } from "../src/session/settings.ts";
+import { spawnProvider } from "./fixtures/legacy-acp/process.ts";
 
 const FIXTURE = new URL("./fixtures/fake-acp-agent.mjs", import.meta.url).pathname;
 

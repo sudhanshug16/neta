@@ -4,7 +4,7 @@
 // `mcp --actor <id> --token <t>`, `env` carries `NETA_SOCKET` only. 03 passes
 // the config at `session/new` and again at `session/resume`; the Node mints
 // the token immediately before each launch and revokes the previous one.
-import { type McpServerSpec, netaMcpServer } from "../acp/mcp.ts";
+import { type McpServerSpec, netaMcpServer } from "../session/mcp.ts";
 import { coordinationHandlers } from "./handlers/coordination.ts";
 import { lifecycleHandlers } from "./handlers/lifecycle.ts";
 import { missionHandlers } from "./handlers/mission.ts";

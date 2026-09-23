@@ -54,7 +54,7 @@ function descriptorPath(dir?: string): string {
 
 // The descriptor in a named directory. The socket always sits beside
 // `node.json` in the same NETA_DIR, so a client handed only `NETA_SOCKET`
-// (which is all `netaMcpServer` puts in an ACP session's environment) can
+// (which is all `netaMcpServer` puts in an OpenCode actor's environment) can
 // still find the node token by looking next to the socket.
 export async function readDescriptorIn(dir: string): Promise<NodeDescriptor | undefined> {
 	return readDescriptorAt(descriptorPath(dir));

@@ -2,12 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type AcpSession, startSession } from "../src/acp/session.ts";
-import type { Settings } from "../src/acp/settings.ts";
 import { ulid } from "../src/core/ids.ts";
 import { NAME_POOL } from "../src/core/names.ts";
 import type { Agent, EventKind, Leader, Mission, Workspace } from "../src/core/types.ts";
 import type { NodeStore } from "../src/node/server.ts";
+import type { Settings } from "../src/session/settings.ts";
 import {
 	type MissionPorts,
 	type MissionToolContext,
@@ -18,6 +17,7 @@ import type { Actor } from "../src/tools/router.ts";
 import { createWorktreeService, LeaseManager, WorktrunkDriver } from "../src/worktrees/index.ts";
 import { runGit } from "../src/worktrees/integration.ts";
 import { WorktreeSetupError } from "../src/worktrees/setup-diagnostics.ts";
+import { type AcpSession, startSession } from "./fixtures/legacy-acp/session.ts";
 import { fakeWtEnv, makeRepo } from "./helpers/git-repo.ts";
 
 function workspace(id: string, kind: Workspace["kind"]): Workspace {

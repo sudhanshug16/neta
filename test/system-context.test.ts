@@ -3,7 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readAppliedSystemContext, systemContextPath, writeSystemContext } from "../src/acp/system-context.ts";
+import { readAppliedSystemContext, systemContextPath, writeSystemContext } from "../src/session/system-context.ts";
 
 describe("Neta system instruction contract", () => {
 	test("atomic bundles and only matching local acknowledgments survive context and binding changes", async () => {

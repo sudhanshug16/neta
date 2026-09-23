@@ -3,7 +3,7 @@
 Neta is the interface, engine, and machine service for running persistent agent
 teams across workspaces. It is not itself the top-level agent. A user talks to
 the leader belonging to a specific workspace on a specific machine, and can
-open the ACP conversation of any mission lead or agent beneath it.
+open the OpenCode conversation of any mission lead or agent beneath it.
 
 This manifesto defines the target product. The current implementation is still
 described in [docs/how-it-works.md](docs/how-it-works.md) while the migration is
@@ -19,7 +19,7 @@ direction and `docs/how-it-works.md` is the description of what ships today.
 - **Machine** — a physical host, virtual machine, or isolated runtime that owns
   one copy of a workspace and runs its complete agent tree.
 - **Leader** — the persistent assistant for one workspace on one machine. It has
-  its own ACP conversation and decides whether to work directly or create a
+  its own OpenCode conversation and decides whether to work directly or create a
   mission.
 - **Mission** — one bounded objective. A Git mission receives its own Worktrunk
   worktree by default. Every mission has a permanent number assigned at
@@ -59,7 +59,7 @@ machine.
 2. **One objective, one mission.** Missions are bounded units of work with clear
    ownership, history, and closeout.
 3. **Execution is machine-local.** A leader, its mission leads, their agents,
-   ACP sessions, shells, and worktrees all run on the machine that owns the
+   OpenCode sessions, shells, and worktrees all run on the machine that owns the
    workspace copy. Neta never distributes one agent tree across machines.
 4. **Isolation before ceremony.** Git missions use Worktrunk worktrees. Neta
    does not require a scout, writer, reviewer, or full test suite for every
@@ -67,8 +67,8 @@ machine.
 5. **Access is visible and reversible.** Leaders move between Lead and Lead++;
    agents receive read-only or read-write access. The current state is always
    visible and durably recorded.
-6. **Every conversation is real ACP.** Desktop, native CLI, and future clients
-   open the same exact ACP sessions. There are no dummy chat surfaces and no
+6. **Every conversation is a real OpenCode session.** Native and future clients
+   open the same exact OpenCode sessions. There are no dummy chat surfaces and no
    keystroke injection.
 7. **Work survives the UI.** Closing a client does not stop the machine service.
    State, conversations, missions, modes, skills, and model choices are durable.
@@ -89,7 +89,7 @@ client leaves the Node and its work running. Explicitly stopping a Node stops
 only the processes owned by that Node.
 
 Each Node is authoritative for its local workspaces, leaders, missions, agents,
-ACP conversations, process identities, and worktrees. A machine that goes
+OpenCode conversations, process identities, and worktrees. A machine that goes
 offline is shown as offline. Another machine does not steal its sessions or
 silently resume its work.
 
@@ -139,7 +139,7 @@ A mission contains:
 - one owning workspace and machine;
 - one Worktrunk worktree for a Git workspace;
 - one mission lead, which may be the workspace leader for direct work;
-- its agents and exact ACP conversation identifiers;
+- its agents and exact OpenCode conversation identifiers;
 - assigned models, skills, access state, progress, blockers, and terminal
   outcomes;
 - its integration and closeout state.
@@ -195,7 +195,7 @@ mutation work ends. Completing or abandoning a mission returns its mission lead
 to Lead.
 
 A manual mode change affects only the selected leader. If it occurs during an
-ACP turn, Neta uses its existing steering boundary: cancel the active turn and
+OpenCode turn, Neta uses its existing steering boundary: cancel the active turn and
 re-prompt the same exact session with the mode-change event. The UI must show
 mode with text and an icon as well as color. The compact labels are **Lead** and
 **Lead++**; Lead++ is described as "build access" for accessibility.
@@ -209,7 +209,7 @@ An ordinary agent receives:
 
 - a bounded task;
 - read-only or read-write access chosen by its mission lead;
-- an ACP provider;
+- the OpenCode runtime;
 - a concrete model;
 - optional reusable skills or guidance;
 - the mission worktree and relevant context.
@@ -223,9 +223,8 @@ For OpenCode delegation, the leader supplies task difficulty as `effort` from
 connected models using the user's fixed effort-to-model configuration or the
 Jev classifier. Explicit model choices bypass routing. An omitted model never
 silently inherits the parent's model; routing failures do not change policies.
-Other ACP providers retain their configured defaults. Provider, model, routing
-decision, skills, access, and exact conversation ID persist with the session and
-survive resume.
+Model, routing decision, skills, access, and exact conversation ID persist
+with the session and survive resume.
 
 ## Writers and worktrees
 
@@ -327,17 +326,16 @@ Every agent has an Archive action:
 
 - archiving a running agent requires confirmation, stops it, then archives it;
 - blocked, failed, and completed agents archive immediately;
-- archive hides the node from the primary graph but preserves its ACP history
+- archive hides the node from the primary graph but preserves its conversation history
   and outcome.
 
-## ACP, steering, and recovery
+## OpenCode sessions, steering, and recovery
 
-ACP is the single transport for leaders, mission leads, and agents across
-supported providers. Clicking any agent node opens that exact ACP conversation.
-All controls operate through the same Node-owned session rather than a desktop-
-specific orchestration path.
+The Node controls private OpenCode V2 servers through their native APIs. Clicking
+any agent node opens that exact saved OpenCode session. Neta owns mission
+identity, writer authority, message admission, and tool authentication.
 
-ACP cannot inject text into the middle of a prompt turn. Immediate steering and
+Neta does not inject text into the middle of a prompt turn. Immediate steering and
 manual mode changes cancel the active turn, wait for that cancellation boundary,
 and send the replacement prompt to the same exact session. Passive reminders
 wait for a safe tool or turn boundary and coalesce.
@@ -353,7 +351,7 @@ Each client keeps a bounded read cache so an offline machine remains
 understandable:
 
 - canvas structure and status summaries;
-- up to 1 MB of recently viewed display messages per ACP conversation;
+- up to 1 MB of recently viewed display messages per conversation;
 - message caches for at most the 100 most recently updated agents;
 - approximately 100 MB maximum message content before metadata and indexes;
 - no large tool blobs, attachments, full diffs, or authoritative process state.
@@ -428,7 +426,7 @@ over the same Node-owned sessions and durable state.
 
 The desktop window has one primary surface: the canvas.
 
-The chat surface floats on the right and holds the selected agent's ACP
+The chat surface floats on the right and holds the selected agent's OpenCode
 conversation. A person may hide it. It never auto-hides.
 
 The navigator is an overlay that auto-hides. It appears on hovering the left
@@ -445,7 +443,7 @@ The chat header shows the path from the workspace leader to the selected agent,
 so one click returns to the leader.
 
 The workspace leader is selected by default. Selecting a mission lead or agent
-opens that exact ACP conversation in the same chat surface. Chat is primary;
+opens that exact OpenCode conversation in the same chat surface. Chat is primary;
 secondary session information is opened with a **Details** action that either
 changes the right-hand view or adds a secondary inspector. It is not a
 permanent Chat/Details tab bar.
@@ -533,7 +531,7 @@ visual subject.
 The graph must balance two needs that are both product requirements:
 
 1. enough density to understand several missions and their agents at once;
-2. enough size, labeling, and separation to click around and enter any ACP
+2. enough size, labeling, and separation to click around and enter any OpenCode
    conversation without hunting.
 
 The current design exploration has not resolved that balance. A clean but
@@ -596,7 +594,7 @@ configuration belongs in settings.
 ## Non-goals
 
 - A global conversational agent above workspace-machine leaders.
-- Cross-machine workers, mission leads, shells, or ACP sessions.
+- Cross-machine workers, mission leads, shells, or OpenCode sessions.
 - Unbounded agent nesting.
 - Permanent roles or trust tiers as product taxonomy.
 - Mandatory scout-writer-reviewer pipelines or full-suite validation for every

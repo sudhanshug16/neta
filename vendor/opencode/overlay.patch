@@ -122,7 +122,7 @@ index 0f1a6fe7a..26c6b2dce 100644
      throw new ACPError.ServiceFailureError({
        safeMessage: error.message || "OpenCode prompt failed",
 diff --git a/packages/cli/src/acp/service.ts b/packages/cli/src/acp/service.ts
-index c3182b56a..bacf6aeea 100644
+index c3182b56a..b960dc67f 100644
 --- a/packages/cli/src/acp/service.ts
 +++ b/packages/cli/src/acp/service.ts
 @@ -58,6 +58,8 @@ import {
@@ -459,6 +459,27 @@ index c3182b56a..bacf6aeea 100644
    state.modeID = modeID
    await client.session.switchAgent({ sessionID: state.id, agent: modeID })
  }
+@@ -513,11 +663,19 @@ async function registerMcpServers(
+ ) {
+   const current = registered.get(session.id) ?? new Set<string>()
+   registered.set(session.id, current)
++  // The location service can be evicted while this ACP session stays attached.
++  // Its MCP overrides disappear with that service, so the local cache alone is
++  // not evidence that OpenCode still has the server.
++  const live = current.size
++    ? new Set((await client.mcp.list({ location: { directory: session.cwd } })).data.map((server) => server.name))
++    : undefined
++  const scheduled = new Set<string>()
+   await Promise.all(
+     servers.flatMap((server) => {
+       const config = mcpConfig(server)
+       const key = `${server.name}:${stableStringify(config)}`
+-      if (current.has(key)) return []
++      if (scheduled.has(key) || (current.has(key) && live?.has(server.name))) return []
++      scheduled.add(key)
+       current.add(key)
+       return [
+         client.mcp.add({ server: server.name, location: { directory: session.cwd }, config }).catch((error) => {
 diff --git a/packages/cli/src/commands/commands.ts b/packages/cli/src/commands/commands.ts
 index 9a9fc4c4b..14e849ecc 100644
 --- a/packages/cli/src/commands/commands.ts
@@ -563,6 +584,32 @@ index 9ff4fac69..cbeb5a09a 100755
    $: () => import("./commands/handlers/default"),
    upgrade: () => import("./commands/handlers/upgrade"),
    uninstall: () => import("./commands/handlers/uninstall"),
+diff --git a/packages/cli/test/acp/service-directory.test.ts b/packages/cli/test/acp/service-directory.test.ts
+index 757a812f6..f8b3fcd5e 100644
+--- a/packages/cli/test/acp/service-directory.test.ts
++++ b/packages/cli/test/acp/service-directory.test.ts
+@@ -281,6 +281,7 @@ describe("acp service directory behavior", () => {
+       headers: [{ name: "Authorization", value: "Bearer x" }],
+     }
+     let created = 0
++    const registeredServers = new Set<string>()
+     await using fixture = makeACPFixture({
+       fetch(request) {
+         if (request.method === "POST" && request.path === "/api/session") {
+@@ -290,7 +291,13 @@ describe("acp service directory behavior", () => {
+         if (request.method === "GET" && request.path === "/api/session/ses_1") {
+           return Response.json({ data: makeSession("ses_1") })
+         }
++        if (request.method === "GET" && request.path === "/api/mcp") {
++          return Response.json({
++            data: [...registeredServers].map((name) => ({ name, status: { status: "connected" } })),
++          })
++        }
+         if (request.method === "PUT" && request.path.startsWith("/api/mcp/")) {
++          registeredServers.add(request.path.slice("/api/mcp/".length))
+           return new Response(null, { status: 204 })
+         }
+         return undefined
 diff --git a/packages/cli/test/acp/service-fixture.ts b/packages/cli/test/acp/service-fixture.ts
 index f690def45..78b707ab3 100644
 --- a/packages/cli/test/acp/service-fixture.ts
@@ -616,10 +663,10 @@ index 2e104c27d..3bedd391e 100644
 + })
 +}
 diff --git a/packages/cli/test/acp/service.test.ts b/packages/cli/test/acp/service.test.ts
-index 30ca6dab8..01613e3fb 100644
+index 30ca6dab8..49f944c65 100644
 --- a/packages/cli/test/acp/service.test.ts
 +++ b/packages/cli/test/acp/service.test.ts
-@@ -5,7 +5,7 @@ import { ACPService } from "../../src/acp/service"
+@@ -5,9 +5,10 @@ import { ACPService } from "../../src/acp/service"
  import { ChildSessionUpdatesCapability } from "../../src/acp/event"
  
  describe("acp service", () => {
@@ -627,8 +674,11 @@ index 30ca6dab8..01613e3fb 100644
 +  test.each([false, true])("registers MCP before native interaction (native: %s)", async (native) => {
      const requests: Array<{ method: string; path: string; body?: unknown }> = []
      const updates: Parameters<AgentSideConnection["sessionUpdate"]>[0][] = []
++    let mcpPresent = false
      const server = Bun.serve({
-@@ -19,6 +19,8 @@ describe("acp service", () => {
+       port: 0,
+       async fetch(request) {
+@@ -19,6 +20,8 @@ describe("acp service", () => {
          })
          const location = { directory: "/workspace", project: { id: "global", directory: "/workspace" } }
          if (url.pathname === "/api/plugin/await-activation") return new Response(null, { status: 204 })
@@ -637,7 +687,19 @@ index 30ca6dab8..01613e3fb 100644
          if (url.pathname === "/api/model") return Response.json({ location, data: [model] })
          if (url.pathname === "/api/model/default") return Response.json({ location, data: model })
          if (url.pathname === "/api/agent") return Response.json({ location, data: [agent] })
-@@ -32,6 +34,7 @@ describe("acp service", () => {
+@@ -26,12 +29,18 @@ describe("acp service", () => {
+           return Response.json({ location, data: [{ name: "review", template: "" }] })
+         if (url.pathname === "/api/skill") return Response.json({ location, data: [skill] })
+         if (url.pathname === "/api/session" && request.method === "POST") return Response.json({ data: session })
+-        if (url.pathname === "/api/mcp/docs" && request.method === "PUT") return new Response(null, { status: 204 })
++        if (url.pathname === "/api/mcp" && request.method === "GET")
++          return Response.json({ location, data: mcpPresent ? [{ name: "docs", status: { status: "connected" } }] : [] })
++        if (url.pathname === "/api/mcp/docs" && request.method === "PUT") {
++          mcpPresent = true
++          return new Response(null, { status: 204 })
++        }
+         return new Response(null, { status: 404 })
+       },
      })
      const service = ACPService.make({
        client: OpenCode.make({ baseUrl: server.url.toString() }),
@@ -645,7 +707,7 @@ index 30ca6dab8..01613e3fb 100644
        connection: {
          sessionUpdate: async (update) => {
            updates.push(update)
-@@ -50,6 +53,12 @@ describe("acp service", () => {
+@@ -50,6 +59,15 @@ describe("acp service", () => {
          cwd: "/workspace",
          mcpServers: [{ name: "docs", command: "bun", args: ["docs.ts"], env: [{ name: "TOKEN", value: "x" }] }],
        })
@@ -653,8 +715,11 @@ index 30ca6dab8..01613e3fb 100644
 +        expect(requests.some((request) => request.path === "/api/mcp/docs")).toBe(false)
 +        await service.setSessionConfigOption({ sessionId: result.sessionId, configId: "neta_refresh_tools", value: "" })
 +        await service.setSessionConfigOption({ sessionId: result.sessionId, configId: "neta_refresh_tools", value: "" })
++        expect(requests.filter((request) => request.path === "/api/mcp/docs")).toHaveLength(1)
++        mcpPresent = false // OpenCode evicts the location service while ACP remains attached.
++        await service.setSessionConfigOption({ sessionId: result.sessionId, configId: "neta_refresh_tools", value: "" })
 +      }
-+      expect(requests.filter((request) => request.path === "/api/mcp/docs")).toHaveLength(1)
++      expect(requests.filter((request) => request.path === "/api/mcp/docs")).toHaveLength(native ? 2 : 1)
        expect(result.sessionId).toBe("ses_acp")
        expect(initialized.agentCapabilities?._meta).toEqual({ [ChildSessionUpdatesCapability]: true })
        expect(result.configOptions?.map((option) => option.id)).toEqual(["model", "effort", "mode"])
@@ -5347,10 +5412,10 @@ index 000000000..d4c91af03
 +}
 diff --git a/packages/tui/src/neta/reconnect.ts b/packages/tui/src/neta/reconnect.ts
 new file mode 100644
-index 000000000..f319d08a0
+index 000000000..05ef77cc7
 --- /dev/null
 +++ b/packages/tui/src/neta/reconnect.ts
-@@ -0,0 +1,39 @@
+@@ -0,0 +1,40 @@
 +/** Reopen the saved Neta view, rather than retrying a dead native server URL. */
 +export function createNetaReconnect(options: {
 +  connect(): Promise<boolean>
@@ -5362,6 +5427,7 @@ index 000000000..f319d08a0
 +  let active = false
 +  let stopped = false
 +  let attempt = 0
++  let reported = false
 +  async function retry() {
 +    timer = undefined
 +    const connected = await options.connect().catch(() => false)
@@ -5370,18 +5436,18 @@ index 000000000..f319d08a0
 +      return
 +    }
 +    attempt += 1
-+    if (attempt >= (options.attempts ?? 5)) {
-+      active = false
++    if (!reported && attempt >= (options.attempts ?? 5)) {
++      reported = true
 +      options.failed()
-+      return
 +    }
-+    timer = setTimeout(retry, Math.min(30_000, (options.delayMs ?? 1000) * 2 ** attempt))
++    timer = setTimeout(retry, Math.min(30_000, (options.delayMs ?? 1000) * 2 ** Math.min(attempt, 30)))
 +  }
 +  return {
 +    start() {
 +      if (active || stopped) return
 +      active = true
 +      attempt = 0
++      reported = false
 +      timer = setTimeout(retry, options.delayMs ?? 1000)
 +    },
 +    stop() {
@@ -5746,10 +5812,10 @@ index 000000000..1c94b747d
 +}
 diff --git a/packages/tui/src/neta/shell.tsx b/packages/tui/src/neta/shell.tsx
 new file mode 100644
-index 000000000..832e52cd3
+index 000000000..2046f6891
 --- /dev/null
 +++ b/packages/tui/src/neta/shell.tsx
-@@ -0,0 +1,834 @@
+@@ -0,0 +1,837 @@
 +import { createEffect, createMemo, createSignal, For, onCleanup, Show, type JSX } from "solid-js"
 +import { TerminalViewport, useTerminalDimensions } from "../ui/terminal-dimensions"
 +import { ownerSession, type Agent, type Mission, type Snapshot, type View } from "@neta/client"
@@ -5854,7 +5920,7 @@ index 000000000..832e52cd3
 +  let dirty = false
 +  const reconnect = createNetaReconnect({
 +    connect: () => navigate(state.view, true),
-+    failed: () => setStartupNotice("Neta could not reconnect. Saved work is retained. Use /reconnect to retry."),
++    failed: () => setStartupNotice("Neta is still reconnecting. Saved work is retained; retries continue automatically."),
 +  })
 +  onCleanup(reconnect.stop)
 +  createEffect(() => {
@@ -6569,6 +6635,9 @@ index 000000000..832e52cd3
 +                Help · actions
 +              </text>
 +            </scrollbox>
++            <text height={2} flexShrink={0} fg={theme.text.subdued}>
++              {"Mission lead and active agents stay visible\nHelp opens actions and history"}
++            </text>
 +          </box>
 +        </Show>
 +        <box flexGrow={1} minWidth={0} flexDirection="column">
@@ -7906,10 +7975,10 @@ index 000000000..438202684
 +}
 diff --git a/packages/tui/test/neta-reconnect.test.ts b/packages/tui/test/neta-reconnect.test.ts
 new file mode 100644
-index 000000000..d2e3a3f6c
+index 000000000..6f07223cb
 --- /dev/null
 +++ b/packages/tui/test/neta-reconnect.test.ts
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,63 @@
 +import { expect, test } from "bun:test"
 +import { createNetaReconnect } from "../src/neta/reconnect"
 +
@@ -7929,24 +7998,22 @@ index 000000000..d2e3a3f6c
 +  expect(failed).toBe(false)
 +})
 +
-+test("bounds failed recovery and allows a later retry", async () => {
++test("continues recovery after showing the failure notice", async () => {
 +  let calls = 0
 +  let failures = 0
 +  const recovery = createNetaReconnect({
 +    delayMs: 1,
 +    attempts: 2,
-+    connect: async () => { calls++; throw new Error("offline") },
++    connect: async () => ++calls === 4,
 +    failed: () => { failures++ },
 +  })
 +  recovery.start()
-+  await Bun.sleep(40)
-+  expect(calls).toBe(2)
++  await Bun.sleep(80)
++  expect(calls).toBe(4)
 +  expect(failures).toBe(1)
 +  recovery.start()
-+  await Bun.sleep(40)
 +  recovery.stop()
 +  expect(calls).toBe(4)
-+  expect(failures).toBe(2)
 +})
 +
 +test("unmount cancels scheduled and in-flight retries", async () => {

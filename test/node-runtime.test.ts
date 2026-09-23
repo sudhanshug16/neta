@@ -16,6 +16,7 @@
 //   leader record.
 // - skills resolve against the workspace root, not the directory the node
 //   happened to be detached from.
+
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -24,6 +25,7 @@ import type { Agent, Block, Leader, Turn, Workspace } from "../src/core/types.ts
 import { connectNode, type NodeClient } from "../src/node/client.ts";
 import { type Node as NetaNode, startNode } from "../src/node/lifecycle.ts";
 import type { ConversationTailResult, StateNotification, TurnNotification } from "../src/node/protocol.ts";
+import { startLegacySession } from "./fixtures/legacy-acp-runtime.ts";
 
 const FIXTURE = new URL("./fixtures/fake-acp-agent.mjs", import.meta.url).pathname;
 const MCP_RUNNER = new URL("./fixtures/mcp-proxy-runner.mjs", import.meta.url).pathname;
@@ -261,9 +263,9 @@ async function attach(): Promise<Attached> {
 	return { client, leader: opened.leader, turns, states };
 }
 
-test("a fresh workspace remains selectable when its provider fails and recovers on reopen", async () => {
+test("a fresh workspace remains selectable when its retired provider cannot launch", async () => {
 	await writeUnavailableProviderSettings();
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const client = await connectNode({ client: "desktop" });
 	try {
 		const opened = await client.request<{ workspace: Workspace; leader: Leader }>("workspace.open", { path: work });
@@ -275,7 +277,7 @@ test("a fresh workspace remains selectable when its provider fails and recovers 
 		const catalog = await client.request<{ providers: Array<{ id: string; available: boolean }> }>("providers.list", {
 			sessionId: opened.leader.sessionId,
 		});
-		expect(catalog.providers.find((one) => one.id === "alternate")?.available).toBe(true);
+		expect(catalog.providers.map((one) => one.id)).toEqual(["opencode"]);
 		await expect(
 			client.request("conversation.setProvider", {
 				sessionId: opened.leader.sessionId,
@@ -284,36 +286,14 @@ test("a fresh workspace remains selectable when its provider fails and recovers 
 		).rejects.toThrow();
 		const stillFailed = await client.request<{ leaders: Leader[] }>("snapshot", {});
 		expect(stillFailed.leaders.find((one) => one.workspaceId === opened.workspace.id)).toEqual(opened.leader);
-		const switched = await client.request<{ sessionId: string; provider: string }>("conversation.setProvider", {
-			sessionId: opened.leader.sessionId,
-			provider: "alternate",
-		});
-		expect(switched.provider).toBe("alternate");
-		expect(switched.sessionId).not.toBe(opened.leader.sessionId);
-		const recoveredSnapshot = await client.request<{ leaders: Leader[] }>("snapshot", {});
-		const recovered = recoveredSnapshot.leaders.find((one) => one.workspaceId === opened.workspace.id);
-		expect(recovered?.state).toBe("idle");
-		expect(recovered?.sessionId).toBe(switched.sessionId);
-		const models = await client.request<{ models: Array<{ id: string }> }>("models.list", {
-			sessionId: switched.sessionId,
-		});
-		expect(models.models.length).toBeGreaterThan(0);
-		const capabilities = await client.request<{ image: boolean; embeddedContext: boolean }>(
-			"conversation.capabilities",
-			{ sessionId: switched.sessionId },
-		);
-		expect(capabilities).toEqual({ image: true, embeddedContext: true });
-		await client.request("conversation.tail", { sessionId: switched.sessionId, limit: 20 });
-		await client.request("conversation.prompt", { sessionId: switched.sessionId, text: "recovered" });
-		await waitFor("recovered provider reply", async () => {
-			const tail = await client.request<ConversationTailResult>("conversation.tail", {
-				sessionId: switched.sessionId,
-				limit: 20,
-			});
-			return tail.blocks.some((block) => block.role === "agent" && block.text.includes("echo:recovered"))
-				? true
-				: undefined;
-		});
+		await expect(
+			client.request("conversation.setProvider", {
+				sessionId: opened.leader.sessionId,
+				provider: "alternate",
+			}),
+		).rejects.toThrow("unavailable");
+		const unchanged = await client.request<{ leaders: Leader[] }>("snapshot", {});
+		expect(unchanged.leaders.find((one) => one.workspaceId === opened.workspace.id)).toEqual(opened.leader);
 	} finally {
 		await client.close();
 	}
@@ -325,7 +305,7 @@ test.each(["finish", "cancel"] as const)(
 		const barrier = join(dir, "activity-barrier");
 		const ready = join(dir, "activity-ready");
 		await writeBarrierSettings(join(dir, "activity-sessions.json"), barrier, ready);
-		node = await startNode();
+		node = await startNode({ sessionFactory: startLegacySession });
 		const at = await attach();
 		try {
 			await at.client.request("conversation.prompt", {
@@ -358,7 +338,7 @@ test.each(["finish", "cancel"] as const)(
 );
 
 test("workspace leader displays a provider failure and returns to running on retry", async () => {
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const at = await attach();
 	try {
 		// The fixture rejects the request when no barrier path is configured.
@@ -380,7 +360,7 @@ test("workspace leader displays a provider failure and returns to running on ret
 }, 30000);
 
 test("a prompt persists the user turn, the blocks and the closed turn", async () => {
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const at = await attach();
 	try {
 		await at.client.request<{ turnId: string }>("conversation.prompt", {
@@ -420,7 +400,7 @@ test("a prompt persists the user turn, the blocks and the closed turn", async ()
 }, 60000);
 
 test("a cancelled turn is closed as cancelled", async () => {
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const at = await attach();
 	try {
 		await at.client.request("conversation.prompt", { sessionId: at.leader.sessionId, text: "HOLD_FOREVER" });
@@ -434,7 +414,7 @@ test("a cancelled turn is closed as cancelled", async () => {
 }, 60000);
 
 test("a durable prompt relaunches once after the provider exits before dispatch", async () => {
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const at = await attach();
 	try {
 		const exited = await at.client.request<{ turnId: string }>("conversation.prompt", {
@@ -472,7 +452,7 @@ test("a durable prompt relaunches once after the provider exits before dispatch"
 }, 60000);
 
 test("rich ACP progress and attachment metadata survive tail without payload bytes", async () => {
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const at = await attach();
 	try {
 		expect(
@@ -515,14 +495,14 @@ test("rich ACP progress and attachment metadata survive tail without payload byt
 }, 60000);
 
 test("the leader can be prompted again after the node restarts", async () => {
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const first = await attach();
 	await first.client.request("conversation.prompt", { sessionId: first.leader.sessionId, text: "before" });
 	await waitFor("the first reply", () => first.turns.find((n) => n.block?.text === "echo:before"));
 	await first.client.close();
 	await node.stop();
 
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const second = await attach();
 	try {
 		// The session is live again — resumed, or re-created under a new id
@@ -548,14 +528,14 @@ test("the leader can be prompted again after the node restarts", async () => {
 
 test("a provider that remembers its session resumes into the same conversation", async () => {
 	await writeSettings(join(dir, "fake-sessions.json"));
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const first = await attach();
 	await first.client.request("conversation.prompt", { sessionId: first.leader.sessionId, text: "before" });
 	await waitFor("the first reply", () => first.turns.find((n) => n.block?.text === "echo:before"));
 	await first.client.close();
 	await node.stop();
 
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const second = await attach();
 	try {
 		expect(second.leader.sessionId).toBe(first.leader.sessionId);
@@ -577,7 +557,7 @@ test("a provider that remembers its session resumes into the same conversation",
 test("reset chat starts a fresh leader conversation and resumes that identity after restart", async () => {
 	const storeFile = join(dir, "reset-sessions.json");
 	await writeSettings(storeFile);
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const first = await attach();
 	await first.client.request("conversation.prompt", {
 		sessionId: first.leader.sessionId,
@@ -626,7 +606,7 @@ test("reset chat starts a fresh leader conversation and resumes that identity af
 	expect(oldTail.blocks.some((block) => block.text.includes("UNWANTED_RESET_CONTEXT"))).toBe(true);
 	await first.client.close();
 	await node.stop();
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const second = await attach();
 	try {
 		expect(second.leader.sessionId).toBe(reset.sessionId);
@@ -643,7 +623,7 @@ test("reset chat starts a fresh leader conversation and resumes that identity af
 
 test("a reset provider startup failure leaves the old owner and chat usable", async () => {
 	await writeSettings(join(dir, "reset-failure-sessions.json"));
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const at = await attach();
 	try {
 		await writeFile(
@@ -670,7 +650,7 @@ test("a reset provider startup failure leaves the old owner and chat usable", as
 
 test("reset chat rebinds mission leads and agents without changing their authority", async () => {
 	await writeSettings(join(dir, "reset-agent-sessions.json"));
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const at = await attach();
 	try {
 		const actor = await leaderActor(at);
@@ -730,7 +710,7 @@ test("reset chat rebinds mission leads and agents without changing their authori
 
 test("an interrupted agent resumes its exact conversation when the leader continues it", async () => {
 	await writeSettings(join(dir, "fake-agent-sessions.json"));
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const first = await attach();
 	const firstActor = await leaderActor(first);
 	const created = await first.client.request<{ content: Array<{ text: string }> }>("tools.call", {
@@ -750,7 +730,7 @@ test("an interrupted agent resumes its exact conversation when the leader contin
 	await first.client.close();
 	await node.stop();
 
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const second = await attach();
 	try {
 		const actor = await leaderActor(second);
@@ -778,7 +758,7 @@ test("an interrupted agent resumes its exact conversation when the leader contin
 
 test("completed lead follow-up keeps identity and off-screen clients receive completion and question events", async () => {
 	await writeSettings(join(dir, "completed-followup-sessions.json"));
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const at = await attach();
 	const observer = await connectNode({ client: "cli" });
 	const ended: TurnNotification[] = [];
@@ -852,7 +832,7 @@ test("completed lead follow-up keeps identity and off-screen clients receive com
 test("a rejected idle-agent resume does not invent a replacement session", async () => {
 	const sessionStore = join(dir, "rejecting-agent-sessions.json");
 	await writeSettings(sessionStore);
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const first = await attach();
 	const firstActor = await leaderActor(first);
 	await first.client.request("tools.call", {
@@ -872,7 +852,7 @@ test("a rejected idle-agent resume does not invent a replacement session", async
 	await node.stop();
 	await writeRejectingResumeSettings(sessionStore);
 
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const second = await attach();
 	try {
 		const actor = await leaderActor(second);
@@ -923,7 +903,7 @@ async function agentActor(at: Attached, agent: Agent): Promise<{ actorId: string
 }
 
 test("two real writers serialize and completion starts exactly one queued successor", async () => {
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const at = await attach();
 	try {
 		const leader = await leaderActor(at);
@@ -977,7 +957,7 @@ test("two real writers serialize and completion starts exactly one queued succes
 }, 90000);
 
 test("a failed promoted writer is closed before the next queued writer starts", async () => {
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const at = await attach();
 	try {
 		const leader = await leaderActor(at);
@@ -1020,7 +1000,7 @@ test("a failed promoted writer is closed before the next queued writer starts", 
 }, 90000);
 
 test("an initial writer launch failure releases its lease before the next writer starts", async () => {
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const at = await attach();
 	try {
 		const leader = await leaderActor(at);
@@ -1054,7 +1034,7 @@ test("an initial writer launch failure releases its lease before the next writer
 
 test("restart preserves writer FIFO and explicit continuation starts the queued head", async () => {
 	await writeSettings(join(dir, "writer-restart-sessions.json"));
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const firstNode = await attach();
 	const leader = await leaderActor(firstNode);
 	await firstNode.client.request("tools.call", {
@@ -1077,7 +1057,7 @@ test("restart preserves writer FIFO and explicit continuation starts the queued 
 	await firstNode.client.close();
 	await node.stop();
 
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const secondNode = await attach();
 	try {
 		const nextLeader = await leaderActor(secondNode);
@@ -1107,7 +1087,7 @@ test("restart preserves writer FIFO and explicit continuation starts the queued 
 
 test("an interrupted writer queued behind another resumes its exact history when promoted", async () => {
 	await writeSettings(join(dir, "queued-resume-sessions.json"));
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const firstNode = await attach();
 	const leader = await leaderActor(firstNode);
 	await firstNode.client.request("tools.call", {
@@ -1163,7 +1143,7 @@ test("an interrupted writer queued behind another resumes its exact history when
 	await firstNode.client.close();
 	await node.stop();
 
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const secondNode = await attach();
 	try {
 		const nextLeader = await leaderActor(secondNode);
@@ -1223,7 +1203,7 @@ test("an interrupted writer queued behind another resumes its exact history when
 }, 90000);
 
 test("concurrent agent additions preserve both ids and admit one real writer", async () => {
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const at = await attach();
 	try {
 		const leader = await leaderActor(at);
@@ -1259,7 +1239,7 @@ test("concurrent agent additions preserve both ids and admit one real writer", a
 }, 90000);
 
 test("a completed writer is closed at its turn boundary before promotion", async () => {
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const at = await attach();
 	try {
 		const leader = await leaderActor(at);
@@ -1313,7 +1293,7 @@ test("a completed writer is closed at its turn boundary before promotion", async
 }, 90000);
 
 test("the tools answer on the socket and neta_mission creates a mission", async () => {
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const at = await attach();
 	try {
 		// The actor token is minted at session launch and handed to the
@@ -1352,7 +1332,7 @@ test("the fake ACP creates a mission through the injected MCP stdio proxy", asyn
 	const control = await shortTempDir("neta-mcp-e2e-");
 	process.env.NETA_BIN = MCP_RUNNER;
 	await writeMissionE2ESettings(control);
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const at = await attach();
 	try {
 		await at.client.request("conversation.prompt", { sessionId: at.leader.sessionId, text: "MCP_E2E_CREATE" });
@@ -1430,7 +1410,7 @@ test("the fake ACP creates a mission through the injected MCP stdio proxy", asyn
 
 test("the charter's reservations gate neta_mode", async () => {
 	await writeFile(join(work, "CHARTER.md"), "# Charter\n\n## Reserved for the user\n\n- database migrations\n");
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const at = await attach();
 	try {
 		const { actorId, token } = await leaderActor(at);
@@ -1475,7 +1455,7 @@ test("the charter's reservations gate neta_mode", async () => {
 
 test("neta_mode moves the leader to leadPlus and back", async () => {
 	await writeSettings(join(dir, "mode-sessions.json"));
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const at = await attach();
 	try {
 		const { actorId, token } = await leaderActor(at);
@@ -1535,7 +1515,7 @@ test("Lead++ waits for a normal turn boundary before relaunching writable", asyn
 	const barrier = join(dir, "mode-barrier");
 	const ready = join(dir, "mode-ready");
 	await writeBarrierSettings(join(dir, "mode-barrier-sessions.json"), barrier, ready);
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const at = await attach();
 	try {
 		const actor = await leaderActor(at);
@@ -1585,7 +1565,7 @@ test("Lead++ waits for a normal turn boundary before relaunching writable", asyn
 
 test("cancelling a turn invalidates its pending Lead++ grant and frees the writer", async () => {
 	await writeSettings(join(dir, "mode-cancel-sessions.json"));
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const at = await attach();
 	try {
 		const actor = await leaderActor(at);
@@ -1643,7 +1623,7 @@ test("cancelling a turn invalidates its pending Lead++ grant and frees the write
 
 test("closing a self-led Lead++ mission downgrades it before promoting another mission", async () => {
 	await writeSettings(join(dir, "mode-close-sessions.json"));
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const at = await attach();
 	try {
 		const actor = await leaderActor(at);
@@ -1705,7 +1685,7 @@ test("a refused Lead++ close returns and persists its real closeout outcome", as
 	await makeGitWorkspace();
 	const sessionStore = join(dir, "mode-refused-close-sessions.json");
 	await writeCwdResumeSettings(sessionStore);
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const at = await attach();
 	try {
 		let actor = await leaderActor(at);
@@ -1760,7 +1740,7 @@ test("a refused Lead++ close returns and persists its real closeout outcome", as
 test("a skill in the workspace root is found, whatever the node's cwd is", async () => {
 	await mkdir(join(work, ".neta", "skills"), { recursive: true });
 	await writeFile(join(work, ".neta", "skills", "repo-only.md"), "# Repo only\n\nUse the repo's own tools.\n");
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const at = await attach();
 	try {
 		const { actorId, token } = await leaderActor(at);
@@ -1803,7 +1783,7 @@ test("a skill in the workspace root is found, whatever the node's cwd is", async
 // transition keeps the same conversation and never re-sandboxes its leader.
 test("a mode change keeps the leader provider unrestricted", async () => {
 	await writeSettings(join(dir, "fake-sessions.json"));
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const at = await attach();
 	try {
 		const actor = await leaderActor(at);
@@ -1835,7 +1815,7 @@ test("a mode change keeps the leader provider unrestricted", async () => {
 
 test("workspace open reacquires a durable Lead++ mission before reviving writable", async () => {
 	await writeSettings(join(dir, "mode-restart-sessions.json"));
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const first = await attach();
 	const actor = await leaderActor(first);
 	await first.client.request("tools.call", {
@@ -1848,7 +1828,7 @@ test("workspace open reacquires a durable Lead++ mission before reviving writabl
 	await first.client.close();
 	await node.stop();
 
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const second = await attach();
 	try {
 		expect(second.leader.mode).toBe("leadPlus");
@@ -1865,7 +1845,7 @@ test("workspace open reacquires a durable Lead++ mission before reviving writabl
 test("provider switching keeps the Neta session, owner, tools, and a one-shot visible handoff", async () => {
 	const sessionStore = join(dir, "provider-switch-sessions.json");
 	await writeTwoProviderSettings(sessionStore);
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const at = await attach();
 	try {
 		const actor = await leaderActor(at);
@@ -1884,9 +1864,7 @@ test("provider switching keeps the Neta session, owner, tools, and a one-shot vi
 		const providers = await at.client.request<{
 			providers: Array<{ id: string; label: string; defaultModel: string; available: boolean }>;
 		}>("providers.list", {});
-		expect(providers.providers.map((provider) => provider.id)).toContain("fake");
-		expect(providers.providers.map((provider) => provider.id)).toContain("alternate");
-		expect(providers.providers.every((provider) => provider.available)).toBe(true);
+		expect(providers.providers.map((provider) => provider.id)).toEqual(["opencode"]);
 		const unopenedModels = await at.client.request<{ models: Array<{ id: string; name: string; provider: string }> }>(
 			"models.list",
 			{ provider: "alternate" },
@@ -1975,7 +1953,7 @@ test("provider switching keeps the Neta session, owner, tools, and a one-shot vi
 test("a provider handoff survives restart until the next accepted prompt", async () => {
 	const sessionStore = join(dir, "provider-handoff-restart.json");
 	await writeTwoProviderSettings(sessionStore);
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const first = await attach();
 	await first.client.request("conversation.setProvider", {
 		sessionId: first.leader.sessionId,
@@ -1986,7 +1964,7 @@ test("a provider handoff survives restart until the next accepted prompt", async
 	await first.client.close();
 	await node.stop();
 
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const second = await attach();
 	try {
 		await second.client.request("conversation.prompt", { sessionId, text: "AFTER_RESTART" });
@@ -2010,7 +1988,7 @@ test("a provider handoff survives restart until the next accepted prompt", async
 test("a provider that cannot assume writable access restores the original live provider", async () => {
 	const sessionStore = join(dir, "provider-switch-rollback.json");
 	await writeRejectingAlternateSettings(sessionStore);
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const at = await attach();
 	try {
 		const actor = await leaderActor(at);
@@ -2052,7 +2030,7 @@ test("a provider that cannot assume writable access restores the original live p
 
 test("workspace reset archives missions and queued workers and creates one blank leader", async () => {
 	await writeSettings(join(dir, "reset-workspace-sessions.json"));
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const at = await attach();
 	try {
 		const creation = await at.client.request<{ isError?: boolean }>("tools.call", {
@@ -2101,7 +2079,7 @@ test("workspace reset archives missions and queued workers and creates one blank
 
 test("runtime wakes workspace leader when mission leader ends without a completion tool", async () => {
 	await writeSettings(join(dir, "automatic-report-sessions.json"));
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const at = await attach();
 	try {
 		const creation = await at.client.request<{ isError?: boolean }>("tools.call", {
@@ -2133,7 +2111,8 @@ test("runtime wakes workspace leader when mission leader ends without a completi
 			messages?.some((message) => message.text.includes("Neta automatic report") && message.status === "delivered"),
 		).toBe(true);
 		const snapshot = await at.client.request<{ agents: Agent[] }>("snapshot");
-		const missionLead = snapshot.agents.find((agent) => agent.canSpawn)!;
+		const missionLead = snapshot.agents.find((agent) => agent.canSpawn);
+		if (!missionLead) throw new Error("mission lead is missing");
 		expect(missionLead.model).toBe("fixture-fast");
 		expect(messages.some((message) => message.text.includes("Actual model: fixture-fast"))).toBe(true);
 		const workerCreation = await at.client.request<{ isError?: boolean }>("tools.call", {
@@ -2201,7 +2180,7 @@ test("delegation routes effort independently, reports idle, hands off by role an
 			},
 		}),
 	);
-	node = await startNode();
+	node = await startNode({ sessionFactory: startLegacySession });
 	const at = await attach();
 	try {
 		const actor = await leaderActor(at);

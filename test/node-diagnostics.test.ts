@@ -5,10 +5,10 @@ import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Agent, InboxMessage, Workspace } from "../src/core/types.ts";
-import { systemContextPath, writeSystemContext } from "../src/acp/system-context.ts";
-import { RuntimeAdmission } from "../src/node/runtime-admission.ts";
 import { diagnosticsHandlers, prepareDiagnosticsFromDisk } from "../src/node/handlers-diagnostics.ts";
+import { RuntimeAdmission } from "../src/node/runtime-admission.ts";
 import type { NodeContext } from "../src/node/server.ts";
+import { systemContextPath, writeSystemContext } from "../src/session/system-context.ts";
 
 const dirs: string[] = [];
 const priorNetaDir = process.env.NETA_DIR;
@@ -142,13 +142,14 @@ test("prepared diagnostics stream only immutable allowlisted chunks", async () =
 	).files;
 	const file = preparedFiles.find((entry) => entry.path === "data/conversations/full.ndjson");
 	expect(file).toBeDefined();
+	if (!file) throw new Error("prepared transcript is missing");
 	await writeFile(source, "changed after prepare");
 	let offset = 0;
 	const chunks: Buffer[] = [];
 	for (;;) {
 		const page = (await diagnosticsHandlers["diagnostics.read"](
 			context([]),
-			{ exportId: prepared.exportId, cleanupToken: prepared.cleanupToken, fileId: file!.fileId, offset },
+			{ exportId: prepared.exportId, cleanupToken: prepared.cleanupToken, fileId: file.fileId, offset },
 			{} as never,
 		)) as { dataBase64: string; nextOffset: number; eof: boolean };
 		chunks.push(Buffer.from(page.dataBase64, "base64"));
@@ -158,19 +159,20 @@ test("prepared diagnostics stream only immutable allowlisted chunks", async () =
 	}
 	const received = Buffer.concat(chunks);
 	expect(received).toEqual(original);
-	expect(createHash("sha256").update(received).digest("hex")).toBe(file!.sha256);
+	expect(createHash("sha256").update(received).digest("hex")).toBe(file.sha256);
 
 	const empty = join(root, "conversations", "empty.ndjson");
 	await writeFile(empty, "");
 	const emptyPrepared = await prepareDiagnosticsFromDisk({ root, liveSnapshot: false });
 	const emptyFiles = (emptyPrepared.manifest as unknown as { files: typeof preparedFiles }).files;
 	const emptyFile = emptyFiles.find((entry) => entry.path === "data/conversations/empty.ndjson");
+	if (!emptyFile) throw new Error("prepared empty transcript is missing");
 	const eof = (await diagnosticsHandlers["diagnostics.read"](
 		context([]),
 		{
 			exportId: emptyPrepared.exportId,
 			cleanupToken: emptyPrepared.cleanupToken,
-			fileId: emptyFile!.fileId,
+			fileId: emptyFile.fileId,
 			offset: 0,
 		},
 		{} as never,
@@ -180,7 +182,7 @@ test("prepared diagnostics stream only immutable allowlisted chunks", async () =
 	await expect(
 		diagnosticsHandlers["diagnostics.read"](
 			context([]),
-			{ exportId: prepared.exportId, cleanupToken: "wrong", fileId: file!.fileId, offset: 0 },
+			{ exportId: prepared.exportId, cleanupToken: "wrong", fileId: file.fileId, offset: 0 },
 			{} as never,
 		),
 	).rejects.toThrow("wrong cleanup token");
@@ -194,21 +196,21 @@ test("prepared diagnostics stream only immutable allowlisted chunks", async () =
 	await expect(
 		diagnosticsHandlers["diagnostics.read"](
 			context([]),
-			{ exportId: prepared.exportId, cleanupToken: prepared.cleanupToken, fileId: file!.fileId, offset: -1 },
+			{ exportId: prepared.exportId, cleanupToken: prepared.cleanupToken, fileId: file.fileId, offset: -1 },
 			{} as never,
 		),
 	).rejects.toThrow("offset");
 	await expect(
 		diagnosticsHandlers["diagnostics.read"](
 			context([]),
-			{ exportId: prepared.exportId, cleanupToken: prepared.cleanupToken, fileId: file!.fileId, offset: "0" },
+			{ exportId: prepared.exportId, cleanupToken: prepared.cleanupToken, fileId: file.fileId, offset: "0" },
 			{} as never,
 		),
 	).rejects.toThrow("offset");
 	await expect(
 		diagnosticsHandlers["diagnostics.read"](
 			context([]),
-			{ exportId: prepared.exportId, cleanupToken: prepared.cleanupToken, fileId: file!.fileId },
+			{ exportId: prepared.exportId, cleanupToken: prepared.cleanupToken, fileId: file.fileId },
 			{} as never,
 		),
 	).rejects.toThrow("offset");
@@ -220,7 +222,7 @@ test("prepared diagnostics stream only immutable allowlisted chunks", async () =
 	await expect(
 		diagnosticsHandlers["diagnostics.read"](
 			context([]),
-			{ exportId: prepared.exportId, cleanupToken: prepared.cleanupToken, fileId: file!.fileId, offset: 0 },
+			{ exportId: prepared.exportId, cleanupToken: prepared.cleanupToken, fileId: file.fileId, offset: 0 },
 			{} as never,
 		),
 	).rejects.toThrow("export is unavailable");
@@ -235,7 +237,7 @@ test("prepared diagnostics stream only immutable allowlisted chunks", async () =
 			{
 				exportId: emptyPrepared.exportId,
 				cleanupToken: emptyPrepared.cleanupToken,
-				fileId: emptyFile!.fileId,
+				fileId: emptyFile.fileId,
 				offset: 0,
 			},
 			{} as never,
@@ -358,7 +360,7 @@ test("runtime diagnostics expose bounded verified facts without instruction text
 	const ctx = context([]);
 	ctx.store.listAgents = () => [agent];
 	ctx.runtimeAdmission = new RuntimeAdmission("runtime-instance");
-	ctx.acp = {
+	ctx.runtime = {
 		runtimeDiagnostics: async () => ({
 			attached: true,
 			bindingGeneration: "generation",
@@ -371,7 +373,7 @@ test("runtime diagnostics expose bounded verified facts without instruction text
 				(status) => ({ status, text: "PRIVATE INBOX CONTENT" }) as InboxMessage,
 			),
 		isTurnActive: () => true,
-	} as unknown as NodeContext["acp"];
+	} as unknown as NodeContext["runtime"];
 	const bundle = await writeSystemContext({
 		sessionId: "session",
 		actorId: "agent",
@@ -423,7 +425,7 @@ test("runtime diagnostics expose bounded verified facts without instruction text
 	expect(bounded.instructions).toMatchObject({ revision: null, hash: bundle.hash });
 	expect(Buffer.byteLength(JSON.stringify(bounded))).toBeLessThan(8192);
 
-	ctx.acp.runtimeDiagnostics = async () => ({ attached: false, bindingGeneration: "replacement" });
+	ctx.runtime.runtimeDiagnostics = async () => ({ attached: false, bindingGeneration: "replacement" });
 	const replacement = (await diagnosticsHandlers["diagnostics.runtime"](
 		ctx,
 		{ sessionId: "session" },
@@ -432,10 +434,10 @@ test("runtime diagnostics expose bounded verified facts without instruction text
 	expect(replacement.instructions).toBeNull();
 	expect(replacement.instructionStatus).toBe("unverified");
 	expect(replacement.runtimeState).toBe("unattached");
-	ctx.acp.runtimeDiagnostics = async () => {
+	ctx.runtime.runtimeDiagnostics = async () => {
 		throw new Error("Bearer PRIVATE-CREDENTIAL");
 	};
-	ctx.acp.listInbox = async () => {
+	ctx.runtime.listInbox = async () => {
 		throw new Error("PRIVATE INBOX FAILURE");
 	};
 	agent.requestedModel = "sk-private-key";

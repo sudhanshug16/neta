@@ -2,10 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type SessionEvent, startSession } from "../src/acp/session.ts";
-import type { ProviderSettings } from "../src/acp/settings.ts";
 import type { SessionId } from "../src/core/types.ts";
 import { accessFor, applyModeSwitch, modeChangeText, type SwitchDeps } from "../src/modes/switch.ts";
+import type { ProviderSettings } from "../src/session/settings.ts";
+import { type SessionEvent, startSession } from "./fixtures/legacy-acp/session.ts";
 
 const FIXTURE = new URL("./fixtures/fake-acp-agent.mjs", import.meta.url).pathname;
 
