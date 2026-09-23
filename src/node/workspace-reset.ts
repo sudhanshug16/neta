@@ -50,17 +50,25 @@ export async function archiveWorkspace(
 	const wasActive = new Map(
 		missions.map((mission) => [mission.id, missionIsActive(agents, mission, leader, isTurnActive)]),
 	);
-	// Quiesce first: stop every session, archive every agent and release their
-	// leases, so no runtime can still use a worktree when removal runs and no
-	// release can promote a queued worker during reset.
+	// Quiesce in strict phases. First stop every session and archive every
+	// agent with NO lease released: releasing the first writer while a second
+	// is still queued would promote (start) it mid-reset. Only once nothing
+	// remains queued are the agent leases released, which makes promotion a
+	// no-op. (Admission of new work is already blocked by the caller, which
+	// clears this workspace's pending closes, modes and releases and rejects
+	// new mission/agent/model calls while resetting.)
 	if (ctx.runtime.isTurnActive?.(leader.sessionId)) await ctx.runtime.cancel(leader.sessionId);
+	const quiesced: Agent[] = [];
 	for (const agent of agents.filter((item) => item.state !== "archived")) {
 		if (agent.provider === "pi" && ctx.pi) ctx.pi.closeSession(agent.sessionId);
 		else await ctx.runtime.close(agent.sessionId);
 		const archived = { ...agent, state: "archived" as const, endedAt: agent.endedAt ?? nowIso() };
 		await ctx.store.putAgent(archived);
-		await ports.release(workspaceId, agent.id);
+		quiesced.push(archived);
 		ctx.hub.broadcast("state", { kind: "agent", record: archived });
+	}
+	for (const agent of quiesced) {
+		await ports.release(workspaceId, agent.id);
 	}
 	// Clean inactive worktrees close through the authoritative pipeline with
 	// their branches retained; dirty or active ones stay open with a visible

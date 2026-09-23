@@ -2415,7 +2415,11 @@ test("workspace reset archives missions and queued workers and creates one blank
 
 test("workspace reset on a git workspace reclaims clean idle worktrees and keeps active ones open", async () => {
 	await makeGitWorkspace();
-	await writeSettings(join(dir, "reset-git-workspace-sessions.json"));
+	await writeBarrierSettings(
+		join(dir, "reset-git-workspace-sessions.json"),
+		join(dir, "reset-barrier"),
+		join(dir, "reset-barrier-ready"),
+	);
 	node = await startNode({ sessionFactory: startLegacySession });
 	const at = await attach();
 	try {
@@ -2428,6 +2432,12 @@ test("workspace reset on a git workspace reclaims clean idle worktrees and keeps
 				objective: "stay active across reset",
 				access: "readWrite",
 				lead: { task: "Coordinate busy reset", effort: 2 },
+				agents: [
+					// The first writer blocks on the barrier while holding the
+					// lease, so the second writer stays queued behind it.
+					{ task: "WAIT_FOR_BARRIER hold the writer lease", access: "readWrite" },
+					{ task: "queued writer", access: "readWrite" },
+				],
 			},
 		});
 		if (busy.isError) throw new Error(JSON.stringify(busy));
@@ -2452,6 +2462,17 @@ test("workspace reset on a git workspace reclaims clean idle worktrees and keeps
 		await waitFor("busy lead turn", () =>
 			at.turns.find((turn) => turn.sessionId === busyLead.sessionId && turn.turn?.endedAt === undefined),
 		);
+		// The first writer blocks on the barrier while holding the lease, so
+		// the second writer stays queued behind it; neither may be promoted
+		// (started) by reset's own lease releases.
+		await waitFor("queued writer waiting", async () => {
+			const current = await at.client.request<{ agents: Agent[] }>("snapshot", {});
+			const workers = current.agents.filter((agent) => agent.missionId === busyId && !agent.canSpawn);
+			return workers.some((agent) => agent.state === "running") &&
+				workers.some((agent) => agent.state === "queued")
+				? true
+				: undefined;
+		});
 		await waitFor("idle lead settled", async () => {
 			const current = await at.client.request<{ agents: Agent[] }>("snapshot", {});
 			const lead = current.agents.find((agent) => agent.missionId === idleId && agent.canSpawn);
@@ -2477,6 +2498,7 @@ test("workspace reset on a git workspace reclaims clean idle worktrees and keeps
 		expect(afterA.mission.attention).toContain("agents were active");
 		await expect(stat(pathA)).resolves.toBeDefined();
 		expect(afterA.agents.every((agent) => agent.state === "archived")).toBe(true);
+		expect(afterA.agents.some((agent) => !agent.canSpawn)).toBe(true);
 		// The clean idle mission closed through the pipeline: its directory
 		// is reclaimed while its committed branch is retained.
 		const afterB = await at.client.request<{ mission: Mission }>("missions.get", { missionId: idleId });

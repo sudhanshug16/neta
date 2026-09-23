@@ -151,6 +151,29 @@ test("reset quiesces actors before closing, reclaims clean inactive worktrees, l
 	expect(f.leader().sessionId).toBe("new");
 });
 
+test("releasing the first writer cannot promote the queued writer mid-reset", async () => {
+	const f = fixture();
+	const promoted: string[] = [];
+	const innerRelease = f.ports.release;
+	f.ports.release = async (workspaceId: string, holder: string) => {
+		await innerRelease(workspaceId, holder);
+		// Simulate the real scheduler: start anything still queued. With the
+		// phased quiesce nothing is queued anymore, so this must never fire.
+		const next = f.agents.find((agent) => agent.id !== holder && agent.state === "queued");
+		if (next !== undefined) {
+			promoted.push(next.id);
+			next.state = "starting";
+		}
+	};
+	await archiveWorkspace(f.context, "w", f.ports);
+	expect(promoted).toHaveLength(0);
+	expect(f.agents.find((agent) => agent.id === "agent-1")?.state).toBe("archived");
+	// Every archive landed before the first release ran.
+	const archiveIdx = f.calls.flatMap((call, i) => (call.startsWith("archive:") ? [i] : []));
+	const releaseIdx = f.calls.flatMap((call, i) => (call.startsWith("release:") ? [i] : []));
+	expect(Math.max(...archiveIdx)).toBeLessThan(Math.min(...releaseIdx));
+});
+
 test("a refused removal stays open with the refusal reason and keeps its work", async () => {
 	const f = fixture(async (input) => ({
 		ok: false,
