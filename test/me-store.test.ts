@@ -317,3 +317,25 @@ test("legacy logical Sol ids are replaced by a real session id", async () => {
 	expect(sol.sessionId).not.toBe(SOL_SESSION_ID);
 	expect(await openMeStore().solIdentity()).toEqual(sol);
 });
+
+test("Luna curator retains one native session identity and rejects silent target rebinding", async () => {
+	isolated();
+	const store = openMeStore();
+	const identity = await store.lunaIdentity();
+	expect(identity.sessionId).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/);
+	expect(identity.role).toBe("curator");
+	expect(
+		await store.bindLunaRuntime({ workspaceId: "workspace-A", provider: "opencode", model: "openai/gpt-6-luna" }),
+	).toMatchObject({
+		sessionId: identity.sessionId,
+		workspaceId: "workspace-A",
+		model: "openai/gpt-6-luna",
+	});
+	expect(await openMeStore().lunaIdentity()).toMatchObject({
+		sessionId: identity.sessionId,
+		workspaceId: "workspace-A",
+	});
+	await expect(
+		store.bindLunaRuntime({ workspaceId: "workspace-B", provider: "opencode", model: "openai/gpt-6-luna" }),
+	).rejects.toThrow("already bound");
+});

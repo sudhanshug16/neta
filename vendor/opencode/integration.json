@@ -4,7 +4,7 @@
   "commit": "7a31b5c0f76ce1c06befacc09b47b4fc3c71c408",
   "bun": "1.4.2",
   "integrationVersion": 2,
-  "overlaySha256": "cbaf6403a661f5aabfe70b1b203d7d8f0b1aa721450fdd55cef2b6b81b6bf40f",
+  "overlaySha256": "f586676f9fe821a4896592c2a419e3f32667a40f05a16d0dbd6adaf785aa537a",
   "lockSha256": "1eede033cd5ffbe7d4d5994d0e4b4bfb72948d8fc27e2343cf220e8d5d277764",
   "files": {
     "NETA.md": "789ccd30cd4422792b9c054e6766b14253a1c9ebf65879f2b2b85611442f1260",
@@ -38,7 +38,7 @@
     "packages/core/src/codemode/catalog.ts": "e422187a2a24da9a8ff37086af9c68084ee8e5116d1fc09040dd198de39a6cc4",
     "packages/core/src/codemode/tool.ts": "76d1d48003f0dfc3223ffa2a5b540af40923998cb2a6a40f2cb3098399755eee",
     "packages/core/src/permission.ts": "884391bad7f35befa15f8dfd6e5e5cf30a0090a157b7223b38774a0ac35dd98a",
-    "packages/core/src/plugin/neta-context.ts": "83a271e072d3b2a4234421fb9fd1adb21894829fe64767dd635b55ef7007bb78",
+    "packages/core/src/plugin/neta-context.ts": "79565c02118a8bd801eaaaa267fe9a8522f16dfbb59186467c8005e14f6f0a47",
     "packages/core/src/plugin/optimize.ts": "0e6c4e682230d942c99950f9fdc2d345942d4fa420c80c0a93aba7e1bccf3230",
     "packages/core/src/session/runner/step.ts": "ea7dd0d128f050293e024b56faeeb857cc3f80df24729f955e82e4e7c2ce2fa8",
     "packages/core/src/session/to-session-error.ts": "0b5b4a425d42f61307eeef83cc76ae7cb8cdb7c43f1195f76381f8358ea1ccbb",
@@ -46,7 +46,7 @@
     "packages/core/src/shell/select.ts": "19d30324682fadb7ea17c6b70abcc4424cc1c2a0a013c398e3cbead3b0e465b6",
     "packages/core/test/codemode/catalog.test.ts": "01ea02d3d08c2dcf32124f2757a637b01b91a1081e16a47017fc1f34edb5240c",
     "packages/core/test/permission.test.ts": "60ffe357e07c218367bc02d36f9459fb3265d4837d8cdde4e36c16bad8c6ffc2",
-    "packages/core/test/plugin/neta-context.test.ts": "28198a7ce93e6f3397ac1d3145b2e689f7dfe4d22e57914703fa841abff745df",
+    "packages/core/test/plugin/neta-context.test.ts": "b22040c41ba3cf0a2a236470db1b297837fb8d0fdf4da11d5bc4401df147707f",
     "packages/core/test/plugin/optimize.test.ts": "67477fc2ab82626de53f8141bd72b14005af0fc6afb57bf90beec0b528419a86",
     "packages/core/test/session-runner.test.ts": "4e15d8a1e0216370b29b211bdf27548e706ab83c9cd81de1e2be1e8daa21ff25",
     "packages/core/test/shell.test.ts": "a69299b9b94b904bd421f355b133d4c73eddd2f6106dbd3f2d1f92acca5af4cb",
@@ -138,6 +138,6 @@
     "packages/tui/test/neta-updates.test.tsx": "dc30bcec8e82ad9b952f80b5613fe61c56b4ef6fba3d0d561992a7cfdfd8114b",
     "packages/tui/test/neta-viewport.test.tsx": "0d64dac754e235e6a1a1e9ed4c1a8d129e733e278666e744e16df48f1b085a97",
     "packages/tui/test/terminal-dimensions.test.ts": "552232ce26bbc1a785f64deb9be1c64f8bf50c00b8e7d9c9ed99c99dd7484420",
-    "packages/util/src/neta-contract.ts": "247669304b3cbd85985b1dd25c5eaa4ccff7c3917c86669df0c264ac12d69b33"
+    "packages/util/src/neta-contract.ts": "914bdb61f59c886c583e6a155f6ab47e94bea19ac7f99a8e7bdfd636ab2c8230"
   }
 }

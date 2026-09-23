@@ -254,9 +254,12 @@ same ID. Superleader routes preserve the exact user instruction separately from
 the derived text and explanation, validate a current workspace-leader session,
 and deliver with a stable source key. The TUI exposes the route only as an
 explicit confirmation action. GPT-6 Sol medium is selected and checked through
-the native runtime when that provider is configured. Luna classification and
-permission-request capture are still not wired; uncategorized sources remain
-pending, and no background classifier runs.
+the native runtime when that provider is configured. Luna classification uses
+the authenticated OpenCode runtime and a persisted read-only session with Neta
+tools disabled. It runs only when `meCurator.enabled` is explicitly set to
+`true` in `~/.neta/settings.json`. It is off by default. Model/transport errors leave
+sources pending for retry on a later relevant event or Node restart.
+Permission-request capture remains separate integration work.
 
 ## Missions
 

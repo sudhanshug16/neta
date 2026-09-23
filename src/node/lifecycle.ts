@@ -45,6 +45,8 @@ import type {
 	WorkspaceId,
 } from "../core/types.ts";
 import { captureMeEvent, captureMeLeaderTurn, replayMeEvents, replayMeLeaderTurns } from "../me/capture.ts";
+import { createMeCurator } from "../me/curator.ts";
+import { createRuntimeMeClassifier } from "../me/runtime-curator.ts";
 import { openMeStore } from "../me/store.ts";
 import { nativeEndpointReady } from "../opencode/attachment.ts";
 import { openCodeInvocation } from "../opencode/runtime.ts";
@@ -198,7 +200,7 @@ function checkBlockCursor(cursor: string): number {
 // The real 02/03 modules behind the ports. Reads are served from memory
 // loaded here (registries, workspaces, leaders, agents); events and
 // conversations read fresh from disk per call.
-export async function adaptStore(real: Store): Promise<AdaptedStore> {
+export async function adaptStore(real: Store, onMeSource?: () => void): Promise<AdaptedStore> {
 	const machine = await real.machine.load();
 	const workspaces = new Map((await real.workspaces.list()).map((workspace) => [workspace.id, workspace]));
 	const leaders = await loadLeaders();
@@ -219,10 +221,11 @@ export async function adaptStore(real: Store): Promise<AdaptedStore> {
 	});
 	const appendEvent = async (input: Omit<Event, "seq" | "at">): Promise<Event> => {
 		const event = await real.events.append(input);
-		await captureMeEvent(me, event, meContext());
+		const captured = await captureMeEvent(me, event, meContext());
 		await me.setCheckpoint({
 			workspaces: [{ workspaceId: event.workspaceId, eventSeq: event.seq, turns: [] }],
 		});
+		if (captured) onMeSource?.();
 		return event;
 	};
 
@@ -462,7 +465,7 @@ export function adaptRuntime(
 	runtimeAdmission?: RuntimeAdmission,
 	inboxGuard?: (message: InboxMessage) => Promise<boolean>,
 	sessionFactory: (options: StartOptions) => Promise<RuntimeSession> = startSession,
-	systemContextRole?: (sessionId: string) => "leader" | "lead" | "agent" | "orchestrator" | undefined,
+	systemContextRole?: (sessionId: string) => "leader" | "lead" | "agent" | "orchestrator" | "curator" | undefined,
 ): AdaptedRuntime {
 	const makeSession = sessionFactory;
 	const sessionLifecycle = new SessionLifecycle();
@@ -1784,11 +1787,15 @@ export async function startNode(o?: {
 	try {
 		let storePort: NodeStore;
 		let adapted: AdaptedStore | undefined;
+		let scheduleMeCurator: () => void = () => {};
+		let stopMeCurator: () => void = () => {};
+		let curatorSessionId: SessionId | undefined;
+		let notifyMeChanged: () => void = () => {};
 		if (o?.store !== undefined) {
 			storePort = o.store;
 		} else {
 			realStore = await openStore();
-			adapted = await adaptStore(realStore);
+			adapted = await adaptStore(realStore, () => scheduleMeCurator());
 			storePort = adapted;
 		}
 		const settings = loadSettings({ netaDir: netaDir() }).settings;
@@ -1802,8 +1809,10 @@ export async function startNode(o?: {
 				if (actor === undefined) return;
 				const leader = storePort.listLeaders().find((item) => item.sessionId === sessionId);
 				const workspace = storePort.getWorkspace(actor.workspaceId);
-				if (leader && workspace)
-					await captureMeLeaderTurn({ store: openMeStore(), workspace, sessionId, turn, blocks });
+				if (leader && workspace) {
+					if (await captureMeLeaderTurn({ store: openMeStore(), workspace, sessionId, turn, blocks }))
+						scheduleMeCurator();
+				}
 				const source = blocks
 					.map((block) => block.text.trim())
 					.filter(Boolean)
@@ -1837,12 +1846,20 @@ export async function startNode(o?: {
 				(sessionId) => prepareHandoffForSession({ store: storePort }, sessionId),
 				realStore?.inbox,
 				(sessionId) =>
-					sessionSystemContext({ store: storePort, superleaderSessionId: solIdentity.sessionId }, sessionId),
+					sessionSystemContext(
+						{ store: storePort, superleaderSessionId: solIdentity.sessionId, lunaSessionId: curatorSessionId },
+						sessionId,
+					),
 				(notification) => mounted?.recordTurn(notification) ?? Promise.resolve(),
 				runtimeAdmission,
 				(message) => mounted?.canDeliverInbox(message) ?? Promise.resolve(true),
 				o?.sessionFactory,
-				(sessionId) => (sessionId === solIdentity.sessionId ? "orchestrator" : undefined),
+				(sessionId) =>
+					sessionId === solIdentity.sessionId
+						? "orchestrator"
+						: sessionId === curatorSessionId
+							? "curator"
+							: undefined,
 			);
 			runtimePort = adaptedRuntime;
 		} else {
@@ -1969,6 +1986,7 @@ export async function startNode(o?: {
 			runtimeAdmission.stop();
 			stopping = (async (): Promise<void> => {
 				try {
+					stopMeCurator();
 					// 07's mode ticker first: it writes through the store,
 					// which is about to close.
 					mounted?.stop();
@@ -2029,6 +2047,87 @@ export async function startNode(o?: {
 		const tools = mounted?.handlers ?? {};
 		const server = await createServer({ socketPath, token, handlers: { ...allHandlers, ...tools }, ctx });
 		hub = server.hub;
+		notifyMeChanged = () => hub.broadcast("me.changed", { pending: true });
+		if (realStore !== undefined && settings.meCurator?.enabled === true) {
+			const me = openMeStore();
+			const luna = await me.lunaIdentity();
+			curatorSessionId = luna.sessionId;
+			let classifier: ReturnType<typeof createRuntimeMeClassifier> | undefined;
+			let activeRun: Promise<void> | undefined;
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			let rerunRequested = false;
+			const ensureLuna = async (sourceWorkspaceId: string): Promise<void> => {
+				const saved = await me.lunaIdentity();
+				const workspaceId = saved.workspaceId ?? sourceWorkspaceId;
+				const workspace = storePort.getWorkspace(workspaceId);
+				const leader = storePort.getLeader(workspaceId);
+				const root = workspace?.roots.find((item) => item.machineId === storePort.machine().id)?.path;
+				if (!workspace || !leader || !root)
+					throw new Error("Luna needs a current workspace leader and local workspace root");
+				const provider = "opencode";
+				const model = "openai/gpt-6-luna";
+				if (!settings.providers[provider] || settings.forbiddenModels.includes(model))
+					throw new Error("GPT-6 Luna is unavailable in the configured OpenCode runtime");
+				const alreadyBound = saved.workspaceId !== undefined;
+				const identity = await me.bindLunaRuntime({ workspaceId, provider, model });
+				const request = {
+					sessionId: identity.sessionId,
+					workspaceId,
+					cwd: root,
+					provider,
+					model,
+					access: "readOnly" as const,
+					unsandboxed: false,
+					netaTools: false,
+				};
+				const selected = alreadyBound
+					? await runtimePort.ensureSession({ ...request, allowFresh: false })
+					: await runtimePort.createSession(request);
+				if (selected.sessionId !== identity.sessionId)
+					throw new Error("Luna native runtime changed its persisted session identity");
+				await runtimePort.setModel(identity.sessionId, model);
+				const diagnostics = await runtimePort.runtimeDiagnostics?.(identity.sessionId);
+				if (diagnostics?.model !== undefined && diagnostics.model !== model)
+					throw new Error("Luna model selection could not be verified");
+				classifier ??= createRuntimeMeClassifier({
+					runtime: runtimePort,
+					store: storePort,
+					sessionId: identity.sessionId,
+				});
+			};
+			const curator = createMeCurator({
+				store: me,
+				classify: async (input) => {
+					await ensureLuna(input.source.workspaceId);
+					if (!classifier) throw new Error("Luna runtime classifier is unavailable");
+					return classifier(input);
+				},
+			});
+			scheduleMeCurator = () => {
+				rerunRequested = true;
+				if (timer) clearTimeout(timer);
+				timer = setTimeout(() => {
+					timer = undefined;
+					if (activeRun) return;
+					rerunRequested = false;
+					activeRun = curator
+						.run()
+						.then(() => notifyMeChanged())
+						.catch(() => undefined)
+						.finally(() => {
+							activeRun = undefined;
+							if (rerunRequested) scheduleMeCurator();
+						});
+				}, 250);
+				timer.unref();
+			};
+			stopMeCurator = () => {
+				if (timer) clearTimeout(timer);
+				timer = undefined;
+				rerunRequested = false;
+			};
+			if ((await me.pendingSources()).length > 0) scheduleMeCurator();
+		}
 		wireTurnStream({ ...ctx, hub: server.hub });
 		await mounted?.recover();
 		return { descriptor, hub: server.hub, stop, stopped };

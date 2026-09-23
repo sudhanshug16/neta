@@ -20,11 +20,11 @@ const relevantKinds = new Set<Event["kind"]>([
 ]);
 
 /** Capture only attention-relevant Neta lifecycle events; Luna makes the fallible feed decision later. */
-export async function captureMeEvent(store: MeStore, event: Event, context: MeEventSourceContext): Promise<void> {
-	if (!relevantKinds.has(event.kind)) return;
+export async function captureMeEvent(store: MeStore, event: Event, context: MeEventSourceContext): Promise<boolean> {
+	if (!relevantKinds.has(event.kind)) return false;
 	const workspace = context.workspaces.find((item) => item.id === event.workspaceId);
 	const leader = context.leaders.find((item) => item.workspaceId === event.workspaceId);
-	if (!workspace || !leader) return;
+	if (!workspace || !leader) return false;
 	const agent = event.agentId ? context.agents.find((item) => item.id === event.agentId) : undefined;
 	const mission = event.missionId ? context.missions.find((item) => item.id === event.missionId) : undefined;
 	const sessionId = event.sessionId ?? agent?.sessionId ?? leader.sessionId;
@@ -39,9 +39,9 @@ export async function captureMeEvent(store: MeStore, event: Event, context: MeEv
 	]
 		.filter((part): part is string => part !== undefined)
 		.join(" · ");
-	if (!text) return;
+	if (!text) return false;
 	const destinations = [...new Set([sessionId, leader.sessionId])];
-	await store.capture({
+	const captured = await store.capture({
 		id: "",
 		workspaceId: event.workspaceId,
 		workspaceName: workspace.name,
@@ -56,6 +56,7 @@ export async function captureMeEvent(store: MeStore, event: Event, context: MeEv
 		destinationSessionIds: destinations,
 		...(event.missionId ? { missionId: event.missionId } : {}),
 	});
+	return captured.id.length > 0;
 }
 
 /** Replay strictly after the durable high-water mark and checkpoint only after capture succeeds. */
@@ -92,24 +93,24 @@ export async function captureMeLeaderTurn(input: {
 	sessionId: string;
 	turn: Turn;
 	blocks: readonly Block[];
-}): Promise<void> {
+}): Promise<boolean> {
 	if (
 		!input.turn.endedAt ||
 		input.turn.readerDirected !== true ||
 		input.turn.cancelled ||
 		input.turn.sessionId !== input.sessionId
 	)
-		return;
+		return false;
 	const blocks = input.blocks.filter(
 		(block) => block.turnId === input.turn.id && block.role === "agent" && block.kind === "text",
 	);
 	const text = blocks.map((block) => block.text).join("\n\n");
-	if (!text.trim() && !input.turn.failed) return;
+	if (!text.trim() && !input.turn.failed) return false;
 	const firstSeq = blocks[0]?.seq;
 	const lastSeq = blocks.at(-1)?.seq;
 	const sourceText = text || "Workspace leader runtime turn failed.";
 	const sourceHash = createHash("sha256").update(sourceText).digest("hex");
-	await input.store.capture({
+	const captured = await input.store.capture({
 		id: "",
 		workspaceId: input.workspace.id,
 		workspaceName: input.workspace.name,
@@ -125,6 +126,7 @@ export async function captureMeLeaderTurn(input: {
 			? {}
 			: { transcriptPointer: { sessionId: input.sessionId, turnId: input.turn.id, firstSeq, lastSeq, sourceHash } }),
 	});
+	return captured.id.length > 0;
 }
 
 /** Replay whole completed turns; leave a split turn buffered until its final block is read. */

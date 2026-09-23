@@ -23,12 +23,14 @@ export interface Settings {
 	// from the name pool at leader creation".
 	leader: { provider: string; model?: string; name?: string };
 	forbiddenModels: string[];
+	meCurator?: { enabled: boolean };
 }
 
 export interface PartialSettings {
 	providers?: Record<string, Partial<ProviderSettings>>;
 	leader?: Partial<Settings["leader"]>;
 	forbiddenModels?: string[];
+	meCurator?: Partial<Settings["meCurator"]>;
 }
 
 export const DEFAULT_PROVIDERS: Record<string, ProviderSettings> = {
@@ -47,6 +49,7 @@ export const DEFAULT_SETTINGS: Settings = {
 	providers: DEFAULT_PROVIDERS,
 	leader: { provider: "opencode" },
 	forbiddenModels: [],
+	meCurator: { enabled: false },
 };
 
 function copyEnv(env: Record<string, string> | undefined): Record<string, string> | undefined {
@@ -82,6 +85,7 @@ export function mergeSettings(base: Settings, patch: PartialSettings): Settings 
 		providers,
 		leader: { ...base.leader, ...patch.leader },
 		forbiddenModels: patch.forbiddenModels === undefined ? [...base.forbiddenModels] : [...patch.forbiddenModels],
+		meCurator: { enabled: patch.meCurator?.enabled ?? base.meCurator?.enabled ?? false },
 	};
 }
 
@@ -225,6 +229,19 @@ function validateLayer(raw: unknown, where: string, warnings: string[]): Partial
 			patch.forbiddenModels = layer.forbiddenModels;
 		} else {
 			warnings.push(`${where}: forbiddenModels is not a string array, ignoring`);
+		}
+	}
+	if (layer.meCurator !== undefined) {
+		if (typeof layer.meCurator !== "object" || layer.meCurator === null || Array.isArray(layer.meCurator)) {
+			warnings.push(`${where}: meCurator is not an object, ignoring`);
+		} else {
+			const curator = layer.meCurator as Record<string, unknown>;
+			const kept: Partial<Settings["meCurator"]> = {};
+			if (curator.enabled !== undefined) {
+				if (typeof curator.enabled === "boolean") kept.enabled = curator.enabled;
+				else warnings.push(`${where}: meCurator.enabled is not a boolean, ignoring`);
+			}
+			patch.meCurator = kept;
 		}
 	}
 	return patch;

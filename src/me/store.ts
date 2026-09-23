@@ -110,6 +110,17 @@ export interface SolRouteIntent {
 	receipt?: string;
 }
 
+export interface LunaIdentity {
+	id: "luna";
+	role: "curator";
+	title: "Luna";
+	sessionId: SessionId;
+	createdAt: string;
+	workspaceId?: string;
+	provider?: string;
+	model?: string;
+}
+
 export interface MeStore {
 	capture(input: MeSource): Promise<MeSource>;
 	list(options?: {
@@ -155,6 +166,8 @@ export interface MeStore {
 	updateRoute(id: string, status: MeReplyStatus, receipt?: string): Promise<SolRouteIntent>;
 	getRoute(id: string): Promise<SolRouteIntent | undefined>;
 	listRoutes(limit?: number): Promise<SolRouteIntent[]>;
+	lunaIdentity(): Promise<LunaIdentity>;
+	bindLunaRuntime(input: { workspaceId: string; provider: string; model: string }): Promise<LunaIdentity>;
 }
 
 interface Document {
@@ -165,6 +178,7 @@ interface Document {
 	replies: MeReply[];
 	checkpoint: MeCheckpoint;
 	sol?: SolIdentity;
+	luna?: LunaIdentity;
 	solTurns: SolTurn[];
 	routes: SolRouteIntent[];
 }
@@ -316,6 +330,8 @@ function normalize(raw: (Omit<Partial<Document>, "version"> & { version?: 1 | 2 
 	if (raw.version !== 1 && raw.version !== 2) throw new Error("unsupported Me store version");
 	if (raw.sol && (raw.sol.id !== SOL_ID || raw.sol.role !== SOL_ROLE || typeof raw.sol.sessionId !== "string"))
 		throw new Error("Sol identity cannot alias a workspace leader");
+	if (raw.luna && (raw.luna.id !== "luna" || raw.luna.role !== "curator" || typeof raw.luna.sessionId !== "string"))
+		throw new Error("Luna identity is invalid");
 	const sol = raw.sol?.sessionId === SOL_SESSION_ID ? undefined : raw.sol;
 	return {
 		version: 2,
@@ -325,6 +341,7 @@ function normalize(raw: (Omit<Partial<Document>, "version"> & { version?: 1 | 2 
 		replies: raw.replies ?? [],
 		checkpoint: raw.checkpoint ?? emptyCheckpoint(),
 		...(sol ? { sol } : {}),
+		...(raw.luna ? { luna: raw.luna } : {}),
 		solTurns: raw.solTurns ?? [],
 		routes: raw.routes ?? [],
 	};
@@ -531,6 +548,48 @@ export function openMeStore(): MeStore {
 					await save(doc);
 				}
 				return copy(doc.sol);
+			}),
+		lunaIdentity: () =>
+			locked(async () => {
+				const doc = await load();
+				if (!doc.luna) {
+					doc.luna = {
+						id: "luna",
+						role: "curator",
+						title: "Luna",
+						sessionId: ulid() as SessionId,
+						createdAt: new Date().toISOString(),
+					};
+					await save(doc);
+				}
+				return copy(doc.luna);
+			}),
+		bindLunaRuntime: (input) =>
+			locked(async () => {
+				const doc = await load();
+				if (!doc.luna) {
+					doc.luna = {
+						id: "luna",
+						role: "curator",
+						title: "Luna",
+						sessionId: ulid() as SessionId,
+						createdAt: new Date().toISOString(),
+					};
+				}
+				if (doc.luna.workspaceId) {
+					if (
+						doc.luna.workspaceId !== input.workspaceId ||
+						doc.luna.provider !== input.provider ||
+						doc.luna.model !== input.model
+					)
+						throw new Error("Luna native session is already bound to another runtime target");
+					return copy(doc.luna);
+				}
+				doc.luna.workspaceId = bounded(input.workspaceId, "Luna workspaceId", 256);
+				doc.luna.provider = bounded(input.provider, "Luna provider", 256);
+				doc.luna.model = bounded(input.model, "Luna model", 256);
+				await save(doc);
+				return copy(doc.luna);
 			}),
 		bindSolRuntime: (input) =>
 			locked(async () => {
