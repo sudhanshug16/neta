@@ -118,9 +118,9 @@ leaders.
 
 A leader stays available for conversation and routes sustained work into
 missions. It may handle a small bounded task itself. Any task that writes is
-   still represented by a mission so its isolation, access, and closeout remain
-   visible; it requires a separate mission lead. The workspace leader may use
-   Lead++ to review and integrate that mission's work.
+still represented by a mission so its isolation, access, and closeout remain
+visible; it requires a separate mission lead. The workspace leader may use
+Lead++ to review and integrate that mission's work.
 
 The workspace leader's conversation is continuous by default per workspace and
 machine. A person may explicitly reset the selected chat to a fresh provider
