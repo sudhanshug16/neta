@@ -403,16 +403,23 @@ export function toolMount(o: ToolMountOptions): {
 	// one 06 call with no announcing follow-up is `refreshIntegration`, which
 	// nothing calls yet; whoever wires it announces its own save.
 	async function saveMission(mission: Mission, announce = true): Promise<void> {
+		const existing = await o.real.missions.get(mission.workspaceId, mission.id);
 		if (mission.lead.kind === "agent") {
 			const leader = o.store.getLeader(mission.workspaceId);
 			const lead = o.store.getAgent(mission.lead.agentId);
-			if (!distinctMissionLead(mission, leader, lead)) {
+			if (
+				!lead ||
+				lead.missionId !== mission.id ||
+				lead.workspaceId !== mission.workspaceId ||
+				!lead.canSpawn ||
+				!mission.agentIds.includes(lead.id) ||
+				!distinctMissionLead(mission, leader, lead)
+			) {
 				throw new Error(
-					"Mission lead must have a distinct actor and session from the workspace leader. Supply a separate lead task and effort.",
+					"Mission lead must be a reserved, separate actor and session for this mission. Supply a separate lead task and effort.",
 				);
 			}
 		}
-		const existing = await o.real.missions.get(mission.workspaceId, mission.id);
 		if (existing === undefined) {
 			await o.real.missions.create(mission);
 		} else {
@@ -1013,7 +1020,7 @@ export function toolMount(o: ToolMountOptions): {
 			release: releaseHolder,
 		},
 		worktrees: {
-			prepare: (mission, workspace) => worktrees.prepare(mission, workspace),
+			prepare: (mission, workspace, opts) => worktrees.prepare(mission, workspace, opts),
 			close: async (input) => {
 				if ([...pendingReleases.values()].some((agent) => agent.missionId === input.mission.id)) {
 					return {

@@ -74,7 +74,7 @@ export interface MissionPorts {
 		prepare(
 			mission: Mission,
 			workspace: Workspace,
-			opts?: { recovery?: NonNullable<MissionParams["recoverWorktree"]> },
+			opts?: { recovery?: NonNullable<MissionParams["recoverWorktree"]>; deferSave?: boolean },
 		): Promise<Mission>;
 	};
 	// The names resolve under the workspace root (`<root>/.neta/skills`, then
@@ -107,6 +107,8 @@ function refused(message: string): ToolResult {
 function notFound(message: string): ToolResult {
 	return { ok: false, code: "notFound", message };
 }
+
+class MissionLeadSessionAliasError extends Error {}
 
 // An agent may work at the mission's access or below it, never above.
 function aboveMission(spec: Access, mission: Access): boolean {
@@ -203,19 +205,27 @@ async function launchAgent(
 	await onReserved?.(reserved);
 	if (admitted) {
 		let live = reserved;
+		let aliasedSession = false;
 		try {
 			const created = await ctx.deps.sessions.launch(launch);
-			if (input.canSpawn && created.sessionId === ctx.deps.store.getLeader(workspace.id)?.sessionId)
-				throw new Error("Mission lead session aliases the workspace leader; use a separate lead session.");
+			if (input.canSpawn && created.sessionId === ctx.deps.store.getLeader(workspace.id)?.sessionId) {
+				aliasedSession = true;
+				throw new MissionLeadSessionAliasError(
+					"Mission lead session aliases the workspace leader; use a separate lead session.",
+				);
+			}
 			live = created.sessionId === sessionId ? reserved : { ...reserved, sessionId: created.sessionId };
 			if (live.sessionId !== reserved.sessionId) await ctx.deps.store.putAgent(live);
 			await ctx.deps.sessions.brief({ ...launch, sessionId: live.sessionId });
 			return ctx.deps.store.getAgent(live.id) ?? live;
 		} catch (error) {
-			await ctx.deps.sessions.close(live.sessionId).catch(() => undefined);
+			// The returned identity might belong to the workspace leader. Never
+			// close or brief that session, or bind the mission actor to it.
+			if (!aliasedSession) await ctx.deps.sessions.close(live.sessionId).catch(() => undefined);
 			const failed = { ...live, state: "failed" as const, endedAt: nowIso(), outcome: String(error) };
 			await ctx.deps.store.putAgent(failed);
 			await ctx.deps.sessions.failed(failed);
+			if (aliasedSession) throw error;
 			return failed;
 		}
 	}
@@ -348,7 +358,10 @@ async function createMissionUnlocked(ctx: MissionToolContext, params: MissionPar
 	};
 	if (workspace.kind === "git") {
 		try {
-			mission = await ctx.deps.worktrees.prepare(mission, workspace, { recovery: params.recoverWorktree });
+			mission = await ctx.deps.worktrees.prepare(mission, workspace, {
+				recovery: params.recoverWorktree,
+				deferSave: true,
+			});
 		} catch (error) {
 			if (error instanceof WorktreeSetupError) {
 				const { diagnostic } = error;
@@ -375,38 +388,50 @@ async function createMissionUnlocked(ctx: MissionToolContext, params: MissionPar
 			throw error;
 		}
 	}
-	// The mission exists before any agent receives its first prompt, so that
-	// its first tool call can resolve both the actor and its owning mission.
-	await ctx.deps.missions.save(mission);
-
 	// The leader's own name is spoken for: two "Halden"s in the mission bar
 	// and on the spine would name one person twice.
 	const taken = new Set<string>([leader.name]);
 	const launched: Agent[] = [];
 	{
-		const lead = await launchAgent(
-			ctx,
-			mission,
-			workspace,
-			{
-				task: leadSpec.task,
-				// Mission leads begin in Lead. The mission's write allowance is a
-				// ceiling; it does not grant effective writer access until Lead++.
-				access: "readOnly",
-				provider: resolved.get(leadSpec)?.provider ?? leadSpec.provider ?? leader.provider,
-				model: resolved.get(leadSpec)?.model ?? leadSpec.model ?? leader.model,
-				routing: resolved.get(leadSpec)?.routing,
-				fallbackModels: leadSpec.fallbackModels,
-				skills: leadSpec.skills ?? [],
-				canSpawn: true,
-				taken,
-			},
-			async (reserved) => {
-				mission.agentIds.push(reserved.id);
-				await ctx.deps.missions.save(mission);
-			},
-			leadIdentity,
-		);
+		let lead: Agent;
+		try {
+			lead = await launchAgent(
+				ctx,
+				mission,
+				workspace,
+				{
+					task: leadSpec.task,
+					// Mission leads begin in Lead. The mission's write allowance is a
+					// ceiling; it does not grant effective writer access until Lead++.
+					access: "readOnly",
+					provider: resolved.get(leadSpec)?.provider ?? leadSpec.provider ?? leader.provider,
+					model: resolved.get(leadSpec)?.model ?? leadSpec.model ?? leader.model,
+					routing: resolved.get(leadSpec)?.routing,
+					fallbackModels: leadSpec.fallbackModels,
+					skills: leadSpec.skills ?? [],
+					canSpawn: true,
+					taken,
+				},
+				async (reserved) => {
+					mission.agentIds.push(reserved.id);
+					await ctx.deps.missions.save(mission);
+				},
+				leadIdentity,
+			);
+		} catch (error) {
+			if (!(error instanceof MissionLeadSessionAliasError)) throw error;
+			mission = { ...mission, state: "failed", attention: error.message };
+			await ctx.deps.missions.save(mission);
+			await ctx.deps.store.appendEvent({
+				workspaceId: workspace.id,
+				kind: "mission.created",
+				missionId: mission.id,
+				data: { number: mission.number, name: mission.name },
+			});
+			return refused(
+				`${error.message} Mission #${mission.number} remains failed and can be closed without touching the workspace leader's session.`,
+			);
+		}
 		launched.push(lead);
 	}
 	for (const spec of params.agents ?? []) {

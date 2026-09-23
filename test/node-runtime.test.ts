@@ -1292,7 +1292,7 @@ test("a completed writer is closed at its turn boundary before promotion", async
 	}
 }, 90000);
 
-test("the tools answer on the socket and neta_mission creates a mission", async () => {
+test("the real Node mount reserves a separate lead before persisting and launching a mission", async () => {
 	node = await startNode({ sessionFactory: startLegacySession });
 	const at = await attach();
 	try {
@@ -1312,7 +1312,12 @@ test("the tools answer on the socket and neta_mission creates a mission", async 
 			actorId,
 			token,
 			name: "neta_mission",
-			arguments: { name: "Fix the widget", objective: "Make it work", access: "readOnly", lead: "self" },
+			arguments: {
+				name: "Fix the widget",
+				objective: "Make it work",
+				access: "readOnly",
+				lead: { task: "Lead the widget fix", model: at.leader.model },
+			},
 		});
 		expect(called.isError).toBe(false);
 		const created = JSON.parse(called.content[0]?.text.split("\n")[0] ?? "{}") as { number: number; id: string };
@@ -1320,8 +1325,16 @@ test("the tools answer on the socket and neta_mission creates a mission", async 
 
 		// It is on the spine's side of the wire too: in the snapshot, and
 		// announced as one `state` notification.
-		const snapshot = await at.client.request<{ missions: Array<{ id: string; name: string }> }>("snapshot", {});
+		const snapshot = await at.client.request<{
+			missions: Array<{ id: string; name: string; lead: { kind: string; agentId?: string }; agentIds: string[] }>;
+			agents: Array<{ id: string; sessionId: string }>;
+		}>("snapshot", {});
 		expect(snapshot.missions.map((m) => m.name)).toContain("Fix the widget");
+		const mission = snapshot.missions.find((m) => m.id === created.id);
+		expect(mission?.lead.kind).toBe("agent");
+		const lead = snapshot.agents.find((agent) => agent.id === mission?.lead.agentId);
+		expect(lead?.sessionId).not.toBe(at.leader.sessionId);
+		expect(mission?.agentIds).toContain(lead?.id);
 		expect(at.states.some((s) => s.kind === "mission" && (s.record as { id: string }).id === created.id)).toBe(true);
 	} finally {
 		await at.client.close();

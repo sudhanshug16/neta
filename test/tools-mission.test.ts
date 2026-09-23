@@ -199,6 +199,31 @@ describe("neta_mission", () => {
 		expect(f.launches[0]?.sessionId).not.toBe(leaderSession);
 		expect(f.saved[0]?.lead).toEqual({ kind: "agent", agentId: f.launches[0]?.agentId });
 	});
+	test("a runtime returning the workspace leader session is refused without close, brief or rebind", async () => {
+		const f = fixture("folder");
+		const leaderSession = f.store.getLeader("folder-w")?.sessionId;
+		if (!leaderSession) throw new Error("missing leader session");
+		const closed: string[] = [];
+		f.ports.sessions.launch = async (input) => {
+			f.launches.push(input);
+			return { sessionId: leaderSession };
+		};
+		f.ports.sessions.close = async (sessionId) => {
+			closed.push(sessionId);
+		};
+		const result = await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+			name: "alias attempt",
+			objective: "reject runtime alias",
+			access: "readOnly",
+			lead: { task: "lead separately", model: "test-model" },
+		});
+		expect(result).toMatchObject({ ok: false, code: "refused", message: expect.stringContaining("aliases") });
+		expect(closed).toEqual([]);
+		expect(f.briefs).toEqual([]);
+		expect(f.saved.at(-1)?.state).toBe("failed");
+		expect(f.store.getAgent(f.launches[0]?.agentId ?? "")?.sessionId).not.toBe(leaderSession);
+		expect(f.store.getLeader("folder-w")?.sessionId).toBe(leaderSession);
+	});
 	test("real Worktrunk runs setup in the new worktree, launches the fake agent there, and blocks launch on setup failure", async () => {
 		const repo = await makeRepo();
 		const temp = await mkdtemp(join(tmpdir(), "neta-real-worktrunk-"));
@@ -501,7 +526,7 @@ describe("neta_mission", () => {
 			});
 			expect(result.ok).toBe(true);
 		}
-		expect(f.saved.map((m) => m.number)).toEqual([1, 1, 1, 2, 2, 2]);
+		expect(f.saved.map((m) => m.number)).toEqual([1, 1, 2, 2]);
 	});
 
 	test("mission.created precedes every agent.spawned", async () => {
@@ -621,7 +646,7 @@ describe("neta_mission", () => {
 			expect(result.data.queued).toBeUndefined();
 			expect(result.data.worktree).toBeNull();
 		}
-		expect(f.saved).toHaveLength(3);
+		expect(f.saved).toHaveLength(2);
 		expect(f.events).toEqual(["mission.created", "agent.spawned"]);
 	});
 
