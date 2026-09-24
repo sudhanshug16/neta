@@ -102,6 +102,12 @@ const CASES: SchemaCase[] = [
 		wrongType: { question: 42 },
 	},
 	{
+		name: "neta_superleader_answer",
+		valid: { inquiryId: "inquiry-123", answer: "Mission 2 needs an API key." },
+		missing: { inquiryId: "inquiry-123" },
+		wrongType: { inquiryId: 42, answer: "Answer" },
+	},
+	{
 		name: "neta_done",
 		valid: { outcome: "Shipped." },
 		missing: {},
@@ -110,9 +116,9 @@ const CASES: SchemaCase[] = [
 ];
 
 describe("tool schemas", () => {
-	test("fourteen tools, unique names, standalone schemas", () => {
-		expect(TOOLS).toHaveLength(14);
-		expect(new Set(TOOLS.map((tool) => tool.name)).size).toBe(14);
+	test("tools have unique names and standalone schemas", () => {
+		expect(TOOLS).toHaveLength(16);
+		expect(new Set(TOOLS.map((tool) => tool.name)).size).toBe(16);
 		for (const tool of TOOLS) {
 			expect(typeof tool.description).toBe("string");
 			expect(JSON.stringify(tool.inputSchema).includes("$ref")).toBe(false);
@@ -186,25 +192,25 @@ describe("tool schemas", () => {
 });
 
 describe("actor tool sets", () => {
-	test("agents see reporting, history and their own model adjustment", () => {
+	test("agents see reporting, parent questions, artifacts and their own model adjustment", () => {
 		expect(
 			toolsFor("agent")
 				.map((tool) => tool.name)
 				.sort(),
-		).toEqual(["neta_done", "neta_history", "neta_model", "neta_progress"]);
+		).toEqual(["neta_artifacts", "neta_ask", "neta_done", "neta_history", "neta_model", "neta_progress"]);
 	});
 
 	test("leads see everything but mission, close and pin", () => {
 		const names = toolsFor("lead").map((tool) => tool.name);
-		expect(names).toHaveLength(11);
-		for (const excluded of ["neta_mission", "neta_close", "neta_pin"]) {
+		expect(names).toHaveLength(12);
+		for (const excluded of ["neta_mission", "neta_close", "neta_pin", "neta_superleader_answer"]) {
 			expect(names).not.toContain(excluded);
 		}
 	});
 
 	test("leaders see everything but progress and done", () => {
 		const names = toolsFor("leader").map((tool) => tool.name);
-		expect(names).toHaveLength(12);
+		expect(names).toHaveLength(14);
 		expect(names).not.toContain("neta_progress");
 		expect(names).not.toContain("neta_done");
 	});

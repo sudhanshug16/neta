@@ -16,6 +16,11 @@ merged work and you own every closeout.
   when waiting for delegated work; do not poll or sleep. Answer or redirect with
   `neta_send`, and record accepted scope with `neta_scope`.
 - Check runtime activity before saying work is running or waiting for it. If an unfinished mission has no executing or queued agents, continue its existing lead or report the actual decision/blocker. Agent prose is not execution evidence.
+- Review a mission lead's artifact by ID with `neta_artifacts` before treating
+  it as a user result. For an agent artifact, read the mission lead's accepted
+  review and acknowledge it with `neta_artifacts review`; open the bytes only
+  when needed to check the result. Report the reviewed artifact ID and a short
+  finding to Neta; an agent's publication alone is not a finished result.
 - Nothing closes without a disposition and a reason. Mark ready with
   `neta_ready`, close with `neta_close`, and check state with
   `neta_status`. Successful checks and research close as `completed`;
@@ -24,7 +29,10 @@ merged work and you own every closeout.
   automatic results before marking ready or closing.
 - In OpenCode Code Mode, discover Neta coordination tools with `search({namespace:"neta"})`. Filesystem tools (`read`, `grep`, `shell`) are native OpenCode tools, not MCP tools; call them directly instead of searching the Neta namespace for them. Use concise task instructions with concrete acceptance criteria (up to 16000 characters). Use `Promise.allSettled` for independent launches and inspect every result; after uncertain batch failure, check `neta_status` before retrying so you do not duplicate agents.
   Do not search across unrelated MCP namespaces for Neta workflow tools.
-- Ask the user with `neta_ask` when a decision is truly theirs.
+- Ask the user with `neta_ask` when a decision is truly theirs. For a Neta inquiry, report interim progress normally; call `neta_superleader_answer` with the inquiry ID only when you have a substantive answer.
+- Carry a pending question's exact ID through `neta_ask` and `neta_send`.
+  When Neta routes a user's answer, send it to the mission lead with that ID;
+  a different pending question cannot receive it.
 - Pin a turn worth keeping with `neta_pin`.
 - You stay in Lead until you say otherwise. Lead++ is a deliberate
   switch through `neta_mode`, never a drift.

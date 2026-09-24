@@ -52,6 +52,9 @@ import {
 	replayMeLeaderTurns,
 } from "../me/capture.ts";
 import { createMeCurator } from "../me/curator.ts";
+import { readMeEvidence } from "../me/evidence.ts";
+import { commitNoticeForTurn, deliverPendingNotices, reconcileNoticePresentations } from "../me/notice-delivery.ts";
+import { watchStalledQuestions, watchStalledRoutes } from "../me/route-watch.ts";
 import { createRuntimeMeClassifier } from "../me/runtime-curator.ts";
 import { openPersistedRuntimeSession } from "../me/runtime-session.ts";
 import { openMeStore } from "../me/store.ts";
@@ -85,7 +88,15 @@ import {
 } from "./handlers-conversation.ts";
 import { diagnosticsHandlers } from "./handlers-diagnostics.ts";
 import { glanceHandlers } from "./handlers-glance.ts";
-import { createSuperleaderToolBridge, meHandlers } from "./handlers-me.ts";
+import {
+	createSuperleaderToolBridge,
+	meHandlers,
+	openSolSession,
+	reconcileRoutes,
+	registerSuperleaderSession,
+	unregisterSuperleaderSession,
+	workspaceForSuperleaderSession,
+} from "./handlers-me.ts";
 import { registryHandlers } from "./handlers-registry.ts";
 import { routingHandlers } from "./handlers-routing.ts";
 import { terminalHandlers } from "./handlers-terminal.ts";
@@ -207,7 +218,11 @@ function checkBlockCursor(cursor: string): number {
 // The real 02/03 modules behind the ports. Reads are served from memory
 // loaded here (registries, workspaces, leaders, agents); events and
 // conversations read fresh from disk per call.
-export async function adaptStore(real: Store, onMeSource?: () => void): Promise<AdaptedStore> {
+export async function adaptStore(
+	real: Store,
+	onMeSource?: () => void,
+	onQuestionChange?: () => void,
+): Promise<AdaptedStore> {
 	const machine = await real.machine.load();
 	const workspaces = new Map((await real.workspaces.list()).map((workspace) => [workspace.id, workspace]));
 	const leaders = await loadLeaders();
@@ -221,6 +236,7 @@ export async function adaptStore(real: Store, onMeSource?: () => void): Promise<
 	const agentsMutex = createMutex();
 	const me = openMeStore();
 	const meContext = () => ({
+		machineId: machine.id,
 		workspaces: [...workspaces.values()],
 		leaders: [...leaders.values()],
 		agents: [...agents.values()],
@@ -233,6 +249,7 @@ export async function adaptStore(real: Store, onMeSource?: () => void): Promise<
 			workspaces: [{ workspaceId: event.workspaceId, eventSeq: event.seq, turns: [] }],
 		});
 		if (captured) onMeSource?.();
+		if (event.kind === "mission.blocked" || event.kind === "mission.unblocked") onQuestionChange?.();
 		return event;
 	};
 
@@ -1489,6 +1506,7 @@ export function adaptRuntime(
 			const old = record.session;
 			const oldActor = actors.get(id) ?? id;
 			const newId = ulid();
+			const superleaderWorkspaceId = workspaceForSuperleaderSession(id);
 			const workspaceLeader = oldActor === id;
 			const newActor = workspaceLeader ? newId : oldActor;
 			const token = workspaceLeader ? tokens.mint(newActor) : minted.get(oldActor);
@@ -1496,6 +1514,7 @@ export function adaptRuntime(
 				releaseSwitch(id);
 				throw new NodeError("UNAUTHORIZED", "session actor token is unavailable");
 			}
+			if (superleaderWorkspaceId) registerSuperleaderSession(newId, superleaderWorkspaceId);
 			let candidate: RuntimeSession;
 			try {
 				const resetLaunch = launchSettings(old.cwd, record.provider);
@@ -1514,6 +1533,7 @@ export function adaptRuntime(
 				});
 			} catch (error) {
 				if (workspaceLeader) tokens.revoke(newActor);
+				if (superleaderWorkspaceId) unregisterSuperleaderSession(newId);
 				releaseSwitch(id);
 				throw new NodeError("PROVIDER_ERROR", `could not reset provider session: ${String(error)}`);
 			}
@@ -1546,6 +1566,7 @@ export function adaptRuntime(
 				actors.delete(id);
 				prompts.delete(id);
 				if (workspaceLeader) tokens.revoke(oldActor);
+				if (superleaderWorkspaceId) unregisterSuperleaderSession(id);
 				releaseSwitch(id);
 				releaseSwitch(newId);
 				return selected;
@@ -1555,6 +1576,7 @@ export function adaptRuntime(
 				actors.delete(newId);
 				releaseSwitch(newId);
 				if (workspaceLeader) tokens.revoke(newActor);
+				if (superleaderWorkspaceId) unregisterSuperleaderSession(newId);
 				releaseSwitch(id);
 				throw error;
 			}
@@ -1804,29 +1826,78 @@ export async function startNode(o?: {
 		let adapted: AdaptedStore | undefined;
 		let scheduleMeCurator: (delay?: number) => void = () => {};
 		let stopMeCurator: () => void = () => {};
-		let curatorSessionId: SessionId | undefined;
+		let scheduleRouteWatch: () => void = () => {};
+		let stopRouteWatch: () => void = () => {};
+		const curatorSessionIds = new Set<SessionId>();
 		let notifyMeChanged: () => void = () => {};
+		const readNoticeTurn = async (
+			sessionId: string,
+			turnId: string,
+		): Promise<{ turn: Turn; blocks: Block[] } | undefined> => {
+			if (!realStore) return undefined;
+			const range = await realStore.conversations.turnRange(sessionId, turnId);
+			if (!range?.turn.endedAt) return undefined;
+			const blocks: Block[] = [];
+			let cursor = range.start;
+			for (let pageNumber = 0; pageNumber < 50 && cursor < range.end; pageNumber += 1) {
+				const page = await realStore.conversations.tail({ sessionId, cursor, limit: 500 });
+				blocks.push(...page.blocks.filter((block) => block.turnId === turnId));
+				if (page.cursor <= cursor) break;
+				cursor = page.cursor;
+			}
+			return { turn: range.turn, blocks };
+		};
 		if (o?.store !== undefined) {
 			storePort = o.store;
 		} else {
 			realStore = await openStore();
-			adapted = await adaptStore(realStore, () => scheduleMeCurator());
+			adapted = await adaptStore(
+				realStore,
+				() => scheduleMeCurator(),
+				() => scheduleRouteWatch(),
+			);
 			storePort = adapted;
 		}
 		const settings = loadSettings({ netaDir: netaDir() }).settings;
-		const solIdentity = await openMeStore().solIdentity();
+		for (const sol of await openMeStore().listSolIdentities()) {
+			if (sol.workspaceId) registerSuperleaderSession(sol.sessionId, sol.workspaceId);
+		}
+		for (const filter of await openMeStore().listLunaIdentities()) curatorSessionIds.add(filter.sessionId);
 		let adaptedRuntime: AdaptedRuntime | undefined;
 		let runtimePort: NodeRuntime;
 		if (o?.runtime === undefined) {
 			const captureGlance = async (sessionId: SessionId, turn: Turn, blocks: Block[]): Promise<void> => {
 				if (realStore === undefined) return;
+				if (workspaceForSuperleaderSession(sessionId)) {
+					if (
+						(await commitNoticeForTurn({ store: openMeStore(), runtime: runtimePort, sessionId, turn, blocks }))
+							.length
+					)
+						notifyMeChanged();
+					// Delivery can be marked after a very fast native turn ends.
+					scheduleMeCurator();
+					return;
+				}
 				const actor = glanceActorForSession(storePort, sessionId);
 				if (actor === undefined) return;
 				const leader = storePort.listLeaders().find((item) => item.sessionId === sessionId);
 				const workspace = storePort.getWorkspace(actor.workspaceId);
 				if (leader && workspace) {
-					if (await captureMeLeaderTurn({ store: openMeStore(), workspace, sessionId, turn, blocks }))
+					if (
+						await captureMeLeaderTurn({
+							store: openMeStore(),
+							workspace,
+							machineId: storePort.machine().id,
+							sessionId,
+							turn,
+							blocks,
+						})
+					) {
+						// Source capture is durable even when inbox reconciliation is temporarily unavailable.
+						await reconcileRoutes({ runtime: runtimePort }, workspace.id).catch(() => undefined);
 						scheduleMeCurator();
+						scheduleRouteWatch();
+					}
 				}
 				const source = blocks
 					.map((block) => block.text.trim())
@@ -1862,7 +1933,11 @@ export async function startNode(o?: {
 				realStore?.inbox,
 				(sessionId) =>
 					sessionSystemContext(
-						{ store: storePort, superleaderSessionId: solIdentity.sessionId, lunaSessionId: curatorSessionId },
+						{
+							store: storePort,
+							superleaderWorkspaceId: workspaceForSuperleaderSession(sessionId),
+							lunaSessionIds: curatorSessionIds,
+						},
 						sessionId,
 					),
 				(notification) => mounted?.recordTurn(notification) ?? Promise.resolve(),
@@ -1870,9 +1945,9 @@ export async function startNode(o?: {
 				(message) => mounted?.canDeliverInbox(message) ?? Promise.resolve(true),
 				o?.sessionFactory,
 				(sessionId) =>
-					sessionId === solIdentity.sessionId
+					workspaceForSuperleaderSession(sessionId)
 						? "orchestrator"
-						: sessionId === curatorSessionId
+						: curatorSessionIds.has(sessionId)
 							? "curator"
 							: undefined,
 				async (sessionId, request, decision) => {
@@ -1883,6 +1958,7 @@ export async function startNode(o?: {
 					const captured = await captureMePermissionRequest({
 						store: openMeStore(),
 						workspace,
+						machineId: storePort.machine().id,
 						sessionId,
 						actorKind: actor.actorKind,
 						...(actor.missionId === undefined ? {} : { missionId: actor.missionId }),
@@ -1926,6 +2002,7 @@ export async function startNode(o?: {
 					workspaceId: workspace.id,
 					read: (sinceSeq, limit) => realStore?.events.tail(workspace.id, sinceSeq, limit) ?? Promise.resolve([]),
 					context: () => ({
+						machineId: storePort.machine().id,
 						workspaces: storePort.listWorkspaces(),
 						leaders: storePort.listLeaders(),
 						agents: storePort.listAgents(),
@@ -1939,10 +2016,12 @@ export async function startNode(o?: {
 				await replayMeLeaderTurns({
 					store: me,
 					workspace,
+					machineId: storePort.machine().id,
 					sessionId: leader.sessionId,
 					read: (cursor) => durableStore.conversations.tail({ sessionId: leader.sessionId, cursor, limit: 500 }),
 					getTurn: async (turnId) => (await durableStore.conversations.turnRange(leader.sessionId, turnId))?.turn,
 				});
+				await reconcileRoutes({ runtime: runtimePort }, workspace.id).catch(() => undefined);
 			}
 		}
 		const token = newToken();
@@ -2018,6 +2097,7 @@ export async function startNode(o?: {
 			stopping = (async (): Promise<void> => {
 				try {
 					stopMeCurator();
+					stopRouteWatch();
 					// 07's mode ticker first: it writes through the store,
 					// which is about to close.
 					mounted?.stop();
@@ -2057,10 +2137,16 @@ export async function startNode(o?: {
 						settings,
 						runtimeAdmission,
 						hub: () => hub,
-						superleaderTools: createSuperleaderToolBridge({
-							actorId: solIdentity.sessionId,
-							context: () => ({ ...ctx, hub }),
-						}),
+						superleaderTools: (actorId) => {
+							const workspaceId = workspaceForSuperleaderSession(actorId);
+							return workspaceId
+								? createSuperleaderToolBridge({
+										actorId,
+										workspaceId,
+										context: () => ({ ...ctx, hub }),
+									})
+								: undefined;
+						},
 						...(pi === undefined
 							? {}
 							: {
@@ -2083,19 +2169,66 @@ export async function startNode(o?: {
 		const server = await createServer({ socketPath, token, handlers: { ...allHandlers, ...tools }, ctx });
 		hub = server.hub;
 		notifyMeChanged = () => hub.broadcast("me.changed", { pending: true });
+		if (realStore !== undefined) {
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const run = async () => {
+				timer = undefined;
+				try {
+					const me = openMeStore();
+					const routes = await watchStalledRoutes({ store: me, node: storePort, runtime: runtimePort });
+					const questions = await watchStalledQuestions({ store: me, node: storePort, runtime: runtimePort });
+					if (routes.captured.length || questions.captured.length) scheduleMeCurator();
+					const nextAt = [routes.nextAt, questions.nextAt]
+						.filter((value): value is number => value !== undefined)
+						.reduce<number | undefined>(
+							(soonest, value) => (soonest === undefined ? value : Math.min(soonest, value)),
+							undefined,
+						);
+					if (nextAt !== undefined) {
+						timer = setTimeout(() => void run(), Math.max(250, nextAt - Date.now()));
+						timer.unref();
+					}
+				} catch {
+					timer = setTimeout(() => void run(), 60_000);
+					timer.unref();
+				}
+			};
+			scheduleRouteWatch = () => {
+				if (timer) clearTimeout(timer);
+				timer = setTimeout(() => void run(), 250);
+				timer.unref();
+			};
+			stopRouteWatch = () => {
+				if (timer) clearTimeout(timer);
+				timer = undefined;
+			};
+			scheduleRouteWatch();
+		}
+		if (realStore !== undefined) {
+			await reconcileNoticePresentations({
+				store: openMeStore(),
+				runtime: runtimePort,
+				readTurn: readNoticeTurn,
+			});
+		}
 		if (realStore !== undefined && settings.meCurator?.enabled === true) {
 			const me = openMeStore();
-			const luna = await me.lunaIdentity();
-			curatorSessionId = luna.sessionId;
-			let classifier: ReturnType<typeof createRuntimeMeClassifier> | undefined;
+			const dispatchNotices = () =>
+				deliverPendingNotices({
+					store: me,
+					runtime: runtimePort,
+					openNeta: (workspaceId) => openSolSession({ ...ctx, hub }, workspaceId),
+				});
+			const classifiers = new Map<string, ReturnType<typeof createRuntimeMeClassifier>>();
 			let activeRun: Promise<void> | undefined;
 			let timer: ReturnType<typeof setTimeout> | undefined;
 			let rerunRequested = false;
 			let rerunDelay = 250;
 			let failureBackoff = 1_000;
 			const ensureLuna = async (sourceWorkspaceId: string): Promise<void> => {
-				const saved = await me.lunaIdentity();
-				const workspaceId = saved.workspaceId ?? sourceWorkspaceId;
+				const workspaceId = sourceWorkspaceId;
+				const saved = await me.lunaIdentity(workspaceId);
+				curatorSessionIds.add(saved.sessionId);
 				const workspace = storePort.getWorkspace(workspaceId);
 				const leader = storePort.getLeader(workspaceId);
 				const root = workspace?.roots.find((item) => item.machineId === storePort.machine().id)?.path;
@@ -2105,7 +2238,12 @@ export async function startNode(o?: {
 				const model = "openai/gpt-6-luna";
 				if (!settings.providers[provider] || settings.forbiddenModels.includes(model))
 					throw new Error("GPT-6 Luna is unavailable in the configured OpenCode runtime");
-				const identity = await me.bindLunaRuntime({ workspaceId, provider, model });
+				const identity = await me.bindLunaRuntime({
+					workspaceId,
+					machineId: storePort.machine().id,
+					provider,
+					model,
+				});
 				const request = {
 					sessionId: identity.sessionId,
 					workspaceId,
@@ -2119,24 +2257,26 @@ export async function startNode(o?: {
 				await openPersistedRuntimeSession({
 					runtime: runtimePort,
 					request,
-					initialized: saved.runtimeInitialized ?? saved.workspaceId !== undefined,
-					markInitialized: () => me.markLunaRuntimeInitialized(),
+					initialized: saved.runtimeInitialized === true,
+					markInitialized: () => me.markLunaRuntimeInitialized(workspaceId),
 				});
 				await runtimePort.setModel(identity.sessionId, model);
 				const diagnostics = await runtimePort.runtimeDiagnostics?.(identity.sessionId);
 				if (diagnostics?.model !== undefined && diagnostics.model !== model)
 					throw new Error("Luna model selection could not be verified");
-				classifier ??= createRuntimeMeClassifier({
-					runtime: runtimePort,
-					store: storePort,
-					sessionId: identity.sessionId,
-				});
+				if (!classifiers.has(workspaceId))
+					classifiers.set(
+						workspaceId,
+						createRuntimeMeClassifier({ runtime: runtimePort, store: storePort, sessionId: identity.sessionId }),
+					);
 			};
 			const curator = createMeCurator({
 				store: me,
+				loadDetail: (source) => readMeEvidence(storePort, source),
 				classify: async (input) => {
 					await ensureLuna(input.source.workspaceId);
-					if (!classifier) throw new Error("Luna runtime classifier is unavailable");
+					const classifier = classifiers.get(input.source.workspaceId);
+					if (!classifier) throw new Error("workspace filter classifier is unavailable");
 					return classifier(input);
 				},
 			});
@@ -2154,10 +2294,27 @@ export async function startNode(o?: {
 					let followupDelay: number | undefined;
 					activeRun = curator
 						.drain(20, 5)
-						.then((result) => {
+						.then(async (result) => {
 							notifyMeChanged();
+							const notices = await dispatchNotices();
+							if (
+								(
+									await reconcileNoticePresentations({
+										store: me,
+										runtime: runtimePort,
+										readTurn: readNoticeTurn,
+									})
+								).length
+							)
+								notifyMeChanged();
+							const deferredAt = await me.nextDeferredAt();
+							if (deferredAt !== undefined) followupDelay = Math.max(250, deferredAt - Date.now());
+							if (notices.uncertain.length) {
+								followupDelay = Math.min(followupDelay ?? failureBackoff, failureBackoff);
+								failureBackoff = Math.min(failureBackoff * 2, 300_000);
+							}
 							if (result.pending === 0) {
-								failureBackoff = 1_000;
+								if (!notices.uncertain.length) failureBackoff = 1_000;
 								return;
 							}
 							if (result.processed.length > 0 && result.failed.length === 0) {
@@ -2187,7 +2344,9 @@ export async function startNode(o?: {
 				timer = undefined;
 				rerunRequested = false;
 			};
-			if ((await me.pendingSources()).length > 0) scheduleMeCurator();
+			const deferredAt = await me.nextDeferredAt();
+			if ((await me.pendingSources()).length > 0 || (await me.pendingNotices()).length > 0) scheduleMeCurator();
+			else if (deferredAt !== undefined) scheduleMeCurator(Math.max(250, deferredAt - Date.now()));
 		}
 		wireTurnStream({ ...ctx, hub: server.hub });
 		await mounted?.recover();

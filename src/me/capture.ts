@@ -3,6 +3,7 @@ import type { Agent, Block, Event, Leader, Mission, Turn, Workspace } from "../c
 import type { MeSource, MeStore } from "./store.ts";
 
 export interface MeEventSourceContext {
+	machineId?: string;
 	workspaces: readonly Workspace[];
 	leaders: readonly Leader[];
 	agents: readonly Agent[];
@@ -11,7 +12,11 @@ export interface MeEventSourceContext {
 
 const relevantKinds = new Set<Event["kind"]>([
 	"mission.blocked",
+	"mission.unblocked",
 	"mission.failed",
+	"worktree.setupFailed",
+	"artifact.published",
+	"artifact.reviewed",
 	"mission.readyToClose",
 	"mission.merged",
 	"agent.finished",
@@ -27,15 +32,46 @@ export async function captureMeEvent(store: MeStore, event: Event, context: MeEv
 	if (!workspace || !leader) return false;
 	const agent = event.agentId ? context.agents.find((item) => item.id === event.agentId) : undefined;
 	const mission = event.missionId ? context.missions.find((item) => item.id === event.missionId) : undefined;
+	if (event.kind === "mission.blocked" && agent && event.data.userEscalation !== true) return false; // Questions travel through the parent chain before Neta sees them.
+	if (
+		event.kind === "mission.unblocked" &&
+		agent &&
+		!agent.canSpawn &&
+		mission?.lead.kind !== "leader" &&
+		(typeof event.data.questionId !== "string" ||
+			!(await store.hasVisibleQuestion(event.workspaceId, event.data.questionId)))
+	)
+		return false;
 	const sessionId = event.sessionId ?? agent?.sessionId ?? leader.sessionId;
 	const actorKind = sessionId === leader.sessionId ? "leader" : agent?.canSpawn ? "missionLead" : "agent";
 	const explicit = event.data.userEscalation === true || event.data.needsReply === true;
 	const kind: MeSource["kind"] =
-		event.kind === "mission.failed" || event.kind === "routing.failed" ? "failure" : "event";
+		event.kind === "mission.failed" || event.kind === "worktree.setupFailed" || event.kind === "routing.failed"
+			? "failure"
+			: "event";
 	const text = [
 		event.kind,
+		event.kind === "worktree.setupFailed" && typeof event.data.number === "number"
+			? `Mission setup #${event.data.number} failed before registration`
+			: undefined,
 		mission ? `Mission #${mission.number}: ${mission.name}` : undefined,
 		agent ? `Agent: ${agent.name}` : undefined,
+		event.kind === "artifact.published" && typeof event.data.artifactId === "string"
+			? `Artifact ${event.data.artifactId}: ${typeof event.data.title === "string" ? event.data.title : "untitled"}`
+			: undefined,
+		event.kind === "artifact.reviewed" && typeof event.data.artifactId === "string"
+			? `Artifact ${event.data.artifactId} review: ${String(event.data.verdict)}. ${typeof event.data.note === "string" ? event.data.note.slice(0, 1_200) : ""}`
+			: undefined,
+		event.kind === "worktree.setupFailed" && typeof event.data.stderr === "string"
+			? event.data.stderr.slice(0, 4_096)
+			: undefined,
+		event.kind === "worktree.setupFailed" && typeof event.data.diagnosticPath === "string"
+			? `Diagnostic: ${event.data.diagnosticPath}`
+			: undefined,
+		typeof event.data.question === "string"
+			? `Question${typeof event.data.questionId === "string" ? ` ${event.data.questionId}` : ""}: ${event.data.question}`
+			: undefined,
+		typeof event.data.resolution === "string" ? `Resolution: ${event.data.resolution.slice(0, 1_200)}` : undefined,
 	]
 		.filter((part): part is string => part !== undefined)
 		.join(" · ");
@@ -44,17 +80,30 @@ export async function captureMeEvent(store: MeStore, event: Event, context: MeEv
 	const captured = await store.capture({
 		id: "",
 		workspaceId: event.workspaceId,
+		...(context.machineId
+			? { machineId: context.machineId }
+			: mission?.machineId
+				? { machineId: mission.machineId }
+				: {}),
 		workspaceName: workspace.name,
 		sessionId,
 		actorKind,
 		kind,
 		at: event.at,
-		text,
-		eventId: `${event.workspaceId}:${event.seq}`,
+		text: text.slice(0, 8_000),
+		eventId:
+			event.kind === "artifact.reviewed" && typeof event.data.artifactId === "string"
+				? `artifact-review:${event.data.artifactId}`
+				: `${event.workspaceId}:${event.seq}`,
 		explicit,
-		...(explicit ? { forceVisible: true } : {}),
+		...(explicit || event.kind === "worktree.setupFailed" ? { forceVisible: true } : {}),
 		destinationSessionIds: destinations,
 		...(event.missionId ? { missionId: event.missionId } : {}),
+		...(typeof event.data.questionId === "string" ? { questionId: event.data.questionId } : {}),
+		...((event.kind === "artifact.published" || event.kind === "artifact.reviewed") &&
+		typeof event.data.artifactId === "string"
+			? { artifactIds: [event.data.artifactId] }
+			: {}),
 	});
 	return captured.id.length > 0;
 }
@@ -90,29 +139,29 @@ export async function replayMeEvents(input: {
 export async function captureMeLeaderTurn(input: {
 	store: MeStore;
 	workspace: Workspace;
+	machineId?: string;
 	sessionId: string;
 	turn: Turn;
 	blocks: readonly Block[];
 }): Promise<boolean> {
-	if (
-		!input.turn.endedAt ||
-		input.turn.readerDirected !== true ||
-		input.turn.cancelled ||
-		input.turn.sessionId !== input.sessionId
-	)
-		return false;
+	if (!input.turn.endedAt || input.turn.cancelled || input.turn.sessionId !== input.sessionId) return false;
 	const blocks = input.blocks.filter(
 		(block) => block.turnId === input.turn.id && block.role === "agent" && block.kind === "text",
 	);
 	const text = blocks.map((block) => block.text).join("\n\n");
-	if (!text.trim() && !input.turn.failed) return false;
+	if (!text.trim() && !input.turn.failed && !input.turn.readerDirected) return false;
 	const firstSeq = blocks[0]?.seq;
 	const lastSeq = blocks.at(-1)?.seq;
-	const sourceText = text || "Workspace leader runtime turn failed.";
+	const sourceText =
+		text ||
+		(input.turn.failed
+			? "Workspace leader runtime turn failed."
+			: "Workspace leader turn completed without a text report. Work outcome is unknown.");
 	const sourceHash = createHash("sha256").update(sourceText).digest("hex");
 	const captured = await input.store.capture({
 		id: "",
 		workspaceId: input.workspace.id,
+		...(input.machineId ? { machineId: input.machineId } : {}),
 		workspaceName: input.workspace.name,
 		sessionId: input.sessionId,
 		actorKind: "leader",
@@ -132,6 +181,7 @@ export async function captureMeLeaderTurn(input: {
 export async function captureMePermissionRequest(input: {
 	store: MeStore;
 	workspace: Workspace;
+	machineId?: string;
 	sessionId: string;
 	actorKind: MeSource["actorKind"];
 	missionId?: string;
@@ -150,6 +200,7 @@ export async function captureMePermissionRequest(input: {
 	return input.store.capture({
 		id: "",
 		workspaceId: input.workspace.id,
+		...(input.machineId ? { machineId: input.machineId } : {}),
 		workspaceName: input.workspace.name,
 		sessionId: input.sessionId,
 		actorKind: input.actorKind,
@@ -168,6 +219,7 @@ export async function captureMePermissionRequest(input: {
 export async function replayMeLeaderTurns(input: {
 	store: MeStore;
 	workspace: Workspace;
+	machineId?: string;
 	sessionId: string;
 	read: (byteCursor: number) => Promise<{ blocks: Block[]; cursor: number; more: boolean }>;
 	getTurn: (turnId: string) => Promise<Turn | undefined>;
@@ -191,6 +243,7 @@ export async function replayMeLeaderTurns(input: {
 				await captureMeLeaderTurn({
 					store: input.store,
 					workspace: input.workspace,
+					machineId: input.machineId,
 					sessionId: input.sessionId,
 					turn: pendingTurn,
 					blocks: pending,
@@ -219,6 +272,7 @@ export async function replayMeLeaderTurns(input: {
 		await captureMeLeaderTurn({
 			store: input.store,
 			workspace: input.workspace,
+			machineId: input.machineId,
 			sessionId: input.sessionId,
 			turn: pendingTurn,
 			blocks: pending,

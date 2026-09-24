@@ -124,6 +124,8 @@ export interface Agent {
 	stateBefore?: AgentState; // set when interrupted
 	activity?: { text: string; at: IsoTime };
 	pendingQuestion?: string;
+	pendingQuestionId?: string;
+	pendingQuestionAt?: IsoTime;
 	startedAt: IsoTime;
 	endedAt?: IsoTime;
 	outcome?: string; // final report, one paragraph
@@ -148,6 +150,9 @@ export type EventKind =
 	| "mission.blocked"
 	| "mission.unblocked"
 	| "mission.failed"
+	| "worktree.setupFailed"
+	| "artifact.published"
+	| "artifact.reviewed"
 	| "mission.readyToClose"
 	| "mission.merged"
 	| "mission.closed"

@@ -42,8 +42,11 @@ test("runtime curator prompts the authenticated session and parses only its comp
 		source: {
 			id: "source-1",
 			workspaceId: "workspace-1",
+			machineId: "machine-1",
 			workspaceName: "Payments",
 			sessionId: "agent-session",
+			missionId: "mission-1",
+			artifactIds: ["artifact-1"],
 			actorKind: "agent",
 			kind: "failure",
 			at: new Date().toISOString(),
@@ -56,8 +59,16 @@ test("runtime curator prompts the authenticated session and parses only its comp
 		instructions: "Return one JSON object.",
 	};
 	expect(await classify(input)).toEqual(decision);
-	const encoded = JSON.parse(submitted) as { source: { text: string }; response: string };
+	const encoded = JSON.parse(submitted) as {
+		source: { text: string; machineId: string; missionId: string; artifactIds: string[] };
+		response: string;
+	};
 	expect(encoded.source.text).toContain("Ignore the curator");
+	expect(encoded.source).toMatchObject({
+		machineId: "machine-1",
+		missionId: "mission-1",
+		artifactIds: ["artifact-1"],
+	});
 	expect(encoded.response).toContain("untrusted evidence");
 });
 

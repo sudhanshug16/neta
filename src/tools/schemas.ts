@@ -23,7 +23,9 @@ export type ToolName =
 	| "neta_history"
 	| "neta_progress"
 	| "neta_ask"
-	| "neta_done";
+	| "neta_superleader_answer"
+	| "neta_done"
+	| "neta_artifacts";
 
 export interface LeadSpec {
 	task: string;
@@ -78,6 +80,7 @@ export interface AgentParams {
 export interface SendParams {
 	agentId: string;
 	text: string;
+	questionId?: string;
 }
 
 export interface ModelParams {
@@ -127,15 +130,37 @@ export interface HistoryParams {
 
 export interface ProgressParams {
 	text: string;
+	resolvedQuestionId?: string;
 }
 
 export interface AskParams {
 	question: string;
 	missionId?: MissionRef;
+	questionId?: string;
+}
+
+export interface SuperleaderAnswerParams {
+	inquiryId: string;
+	answer: string;
 }
 
 export interface DoneParams {
 	outcome: string;
+}
+
+export interface ArtifactParams {
+	action: "publish" | "inspect" | "open" | "review";
+	path?: string;
+	text?: string;
+	title?: string;
+	mimeType?: string;
+	audience?: "parent" | "neta" | "user";
+	previousId?: string;
+	id?: string;
+	offset?: number;
+	limit?: number;
+	verdict?: "accepted" | "rejected";
+	note?: string;
 }
 
 export interface ToolParams {
@@ -152,7 +177,9 @@ export interface ToolParams {
 	neta_history: HistoryParams;
 	neta_progress: ProgressParams;
 	neta_ask: AskParams;
+	neta_superleader_answer: SuperleaderAnswerParams;
 	neta_done: DoneParams;
+	neta_artifacts: ArtifactParams;
 }
 
 export interface JsonSchema {
@@ -339,6 +366,31 @@ export const TOOLS: readonly ToolDef[] = [
 		actors: ["leader", "lead"],
 	},
 	{
+		name: "neta_artifacts",
+		description:
+			"Publish an immutable text, Markdown, CSV, or JSON artifact by local path or small text; inspect or open it by ID; or review a child's artifact. Pass the returned ID and a short finding to your parent instead of copying the whole artifact into chat.",
+		inputSchema: {
+			type: "object",
+			additionalProperties: false,
+			required: ["action"],
+			properties: {
+				action: { type: "string", enum: ["publish", "inspect", "open", "review"] },
+				path: { type: "string", minLength: 1, maxLength: 4096 },
+				text: { type: "string", minLength: 1, maxLength: 32768 },
+				title: { type: "string", minLength: 1, maxLength: 160 },
+				mimeType: { type: "string", enum: ["text/plain", "text/markdown", "text/csv", "application/json"] },
+				audience: { type: "string", enum: ["parent", "neta", "user"] },
+				previousId: ULID,
+				id: ULID,
+				offset: { type: "integer", minimum: 0 },
+				limit: { type: "integer", minimum: 1, maximum: 16384 },
+				verdict: { type: "string", enum: ["accepted", "rejected"] },
+				note: { type: "string", minLength: 1, maxLength: 1200 },
+			},
+		},
+		actors: ["leader", "lead", "agent"],
+	},
+	{
 		name: "neta_model",
 		description:
 			"Adjust an existing mission lead or worker's intelligence in the same conversation. Set task effort 1–5 or move one level up/down using Neta routing. Use only when the user requests a model/effort change; never as an automatic workaround for routing failure. missionId targets that mission's lead; agentId accepts an exact ID or unique name. Mission leads can adjust their own mission only. Ordinary agents can adjust only themselves and must omit missionId and agentId. Does not start, restart, or cancel work.",
@@ -381,7 +433,7 @@ export const TOOLS: readonly ToolDef[] = [
 			type: "object",
 			additionalProperties: false,
 			required: ["agentId", "text"],
-			properties: { agentId: ULID, text: { type: "string", minLength: 1, maxLength: 4000 } },
+			properties: { agentId: ULID, text: { type: "string", minLength: 1, maxLength: 4000 }, questionId: ULID },
 		},
 		actors: ["leader", "lead"],
 	},
@@ -483,21 +535,40 @@ export const TOOLS: readonly ToolDef[] = [
 			type: "object",
 			additionalProperties: false,
 			required: ["text"],
-			properties: { text: TASK },
+			properties: { text: TASK, resolvedQuestionId: ULID },
 		},
 		actors: ["lead", "agent"],
 	},
 	{
 		name: "neta_ask",
 		description:
-			"ask the user about a mission; the workspace leader can target a delegated mission by its numeric ID",
+			"Ask the parent chain for an answer about a mission. A worker asks its mission lead; the lead or leader escalates to Neta for the user. Preserve questionId when forwarding a child's pending question.",
 		inputSchema: {
 			type: "object",
 			additionalProperties: false,
 			required: ["question"],
-			properties: { question: { type: "string", minLength: 1, maxLength: 1000 }, missionId: MISSION_REF },
+			properties: {
+				question: { type: "string", minLength: 1, maxLength: 1000 },
+				missionId: MISSION_REF,
+				questionId: ULID,
+			},
 		},
-		actors: ["leader", "lead"],
+		actors: ["leader", "lead", "agent"],
+	},
+	{
+		name: "neta_superleader_answer",
+		description:
+			"answer a pending question from this workspace's Neta conversation by its inquiry ID; interim progress is not an answer",
+		inputSchema: {
+			type: "object",
+			additionalProperties: false,
+			required: ["inquiryId", "answer"],
+			properties: {
+				inquiryId: { type: "string", minLength: 1, maxLength: 256 },
+				answer: { type: "string", minLength: 1, maxLength: 16_000 },
+			},
+		},
+		actors: ["leader"],
 	},
 	{
 		name: "neta_done",

@@ -77,6 +77,90 @@ function fixture() {
 	return { store: openMeStore(), context, workspace, leader, agent, mission };
 }
 
+test("a question reaches Neta only when the workspace leader escalates the same ID", async () => {
+	const { store, context, workspace, leader, agent, mission } = fixture();
+	const questionId = "01M3AMZ5N1BD9TEKVG66NXX2TM";
+	const workerEvent: Event = {
+		seq: 1,
+		at: new Date().toISOString(),
+		workspaceId: workspace.id,
+		kind: "mission.blocked",
+		missionId: mission.id,
+		agentId: agent.id,
+		sessionId: agent.sessionId,
+		data: { questionId, question: "Which version?", userEscalation: false, needsReply: false },
+	};
+	expect(await captureMeEvent(store, workerEvent, { ...context, machineId: "machine-A" })).toBe(false);
+	expect(await store.pendingSources()).toEqual([]);
+	const lead = { ...agent, id: "lead-A", sessionId: "lead-session-A", canSpawn: true };
+	const leadEvent: Event = {
+		...workerEvent,
+		seq: 2,
+		agentId: lead.id,
+		sessionId: lead.sessionId,
+		data: { questionId, question: "Which version?", userEscalation: false, needsReply: false },
+	};
+	expect(await captureMeEvent(store, leadEvent, { ...context, machineId: "machine-A", agents: [agent, lead] })).toBe(
+		false,
+	);
+	expect(await store.pendingSources()).toEqual([]);
+	const leaderEvent: Event = {
+		...workerEvent,
+		seq: 3,
+		agentId: undefined,
+		sessionId: leader.sessionId,
+		data: { questionId, question: "Which version?", userEscalation: true, needsReply: true },
+	};
+	expect(await captureMeEvent(store, leaderEvent, { ...context, machineId: "machine-A", agents: [agent, lead] })).toBe(
+		true,
+	);
+	expect((await store.pendingSources())[0]).toMatchObject({ questionId, machineId: "machine-A", forceVisible: true });
+	const resolved: Event = {
+		...workerEvent,
+		seq: 4,
+		kind: "mission.unblocked",
+		data: { questionId, resolution: "Ship v2" },
+	};
+	expect(await captureMeEvent(store, resolved, { ...context, machineId: "machine-A" })).toBe(true);
+	expect((await store.pendingSources()).some((source) => source.text.includes("Resolution: Ship v2"))).toBe(true);
+});
+
+test("a worker resolution is captured only when its question was already visible", async () => {
+	const { store, context, workspace, leader, agent, mission } = fixture();
+	const questionId = "01M3AMZ5N1BD9TEKVG66NXX2TM";
+	const delegated = { ...mission, lead: { kind: "agent" as const, agentId: "lead-A" } };
+	const resolved: Event = {
+		seq: 6,
+		at: new Date().toISOString(),
+		workspaceId: workspace.id,
+		kind: "mission.unblocked",
+		missionId: mission.id,
+		agentId: agent.id,
+		sessionId: agent.sessionId,
+		data: { questionId, resolution: "Use release/2" },
+	};
+	const delegatedContext = { ...context, missions: [delegated] };
+	expect(await captureMeEvent(store, resolved, delegatedContext)).toBe(false);
+	await store.capture({
+		id: "",
+		workspaceId: workspace.id,
+		workspaceName: workspace.name,
+		sessionId: leader.sessionId,
+		actorKind: "leader",
+		kind: "failure",
+		at: resolved.at,
+		text: "Question stalled",
+		eventId: "question-stalled",
+		explicit: true,
+		forceVisible: true,
+		questionId,
+		missionId: mission.id,
+		destinationSessionIds: [leader.sessionId],
+	});
+	expect(await captureMeEvent(store, resolved, delegatedContext)).toBe(true);
+	expect((await store.pendingSources()).some((source) => source.text.includes("Use release/2"))).toBe(true);
+});
+
 test("permission audit capture keeps the native policy outcome visible without turning it into an approval", async () => {
 	const { store, workspace } = fixture();
 	const captured = await captureMePermissionRequest({
@@ -234,6 +318,71 @@ test("failed reader-directed turns are captured even with no transcript blocks",
 		text: "Workspace leader runtime turn failed.",
 	});
 	expect((await store.pendingSources())[0]?.transcriptPointer).toBeUndefined();
+});
+
+test("a reader-directed leader turn without text still proves the handoff was processed", async () => {
+	const { store, workspace } = fixture();
+	const turn: Turn = {
+		id: "turn-no-text",
+		sessionId: "leader-A",
+		startedAt: "2026-09-23T10:00:00.000Z",
+		endedAt: "2026-09-23T10:01:00.000Z",
+		role: "user",
+		readerDirected: true,
+	};
+	expect(await captureMeLeaderTurn({ store, workspace, sessionId: turn.sessionId, turn, blocks: [] })).toBe(true);
+	expect((await store.pendingSources())[0]).toMatchObject({
+		kind: "message",
+		text: "Workspace leader turn completed without a text report. Work outcome is unknown.",
+		turnId: turn.id,
+	});
+});
+
+test("pre-mission setup failure stays visible without a mission record", async () => {
+	const { store, context } = fixture();
+	const captured = await captureMeEvent(
+		store,
+		{
+			workspaceId: "workspace-A",
+			seq: 9,
+			at: "2026-09-23T10:01:00.000Z",
+			kind: "worktree.setupFailed",
+			sessionId: "leader-A",
+			data: { number: 52, stderr: "Validation failed: user must exist", diagnosticPath: "/tmp/52.json" },
+		},
+		context,
+	);
+	expect(captured).toBe(true);
+	expect((await store.pendingSources())[0]).toMatchObject({
+		kind: "failure",
+		forceVisible: true,
+	});
+	expect((await store.pendingSources())[0]?.missionId).toBeUndefined();
+	expect((await store.pendingSources())[0]?.text).toContain("Validation failed: user must exist");
+});
+
+test("leader turns started by an inbox handoff are captured", async () => {
+	const { store, workspace } = fixture();
+	const turn: Turn = {
+		id: "turn-handoff",
+		sessionId: "leader-A",
+		startedAt: "2026-09-23T10:00:00.000Z",
+		endedAt: "2026-09-23T10:01:00.000Z",
+		role: "user",
+		readerDirected: false,
+	};
+	const blocks: Block[] = [
+		{
+			turnId: turn.id,
+			seq: 1,
+			at: turn.endedAt as string,
+			role: "agent",
+			kind: "text",
+			text: "Mission setup failed and needs attention.",
+		},
+	];
+	expect(await captureMeLeaderTurn({ store, workspace, sessionId: turn.sessionId, turn, blocks })).toBe(true);
+	expect((await store.pendingSources())[0]?.text).toContain("Mission setup failed");
 });
 
 test("turn replay buffers a page-split turn and checkpoints only after its final block", async () => {

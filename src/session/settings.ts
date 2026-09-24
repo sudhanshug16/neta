@@ -49,7 +49,7 @@ export const DEFAULT_SETTINGS: Settings = {
 	providers: DEFAULT_PROVIDERS,
 	leader: { provider: "opencode" },
 	forbiddenModels: [],
-	meCurator: { enabled: false },
+	meCurator: { enabled: true },
 };
 
 function copyEnv(env: Record<string, string> | undefined): Record<string, string> | undefined {

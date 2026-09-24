@@ -181,8 +181,10 @@ describe("neta_progress and neta_ask", () => {
 		const lead = makeAgent(ulid(), "running", { canSpawn: true });
 		f.agents.set(lead.id, lead);
 		const result = await coordinationHandlers.neta_ask(ctx(f, leadActor(lead)), { question: "ship it?" });
-		expect(result).toEqual({ ok: true, data: {} });
+		if (!result.ok || typeof result.data.questionId !== "string") throw new Error("missing question ID");
+		expect(result.data.questionId).toHaveLength(26);
 		expect(f.agents.get(lead.id)?.pendingQuestion).toBe("ship it?");
+		expect(f.agents.get(lead.id)?.pendingQuestionId).toBe(result.data.questionId);
 		expect(f.agents.get(lead.id)?.state).toBe("blocked");
 		expect(f.events).toEqual(["mission.blocked"]);
 	});
@@ -224,10 +226,201 @@ test("the workspace leader can ask for a delegated mission without activeMission
 		missionId: 1,
 		question: "Apply to production?",
 	});
-	expect(result).toEqual({ ok: true, data: { missionId: 1 } });
+	expect(result).toMatchObject({ ok: true, data: { missionId: 1, questionId: expect.any(String) } });
 	expect(f.agents.get(lead.id)?.pendingQuestion).toBe("Apply to production?");
 	expect(f.agents.get(lead.id)?.state).toBe("blocked");
-	expect(f.eventData).toContainEqual({ question: "Apply to production?", userEscalation: true, needsReply: true });
+	expect(f.eventData).toContainEqual({
+		questionId: result.ok ? result.data.questionId : undefined,
+		question: "Apply to production?",
+		userEscalation: true,
+		needsReply: true,
+	});
+});
+
+test("a worker question keeps one ID through lead, leader, and the answer back down", async () => {
+	const f = fixture();
+	const lead = makeAgent(ulid(), "running", { canSpawn: true });
+	const worker = makeAgent(ulid(), "running");
+	f.agents.set(lead.id, lead);
+	f.agents.set(worker.id, worker);
+	await f.missions.save({ ...mission(), lead: { kind: "agent", agentId: lead.id }, agentIds: [lead.id, worker.id] });
+	const workerActor: Actor = {
+		kind: "agent",
+		workspaceId: WORKSPACE,
+		missionId: MISSION,
+		agentId: worker.id,
+		sessionId: worker.sessionId,
+	};
+	const leaderActor: Actor = { kind: "leader", workspaceId: WORKSPACE, sessionId: LEADER.sessionId };
+	const question = "Which version should ship?";
+	const workerAsk = await coordinationHandlers.neta_ask(ctx(f, workerActor), { question });
+	if (!workerAsk.ok || typeof workerAsk.data.questionId !== "string") throw new Error("missing worker question ID");
+	const questionId = workerAsk.data.questionId;
+	expect(f.eventData[0]).toMatchObject({ questionId, userEscalation: false, needsReply: false });
+	const leadAsk = await coordinationHandlers.neta_ask(ctx(f, leadActor(lead)), { question, questionId });
+	expect(leadAsk).toMatchObject({ ok: true, data: { questionId } });
+	expect(f.eventData[1]).toMatchObject({ questionId, userEscalation: false, needsReply: false });
+	expect(
+		await coordinationHandlers.neta_ask(ctx(f, leaderActor), { missionId: 1, question, questionId }),
+	).toMatchObject({
+		ok: true,
+		data: { questionId },
+	});
+	expect(f.eventData[2]).toMatchObject({ questionId, userEscalation: true, needsReply: true });
+	const sent: string[] = [];
+	f.sessions.send = async (agent, text) => {
+		sent.push(`${agent.id}:${text}`);
+		return {
+			id: ulid(),
+			sessionId: agent.sessionId,
+			createdAt: new Date().toISOString(),
+			text,
+			attachments: [],
+			status: "queued",
+		};
+	};
+	expect(
+		(await coordinationHandlers.neta_send(ctx(f, leaderActor), { agentId: lead.id, text: "Ship v2", questionId })).ok,
+	).toBe(true);
+	expect(
+		(
+			await coordinationHandlers.neta_send(ctx(f, leadActor(lead)), {
+				agentId: worker.id,
+				text: "Ship v2",
+				questionId,
+			})
+		).ok,
+	).toBe(true);
+	expect(sent).toHaveLength(2);
+	expect(sent.every((text) => text.includes(questionId) && text.includes("Ship v2"))).toBe(true);
+	expect(
+		(
+			await coordinationHandlers.neta_send(ctx(f, leaderActor), {
+				agentId: lead.id,
+				text: "Wrong",
+				questionId: ulid(),
+			})
+		).ok,
+	).toBe(false);
+	expect(
+		(
+			await coordinationHandlers.neta_progress(ctx(f, workerActor), {
+				text: "Applied v2",
+				resolvedQuestionId: questionId,
+			})
+		).ok,
+	).toBe(true);
+	expect(
+		(
+			await coordinationHandlers.neta_progress(ctx(f, leadActor(lead)), {
+				text: "Worker applied v2",
+				resolvedQuestionId: questionId,
+			})
+		).ok,
+	).toBe(true);
+	expect(f.agents.get(worker.id)?.pendingQuestionId).toBeUndefined();
+	expect(f.agents.get(lead.id)?.pendingQuestionId).toBeUndefined();
+	expect(f.events.filter((kind) => kind === "mission.unblocked")).toHaveLength(2);
+});
+
+test("a leader directly owning a mission can escalate its worker's exact question", async () => {
+	const f = fixture();
+	const worker = makeAgent(ulid(), "running");
+	f.agents.set(worker.id, worker);
+	const workerActor: Actor = {
+		kind: "agent",
+		workspaceId: WORKSPACE,
+		missionId: MISSION,
+		agentId: worker.id,
+		sessionId: worker.sessionId,
+	};
+	const leaderActor: Actor = { kind: "leader", workspaceId: WORKSPACE, sessionId: LEADER.sessionId };
+	const question = "Which release branch?";
+	const asked = await coordinationHandlers.neta_ask(ctx(f, workerActor), { question });
+	if (!asked.ok || typeof asked.data.questionId !== "string") throw new Error("missing question ID");
+	expect(
+		(
+			await coordinationHandlers.neta_ask(ctx(f, leaderActor), {
+				missionId: 1,
+				question,
+				questionId: asked.data.questionId,
+			})
+		).ok,
+	).toBe(true);
+	expect(f.eventData[1]).toMatchObject({ questionId: asked.data.questionId, userEscalation: true, needsReply: true });
+	expect((await coordinationHandlers.neta_ask(ctx(f, leaderActor), { missionId: 1, question })).ok).toBe(false);
+	expect(f.store.getMission(MISSION)?.state).toBe("blocked");
+	expect(
+		(
+			await coordinationHandlers.neta_progress(ctx(f, workerActor), {
+				text: "Used the release branch",
+				resolvedQuestionId: asked.data.questionId,
+			})
+		).ok,
+	).toBe(true);
+	expect(f.store.getMission(MISSION)?.state).toBe("running");
+	expect(f.eventData[2]).toMatchObject({ questionId: asked.data.questionId, resolution: "Used the release branch" });
+});
+
+test("a stalled worker question can receive the user's exact answer through its lead", async () => {
+	const f = fixture();
+	const lead = makeAgent(ulid(), "running", { canSpawn: true });
+	const worker = makeAgent(ulid(), "running");
+	f.agents.set(lead.id, lead);
+	f.agents.set(worker.id, worker);
+	await f.missions.save({ ...mission(), lead: { kind: "agent", agentId: lead.id }, agentIds: [lead.id, worker.id] });
+	const workerActor: Actor = {
+		kind: "agent",
+		workspaceId: WORKSPACE,
+		missionId: MISSION,
+		agentId: worker.id,
+		sessionId: worker.sessionId,
+	};
+	const leaderActor: Actor = { kind: "leader", workspaceId: WORKSPACE, sessionId: LEADER.sessionId };
+	const asked = await coordinationHandlers.neta_ask(ctx(f, workerActor), { question: "Which branch?" });
+	if (!asked.ok || typeof asked.data.questionId !== "string") throw new Error("missing question ID");
+	const questionId = asked.data.questionId;
+	const sent: string[] = [];
+	f.sessions.send = async (agent, text) => {
+		sent.push(`${agent.id}:${text}`);
+		return {
+			id: ulid(),
+			sessionId: agent.sessionId,
+			createdAt: new Date().toISOString(),
+			text,
+			attachments: [],
+			status: "queued",
+		};
+	};
+	expect(
+		(
+			await coordinationHandlers.neta_send(ctx(f, leaderActor), {
+				agentId: lead.id,
+				text: "Use release/2",
+				questionId,
+			})
+		).ok,
+	).toBe(true);
+	expect(
+		(
+			await coordinationHandlers.neta_send(ctx(f, leadActor(lead)), {
+				agentId: worker.id,
+				text: "Use release/2",
+				questionId,
+			})
+		).ok,
+	).toBe(true);
+	expect(sent).toHaveLength(2);
+	expect(sent.every((message) => message.includes(questionId))).toBe(true);
+	expect(
+		(
+			await coordinationHandlers.neta_send(ctx(f, leaderActor), {
+				agentId: lead.id,
+				text: "wrong",
+				questionId: ulid(),
+			})
+		).ok,
+	).toBe(false);
 });
 test("asking about an invalid or another mission cannot redirect a lead's question", async () => {
 	const f = fixture();

@@ -5,6 +5,7 @@
 // the config at `session/new` and again at `session/resume`; the Node mints
 // the token immediately before each launch and revokes the previous one.
 import { type McpServerSpec, netaMcpServer } from "../session/mcp.ts";
+import { artifactHandlers } from "./handlers/artifacts.ts";
 import { coordinationHandlers } from "./handlers/coordination.ts";
 import { lifecycleHandlers } from "./handlers/lifecycle.ts";
 import { missionHandlers } from "./handlers/mission.ts";
@@ -16,5 +17,5 @@ export function mcpServerFor(actorId: string, token: string, socketPath: string)
 }
 
 export function toolHandlers(): ToolHandlers {
-	return { ...missionHandlers, ...modelHandlers, ...coordinationHandlers, ...lifecycleHandlers };
+	return { ...missionHandlers, ...modelHandlers, ...coordinationHandlers, ...lifecycleHandlers, ...artifactHandlers };
 }

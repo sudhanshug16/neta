@@ -108,7 +108,9 @@ function stubHandlers(overrides?: Partial<ToolHandlers>): { handlers: ToolHandle
 			neta_history: (_ctx, _args) => ok("neta_history"),
 			neta_progress: (_ctx, _args) => ok("neta_progress"),
 			neta_ask: (_ctx, _args) => ok("neta_ask"),
+			neta_superleader_answer: (_ctx, _args) => ok("neta_superleader_answer"),
 			neta_done: (_ctx, _args) => ok("neta_done"),
+			neta_artifacts: (_ctx, _args) => ok("neta_artifacts"),
 			...overrides,
 		},
 	};
@@ -166,14 +168,13 @@ describe("tool router authorisation", () => {
 		expect(stub.calls).toEqual([]);
 	});
 
-	test("an ordinary agent calling neta_agent or neta_ask is refused", async () => {
+	test("an ordinary agent cannot create agents but can ask its parent", async () => {
 		const { router, stub, agentId, agentToken } = setup();
-		for (const name of ["neta_agent", "neta_ask"]) {
-			const response = await router.call(agentId, agentToken, name, { task: "t", access: "readOnly" });
-			expect(response.isError).toBe(true);
-			expect(textOf(response)).toStartWith("error notAuthorised:");
-		}
-		expect(stub.calls).toEqual([]);
+		const refused = await router.call(agentId, agentToken, "neta_agent", { task: "t", access: "readOnly" });
+		expect(refused.isError).toBe(true);
+		expect(textOf(refused)).toStartWith("error notAuthorised:");
+		expect((await router.call(agentId, agentToken, "neta_ask", { question: "Which version?" })).isError).toBe(false);
+		expect(stub.calls).toEqual(["neta_ask"]);
 		// A lead may call neta_agent.
 		const { router: leadRouter, tokens: leadTokens, leadId: lead, leadToken: leadTok } = setup();
 		const allowed = await leadRouter.call(lead, leadTok, "neta_agent", { task: "t", access: "readOnly" });
@@ -250,6 +251,24 @@ describe("tool router rendering", () => {
 		expect(called).toBe("superleader_feed");
 	});
 
+	test("workspace Superleader bridges can register after the router starts", async () => {
+		const tokens = createTokenTable();
+		const bridges = new Map<string, SessionToolBridge>();
+		const router = createRouter({ store: stubStore([], [], []) }, stubHandlers().handlers, tokens, (actorId) =>
+			bridges.get(actorId),
+		);
+		const actorId = ulid();
+		const token = tokens.mint(actorId);
+		expect(router.list(actorId, token)).toMatchObject({ ok: false, code: "notAuthorised" });
+		bridges.set(actorId, {
+			actorId,
+			tools: [{ name: "superleader_missions", description: "This workspace", inputSchema: { type: "object" } }],
+			call: async () => ({ content: [{ type: "text", text: "scoped" }], isError: false }),
+		});
+		expect(router.list(actorId, token)).toMatchObject([{ name: "superleader_missions" }]);
+		expect(textOf(await router.call(actorId, token, "superleader_missions", {}))).toBe("scoped");
+	});
+
 	test("leader and lead responses carry the reminder, an agent's does not", async () => {
 		const { router, leaderId, leaderToken, leadId, leadToken, agentId, agentToken } = setup();
 		const leadCall = await router.call(leadId, leadToken, "neta_status", {});
@@ -281,6 +300,7 @@ describe("tool router rendering", () => {
 		const leaderNames = leaderTools.map((t) => t.name).sort();
 		expect(leaderNames).toEqual([
 			"neta_agent",
+			"neta_artifacts",
 			"neta_ask",
 			"neta_close",
 			"neta_history",
@@ -292,8 +312,11 @@ describe("tool router rendering", () => {
 			"neta_scope",
 			"neta_send",
 			"neta_status",
+			"neta_superleader_answer",
 		]);
 		expect(agentTools.map((t) => t.name).sort()).toEqual([
+			"neta_artifacts",
+			"neta_ask",
 			"neta_done",
 			"neta_history",
 			"neta_model",

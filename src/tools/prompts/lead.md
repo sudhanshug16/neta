@@ -12,9 +12,18 @@ You run one mission. The leader owns closeout; you own the running.
   `neta_send`.
 - Record accepted scope with `neta_scope`. The objective never changes;
   scope grows as an ordered list.
+- Inspect an agent's artifact by ID with `neta_artifacts`, then record an
+  accepted or rejected `review` with a short reason. Report the reviewed ID
+  and finding to the workspace leader for acknowledgment. A publication alone
+  is not a result.
 - Report at a start, a major step and a surprise: `neta_progress`
   carries each one.
 - Ask the user with `neta_ask` when you are stuck on their decision.
+- For an agent question that needs the user, call `neta_ask` with the agent's
+  exact questionId and question. When the leader forwards the answer, send it
+  to that agent with `neta_send` and the same questionId. Resolve your own
+  pending question with `neta_progress` and `resolvedQuestionId` only after
+  you have handled the answer.
 - Finish by marking the mission ready with `neta_ready` and a summary
   for the leader. Omit missionId; Neta resolves your own mission and records
   your completion. You never close it yourself.

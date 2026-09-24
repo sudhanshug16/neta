@@ -5,6 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ulid } from "../src/core/ids.ts";
 import type { Agent, AgentState, Event, Leader, Mission, MissionState, Workspace } from "../src/core/types.ts";
+import {
+	registerSuperleaderSession,
+	unregisterSuperleaderSession,
+	workspaceForSuperleaderSession,
+} from "../src/node/handlers-me.ts";
 import { connectNode, type NodeClient, startNode } from "../src/node/index.ts";
 import {
 	adaptStore,
@@ -1155,6 +1160,42 @@ test("a resume queued behind reset cannot resurrect the retired conversation", a
 		release();
 		await acp.closeAll();
 		await real.close();
+	}
+});
+
+test("Superleader reset transfers workspace tool ownership to the replacement session", async () => {
+	const configured = loadSettings({ netaDir: dir }).settings;
+	configured.providers.fake = {
+		command: process.execPath,
+		args: [FIXTURE, "--session-store", join(dir, "provider.json")],
+		resume: true,
+		defaultModel: "test-model",
+	};
+	const acp = adaptRuntime(configured);
+	let oldSessionId: string | undefined;
+	let nextSessionId: string | undefined;
+	try {
+		const created = await acp.createSession({
+			workspaceId: "w1",
+			cwd: dir,
+			provider: "fake",
+			model: "test-model",
+			access: "readOnly",
+			netaTools: true,
+		});
+		oldSessionId = created.sessionId;
+		registerSuperleaderSession(created.sessionId, "w1");
+		const fresh = await acp.resetSession(created.sessionId, "", async (next) => {
+			nextSessionId = next.sessionId;
+			expect(workspaceForSuperleaderSession(next.sessionId)).toBe("w1");
+		});
+		expect(fresh.sessionId).toBe(nextSessionId ?? "");
+		expect(workspaceForSuperleaderSession(created.sessionId)).toBeUndefined();
+		expect(workspaceForSuperleaderSession(fresh.sessionId)).toBe("w1");
+	} finally {
+		if (oldSessionId) unregisterSuperleaderSession(oldSessionId);
+		if (nextSessionId) unregisterSuperleaderSession(nextSessionId);
+		await acp.closeAll();
 	}
 });
 

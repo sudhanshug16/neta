@@ -248,26 +248,51 @@ bounded preview and a session/turn/block-range/hash pointer to the original
 transcript. Capture is durable before event or block-sequence checkpoints
 advance. On startup the Node replays after those checkpoints; source identity
 makes crash/retry idempotent, and a page-split turn stays buffered until its
-final block. Sol opens one persisted native OpenCode session on user request;
-chat messages use durable inbox admission, and the session is resumed under the
-same ID. Superleader routes preserve the exact user instruction separately from
+final block. Neta opens one persisted native OpenCode conversation per local
+workspace copy; chat messages use durable inbox admission, and the session is
+resumed under the same ID. The TUI opens that session in OpenCode's native chat;
+feed records are available through tools, not a separate inbox screen. Neta routes
+preserve the exact user instruction separately from
 the derived text and explanation, validate a current workspace-leader session,
-and deliver with a stable source key. Sol's native session receives only
-session-scoped feed, evidence, and user-directed leader-routing tools; ordinary
-Neta coordination and permission tools are not exposed. Its chat context includes
-recent Sol turns and current feed records, while those tools can retrieve
-suppressed history and verify bounded transcript evidence. Routing records a
+and deliver both original and derived text with a stable source key. The
+leader's first captured response is correlated to that handoff as a reply;
+it does not by itself prove the work is complete. Its
+question tool saves each question and
+delivery receipt, then correlates the leader's immediate reply to its native
+turn. The question remains pending until the workspace leader records a
+substantive answer with `neta_superleader_answer`.
+Blocked mission questions remain in the durable event feed even if a mission's
+one-line attention field changes. Neta's native session receives only
+workspace-scoped mission, attention, evidence, question, and leader-routing tools; ordinary
+Neta coordination and permission tools are not exposed. Read-only Neta
+tools expose current mission and agent records for that workspace on this Node, plus
+captured feed history and bounded transcript evidence. Its system context contains
+only the workspace role and tool guidance; saved user turn IDs are available through
+an on-demand tool for routing. Routing records a
 visible destination and receipt. GPT-6 Sol medium is selected and checked through
-the native runtime when that provider is configured. Luna classification uses
-the authenticated OpenCode runtime and a persisted read-only session with Neta
-ordinary Neta tools disabled. It runs only when `meCurator.enabled` is explicitly set to
-`true` in `~/.neta/settings.json`. It is off by default. Model/transport errors leave
-sources pending; startup backlog drains in bounded batches and failures retry with
-backoff. Session identity is reserved durably and marked initialized only after
+the native runtime when that provider is configured. The attention filter uses
+the authenticated OpenCode runtime and a separate persisted read-only session
+per local workspace copy, with execution tools disabled. It is enabled by
+default and can be disabled with `meCurator.enabled: false` in
+`~/.neta/settings.json`. The filter classifies captured sources and creates
+durable Neta notices. A notice reaches Neta through the native inbox; only a
+completed native Neta turn with a matching `neta_present` declaration records a
+presentation. Delivery alone does not prove presentation or completed work.
+Worker questions pass through the mission lead and workspace leader with one
+question ID; direct-leader missions pass from worker to leader. An idle parent
+that does not forward a pending question within two minutes creates a durable
+attention source; an active but stalled turn has a ten-minute grace period.
+User answers travel back down with that exact ID. Workers
+publish text, Markdown, JSON, or CSV artifacts by immutable reference. A worker
+artifact needs an accepted mission-lead review and workspace-leader
+acknowledgment before Neta can open it. The filter receives a short source and
+artifact ID; full bytes enter a model only when it explicitly opens the artifact.
+Model/transport errors leave sources pending; startup backlog drains in bounded
+batches and failures retry with backoff. Session identity is reserved durably and marked initialized only after
 successful native session creation, so a failed first launch can retry under the
 same ID while established sessions resume rather than being recreated.
 Permission events are captured with the disposition applied by the existing
-OpenCode/Neta permission policy; Superleader does not grant additional access.
+OpenCode/Neta permission policy; Neta does not grant additional access.
 
 ## Missions
 
@@ -506,8 +531,10 @@ provider launch, availability, and model selection use the same effective
 settings. Live model options come from OpenCode's connected model catalog;
 before launch, only a configured non-empty default can be shown.
 
-`conversation.reset` replaces the selected owner session atomically with a
-fresh provider and vendor conversation. It keeps provider, model, access,
+`conversation.reset` replaces both workspace leader and Neta sessions
+when either chat is selected. An agent reset replaces only that agent's
+session. Each replacement starts a fresh provider and vendor conversation. It
+keeps provider, model, access,
 leader sandbox policy, MCP actor authority, and current role/mission brief. The
 brief is supplied as refreshed system context for native OpenCode, and attached
 once to the first new user prompt for other providers; no old transcript or

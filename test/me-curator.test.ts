@@ -18,7 +18,7 @@ function isolate() {
 	dirs.push(dir);
 	process.env.NETA_DIR = dir;
 }
-function source(turnId: string): MeSource {
+function source(turnId: string, overrides: Partial<MeSource> = {}): MeSource {
 	const draft = {
 		id: "",
 		workspaceId: "one",
@@ -31,6 +31,7 @@ function source(turnId: string): MeSource {
 		turnId,
 		explicit: true,
 		destinationSessionIds: ["leader-1"],
+		...overrides,
 	};
 	return { ...draft, id: meSourceId(draft) };
 }
@@ -133,4 +134,91 @@ test("bounded curator drain processes a 25-source restart backlog and stops when
 	expect(stalled.pending).toBe(3);
 	expect(stalled.failed).toEqual(pending.map((item) => item.id));
 	expect(failures).toBe(3);
+});
+
+test("routine evidence defers with a durable deadline, while urgent failures fall back after repeated model errors", async () => {
+	isolate();
+	const store = openMeStore();
+	const routine = await store.capture(source("routine"));
+	const until = new Date(Date.now() + 60_000).toISOString();
+	const deferred = await createMeCurator({
+		store,
+		classify: async () => ({ action: "defer", concernKey: "routine", reason: "Wait for mission closeout", until }),
+	}).run();
+	expect(deferred).toMatchObject({ processed: [], pending: 0, failed: [] });
+	expect(await store.nextDeferredAt()).toBe(Date.parse(until));
+	expect((await store.list()).pending.map((item) => item.id)).toContain(routine.id);
+	const urgent = await store.capture(
+		source("urgent", { kind: "failure", forceVisible: true, questionId: "question-1" }),
+	);
+	const broken = createMeCurator({
+		store,
+		classify: async () => {
+			throw new Error("model down");
+		},
+	});
+	expect((await broken.run()).failed).toEqual([urgent.id]);
+	expect((await broken.run()).failed).toEqual([urgent.id]);
+	expect((await broken.run()).failed).toEqual([]);
+	expect((await store.pendingNotices())[0]).toMatchObject({ sourceIds: [urgent.id], needsReply: true });
+	expect((await store.list()).pending.map((item) => item.id)).toEqual([routine.id]);
+});
+
+test("filter opens bounded detail once and resolves a prior concern with later cited evidence", async () => {
+	isolate();
+	const store = openMeStore();
+	const initial = await store.capture(source("initial"));
+	await store.decide(initial.id, decision(initial));
+	const later = await store.capture(source("later", { text: "The answer arrived" }));
+	let calls = 0;
+	const curator = createMeCurator({
+		store,
+		loadDetail: async (selected) => ({ text: `Full verified detail for ${selected.id}`, complete: true }),
+		classify: async (input) => {
+			calls += 1;
+			if (!input.details) return { action: "request_detail", sourceIds: [later.id] };
+			expect(input.details).toEqual([
+				{ sourceId: later.id, text: `Full verified detail for ${later.id}`, complete: true },
+			]);
+			return {
+				...decision(later),
+				action: "resolve",
+				summary: "The answer arrived",
+				evidenceSourceIds: [initial.id, later.id],
+				needsReply: false,
+				resolved: true,
+			};
+		},
+	});
+	expect((await curator.run()).processed[0]).toMatchObject({ action: "resolve", resolved: true });
+	expect(calls).toBe(2);
+	expect((await store.pendingNotices()).length).toBe(1);
+});
+
+test("one filter turn can checkpoint a small same-work batch without dropping urgent evidence", async () => {
+	isolate();
+	const store = openMeStore();
+	const items = await Promise.all(
+		Array.from({ length: 5 }, (_, index) =>
+			store.capture(
+				source(`burst-${index}`, { text: `Progress ${index}`, kind: "event", forceVisible: index === 2 }),
+			),
+		),
+	);
+	let calls = 0;
+	const curator = createMeCurator({
+		store,
+		classify: async ({ source: first, relatedSources }) => {
+			calls += 1;
+			expect(relatedSources).toHaveLength(4);
+			return {
+				...decision(first),
+				needsReply: false,
+				evidenceSourceIds: [first.id, ...(relatedSources ?? []).map((item) => item.id)],
+			};
+		},
+	});
+	expect((await curator.run()).pending).toBe(0);
+	expect(calls).toBe(1);
+	expect((await store.pendingNotices())[0]?.sourceIds).toEqual(items.map((item) => item.id));
 });

@@ -1,7 +1,16 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { ulid } from "../src/core/ids.ts";
 import type { Agent, Block, Leader, Mission, SessionId, Turn, Workspace } from "../src/core/types.ts";
-import { conversationHandlers, restoreNativeOwner, wireTurnStream } from "../src/node/handlers-conversation.ts";
+import { openMeStore } from "../src/me/store.ts";
+import {
+	conversationHandlers,
+	restoreNativeOwner,
+	sessionSystemContext,
+	wireTurnStream,
+} from "../src/node/handlers-conversation.ts";
 import { NodeError, type TurnNotification } from "../src/node/protocol.ts";
 import type { Connection, NodeContext, NodeRuntime, NodeStore } from "../src/node/server.ts";
 
@@ -543,7 +552,7 @@ describe("prompt, cancel, setModel and models.list", () => {
 	});
 });
 
-test("leader reset only rebinds the chat and keeps missions and worker sessions", async () => {
+test("leader chat reset keeps missions and worker sessions", async () => {
 	const ctx = testCtx({}, []);
 	const at = "2026-02-01T00:00:00.000Z";
 	let leader: Leader = {
@@ -623,6 +632,102 @@ test("leader reset only rebinds the chat and keeps missions and worker sessions"
 	expect(leader.sessionId).toBe(SC);
 	expect(leader.name).toBe("Leader");
 	expect(JSON.stringify({ mission, worker })).toBe(before);
+});
+
+test("resetting either workspace chat starts fresh leader and Superleader sessions", async () => {
+	const originalDir = process.env.NETA_DIR;
+	const dir = mkdtempSync(join(tmpdir(), "neta-superleader-reset-"));
+	process.env.NETA_DIR = dir;
+	try {
+		const store = openMeStore();
+		const identity = await store.solIdentity("workspace-A");
+		const other = await store.solIdentity("workspace-B");
+		const oldTurn = await store.appendSolTurn({
+			workspaceId: "workspace-A",
+			idempotencyKey: "old-superleader-chat",
+			author: "user",
+			text: "Old chat marker",
+			at: "2026-01-01T00:00:00.000Z",
+		});
+		const conn = testConn();
+		const ctx = testCtx({}, [conn]);
+		let leader: Leader = {
+			workspaceId: "workspace-A",
+			machineId: "machine",
+			name: "Leader",
+			sessionId: SA,
+			provider: "opencode",
+			model: "model",
+			mode: "lead",
+			modeSince: "2026-01-01T00:00:00.000Z",
+			modeActiveMs: 0,
+			state: "idle",
+		};
+		ctx.store = {
+			...ctx.store,
+			machine: () => ({ id: "machine", name: "Machine", createdAt: leader.modeSince }),
+			getWorkspace: () => ({
+				id: "workspace-A",
+				kind: "folder",
+				name: "Workspace A",
+				roots: [{ machineId: "machine", path: dir }],
+				createdAt: leader.modeSince,
+			}),
+			listLeaders: () => [leader],
+			putLeader: async (next) => {
+				leader = next;
+			},
+		};
+		const resetIds: string[] = [];
+		ctx.runtime.resetSession = async (id, brief, rebind) => {
+			resetIds.push(id);
+			if (id === identity.sessionId || id === SC) expect(brief).toBe("");
+			const next = {
+				sessionId: id === identity.sessionId ? SC : id === SA ? SB : ulid(),
+				provider: "opencode",
+				model: "model",
+			};
+			await rebind(next);
+			return next;
+		};
+		const result = await call(ctx, testConn(), "conversation.reset", { sessionId: identity.sessionId });
+		expect(result).toEqual({ sessionId: SC, provider: "opencode", model: "model" });
+		expect(resetIds).toEqual([identity.sessionId, SA]);
+		expect(conn.sent.filter((item) => item.method === "chats.reset")).toEqual([
+			{ method: "chats.reset", params: { workspaceId: "workspace-A" } },
+		]);
+		expect(leader.sessionId).toBe(SB);
+		expect((await store.solIdentity("workspace-A")).sessionId).toBe(SC);
+		expect((await store.solIdentity("workspace-B")).sessionId).toBe(other.sessionId);
+		expect((await store.listSolTurns({ workspaceId: "workspace-A" })).turns).toEqual([oldTurn]);
+		const context = await sessionSystemContext({ store: ctx.store, superleaderWorkspaceId: "workspace-A" }, SC);
+		expect(context).not.toContain("Old chat marker");
+		const second = await call(ctx, testConn(), "conversation.reset", { sessionId: leader.sessionId });
+		expect(second).toMatchObject({ sessionId: leader.sessionId });
+		expect(resetIds).toEqual([identity.sessionId, SA, SC, SB]);
+		expect(conn.sent.filter((item) => item.method === "chats.reset")).toHaveLength(2);
+		expect((await store.solIdentity("workspace-A")).sessionId).not.toBe(SC);
+		const beforeFailure = {
+			leaderSessionId: leader.sessionId,
+			solSessionId: (await store.solIdentity("workspace-A")).sessionId,
+		};
+		ctx.runtime.resetSession = async (id, _brief, rebind) => {
+			if (id === beforeFailure.leaderSessionId) throw new Error("leader reset failed");
+			const next = { sessionId: ulid(), provider: "opencode", model: "model" };
+			await rebind(next);
+			return next;
+		};
+		await expect(call(ctx, conn, "conversation.reset", { sessionId: beforeFailure.leaderSessionId })).rejects.toThrow(
+			"leader reset failed",
+		);
+		expect(leader.sessionId).toBe(beforeFailure.leaderSessionId);
+		expect((await store.solIdentity("workspace-A")).sessionId).not.toBe(beforeFailure.solSessionId);
+		expect(conn.sent.filter((item) => item.method === "chats.reset")).toHaveLength(3);
+	} finally {
+		if (originalDir === undefined) delete process.env.NETA_DIR;
+		else process.env.NETA_DIR = originalDir;
+		rmSync(dir, { recursive: true, force: true });
+	}
 });
 
 test("a saved mission-leader tab resumes its exact session without prompting", async () => {

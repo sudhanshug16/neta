@@ -145,7 +145,7 @@ export function createRouter(
 	deps: ToolDeps,
 	handlers: ToolHandlers,
 	tokens: TokenTable,
-	sessionTools?: SessionToolBridge,
+	sessionTools?: SessionToolBridge | ((actorId: string) => SessionToolBridge | undefined),
 ): {
 	list(
 		actorId: string,
@@ -159,15 +159,22 @@ export function createRouter(
 		}
 		return resolveActor(deps.store, actorId);
 	}
+	const sessionBridge = (actorId: string): SessionToolBridge | undefined =>
+		typeof sessionTools === "function"
+			? sessionTools(actorId)
+			: sessionTools?.actorId === actorId
+				? sessionTools
+				: undefined;
 
 	return {
 		list(
 			actorId: string,
 			token: string,
 		): Array<{ name: string; description: string; inputSchema: JsonSchema }> | ToolResult {
-			if (sessionTools?.actorId === actorId)
+			const bridge = sessionBridge(actorId);
+			if (bridge)
 				return tokens.verify(actorId, token)
-					? sessionTools.tools
+					? bridge.tools
 					: { ok: false, code: "notAuthorised", message: "bad token or unknown session tools actor" };
 			const actor = authed(actorId, token);
 			if (actor === undefined) {
@@ -177,16 +184,17 @@ export function createRouter(
 		},
 
 		async call(actorId: string, token: string, name: string, args: unknown): Promise<McpToolResponse> {
-			if (sessionTools?.actorId === actorId) {
+			const bridge = sessionBridge(actorId);
+			if (bridge) {
 				if (!tokens.verify(actorId, token))
 					return { content: [{ type: "text", text: "error notAuthorised: bad token" }], isError: true };
-				if (!sessionTools.tools.some((tool) => tool.name === name))
+				if (!bridge.tools.some((tool) => tool.name === name))
 					return {
 						content: [{ type: "text", text: `error notAuthorised: no such session tool: ${name}` }],
 						isError: true,
 					};
 				try {
-					return await sessionTools.call(name, args);
+					return await bridge.call(name, args);
 				} catch (error) {
 					return {
 						content: [

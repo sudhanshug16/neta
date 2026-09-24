@@ -64,6 +64,31 @@ test("machine-global capture deduplicates replay across reopen and preserves pen
 	expect(await readFile(join(root, "me", "state.json"), "utf8")).not.toContain("do-not-persist");
 });
 
+test("Neta notice records delivery separately from committed presentation", async () => {
+	isolated();
+	const store = openMeStore();
+	const first = await store.capture(source("notice-1"));
+	await store.decide(first.id, decision(first));
+	const second = await store.capture(source("notice-2"));
+	await store.decide(second.id, decision(second, { action: "update", summary: "New constraint" }));
+	const pending = await store.pendingNotices("workspace-A");
+	expect(pending).toHaveLength(1);
+	expect(pending[0]).toMatchObject({ cardVersion: 2, sourceIds: [first.id, second.id], status: "queued" });
+	const notice = pending[0];
+	if (!notice) throw new Error("missing notice");
+	await store.claimNotice(notice.id);
+	await store.recordNoticeDelivery(notice.id, "delivered", "inbox-1", "turn-1");
+	expect(await openMeStore().listPresentations("workspace-A")).toEqual([]);
+	await expect(store.declareNotice(notice.id, ["another-source"])).rejects.toThrow("captured sources");
+	await store.declareNotice(notice.id, [second.id]);
+	await expect(store.commitNotice(notice.id, "wrong-turn", "User-facing update")).rejects.toThrow("bound");
+	const committed = await store.commitNotice(notice.id, "turn-1", "User-facing update");
+	expect(committed).toMatchObject({ status: "committed", declaredSourceIds: [second.id] });
+	expect(committed.messageHash).toMatch(/^[a-f0-9]{64}$/);
+	expect((await openMeStore().listPresentations("workspace-A"))[0]?.presentationDigest).toBe("User-facing update");
+	expect(await store.pendingNotices("workspace-A")).toEqual([]);
+});
+
 test("groups concern updates, retains evidence and unanswered read cards, hides suppression only from primary feed", async () => {
 	isolated();
 	const store = openMeStore();
@@ -213,7 +238,7 @@ test("Sol transcript and routes stay separate from card replies and do not alias
 	isolated();
 	const store = openMeStore();
 	const sol = await store.solIdentity();
-	expect(sol).toMatchObject({ id: "sol", role: SOL_ROLE, title: "Sol" });
+	expect(sol).toMatchObject({ id: "sol", role: SOL_ROLE, title: "Neta" });
 	expect(sol.sessionId).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/);
 	expect(sol.sessionId).not.toBe(SOL_SESSION_ID);
 	expect(sol.role).not.toBe("leader");
@@ -263,6 +288,143 @@ test("Sol transcript and routes stay separate from card replies and do not alias
 		}),
 	).rejects.toThrow("exact user instruction");
 	expect((await store.listSolTurns()).turns.map((turn) => turn.id)).toEqual([user.id]);
+});
+
+test("workspace Superleader sessions, turns, inquiries, and attention stay isolated", async () => {
+	isolated();
+	const store = openMeStore();
+	const a = await store.solIdentity("workspace-A");
+	const b = await store.solIdentity("workspace-B");
+	expect(a.sessionId).not.toBe(b.sessionId);
+	expect((await store.solBySession(b.sessionId))?.workspaceId).toBe("workspace-B");
+	const turn = await store.appendSolTurn({
+		workspaceId: "workspace-A",
+		idempotencyKey: "turn-A",
+		author: "user",
+		text: "Do A",
+	});
+	expect((await store.listSolTurns({ workspaceId: "workspace-A" })).turns).toEqual([turn]);
+	expect((await store.listSolTurns({ workspaceId: "workspace-B" })).turns).toEqual([]);
+	const inquiry = await store.queueInquiry({
+		idempotencyKey: "ask-A",
+		workspaceId: "workspace-A",
+		leaderSessionId: "leader-A",
+		question: "What is blocked?",
+	});
+	expect((await store.listInquiries("workspace-A"))[0]).toEqual(inquiry);
+	expect(await store.listInquiries("workspace-B")).toEqual([]);
+	await store.updateInquiry(inquiry.id, "delivering");
+	await store.updateInquiry(inquiry.id, "delivered", "receipt-A");
+	const answered = await store.answerInquiry(inquiry.id, "Mission 3 is blocked");
+	expect(answered).toMatchObject({ status: "answered", answer: "Mission 3 is blocked" });
+	expect((await openMeStore().listInquiries("workspace-A"))[0]).toEqual(answered);
+	const pending = await store.queueInquiry({
+		idempotencyKey: "ask-A-again",
+		workspaceId: "workspace-A",
+		leaderSessionId: "leader-A",
+		question: "Is anything else blocked?",
+	});
+	expect((await store.listInquiries("workspace-A", 1))[0]?.id).toBe(pending.id);
+	expect((await store.listInquiries("workspace-A", 1, pending.id))[0]?.id).toBe(answered.id);
+	const event = await store.capture(
+		source("event-A", "workspace-A", {
+			kind: "event",
+			text: "mission.blocked · Question: Choose a region",
+			eventId: "workspace-A:10",
+			turnId: undefined,
+		}),
+	);
+	expect((await store.attentionEvents("workspace-A"))[0]?.id).toBe(event.id);
+	expect(await store.attentionEvents("workspace-B")).toEqual([]);
+});
+
+test("a routed user answer must cite the exact pending question in its machine copy", async () => {
+	isolated();
+	const store = openMeStore();
+	await store.bindSolRuntime({
+		workspaceId: "workspace-A",
+		machineId: "machine-A",
+		provider: "opencode",
+		model: "openai/gpt-6-sol",
+	});
+	const turn = await store.appendSolTurn({
+		workspaceId: "workspace-A",
+		idempotencyKey: "answer-turn",
+		author: "user",
+		text: "Ship v2",
+	});
+	expect(turn.machineId).toBe("machine-A");
+	const question = await store.capture(
+		source("question-turn", "workspace-A", {
+			machineId: "machine-A",
+			kind: "event",
+			turnId: undefined,
+			eventId: "question-event",
+			questionId: "question-1",
+			forceVisible: true,
+		}),
+	);
+	await expect(
+		store.queueRoute({
+			idempotencyKey: "wrong-question",
+			solTurnId: turn.id,
+			instruction: turn.text,
+			destinationSessionIds: ["leader-workspace-A"],
+			provenanceSourceIds: [question.id],
+			questionId: "question-2",
+		}),
+	).rejects.toThrow("captured pending question");
+	const route = await store.queueRoute({
+		idempotencyKey: "right-question",
+		solTurnId: turn.id,
+		instruction: turn.text,
+		destinationSessionIds: ["leader-workspace-A"],
+		provenanceSourceIds: [question.id],
+		questionId: "question-1",
+	});
+	expect(route).toMatchObject({ questionId: "question-1", machineId: "machine-A" });
+	await expect(
+		store.bindSolRuntime({
+			workspaceId: "workspace-A",
+			machineId: "machine-B",
+			provider: "opencode",
+			model: "openai/gpt-6-sol",
+		}),
+	).rejects.toThrow("another machine copy");
+});
+
+test("Superleader chat reset changes only its session and keeps workspace records", async () => {
+	isolated();
+	const store = openMeStore();
+	const first = await store.solIdentity("workspace-A");
+	const other = await store.solIdentity("workspace-B");
+	const turn = await store.appendSolTurn({
+		workspaceId: "workspace-A",
+		idempotencyKey: "before-reset",
+		author: "user",
+		text: "Old chat marker",
+	});
+	const inquiry = await store.queueInquiry({
+		idempotencyKey: "before-reset-question",
+		workspaceId: "workspace-A",
+		leaderSessionId: "leader-A",
+		question: "What is blocked?",
+	});
+	await expect(store.resetSolSession("workspace-A", first.sessionId, other.sessionId)).rejects.toThrow(
+		"aliases another workspace",
+	);
+	const nextSessionId = "fresh-superleader-session";
+	const next = await store.resetSolSession("workspace-A", first.sessionId, nextSessionId);
+	expect(next).toMatchObject({ workspaceId: "workspace-A", sessionId: nextSessionId, runtimeInitialized: true });
+	expect(next.contextResetAt).toBeDefined();
+	expect(await store.solBySession(first.sessionId)).toBeUndefined();
+	expect((await store.solBySession(nextSessionId))?.workspaceId).toBe("workspace-A");
+	expect((await store.solIdentity("workspace-B")).sessionId).toBe(other.sessionId);
+	expect((await store.listSolTurns({ workspaceId: "workspace-A" })).turns).toEqual([turn]);
+	expect((await store.listInquiries("workspace-A"))[0]).toEqual(inquiry);
+	await expect(store.resetSolSession("workspace-A", first.sessionId, "another-session")).rejects.toThrow(
+		"changed during chat reset",
+	);
 });
 
 test("version 1 documents gain checkpoint and Sol fields without dropping pending questions", async () => {
@@ -318,10 +480,54 @@ test("legacy logical Sol ids are replaced by a real session id", async () => {
 	expect(await openMeStore().solIdentity()).toEqual(sol);
 });
 
-test("Luna curator retains one native session identity and rejects silent target rebinding", async () => {
+test("version 2 Sol session and transcript migrate into their bound workspace", async () => {
+	const root = isolated();
+	await mkdir(join(root, "me"), { recursive: true });
+	await writeFile(
+		join(root, "me", "state.json"),
+		JSON.stringify({
+			version: 2,
+			sources: [],
+			decidedSourceIds: [],
+			cards: [],
+			replies: [],
+			checkpoint: { workspaces: [] },
+			sol: {
+				id: "sol",
+				role: SOL_ROLE,
+				title: "Sol",
+				sessionId: "legacy-native-session",
+				workspaceId: "workspace-old",
+				provider: "opencode",
+				model: "openai/gpt-6-sol",
+				createdAt: "2026-09-23T10:00:00.000Z",
+			},
+			solTurns: [
+				{
+					id: "old-turn",
+					idempotencyKey: "old",
+					at: "2026-09-23T10:01:00.000Z",
+					author: "user",
+					text: "Keep this history",
+				},
+			],
+			routes: [],
+		}),
+	);
+	const store = openMeStore();
+	expect((await store.solIdentity("workspace-old")).sessionId).toBe("legacy-native-session");
+	expect((await store.listSolTurns({ workspaceId: "workspace-old" })).turns[0]).toMatchObject({
+		id: "old-turn",
+		workspaceId: "workspace-old",
+		text: "Keep this history",
+	});
+	expect((await store.solIdentity("workspace-new")).sessionId).not.toBe("legacy-native-session");
+});
+
+test("attention filter keeps a distinct native session per workspace", async () => {
 	isolated();
 	const store = openMeStore();
-	const identity = await store.lunaIdentity();
+	const identity = await store.lunaIdentity("workspace-A");
 	expect(identity.sessionId).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/);
 	expect(identity.role).toBe("curator");
 	expect(
@@ -331,11 +537,18 @@ test("Luna curator retains one native session identity and rejects silent target
 		workspaceId: "workspace-A",
 		model: "openai/gpt-6-luna",
 	});
-	expect(await openMeStore().lunaIdentity()).toMatchObject({
+	expect(await openMeStore().lunaIdentity("workspace-A")).toMatchObject({
 		sessionId: identity.sessionId,
 		workspaceId: "workspace-A",
 	});
-	await expect(
-		store.bindLunaRuntime({ workspaceId: "workspace-B", provider: "opencode", model: "openai/gpt-6-luna" }),
-	).rejects.toThrow("already bound");
+	const other = await store.bindLunaRuntime({
+		workspaceId: "workspace-B",
+		provider: "opencode",
+		model: "openai/gpt-6-luna",
+	});
+	expect(other.sessionId).not.toBe(identity.sessionId);
+	expect((await store.listLunaIdentities()).map((item) => item.workspaceId).sort()).toEqual([
+		"workspace-A",
+		"workspace-B",
+	]);
 });

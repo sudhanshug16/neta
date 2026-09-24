@@ -57,6 +57,40 @@ interface SessionConfigOption {
 }
 
 const sessionPath = (id: string): string => `/api/session/${encodeURIComponent(id)}`;
+const SUPERLEADER_PERMISSIONS = new Set([
+	"neta_superleader_missions",
+	"neta_superleader_feed",
+	"neta_superleader_ask",
+	"neta_superleader_questions",
+	"neta_superleader_user_turns",
+	"neta_superleader_attention",
+	"neta_superleader_evidence",
+	"neta_superleader_route",
+	"neta_present",
+	"neta_artifacts",
+]);
+
+export function nativePermissionReply(action: string, access: Access, unsandboxed: boolean): "once" | "reject" {
+	return unsandboxed ||
+		access === "readWrite" ||
+		SUPERLEADER_PERMISSIONS.has(action) ||
+		[
+			"execute",
+			"read",
+			"search",
+			"fetch",
+			"external_directory",
+			"bash",
+			"shell",
+			"grep",
+			"glob",
+			"webfetch",
+			"websearch",
+		].includes(action)
+		? "once"
+		: "reject";
+}
+
 const string = (value: unknown): string | undefined => (typeof value === "string" ? value : undefined);
 const number = (value: unknown): number | undefined => (typeof value === "number" ? value : undefined);
 const record = (value: unknown): Record<string, unknown> => (isRecord(value) ? value : {});

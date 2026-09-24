@@ -7,7 +7,7 @@ import { agreement, BANNED_WORDS, composeContext, loadCharter, loadSkills } from
 import type { ActorKind } from "../src/tools/schemas.ts";
 
 const KINDS: ActorKind[] = ["leader", "lead", "agent"];
-const BUDGET: Record<ActorKind, number> = { leader: 40, lead: 30, agent: 20 };
+const BUDGET: Record<ActorKind, number> = { leader: 48, lead: 39, agent: 26 };
 
 function lineCount(text: string): number {
 	return text.trimEnd().split("\n").length;
@@ -61,10 +61,10 @@ describe("working agreements", () => {
 		}
 	});
 
-	test("the agent agreement names neither neta_agent nor neta_ask", () => {
+	test("the agent agreement permits parent questions without granting agent creation", () => {
 		const text = agreement("agent");
 		expect(text).not.toContain("neta_agent");
-		expect(text).not.toContain("neta_ask");
+		expect(text).toContain("neta_ask");
 	});
 });
 

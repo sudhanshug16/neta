@@ -5,11 +5,12 @@ import { join } from "node:path";
 import type { Block, Leader, Turn, Workspace } from "../src/core/types.ts";
 import { captureMeLeaderTurn } from "../src/me/capture.ts";
 import { meSourceId, openMeStore } from "../src/me/store.ts";
-import { sessionSystemContext } from "../src/node/handlers-conversation.ts";
-import { meHandlers } from "../src/node/handlers-me.ts";
+import { conversationHandlers, sessionSystemContext } from "../src/node/handlers-conversation.ts";
+import { createSuperleaderToolBridge, meHandlers } from "../src/node/handlers-me.ts";
 import type { NodeContext } from "../src/node/server.ts";
 import { loadSettings } from "../src/session/settings.ts";
 import { openStore } from "../src/store/index.ts";
+import { coordinationHandlers } from "../src/tools/handlers/coordination.ts";
 import { adaptLegacyAcp as adaptRuntime } from "./fixtures/legacy-acp-runtime.ts";
 
 const oldDir = process.env.NETA_DIR;
@@ -107,9 +108,52 @@ test("Sol opens and resumes one native runtime session and admits chat messages 
 			access: "readOnly",
 			netaTools: false,
 		});
+		const bridge = createSuperleaderToolBridge({
+			actorId: identity.sessionId,
+			workspaceId: workspace.id,
+			context: () => context(firstRuntime),
+		});
+		const inquiry = await bridge.call("superleader_ask", { question: "What is the current blocker?" });
+		const inquiryId = inquiry.structuredContent?.id;
+		if (typeof inquiryId !== "string") throw new Error("inquiry was not saved");
+		const inquiryDelivery = (await persisted.inbox.list(leader.sessionId)).find(
+			(item) => item.sourceId === `superleader-inquiry:${inquiryId}`,
+		);
+		if (!inquiryDelivery?.turnId) throw new Error("inquiry did not reach the leader");
+		let answerRange = await persisted.conversations.turnRange(leader.sessionId, inquiryDelivery.turnId);
+		for (let attempt = 0; attempt < 50 && !answerRange?.turn.endedAt; attempt += 1) {
+			await Bun.sleep(20);
+			answerRange = await persisted.conversations.turnRange(leader.sessionId, inquiryDelivery.turnId);
+		}
+		if (!answerRange) throw new Error("leader response was not recorded");
+		const answerBlocks = (
+			await persisted.conversations.tail({ sessionId: leader.sessionId, limit: 200 })
+		).blocks.filter((block) => block.turnId === inquiryDelivery.turnId);
+		expect(answerRange.turn.readerDirected).toBe(true);
+		expect(answerRange.turn.endedAt).toBeDefined();
+		expect(answerBlocks.some((block) => block.role === "agent" && block.kind === "text")).toBe(true);
+		await captureMeLeaderTurn({
+			store: openMeStore(),
+			workspace,
+			sessionId: leader.sessionId,
+			turn: answerRange.turn,
+			blocks: answerBlocks,
+		});
+		expect((await bridge.call("superleader_questions", {})).structuredContent?.inquiries).toMatchObject([
+			{ id: inquiryId, status: "replied" },
+		]);
+		expect(
+			await coordinationHandlers.neta_superleader_answer(
+				{
+					actor: { kind: "leader", workspaceId: workspace.id, sessionId: leader.sessionId },
+					deps: { store },
+				} as never,
+				{ inquiryId, answer: "The workspace leader's confirmed answer" },
+			),
+		).toMatchObject({ ok: true, data: { status: "answered" } });
 		const sent = (await meHandlers["sol.prompt"](
 			context(firstRuntime),
-			{ idempotencyKey: "sol-message-1", text: "Summarize my attention feed." },
+			{ workspaceId: workspace.id, idempotencyKey: "sol-message-1", text: "Summarize my attention feed." },
 			{} as never,
 		)) as { sessionId: string; status: string; solTurnId: string };
 		expect(sent).toMatchObject({ sessionId: identity.sessionId, status: "delivered" });
@@ -126,21 +170,65 @@ test("Sol opens and resumes one native runtime session and admits chat messages 
 				provenanceSourceIds: [],
 			},
 			{} as never,
-		)) as { instruction: string; derivedInstruction: string; destinationSessionIds: string[]; status: string };
+		)) as {
+			id: string;
+			instruction: string;
+			derivedInstruction: string;
+			destinationSessionIds: string[];
+			status: string;
+		};
 		expect(route).toMatchObject({
 			instruction: "Summarize my attention feed.",
 			derivedInstruction: "Inspect the deployment checklist and report blockers; do not deploy.",
 			destinationSessionIds: [leader.sessionId],
 			status: "delivered",
 		});
-		expect(await openMeStore().listRoutes()).toMatchObject([
+		const delayedTurn = await openMeStore().appendSolTurn({
+			idempotencyKey: "delayed-sol-message",
+			author: "user",
+			text: "Check the queued instruction.",
+		});
+		const delayedInbox = await persisted.inbox.enqueue(identity.sessionId, delayedTurn.text, [], {
+			readerDirected: true,
+			sourceId: `sol-turn:${delayedTurn.id}`,
+		});
+		const deliveredTurnId = "delayed-native-turn";
+		await persisted.conversations.appendTurn({
+			id: deliveredTurnId,
+			sessionId: identity.sessionId,
+			startedAt: new Date().toISOString(),
+			role: "user",
+			readerDirected: true,
+		});
+		await persisted.conversations.appendBlock(identity.sessionId, {
+			turnId: deliveredTurnId,
+			seq:
+				((await persisted.conversations.tail({ sessionId: identity.sessionId, limit: 500 })).blocks.at(-1)?.seq ??
+					0) + 1,
+			at: new Date().toISOString(),
+			role: "user",
+			kind: "text",
+			text: delayedTurn.text,
+		});
+		await persisted.inbox.markDelivered(identity.sessionId, delayedInbox.id, deliveredTurnId);
+		await meHandlers["sol.route"](
+			context(firstRuntime),
 			{
-				instruction: "Summarize my attention feed.",
-				derivedInstruction: "Inspect the deployment checklist and report blockers; do not deploy.",
-				derivation: "The user's request asks for a readiness assessment, not execution.",
-				status: "delivered",
+				idempotencyKey: "delayed-sol-route",
+				solTurnId: delayedTurn.id,
+				derivedInstruction: "Check the queued instruction.",
+				derivation: "Queue correlation fixture.",
+				destinationSessionId: leader.sessionId,
 			},
-		]);
+			{} as never,
+		);
+		expect((await openMeStore().getSolTurn(delayedTurn.id))?.nativeTurnId).toBe(deliveredTurnId);
+		expect((await openMeStore().listRoutes()).find((item) => item.idempotencyKey === "sol-route-1")).toMatchObject({
+			instruction: "Summarize my attention feed.",
+			derivedInstruction: "Inspect the deployment checklist and report blockers; do not deploy.",
+			derivation: "The user's request asks for a readiness assessment, not execution.",
+			status: "delivered",
+		});
 		await expect(
 			meHandlers["sol.route"](
 				context(firstRuntime),
@@ -167,11 +255,12 @@ test("Sol opens and resumes one native runtime session and admits chat messages 
 			{} as never,
 		);
 		const deliveredRoute = (await persisted.inbox.list(leader.sessionId)).find(
-			(item) => item.text === route.derivedInstruction,
+			(item) => item.sourceId === `sol-route:${route.id}`,
 		);
-		expect(deliveredRoute?.text).toBe(route.derivedInstruction);
+		expect(deliveredRoute?.text).toContain(originalInstruction.text);
+		expect(deliveredRoute?.text).toContain(route.derivedInstruction);
 		expect(
-			(await persisted.inbox.list(leader.sessionId)).filter((item) => item.text === route.derivedInstruction),
+			(await persisted.inbox.list(leader.sessionId)).filter((item) => item.sourceId === deliveredRoute?.sourceId),
 		).toHaveLength(1);
 		const interruptedRoute = await openMeStore().queueRoute({
 			idempotencyKey: "sol-route-interrupted",
@@ -197,7 +286,9 @@ test("Sol opens and resumes one native runtime session and admits chat messages 
 		expect(recoveredRoute.status).toBe("delivered");
 		expect(
 			(await persisted.inbox.list(leader.sessionId)).filter(
-				(item) => item.text === interruptedRoute.derivedInstruction,
+				(item) =>
+					item.sourceId === `sol-route:${interruptedRoute.id}` &&
+					item.text.includes(interruptedRoute.derivedInstruction ?? ""),
 			),
 		).toHaveLength(1);
 		const replyDraft = {
@@ -317,19 +408,60 @@ test("Sol opens and resumes one native runtime session and admits chat messages 
 			destinationSessionIds: [leader.sessionId],
 		});
 		const superleaderContext = await sessionSystemContext(
-			{ store: store as never, superleaderSessionId: identity.sessionId },
+			{ store: store as never, superleaderWorkspaceId: workspace.id },
 			identity.sessionId,
 		);
-		expect(superleaderContext).toContain("A deployment window is needed.");
-		expect(superleaderContext).toContain("SUPPRESSED HISTORY");
-		expect(superleaderContext).toContain("Routine weekly build passed.");
-		expect(superleaderContext).toContain("end-of-original-source");
+		expect(superleaderContext).toContain("superleader_missions");
+		expect(superleaderContext).not.toContain("A deployment window is needed.");
+		expect(superleaderContext).not.toContain("SUPPRESSED HISTORY");
+		expect(superleaderContext).not.toContain("Routine weekly build passed.");
+		expect(superleaderContext).not.toContain("end-of-original-source");
+		expect((await bridge.call("superleader_user_turns", {})).structuredContent?.turns).toContainEqual(
+			expect.objectContaining({ id: sent.solTurnId, text: "Summarize my attention feed." }),
+		);
 		const duplicate = (await meHandlers["sol.prompt"](
 			context(firstRuntime),
-			{ idempotencyKey: "sol-message-1", text: "Summarize my attention feed." },
+			{ workspaceId: workspace.id, idempotencyKey: "sol-message-1", text: "Summarize my attention feed." },
 			{} as never,
 		)) as { sessionId: string };
 		expect(duplicate.sessionId).toBe(identity.sessionId);
+		const nativeAttachment = {
+			url: "http://127.0.0.1:1",
+			authorization: "Basic fixture",
+			sessionId: "ses_fixture_sol",
+			directory: dir,
+			apiVersion: 2 as const,
+		};
+		const nativeRuntime = {
+			...firstRuntime,
+			nativeAttachment: () => nativeAttachment,
+			ensureNativeAttachment: async () => nativeAttachment,
+		};
+		let closeGateway: (() => void) | undefined;
+		const native = (await conversationHandlers["conversation.native"](
+			context(nativeRuntime),
+			{ sessionId: identity.sessionId },
+			{
+				onClose: (close: () => void) => {
+					closeGateway = close;
+				},
+			} as never,
+		)) as { url: string; authorization: string; sessionId: string };
+		try {
+			const response = await fetch(`${native.url}/api/session/${native.sessionId}/neta-prompt`, {
+				method: "POST",
+				headers: { Authorization: native.authorization, "content-type": "application/json" },
+				body: JSON.stringify({ id: "msg_native_sol_1", text: "Native chat question" }),
+			});
+			expect(response.status).toBe(200);
+			expect(
+				(await openMeStore().listSolTurns({ limit: 10 })).turns.some(
+					(turn) => turn.text === "Native chat question",
+				),
+			).toBe(true);
+		} finally {
+			closeGateway?.();
+		}
 	} finally {
 		await firstRuntime.closeAll();
 	}
@@ -342,7 +474,11 @@ test("Sol opens and resumes one native runtime session and admits chat messages 
 		persisted.inbox,
 	);
 	try {
-		const resumed = (await meHandlers["sol.open"](context(resumedRuntime), {}, {} as never)) as { sessionId: string };
+		const resumed = (await meHandlers["sol.open"](
+			context(resumedRuntime),
+			{ workspaceId: workspace.id },
+			{} as never,
+		)) as { sessionId: string };
 		expect(resumed.sessionId).toBe((await openMeStore().solIdentity()).sessionId);
 		expect(resumed.sessionId).toBe((await openMeStore().solIdentity()).sessionId);
 	} finally {

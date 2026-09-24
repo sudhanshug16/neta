@@ -33,6 +33,7 @@ const CLIENT_TOKEN = "e2e-client-token";
 const WORKSPACE = "e2e-w";
 const LEADER_TOOLS = [
 	"neta_agent",
+	"neta_artifacts",
 	"neta_ask",
 	"neta_close",
 	"neta_history",
@@ -44,6 +45,7 @@ const LEADER_TOOLS = [
 	"neta_scope",
 	"neta_send",
 	"neta_status",
+	"neta_superleader_answer",
 ];
 
 let dir = "";

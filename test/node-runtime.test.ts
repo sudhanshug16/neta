@@ -563,6 +563,16 @@ test("reset chat starts a fresh leader conversation and resumes that identity af
 	await writeSettings(storeFile);
 	node = await startNode({ sessionFactory: startLegacySession });
 	const first = await attach();
+	const oldSol = await first.client.request<{ sessionId: string }>("sol.open", {
+		workspaceId: first.leader.workspaceId,
+	});
+	await first.client.request("conversation.tail", { sessionId: oldSol.sessionId });
+	await first.client.request("conversation.prompt", { sessionId: oldSol.sessionId, text: "OLD_SOL_RESET_CONTEXT" });
+	await waitFor("old Superleader context turn", () =>
+		first.turns.find(
+			(turn) => turn.sessionId === oldSol.sessionId && turn.block?.text?.includes("OLD_SOL_RESET_CONTEXT"),
+		),
+	);
 	await first.client.request("conversation.prompt", {
 		sessionId: first.leader.sessionId,
 		text: "UNWANTED_RESET_CONTEXT",
@@ -590,6 +600,14 @@ test("reset chat starts a fresh leader conversation and resumes that identity af
 	expect(reset.sessionId).not.toBe(first.leader.sessionId);
 	expect(reset.provider).toBe(first.leader.provider);
 	expect(reset.model).toBe(first.leader.model);
+	const freshSol = await first.client.request<{ sessionId: string }>("sol.open", {
+		workspaceId: first.leader.workspaceId,
+	});
+	expect(freshSol.sessionId).not.toBe(oldSol.sessionId);
+	const freshSolTail = await first.client.request<ConversationTailResult>("conversation.tail", {
+		sessionId: freshSol.sessionId,
+	});
+	expect(freshSolTail.blocks).toEqual([]);
 	await waitFor("old active turn closed by reset", () =>
 		first.turns.find(
 			(turn) => turn.turn?.id === held.turnId && turn.turn.endedAt !== undefined && turn.turn.cancelled,
@@ -620,6 +638,14 @@ test("reset chat starts a fresh leader conversation and resumes that identity af
 				(turn) => turn.sessionId === reset.sessionId && turn.block?.text?.includes("AFTER_RESET_RESTART"),
 			),
 		);
+		const coldReset = await second.client.request<{ sessionId: string }>("conversation.reset", {
+			sessionId: reset.sessionId,
+		});
+		expect(coldReset.sessionId).not.toBe(reset.sessionId);
+		const reopenedSol = await second.client.request<{ sessionId: string }>("sol.open", {
+			workspaceId: second.leader.workspaceId,
+		});
+		expect(reopenedSol.sessionId).not.toBe(freshSol.sessionId);
 	} finally {
 		await second.client.close();
 	}
@@ -2363,11 +2389,21 @@ test("a provider that cannot assume writable access restores the original live p
 	}
 }, 90000);
 
-test("workspace reset archives missions and queued workers and creates one blank leader", async () => {
+test("workspace reset archives missions and starts blank leader and Superleader chats", async () => {
 	await writeSettings(join(dir, "reset-workspace-sessions.json"));
 	node = await startNode({ sessionFactory: startLegacySession });
 	const at = await attach();
 	try {
+		const oldSol = await at.client.request<{ sessionId: string }>("sol.open", {
+			workspaceId: at.leader.workspaceId,
+		});
+		await at.client.request("conversation.tail", { sessionId: oldSol.sessionId });
+		await at.client.request("conversation.prompt", { sessionId: oldSol.sessionId, text: "OLD_SUPERLEADER_CHAT" });
+		await waitFor("old Superleader chat turn", () =>
+			at.turns.find(
+				(turn) => turn.sessionId === oldSol.sessionId && turn.block?.text?.includes("OLD_SUPERLEADER_CHAT"),
+			),
+		);
 		const creation = await at.client.request<{ isError?: boolean }>("tools.call", {
 			...(await leaderActor(at)),
 			name: "neta_mission",
@@ -2408,6 +2444,14 @@ test("workspace reset archives missions and queued workers and creates one blank
 			sessionId: leader?.sessionId,
 		});
 		expect(tail.blocks).toEqual([]);
+		const freshSol = await at.client.request<{ sessionId: string }>("sol.open", {
+			workspaceId: at.leader.workspaceId,
+		});
+		expect(freshSol.sessionId).not.toBe(oldSol.sessionId);
+		const solTail = await at.client.request<ConversationTailResult>("conversation.tail", {
+			sessionId: freshSol.sessionId,
+		});
+		expect(solTail.blocks).toEqual([]);
 	} finally {
 		await at.client.close();
 	}
@@ -2468,8 +2512,7 @@ test("workspace reset on a git workspace reclaims clean idle worktrees and keeps
 		await waitFor("queued writer waiting", async () => {
 			const current = await at.client.request<{ agents: Agent[] }>("snapshot", {});
 			const workers = current.agents.filter((agent) => agent.missionId === busyId && !agent.canSpawn);
-			return workers.some((agent) => agent.state === "running") &&
-				workers.some((agent) => agent.state === "queued")
+			return workers.some((agent) => agent.state === "running") && workers.some((agent) => agent.state === "queued")
 				? true
 				: undefined;
 		});
@@ -2509,9 +2552,9 @@ test("workspace reset on a git workspace reclaims clean idle worktrees and keeps
 		expect(await branchCheck.exited).toBe(0);
 		// No queued work was promoted across the reset.
 		const snapshot = await at.client.request<{ agents: Agent[] }>("snapshot", {});
-		expect(
-			snapshot.agents.filter((agent) => ["queued", "starting", "running"].includes(agent.state)),
-		).toHaveLength(0);
+		expect(snapshot.agents.filter((agent) => ["queued", "starting", "running"].includes(agent.state))).toHaveLength(
+			0,
+		);
 	} finally {
 		await at.client.close();
 	}

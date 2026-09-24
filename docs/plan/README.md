@@ -15,6 +15,11 @@ direct control supersedes its runtime transport; see
 [direct OpenCode control](opencode-direct-control.md). The manifesto defines the
 current product direction.
 
+The operator-directed [Neta conversation, attention filter, and artifacts
+plan](neta-conversation-attention-artifacts.md) records the replacement for the
+workspace Superleader role and its data path. The local implementation follows
+the updated manifesto contract; full certification remains pending.
+
 ## Current client scope
 
 The native Swift/macOS client has been retired. Desktop workstreams 09–11,

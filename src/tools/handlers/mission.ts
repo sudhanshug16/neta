@@ -366,11 +366,28 @@ async function createMissionUnlocked(ctx: MissionToolContext, params: MissionPar
 		} catch (error) {
 			if (error instanceof WorktreeSetupError) {
 				const { diagnostic } = error;
+				await ctx.deps.store.appendEvent({
+					workspaceId: workspace.id,
+					kind: "worktree.setupFailed",
+					sessionId: leader.sessionId,
+					data: {
+						number: diagnostic.number,
+						name: diagnostic.name,
+						branch: diagnostic.branch,
+						exitCode: diagnostic.exitCode ?? null,
+						partialWorktree: diagnostic.partialWorktree?.path ?? null,
+						diagnosticPath: error.diagnosticPath ?? null,
+						stderr: diagnostic.stderr,
+						missionRegistered: false,
+						agentsLaunched: false,
+					},
+				});
 				return {
 					ok: false,
 					code: "setupFailed",
 					message: JSON.stringify({
 						kind: "worktreeSetup",
+						stage: "worktreeCreate",
 						number: diagnostic.number,
 						branch: diagnostic.branch,
 						partialWorktree: diagnostic.partialWorktree?.path,

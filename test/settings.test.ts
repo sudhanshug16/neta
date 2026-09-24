@@ -22,16 +22,16 @@ describe("OpenCode settings", () => {
 		expect(Object.keys(settings.providers)).toEqual(["opencode"]);
 		expect(settings.providers.opencode?.args).toEqual(["serve"]);
 		expect(settings.forbiddenModels).toEqual([]);
-		expect(settings.meCurator?.enabled).toBe(false);
+		expect(settings.meCurator?.enabled).toBe(true);
 	});
 
-	test("Luna classification is opt-in and ignores a malformed enable flag", () => {
+	test("workspace attention filtering is on by default and can be disabled", () => {
 		const dir = mkdtempSync(join(tmpdir(), "neta-settings-curator-"));
-		writeFileSync(join(dir, "settings.json"), JSON.stringify({ meCurator: { enabled: true } }));
-		expect(loadSettings({ netaDir: dir }).settings.meCurator?.enabled).toBe(true);
+		writeFileSync(join(dir, "settings.json"), JSON.stringify({ meCurator: { enabled: false } }));
+		expect(loadSettings({ netaDir: dir }).settings.meCurator?.enabled).toBe(false);
 		writeFileSync(join(dir, "settings.json"), JSON.stringify({ meCurator: { enabled: "yes" } }));
 		const invalid = loadSettings({ netaDir: dir });
-		expect(invalid.settings.meCurator?.enabled).toBe(false);
+		expect(invalid.settings.meCurator?.enabled).toBe(true);
 		expect(invalid.warnings).toContain(`${join(dir, "settings.json")}: meCurator.enabled is not a boolean, ignoring`);
 	});
 

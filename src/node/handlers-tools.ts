@@ -75,7 +75,7 @@ export interface ToolMountOptions {
 	settings: Settings;
 	runtimeAdmission?: RuntimeAdmission;
 	hub(): Hub;
-	superleaderTools?: SessionToolBridge;
+	superleaderTools?: SessionToolBridge | ((actorId: string) => SessionToolBridge | undefined);
 	pi?: {
 		start(input: { sessionId: string; actorId: string; cwd: string; prompt: string }): Promise<void>;
 		close(sessionId: string): void;

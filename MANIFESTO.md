@@ -1,9 +1,10 @@
 # Neta
 
 Neta is the interface, engine, and machine service for running persistent agent
-teams across workspaces. It is not itself the top-level agent. A user talks to
-the leader belonging to a specific workspace on a specific machine, and can
-open the OpenCode conversation of any mission lead or agent beneath it.
+teams across workspaces. The user talks to Neta in one native OpenCode
+conversation per workspace copy on a machine. Neta sends work to that copy's
+workspace leader, who retains execution ownership. The user can also open the
+OpenCode conversation of any mission lead or agent beneath the leader.
 
 This manifesto defines the target product. The current implementation is still
 described in [docs/how-it-works.md](docs/how-it-works.md) while the migration is
@@ -12,15 +13,19 @@ direction and `docs/how-it-works.md` is the description of what ships today.
 
 ## Vocabulary
 
-- **Neta** — the client, engine, and opt-in service running on a machine. Neta
-  connects users to leaders and agents; it is not a global conversational
-  agent.
+- **Neta** — the user-facing native OpenCode conversation for one workspace
+  copy, plus the client and engine that connect it to leaders and agents.
+  **Neta Node** names the opt-in machine service. There is no global Neta chat.
 - **Workspace** — a Git repository or an ordinary folder in which work happens.
 - **Machine** — a physical host, virtual machine, or isolated runtime that owns
-  one copy of a workspace and runs its complete agent tree.
+one copy of a workspace and runs its complete agent tree.
 - **Leader** — the persistent assistant for one workspace on one machine. It has
   its own OpenCode conversation and decides whether to work directly or create a
   mission.
+- **Attention filter** — an internal, workspace-scoped OpenCode session that
+  decides which captured work updates need Neta's attention. It cannot execute
+  work, grant permission, or speak in the user's chat. Neta Node validates its
+  decisions and keeps delivery and presentation receipts.
 - **Mission** — one bounded objective. A Git mission receives its own Worktrunk
   worktree by default. Every mission has a permanent number assigned at
   creation that never changes.
@@ -74,6 +79,8 @@ machine.
    State, conversations, missions, modes, skills, and model choices are durable.
 8. **Nothing important disappears.** Active missions, blocked questions,
    unfinished closeouts, failures, and archives remain discoverable.
+   Neta attention records stay tied to their workspace copy and do not depend
+   on the chat scroll position.
 9. **Authority is explicit.** A charter defines what leaders may decide and
    which destructive, production, financial, credential, or outward-facing
    actions require the user.
@@ -110,9 +117,17 @@ and runtime state.
 Non-Git folders are not grouped across machines. Each folder is a standalone
 workspace on its machine.
 
-The user chooses a workspace and, when necessary, a machine. The corresponding
-leader is the default chat. There is no global Neta chat above workspace
-leaders.
+The user chooses a workspace and, when necessary, a machine. Neta's conversation
+for that exact workspace copy is the default chat. Its leader, missions, and
+agents remain on that machine. There is no global Neta chat above workspace
+copies.
+
+Neta may answer from verified current state or route the user's exact request
+to that workspace leader. Neta does not create missions, hire agents, take writer
+authority, or approve access. The leader owns mission creation; mission leads
+own their workers. Work results and failures enter a durable attention filter.
+Only a committed Neta chat turn with cited evidence counts as presented to the
+user. A delivery receipt alone does not count as work progress or presentation.
 
 ## Leaders and missions
 
