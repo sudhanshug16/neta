@@ -1,4 +1,4 @@
-import { type ArtifactActor, inspectArtifact, publishArtifact, reviewArtifact } from "../../me/artifacts.ts";
+import { type ArtifactActor, inspectArtifact, publishArtifact } from "../../me/artifacts.ts";
 import type { ToolHandlers } from "../router.ts";
 
 export const artifactHandlers: Pick<ToolHandlers, "neta_artifacts"> = {
@@ -40,20 +40,6 @@ export const artifactHandlers: Pick<ToolHandlers, "neta_artifacts"> = {
 				return { ok: true, data: { artifact } };
 			}
 			if (!args.id) return { ok: false, code: "badParams", message: "artifact id is required" };
-			if (args.action === "review") {
-				if (!args.verdict || !args.note)
-					return { ok: false, code: "badParams", message: "review requires verdict and note" };
-				const { review, artifact } = await reviewArtifact(actor, args.id, args.verdict, args.note);
-				await ctx.deps.store.appendEvent({
-					workspaceId: workspace.id,
-					kind: "artifact.reviewed",
-					...(artifact.missionId ? { missionId: artifact.missionId } : {}),
-					...(ctx.actor.kind === "leader" ? {} : { agentId: ctx.actor.agentId }),
-					sessionId: ctx.actor.sessionId,
-					data: { artifactId: args.id, verdict: review.verdict, note: review.note },
-				});
-				return { ok: true, data: { review } };
-			}
 			const result = await inspectArtifact(
 				actor,
 				args.id,

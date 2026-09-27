@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type ArtifactActor, inspectArtifact, publishArtifact, reviewArtifact } from "../src/me/artifacts.ts";
+import { type ArtifactActor, inspectArtifact, publishArtifact } from "../src/me/artifacts.ts";
 
 const previousDir = process.env.NETA_DIR;
 let directory = "";
@@ -40,41 +40,6 @@ test("worker CSV is stored once and parents open it by reference", async () => {
 		(await inspectArtifact({ ...worker, actorId: "lead-A", kind: "lead" }, artifact.id, { offset: 0, limit: 100 }))
 			.text,
 	).toBe("name,total\nA,12\nB,14\n");
-	await expect(
-		inspectArtifact({ ...worker, actorId: "neta-A", kind: "neta", missionId: undefined }, artifact.id),
-	).rejects.toThrow("not been accepted");
-	const review = await reviewArtifact(
-		{ ...worker, actorId: "lead-A", kind: "lead" },
-		artifact.id,
-		"accepted",
-		"Totals checked against source rows.",
-	);
-	expect(review.review.artifactHash).toBe(artifact.hash);
-	expect(review.created).toBe(true);
-	await expect(reviewArtifact(worker, artifact.id, "accepted", "Self approval")).rejects.toThrow("parent");
-	expect(
-		(
-			await reviewArtifact(
-				{ ...worker, actorId: "lead-A", kind: "lead" },
-				artifact.id,
-				"accepted",
-				"Totals checked against source rows.",
-			)
-		).created,
-	).toBe(false);
-	await expect(
-		reviewArtifact({ ...worker, actorId: "lead-A", kind: "lead" }, artifact.id, "rejected", "Different decision"),
-	).rejects.toThrow("different parent review");
-	await expect(
-		inspectArtifact({ ...worker, actorId: "neta-A", kind: "neta", missionId: undefined }, artifact.id),
-	).rejects.toThrow("not been acknowledged by the workspace leader");
-	const leaderReview = await reviewArtifact(
-		{ ...worker, actorId: "leader-A", kind: "leader", missionId: undefined },
-		artifact.id,
-		"accepted",
-		"Lead reviewed the source rows; share the CSV reference.",
-	);
-	expect(leaderReview.review.reviewerKind).toBe("leader");
 	expect(
 		(await inspectArtifact({ ...worker, actorId: "neta-A", kind: "neta", missionId: undefined }, artifact.id))
 			.artifact.id,
@@ -88,6 +53,46 @@ test("worker CSV is stored once and parents open it by reference", async () => {
 	);
 	const bytes = await readFile(join(process.env.NETA_DIR, "artifacts", "workspace-A", `${artifact.id}.data`));
 	expect(bytes.toString()).toContain("A,12");
+	await writeFile(join(process.env.NETA_DIR, "artifacts", "workspace-A", `${artifact.id}.data`), "changed");
+	await expect(inspectArtifact(worker, artifact.id, { offset: 0, limit: 100 })).rejects.toThrow("missing or changed");
+});
+
+test("parent-only artifacts stay with their immediate parent without acceptance", async () => {
+	directory = await mkdtemp(join(tmpdir(), "neta-artifacts-audience-"));
+	process.env.NETA_DIR = join(directory, "state");
+	const worktree = join(directory, "worktree");
+	await mkdir(worktree);
+	const worker: ArtifactActor = {
+		workspaceId: "workspace-A",
+		machineId: "machine-A",
+		missionId: "mission-A",
+		actorId: "worker-A",
+		kind: "agent",
+	};
+	const lead: ArtifactActor = { ...worker, actorId: "lead-A", kind: "lead" };
+	const coordinator: ArtifactActor = { ...worker, actorId: "leader-A", kind: "leader", missionId: undefined };
+	const workspaceLeader: ArtifactActor = { ...worker, actorId: "neta-A", kind: "neta", missionId: undefined };
+	const workerArtifact = await publishArtifact({
+		actor: worker,
+		assignedRoot: worktree,
+		text: "Worker finding",
+		title: "Worker finding",
+		mimeType: "text/plain",
+		audience: "parent",
+	});
+	expect((await inspectArtifact(lead, workerArtifact.id)).artifact.id).toBe(workerArtifact.id);
+	await expect(inspectArtifact(coordinator, workerArtifact.id)).rejects.toThrow("audience");
+	await expect(inspectArtifact(workspaceLeader, workerArtifact.id)).rejects.toThrow("audience");
+	const leadArtifact = await publishArtifact({
+		actor: lead,
+		assignedRoot: worktree,
+		text: "Lead finding",
+		title: "Lead finding",
+		mimeType: "text/plain",
+		audience: "parent",
+	});
+	expect((await inspectArtifact(coordinator, leadArtifact.id)).artifact.id).toBe(leadArtifact.id);
+	await expect(inspectArtifact(workspaceLeader, leadArtifact.id)).rejects.toThrow("audience");
 });
 
 test("artifact publishing rejects paths outside the assigned worktree and private files", async () => {

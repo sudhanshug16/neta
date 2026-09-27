@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { link, open, realpath, rm, stat } from "node:fs/promises";
+import { open, realpath, rm, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { ulid } from "../core/ids.ts";
 import { ensureDir, readJson, writeJsonAtomic } from "../store/files.ts";
@@ -29,16 +29,6 @@ export interface NetaArtifact {
 	previousId?: string;
 }
 
-export interface NetaArtifactReview {
-	artifactId: string;
-	artifactHash: string;
-	reviewerActorId: string;
-	reviewerKind: "lead" | "leader";
-	verdict: "accepted" | "rejected";
-	note: string;
-	reviewedAt: string;
-}
-
 export interface ArtifactActor {
 	workspaceId: string;
 	machineId: string;
@@ -56,9 +46,6 @@ function metadataPath(workspaceId: string, id: string): string {
 }
 function dataPath(workspaceId: string, id: string): string {
 	return join(artifactDir(workspaceId), `${id}.data`);
-}
-function reviewPath(workspaceId: string, id: string, stage: "parent" | "leader" = "parent"): string {
-	return join(artifactDir(workspaceId), `${id}.${stage === "parent" ? "review" : "leader-review"}.json`);
 }
 function within(root: string, candidate: string): boolean {
 	const path = relative(root, candidate);
@@ -181,27 +168,12 @@ export async function inspectArtifact(
 	openRange?: { offset: number; limit: number },
 ): Promise<{
 	artifact: NetaArtifact;
-	review?: NetaArtifactReview;
-	leaderReview?: NetaArtifactReview;
 	text?: string;
 	nextOffset?: number;
 }> {
 	const artifact = await readJson<NetaArtifact>(metadataPath(actor.workspaceId, id));
 	if (!artifact || artifact.machineId !== actor.machineId)
 		throw new Error("artifact is unavailable in this workspace copy");
-	const review = await readJson<NetaArtifactReview>(reviewPath(actor.workspaceId, id));
-	const leaderReview =
-		artifact.producerKind === "agent"
-			? await readJson<NetaArtifactReview>(reviewPath(actor.workspaceId, id, "leader"))
-			: undefined;
-	if (review && (review.artifactId !== artifact.id || review.artifactHash !== artifact.hash))
-		throw new Error("artifact review does not match its content");
-	if (leaderReview && (leaderReview.artifactId !== artifact.id || leaderReview.artifactHash !== artifact.hash))
-		throw new Error("leader artifact review does not match its content");
-	if (actor.kind === "neta" && artifact.producerKind !== "leader" && review?.verdict !== "accepted")
-		throw new Error("artifact has not been accepted by its parent");
-	if (actor.kind === "neta" && artifact.producerKind === "agent" && leaderReview?.verdict !== "accepted")
-		throw new Error("artifact has not been acknowledged by the workspace leader");
 	const sameMission = actor.missionId !== undefined && actor.missionId === artifact.missionId;
 	const allowed =
 		actor.actorId === artifact.producerActorId ||
@@ -209,7 +181,7 @@ export async function inspectArtifact(
 		(actor.kind === "leader" && (artifact.producerKind === "lead" || artifact.audience !== "parent")) ||
 		(actor.kind === "neta" && (artifact.audience === "neta" || artifact.audience === "user"));
 	if (!allowed) throw new Error("artifact audience does not include this actor");
-	if (!openRange) return { artifact, ...(review ? { review } : {}), ...(leaderReview ? { leaderReview } : {}) };
+	if (!openRange) return { artifact };
 	if (
 		!Number.isSafeInteger(openRange.offset) ||
 		openRange.offset < 0 ||
@@ -235,75 +207,7 @@ export async function inspectArtifact(
 	const text = bytes.toString("utf8", start, end);
 	return {
 		artifact,
-		...(review ? { review } : {}),
-		...(leaderReview ? { leaderReview } : {}),
 		text,
 		...(end < bytes.length ? { nextOffset: end } : {}),
 	};
-}
-
-/** An immutable parent receipt; a correction is a new artifact and a new review. */
-export async function reviewArtifact(
-	actor: ArtifactActor,
-	id: string,
-	verdict: "accepted" | "rejected",
-	note: string,
-): Promise<{ review: NetaArtifactReview; created: boolean; artifact: NetaArtifact }> {
-	const artifact = await readJson<NetaArtifact>(metadataPath(actor.workspaceId, id));
-	if (!artifact || artifact.machineId !== actor.machineId)
-		throw new Error("artifact is unavailable in this workspace copy");
-	const leaderAcknowledgingWorker = artifact.producerKind === "agent" && actor.kind === "leader";
-	if (
-		!(artifact.producerKind === "agent" && actor.kind === "lead" && actor.missionId === artifact.missionId) &&
-		!(artifact.producerKind === "lead" && actor.kind === "leader") &&
-		!leaderAcknowledgingWorker
-	)
-		throw new Error("only the artifact's parent may review it");
-	if (leaderAcknowledgingWorker) {
-		const parentReview = await readJson<NetaArtifactReview>(reviewPath(actor.workspaceId, id));
-		if (parentReview?.verdict !== "accepted" || parentReview.artifactHash !== artifact.hash)
-			throw new Error("mission lead has not accepted this worker artifact");
-	}
-	if (!note.trim() || note.length > 1_200) throw new Error("review note must be 1 to 1200 characters");
-	const target = reviewPath(actor.workspaceId, id, leaderAcknowledgingWorker ? "leader" : "parent");
-	const existing = await readJson<NetaArtifactReview>(target);
-	if (existing) {
-		if (existing.reviewerActorId !== actor.actorId || existing.verdict !== verdict || existing.note !== note.trim())
-			throw new Error("artifact already has a different parent review");
-		return { review: existing, created: false, artifact };
-	}
-	const review: NetaArtifactReview = {
-		artifactId: id,
-		artifactHash: artifact.hash,
-		reviewerActorId: actor.actorId,
-		reviewerKind: actor.kind === "lead" ? "lead" : "leader",
-		verdict,
-		note: note.trim(),
-		reviewedAt: new Date().toISOString(),
-	};
-	const temporary = join(artifactDir(actor.workspaceId), `${ulid()}.review.tmp`);
-	const handle = await open(temporary, "wx", 0o600);
-	try {
-		await handle.writeFile(JSON.stringify(review));
-		await handle.sync();
-	} finally {
-		await handle.close();
-	}
-	try {
-		await link(temporary, target);
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-		const winner = await readJson<NetaArtifactReview>(target);
-		if (
-			!winner ||
-			winner.reviewerActorId !== actor.actorId ||
-			winner.verdict !== verdict ||
-			winner.note !== note.trim()
-		)
-			throw new Error("artifact already has a different parent review");
-		return { review: winner, created: false, artifact };
-	} finally {
-		await rm(temporary, { force: true });
-	}
-	return { review, created: true, artifact };
 }

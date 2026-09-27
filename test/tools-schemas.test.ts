@@ -116,6 +116,14 @@ const CASES: SchemaCase[] = [
 ];
 
 describe("tool schemas", () => {
+	test("artifacts rejects the removed review action and fields", () => {
+		expect(validate("neta_artifacts", { action: "inspect", id: ID }).ok).toBe(true);
+		for (const args of [
+			{ action: "review", id: ID, verdict: "accepted", note: "checked" },
+			{ action: "inspect", id: ID, verdict: "accepted" },
+			{ action: "inspect", id: ID, note: "checked" },
+		]) expect(validate("neta_artifacts", args).ok).toBe(false);
+	});
 	test("tools have unique names and standalone schemas", () => {
 		expect(TOOLS).toHaveLength(16);
 		expect(new Set(TOOLS.map((tool) => tool.name)).size).toBe(16);

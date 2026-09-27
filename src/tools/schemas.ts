@@ -149,7 +149,7 @@ export interface DoneParams {
 }
 
 export interface ArtifactParams {
-	action: "publish" | "inspect" | "open" | "review";
+	action: "publish" | "inspect" | "open";
 	path?: string;
 	text?: string;
 	title?: string;
@@ -159,8 +159,6 @@ export interface ArtifactParams {
 	id?: string;
 	offset?: number;
 	limit?: number;
-	verdict?: "accepted" | "rejected";
-	note?: string;
 }
 
 export interface ToolParams {
@@ -368,13 +366,13 @@ export const TOOLS: readonly ToolDef[] = [
 	{
 		name: "neta_artifacts",
 		description:
-			"Publish an immutable text, Markdown, CSV, or JSON artifact by local path or small text; inspect or open it by ID; or review a child's artifact. Pass the returned ID and a short finding to your parent instead of copying the whole artifact into chat.",
+			"Publish an immutable text, Markdown, CSV, or JSON artifact by local path or small text; inspect or open it by ID. Artifacts can be judged from their contents and conversation. Pass the returned ID and a short finding to your parent instead of copying the whole artifact into chat.",
 		inputSchema: {
 			type: "object",
 			additionalProperties: false,
 			required: ["action"],
 			properties: {
-				action: { type: "string", enum: ["publish", "inspect", "open", "review"] },
+				action: { type: "string", enum: ["publish", "inspect", "open"] },
 				path: { type: "string", minLength: 1, maxLength: 4096 },
 				text: { type: "string", minLength: 1, maxLength: 32768 },
 				title: { type: "string", minLength: 1, maxLength: 160 },
@@ -384,8 +382,6 @@ export const TOOLS: readonly ToolDef[] = [
 				id: ULID,
 				offset: { type: "integer", minimum: 0 },
 				limit: { type: "integer", minimum: 1, maximum: 16384 },
-				verdict: { type: "string", enum: ["accepted", "rejected"] },
-				note: { type: "string", minLength: 1, maxLength: 1200 },
 			},
 		},
 		actors: ["leader", "lead", "agent"],

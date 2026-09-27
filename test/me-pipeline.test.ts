@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Agent, Event, InboxMessage, Leader, Mission, Workspace } from "../src/core/types.ts";
-import { type ArtifactActor, inspectArtifact, publishArtifact, reviewArtifact } from "../src/me/artifacts.ts";
+import { type ArtifactActor, inspectArtifact, publishArtifact } from "../src/me/artifacts.ts";
 import { captureMeEvent } from "../src/me/capture.ts";
 import { createMeCurator } from "../src/me/curator.ts";
 import { commitNoticeForTurn, deliverPendingNotices, noticePrompt } from "../src/me/notice-delivery.ts";
@@ -17,7 +17,7 @@ afterEach(async () => {
 	if (directory) await rm(directory, { recursive: true, force: true });
 });
 
-test("worker CSV moves by reference through both parents, the filter, and one native Neta turn", async () => {
+test("worker CSV moves by reference through the filter and one native Neta turn", async () => {
 	directory = await mkdtemp(join(tmpdir(), "neta-pipeline-"));
 	process.env.NETA_DIR = join(directory, "state");
 	const worktree = join(directory, "worktree");
@@ -103,23 +103,13 @@ test("worker CSV moves by reference through both parents, the filter, and one na
 			artifactId: artifact.id,
 			title: artifact.title,
 			audience: artifact.audience,
-			verdict: "accepted",
-			note: "Reviewed totals",
 		},
 	});
 	expect(await captureMeEvent(store, event(1, "artifact.published", worker.sessionId, worker.id), context)).toBe(true);
-	await reviewArtifact({ ...actor, actorId: lead.id, kind: "lead" }, artifact.id, "accepted", "Rows checked.");
-	expect(await captureMeEvent(store, event(2, "artifact.reviewed", lead.sessionId, lead.id), context)).toBe(true);
-	await expect(inspectArtifact({ ...actor, actorId: "neta-A", kind: "neta" }, artifact.id)).rejects.toThrow(
-		"workspace leader",
-	);
-	await reviewArtifact(
-		{ ...actor, actorId: leader.sessionId, kind: "leader" },
-		artifact.id,
-		"accepted",
-		"Lead review accepted.",
-	);
-	expect(await captureMeEvent(store, event(3, "artifact.reviewed", leader.sessionId), context)).toBe(true);
+	expect(
+		(await inspectArtifact({ ...actor, actorId: "neta-A", kind: "neta" }, artifact.id)).artifact.id,
+	).toBe(artifact.id);
+	expect(await captureMeEvent(store, event(2, "artifact.published", leader.sessionId), context)).toBe(true);
 	const filterInputs: string[] = [];
 	const curator = createMeCurator({
 		store,
@@ -129,7 +119,7 @@ test("worker CSV moves by reference through both parents, the filter, and one na
 				action: source.actorKind === "leader" ? "surface" : "suppress",
 				concernKey: `artifact:${artifact.id}`,
 				headline: "Totals table ready",
-				summary: `Reviewed CSV ${artifact.id}`,
+				summary: `CSV ${artifact.id}`,
 				evidenceSourceIds: [source.id],
 				needsReply: false,
 				resolved: false,

@@ -284,8 +284,7 @@ that does not forward a pending question within two minutes creates a durable
 attention source; an active but stalled turn has a ten-minute grace period.
 User answers travel back down with that exact ID. Workers
 publish text, Markdown, JSON, or CSV artifacts by immutable reference. A worker
-artifact needs an accepted mission-lead review and workspace-leader
-acknowledgment before Neta can open it. The filter receives a short source and
+artifact can be opened without acceptance when its audience permits it. The filter receives a short source and
 artifact ID; full bytes enter a model only when it explicitly opens the artifact.
 Model/transport errors leave sources pending; startup backlog drains in bounded
 batches and failures retry with backoff. Session identity is reserved durably and marked initialized only after
