@@ -1,16 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import * as core from "../src/core/index.ts";
-import type {
-	Agent,
-	Block,
-	DecisionRecord,
-	Event,
-	Leader,
-	Machine,
-	Mission,
-	Turn,
-	Workspace,
-} from "../src/core/types.ts";
+import type { Agent, Block, Event, Leader, Machine, Mission, Turn, Workspace } from "../src/core/types.ts";
 
 const workspace: Workspace = {
 	id: "git:github.com/org/repo",
@@ -34,9 +24,6 @@ const leader: Leader = {
 	sessionId: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
 	provider: "claude",
 	model: "sonnet",
-	mode: "lead",
-	modeSince: "2026-09-03T17:00:00.000Z",
-	modeActiveMs: 0,
 	state: "idle",
 };
 
@@ -47,11 +34,10 @@ const mission: Mission = {
 	machineId: machine.id,
 	name: "fix the flaky specs",
 	objective: "Make the suite green.",
-	changes: [],
 	lead: { kind: "leader" },
 	agentIds: [],
 	access: "readWrite",
-	state: "running",
+	state: "open",
 	createdAt: "2026-09-03T17:00:00.000Z",
 };
 
@@ -69,17 +55,6 @@ const agent: Agent = {
 	canSpawn: false,
 	state: "running",
 	startedAt: "2026-09-03T17:00:00.000Z",
-};
-
-const record: DecisionRecord = {
-	objective: "Write the migration.",
-	whyLeadInsufficient: "Files must change.",
-	missionId: mission.id,
-	mutationKind: "edit",
-	estimatedFiles: 3,
-	validation: "bun test",
-	estimatedMinutes: 20,
-	externalEffects: "none",
 };
 
 const event: Event = {
@@ -111,10 +86,8 @@ describe("core types", () => {
 	test("literals of each interface type-check and the module imports", () => {
 		expect(workspace.roots).toHaveLength(1);
 		expect(machine.name).toBe("mac");
-		expect(leader.mode).toBe("lead");
 		expect(mission.number).toBe(1);
 		expect(agent.canSpawn).toBe(false);
-		expect(record.estimatedFiles).toBe(3);
 		expect(event.seq).toBe(1);
 		expect(turn.role).toBe("user");
 		expect(block.kind).toBe("text");

@@ -2,7 +2,7 @@
 // Each `inputSchema` stands alone ($defs expanded, no $refs); `validate` is
 // hand-written, no dependency, covering every keyword the schemas use.
 
-import type { Access, DecisionRecord, Disposition } from "../core/types.ts";
+import type { Access, Disposition } from "../core/types.ts";
 import type { Effort } from "../routing/types.ts";
 
 export type MissionRef = number | string;
@@ -10,27 +10,21 @@ export type MissionRef = number | string;
 export type ActorKind = "leader" | "lead" | "agent";
 
 export type ToolName =
-	| "neta_mission"
-	| "neta_agent"
-	| "neta_model"
-	| "neta_send"
-	| "neta_scope"
-	| "neta_ready"
-	| "neta_close"
-	| "neta_mode"
-	| "neta_pin"
-	| "neta_status"
-	| "neta_history"
-	| "neta_progress"
-	| "neta_ask"
-	| "neta_superleader_answer"
-	| "neta_done"
-	| "neta_artifacts";
+	| "dispatch_mission"
+	| "spawn_agent"
+	| "change_model"
+	| "send_message"
+	| "close"
+	| "mission_state"
+	| "list_models"
+	| "setup_diagnostic"
+	| "artifacts";
 
 export interface LeadSpec {
 	task: string;
 	provider?: string;
 	model?: string;
+	variant?: string;
 	effort?: Effort;
 	fallbackModels?: string[];
 	skills?: string[];
@@ -41,6 +35,7 @@ export interface AgentSpec {
 	access: Access;
 	provider?: string;
 	model?: string;
+	variant?: string;
 	effort?: Effort;
 	fallbackModels?: string[];
 	skills?: string[];
@@ -50,9 +45,7 @@ export interface MissionParams {
 	name: string;
 	objective: string;
 	access: Access;
-	// Legacy clients may still send "self"; the published schema excludes it and
-	// both validation and the handler reject it before any side effects.
-	lead: "self" | LeadSpec;
+	lead: LeadSpec;
 	agents?: AgentSpec[];
 	continues?: MissionRef;
 	// Explicitly adopt a partial Worktrunk creation recorded for this number.
@@ -72,6 +65,7 @@ export interface AgentParams {
 	missionId?: MissionRef;
 	provider?: string;
 	model?: string;
+	variant?: string;
 	effort?: Effort;
 	fallbackModels?: string[];
 	skills?: string[];
@@ -80,7 +74,6 @@ export interface AgentParams {
 export interface SendParams {
 	agentId: string;
 	text: string;
-	questionId?: string;
 }
 
 export interface ModelParams {
@@ -88,16 +81,9 @@ export interface ModelParams {
 	agentId?: string;
 	effort?: Effort;
 	change?: "up" | "down";
-}
-
-export interface ScopeParams {
-	missionId?: MissionRef;
-	text: string;
-}
-
-export interface ReadyParams {
-	missionId?: MissionRef;
-	summary: string;
+	model?: string;
+	variant?: string;
+	userInstruction?: string;
 }
 
 export interface CloseParams {
@@ -111,41 +97,21 @@ export interface CloseParams {
 	discardUncommitted?: boolean;
 }
 
-export interface ModeParams {
-	mode: "lead" | "leadPlus";
-	record?: Omit<DecisionRecord, "missionId"> & { missionId: MissionRef };
-}
-
-export interface PinParams {
-	turnId: string;
-	text: string;
-}
-
-// No params; the empty object keeps every tool shaped alike.
-export type StatusParams = Record<string, never>;
-export interface HistoryParams {
-	cursor?: string;
+export interface StatusParams {
 	limit?: number;
-}
-
-export interface ProgressParams {
-	text: string;
-	resolvedQuestionId?: string;
-}
-
-export interface AskParams {
-	question: string;
+	cursor?: string;
 	missionId?: MissionRef;
-	questionId?: string;
+	section?: "agents" | "attention";
 }
-
-export interface SuperleaderAnswerParams {
-	inquiryId: string;
-	answer: string;
+export interface ModelsParams {
+	query?: string;
+	limit?: number;
+	cursor?: string;
 }
-
-export interface DoneParams {
-	outcome: string;
+export interface SetupDiagnosticParams {
+	number: number;
+	stream?: "stdout" | "stderr";
+	cursor?: string;
 }
 
 export interface ArtifactParams {
@@ -154,7 +120,6 @@ export interface ArtifactParams {
 	text?: string;
 	title?: string;
 	mimeType?: string;
-	audience?: "parent" | "neta" | "user";
 	previousId?: string;
 	id?: string;
 	offset?: number;
@@ -162,22 +127,15 @@ export interface ArtifactParams {
 }
 
 export interface ToolParams {
-	neta_mission: MissionParams;
-	neta_agent: AgentParams;
-	neta_model: ModelParams;
-	neta_send: SendParams;
-	neta_scope: ScopeParams;
-	neta_ready: ReadyParams;
-	neta_close: CloseParams;
-	neta_mode: ModeParams;
-	neta_pin: PinParams;
-	neta_status: StatusParams;
-	neta_history: HistoryParams;
-	neta_progress: ProgressParams;
-	neta_ask: AskParams;
-	neta_superleader_answer: SuperleaderAnswerParams;
-	neta_done: DoneParams;
-	neta_artifacts: ArtifactParams;
+	dispatch_mission: MissionParams;
+	spawn_agent: AgentParams;
+	change_model: ModelParams;
+	send_message: SendParams;
+	close: CloseParams;
+	mission_state: StatusParams;
+	list_models: ModelsParams;
+	setup_diagnostic: SetupDiagnosticParams;
+	artifacts: ArtifactParams;
 }
 
 export interface JsonSchema {
@@ -224,8 +182,7 @@ const EFFORT: JsonSchema = {
 		"Required when auto-routing: task difficulty 1 confirmation/lookup, 2 bounded investigation, 3 implementation, 4 difficult debugging/design, 5 exceptional reasoning. This is not provider reasoning effort. Required unless model is explicitly selected; omission never inherits the parent model in OpenCode.",
 };
 const MISSION_REF: JsonSchema = {
-	description:
-		"Workspace mission number, for example 12. Legacy internal IDs are accepted for compatibility. A mission lead may omit this to target its own mission.",
+	description: "Workspace mission number, for example 12. Legacy internal IDs are accepted for compatibility.",
 	oneOf: [{ type: "integer", minimum: 1, maximum: Number.MAX_SAFE_INTEGER }, ULID],
 };
 const TASK: JsonSchema = {
@@ -246,7 +203,12 @@ const LEAD_SPEC: JsonSchema = {
 		model: {
 			type: "string",
 			description:
-				"Exact connected model ID from neta_status.modelCatalog. Omit to let Neta choose using task effort (1–5). Supply only for an explicit model override; it bypasses automatic routing.",
+				"Exact connected model ID from list_models. Omit to let Neta choose using task effort (1–5). Supply only for an explicit model override; it bypasses automatic routing.",
+		},
+		variant: {
+			type: "string",
+			minLength: 1,
+			description: "Supported thinking level from list_models; with an explicit model or task effort.",
 		},
 		effort: EFFORT,
 		fallbackModels: FALLBACK_MODELS,
@@ -264,42 +226,22 @@ const AGENT_SPEC: JsonSchema = {
 		model: {
 			type: "string",
 			description:
-				"Exact connected model ID from neta_status.modelCatalog. Omit to let Neta choose using task effort (1–5). Supply only for an explicit model override; it bypasses automatic routing.",
+				"Exact connected model ID from list_models. Omit to let Neta choose using task effort (1–5). Supply only for an explicit model override; it bypasses automatic routing.",
+		},
+		variant: {
+			type: "string",
+			minLength: 1,
+			description: "Supported thinking level from list_models; with an explicit model or task effort.",
 		},
 		effort: EFFORT,
 		fallbackModels: FALLBACK_MODELS,
 		skills: SKILLS,
 	},
 };
-const DECISION_RECORD: JsonSchema = {
-	type: "object",
-	additionalProperties: false,
-	required: [
-		"objective",
-		"whyLeadInsufficient",
-		"missionId",
-		"mutationKind",
-		"estimatedFiles",
-		"validation",
-		"estimatedMinutes",
-		"externalEffects",
-	],
-	properties: {
-		objective: { type: "string" },
-		whyLeadInsufficient: { type: "string" },
-		missionId: MISSION_REF,
-		worktreePath: { type: "string" },
-		mutationKind: { type: "string" },
-		estimatedFiles: { type: "integer" },
-		validation: { type: "string" },
-		estimatedMinutes: { type: "integer" },
-		externalEffects: { type: "string" },
-	},
-};
 
 export const TOOLS: readonly ToolDef[] = [
 	{
-		name: "neta_mission",
+		name: "dispatch_mission",
 		description:
 			"Create and start a mission with a separate mission lead. Supply the lead's task and effort (1–5 unless a model is explicit); for sustained work call this promptly before broad exploration or repeated reads.",
 		inputSchema: {
@@ -313,7 +255,7 @@ export const TOOLS: readonly ToolDef[] = [
 				lead: {
 					...LEAD_SPEC,
 					description:
-						"Separate mission lead; supply a task and effort (1–5 unless a model is explicit). The workspace leader cannot lead its own mission.",
+						"Separate mission lead; supply a task and effort (1–5 unless a model is explicit). The coordinator cannot lead its own mission.",
 				},
 				agents: { type: "array", maxItems: 8, items: AGENT_SPEC },
 				continues: MISSION_REF,
@@ -339,9 +281,9 @@ export const TOOLS: readonly ToolDef[] = [
 		actors: ["leader"],
 	},
 	{
-		name: "neta_agent",
+		name: "spawn_agent",
 		description:
-			"Add a worker to an existing mission. Workspace leaders pass its mission number; mission leads default to their own mission. For a new delegation, use neta_mission with a lead task instead.",
+			"Add a worker to an existing mission. Coordinators pass its mission number; mission leads default to their own mission. For a new delegation, use dispatch_mission with a lead task instead.",
 		inputSchema: {
 			type: "object",
 			additionalProperties: false,
@@ -354,7 +296,12 @@ export const TOOLS: readonly ToolDef[] = [
 				model: {
 					type: "string",
 					description:
-						"Exact connected model ID from neta_status.modelCatalog. Omit to let Neta choose using task effort (1–5). Supply only for an explicit model override; it bypasses automatic routing.",
+						"Exact connected model ID from list_models. Omit to let Neta choose using task effort (1–5). Supply only for an explicit model override; it bypasses automatic routing.",
+				},
+				variant: {
+					type: "string",
+					minLength: 1,
+					description: "Supported thinking level from list_models; with an explicit model or task effort.",
 				},
 				effort: EFFORT,
 				fallbackModels: FALLBACK_MODELS,
@@ -364,9 +311,9 @@ export const TOOLS: readonly ToolDef[] = [
 		actors: ["leader", "lead"],
 	},
 	{
-		name: "neta_artifacts",
+		name: "artifacts",
 		description:
-			"Publish an immutable text, Markdown, CSV, or JSON artifact by local path or small text; inspect or open it by ID. Artifacts can be judged from their contents and conversation. Pass the returned ID and a short finding to your parent instead of copying the whole artifact into chat.",
+			"Publish an immutable text, Markdown, CSV, or JSON artifact by local path or small text; inspect or open it by ID. Pass the returned ID and a short finding to your parent instead of copying the whole artifact into chat.",
 		inputSchema: {
 			type: "object",
 			additionalProperties: false,
@@ -377,19 +324,18 @@ export const TOOLS: readonly ToolDef[] = [
 				text: { type: "string", minLength: 1, maxLength: 32768 },
 				title: { type: "string", minLength: 1, maxLength: 160 },
 				mimeType: { type: "string", enum: ["text/plain", "text/markdown", "text/csv", "application/json"] },
-				audience: { type: "string", enum: ["parent", "neta", "user"] },
 				previousId: ULID,
 				id: ULID,
 				offset: { type: "integer", minimum: 0 },
-				limit: { type: "integer", minimum: 1, maximum: 16384 },
+				limit: { type: "integer", minimum: 1, maximum: 2048 },
 			},
 		},
 		actors: ["leader", "lead", "agent"],
 	},
 	{
-		name: "neta_model",
+		name: "change_model",
 		description:
-			"Adjust an existing mission lead or worker's intelligence in the same conversation. Set task effort 1–5 or move one level up/down using Neta routing. Use only when the user requests a model/effort change; never as an automatic workaround for routing failure. missionId targets that mission's lead; agentId accepts an exact ID or unique name. Mission leads can adjust their own mission only. Ordinary agents can adjust only themselves and must omit missionId and agentId. Does not start, restart, or cancel work.",
+			"Change an existing mission lead or worker's model and thinking level in the same conversation. Use exactly one of task effort 1–5, change up/down, or an exact connected model; variant is an optional supported thinking level with an explicit model. Honor the user's requested model and thinking level. missionId targets that mission's lead; agentId accepts an exact ID or unique name. Mission leads can adjust their own mission only. Ordinary agents can adjust only themselves and must omit missionId and agentId. Does not start, restart, or cancel work.",
 		inputSchema: {
 			type: "object",
 			additionalProperties: false,
@@ -413,51 +359,45 @@ export const TOOLS: readonly ToolDef[] = [
 					enum: ["up", "down"],
 					description: "Change the recorded effort by one level; bounded at 1 and 5.",
 				},
+				model: {
+					type: "string",
+					minLength: 1,
+					description: "Exact connected model ID from list_models.",
+				},
+				variant: {
+					type: "string",
+					minLength: 1,
+					description: "Supported thinking level for the explicit model, such as medium.",
+				},
+				userInstruction: {
+					type: "string",
+					minLength: 1,
+					maxLength: 2000,
+					description: "The user's model or cost preference in their own words for Jev when routing by effort.",
+				},
 			},
 			oneOf: [
 				{ type: "object", required: ["effort"] },
 				{ type: "object", required: ["change"] },
+				{ type: "object", required: ["model"] },
 			],
 		},
 		actors: ["leader", "lead", "agent"],
 	},
 	{
-		name: "neta_send",
+		name: "send_message",
 		description:
-			"Save a follow-up in an agent inbox. Busy or queued agents retain it until they can receive it; this never interrupts a turn. Returns messageId and delivery status.",
+			"Save a follow-up in an agent inbox. Running agents can receive it at the next model step; queued agents retain it until they start. This never interrupts a turn. Returns messageId and delivery status.",
 		inputSchema: {
 			type: "object",
 			additionalProperties: false,
 			required: ["agentId", "text"],
-			properties: { agentId: ULID, text: { type: "string", minLength: 1, maxLength: 4000 }, questionId: ULID },
+			properties: { agentId: ULID, text: { type: "string", minLength: 1, maxLength: 4000 } },
 		},
 		actors: ["leader", "lead"],
 	},
 	{
-		name: "neta_scope",
-		description: "record accepted scope",
-		inputSchema: {
-			type: "object",
-			additionalProperties: false,
-			required: ["text"],
-			properties: { missionId: MISSION_REF, text: { type: "string", minLength: 1, maxLength: 1000 } },
-		},
-		actors: ["leader", "lead"],
-	},
-	{
-		name: "neta_ready",
-		description:
-			"Report successful mission completion and hand off to the workspace leader. Mission leads may omit missionId; this never merges or closes the mission.",
-		inputSchema: {
-			type: "object",
-			additionalProperties: false,
-			required: ["summary"],
-			properties: { missionId: MISSION_REF, summary: { type: "string", minLength: 1, maxLength: 2000 } },
-		},
-		actors: ["leader", "lead"],
-	},
-	{
-		name: "neta_close",
+		name: "close",
 		description:
 			"Close and archive a mission: completed for work with a committed branch (no merge required; the branch is retained even when unmerged); merged requires commit evidence; abandoned discards the work. A dirty worktree must be committed first, or closed as abandoned with discardUncommitted true to explicitly discard uncommitted changes including untracked content.",
 		inputSchema: {
@@ -484,108 +424,88 @@ export const TOOLS: readonly ToolDef[] = [
 		actors: ["leader"],
 	},
 	{
-		name: "neta_mode",
-		description: "switch Lead / Lead++",
-		inputSchema: {
-			type: "object",
-			additionalProperties: false,
-			required: ["mode"],
-			properties: { mode: { type: "string", enum: ["lead", "leadPlus"] }, record: DECISION_RECORD },
-		},
-		actors: ["leader", "lead"],
-	},
-	{
-		name: "neta_pin",
-		description: "pin a turn",
-		inputSchema: {
-			type: "object",
-			additionalProperties: false,
-			required: ["turnId", "text"],
-			properties: { turnId: ULID, text: { type: "string", minLength: 1, maxLength: 400 } },
-		},
-		actors: ["leader"],
-	},
-	{
-		name: "neta_status",
-		description: "open-mission state",
-		inputSchema: { type: "object", additionalProperties: false, properties: {} },
-		actors: ["leader", "lead"],
-	},
-	{
-		name: "neta_history",
-		description: "read earlier user and assistant messages from this conversation",
-		inputSchema: {
-			type: "object",
-			additionalProperties: false,
-			properties: {
-				cursor: { type: "string" },
-				limit: { type: "integer", minimum: 1, maximum: 50 },
-			},
-		},
-		actors: ["leader", "lead", "agent"],
-	},
-	{
-		name: "neta_progress",
-		description: "a start, a major step or a surprise",
-		inputSchema: {
-			type: "object",
-			additionalProperties: false,
-			required: ["text"],
-			properties: { text: TASK, resolvedQuestionId: ULID },
-		},
-		actors: ["lead", "agent"],
-	},
-	{
-		name: "neta_ask",
+		name: "mission_state",
 		description:
-			"Ask the parent chain for an answer about a mission. A worker asks its mission lead; the lead or leader escalates to Neta for the user. Preserve questionId when forwarding a child's pending question.",
+			"Compact open-mission state, paged newest first. Supply missionId for one mission's agent details; use list_models for connected models.",
 		inputSchema: {
 			type: "object",
 			additionalProperties: false,
-			required: ["question"],
 			properties: {
-				question: { type: "string", minLength: 1, maxLength: 1000 },
+				limit: { type: "integer", minimum: 1, maximum: 20 },
+				cursor: { type: "string", minLength: 1 },
 				missionId: MISSION_REF,
-				questionId: ULID,
+				section: { type: "string", enum: ["agents", "attention"] },
 			},
 		},
-		actors: ["leader", "lead", "agent"],
+		actors: ["leader", "lead"],
 	},
 	{
-		name: "neta_superleader_answer",
-		description:
-			"answer a pending question from this workspace's Neta conversation by its inquiry ID; interim progress is not an answer",
+		name: "list_models",
+		description: "Search connected models and supported thinking levels; results are paged.",
 		inputSchema: {
 			type: "object",
 			additionalProperties: false,
-			required: ["inquiryId", "answer"],
 			properties: {
-				inquiryId: { type: "string", minLength: 1, maxLength: 256 },
-				answer: { type: "string", minLength: 1, maxLength: 16_000 },
+				query: { type: "string", minLength: 1, maxLength: 200 },
+				limit: { type: "integer", minimum: 1, maximum: 25 },
+				cursor: { type: "string", minLength: 1 },
+			},
+		},
+		actors: ["leader", "lead"],
+	},
+	{
+		name: "setup_diagnostic",
+		description: "Read a redacted page of a failed worktree setup diagnostic by mission number.",
+		inputSchema: {
+			type: "object",
+			additionalProperties: false,
+			required: ["number"],
+			properties: {
+				number: { type: "integer", minimum: 1 },
+				stream: { type: "string", enum: ["stdout", "stderr"] },
+				cursor: { type: "string", minLength: 1 },
 			},
 		},
 		actors: ["leader"],
-	},
-	{
-		name: "neta_done",
-		description: "the final outcome",
-		inputSchema: {
-			type: "object",
-			additionalProperties: false,
-			required: ["outcome"],
-			properties: { outcome: { type: "string", minLength: 1, maxLength: 4000 } },
-		},
-		actors: ["lead", "agent"],
 	},
 ];
 
 export function toolsFor(kind: ActorKind): ToolDef[] {
 	return TOOLS.filter((tool) => tool.actors.includes(kind)).map((tool) => {
-		if (kind !== "leader" || !["neta_agent", "neta_ready", "neta_scope"].includes(tool.name)) return tool;
-		return {
-			...tool,
-			inputSchema: { ...tool.inputSchema, required: [...(tool.inputSchema.required ?? []), "missionId"] },
-		};
+		if (kind === "leader" && tool.name === "spawn_agent")
+			return {
+				...tool,
+				inputSchema: { ...tool.inputSchema, required: [...(tool.inputSchema.required ?? []), "missionId"] },
+			};
+		if (kind === "lead" && tool.name === "send_message")
+			return {
+				...tool,
+				description:
+					"Send a follow-up to an agent in your mission. Get its agentId from mission_state. Running agents receive it at the next model step; this does not interrupt a turn.",
+			};
+		if (
+			(kind === "lead" || kind === "agent") &&
+			["spawn_agent", "mission_state", "change_model"].includes(tool.name)
+		) {
+			const { missionId: _missionId, agentId: _agentId, ...ownProperties } = tool.inputSchema.properties ?? {};
+			return {
+				...tool,
+				description:
+					tool.name === "spawn_agent"
+						? "Add a worker to your mission. For a new mission, ask the Coordinator."
+						: tool.name === "mission_state"
+							? "Read your mission state and agent details; use list_models for connected models."
+							: kind === "agent"
+								? "Change your own model or thinking level in this conversation."
+								: "Change your own model or an agent's model in your mission. Omit agentId to target yourself.",
+				inputSchema: {
+					...tool.inputSchema,
+					properties:
+						kind === "agent" ? ownProperties : { ...ownProperties, ...(_agentId ? { agentId: _agentId } : {}) },
+				},
+			};
+		}
+		return tool;
 	});
 }
 
@@ -663,7 +583,7 @@ function checkType(schema: JsonSchema, value: unknown, path: string): string | u
 			}
 			if (schema.items !== undefined) {
 				for (let index = 0; index < value.length; index++) {
-					const issue = check(schema.items, value[index], `${path}[${index}]`);
+					const issue = checkSchema(schema.items, value[index], `${path}[${index}]`);
 					if (issue !== undefined) {
 						return issue;
 					}
@@ -683,7 +603,7 @@ function checkType(schema: JsonSchema, value: unknown, path: string): string | u
 			}
 			for (const [key, prop] of Object.entries(schema.properties ?? {})) {
 				if (record[key] !== undefined) {
-					const issue = check(prop, record[key], `${path}.${key}`);
+					const issue = checkSchema(prop, record[key], `${path}.${key}`);
 					if (issue !== undefined) {
 						return issue;
 					}
@@ -704,7 +624,7 @@ function checkType(schema: JsonSchema, value: unknown, path: string): string | u
 	}
 }
 
-function check(schema: JsonSchema, value: unknown, path: string): string | undefined {
+export function checkSchema(schema: JsonSchema, value: unknown, path: string): string | undefined {
 	if (schema.const !== undefined && !deepEqual(value, schema.const)) {
 		return `${path} must be ${JSON.stringify(schema.const)}`;
 	}
@@ -716,7 +636,7 @@ function check(schema: JsonSchema, value: unknown, path: string): string | undef
 		return typed;
 	}
 	if (schema.oneOf !== undefined) {
-		const matches = schema.oneOf.filter((option) => check(option, value, path) === undefined).length;
+		const matches = schema.oneOf.filter((option) => checkSchema(option, value, path) === undefined).length;
 		if (matches !== 1) {
 			return `${path} must match exactly one option`;
 		}
@@ -727,18 +647,25 @@ function check(schema: JsonSchema, value: unknown, path: string): string | undef
 export function validate<N extends ToolName>(
 	name: N,
 	args: unknown,
+	kind?: ActorKind,
 ): { ok: true; value: ToolParams[N] } | { ok: false; message: string } {
-	const def = TOOLS.find((tool) => tool.name === name);
+	const def = (kind ? toolsFor(kind) : TOOLS).find((tool) => tool.name === name);
 	if (def === undefined) {
 		return { ok: false, message: `unknown tool: ${name}` };
 	}
-	if (name === "neta_mission" && typeof args === "object" && args !== null && "lead" in args && args.lead === "self") {
+	if (
+		name === "dispatch_mission" &&
+		typeof args === "object" &&
+		args !== null &&
+		"lead" in args &&
+		args.lead === "self"
+	) {
 		return {
 			ok: false,
 			message:
 				"lead: self is no longer supported. Supply a separate mission lead with a task and effort (1–5 unless a model is explicit).",
 		};
 	}
-	const message = check(def.inputSchema, args, "params");
+	const message = checkSchema(def.inputSchema, args, "params");
 	return message === undefined ? { ok: true, value: args as ToolParams[N] } : { ok: false, message };
 }

@@ -1,4 +1,4 @@
-// The terminal chat (08, T8.4): `neta` attaches to the workspace leader's
+// The terminal chat (08, T8.4): `neta` attaches to the coordinator's
 // conversation. Line-based, never a TUI: `workspace.open`, then
 // `conversation.tail` for the last 20 blocks through the same renderer, then
 // stdin lines become `conversation.prompt`s whose replies stream from `turn`
@@ -69,7 +69,6 @@ export async function attach(client: NodeClient, path: string): Promise<number> 
 	const sessionId = opened.leader.sessionId;
 	const workspaceId = opened.workspace.id;
 	const name = opened.workspace.name;
-	let mode = opened.leader.mode === "leadPlus" ? "lead++" : "lead";
 	const ttyIn = process.stdin.isTTY ?? false;
 	const ttyOut = process.stdout.isTTY ?? false;
 
@@ -259,7 +258,6 @@ export async function attach(client: NodeClient, path: string): Promise<number> 
 		if (leader.workspaceId !== workspaceId) {
 			return;
 		}
-		mode = leader.mode === "leadPlus" ? "lead++" : "lead";
 	});
 
 	let buffer = "";
@@ -333,7 +331,7 @@ export async function attach(client: NodeClient, path: string): Promise<number> 
 					continue;
 				}
 				if (ttyIn) {
-					out(`${name} ${mode}> `);
+					out(`${name}> `);
 				}
 				await until(() => queue.length > 0 || eof || code !== null);
 				continue;

@@ -355,7 +355,6 @@ test("runtime diagnostics expose bounded verified facts without instruction text
 		bindingGeneration: "generation",
 		deliveryStatus: "failed",
 		deliveryError: "Bearer PRIVATE-CREDENTIAL",
-		outcome: "PRIVATE REPORT CONTENT",
 	};
 	const ctx = context([]);
 	ctx.store.listAgents = () => [agent];

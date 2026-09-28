@@ -78,12 +78,15 @@ const task = { task: "Confirm startup", objective: "Response check", effort: 1 a
 
 test("fixed config requires all five exact IDs, preserves repeats, and rejects typos", () => {
 	expect(parseRoutingConfig(fixed)).toEqual(fixed);
+	expect(parseRoutingConfig({ ...fixed, variants: { 3: "medium" } })).toEqual({ ...fixed, variants: { 3: "medium" } });
 	for (const value of [
 		{ mode: "local" },
 		{ mode: "fixed", models: { 1: "luna" } },
 		{ ...fixed, fallbacks: true },
 		{ mode: "jev", maxReferencePrice: -1 },
 		{ mode: "jev", model: " " },
+		{ ...fixed, variants: { 6: "medium" } },
+		{ ...fixed, variants: { 3: "" } },
 	])
 		expect(() => parseRoutingConfig(value)).toThrow();
 });
@@ -113,6 +116,21 @@ test("fixed mapping routes all five efforts with no metadata or classifier acces
 	expect(f.catalogCalls()).toBe(0);
 	expect(f.requests).toHaveLength(0);
 	await expect(f.route(task, [{ id: "openai/astra" }], fixed)).rejects.toThrow("no substitute");
+	const withVariant = await f.route({ ...task, effort: 3 }, [{ id: "openai/terra", variants: ["medium"] }], {
+		...fixed,
+		variants: { 3: "medium" },
+	});
+	expect(withVariant).toMatchObject({
+		model: "openai/terra",
+		variant: "medium",
+		routing: { selectedVariant: "medium" },
+	});
+	await expect(
+		f.route({ ...task, effort: 3 }, [{ id: "openai/terra", variants: ["low"] }], {
+			...fixed,
+			variants: { 3: "medium" },
+		}),
+	).rejects.toThrow("unavailable");
 });
 
 test("explicit overrides bypass effort, config, cache and Jev but require a connected ID", async () => {
@@ -134,6 +152,22 @@ test("explicit overrides bypass effort, config, cache and Jev but require a conn
 		"openai/luna",
 	);
 	await expect(route({ ...task, model: "missing" }, models)).rejects.toThrow("no substitute");
+	expect(
+		await route({ ...task, model: "openai/luna", variant: "medium" }, [
+			{ id: "openai/luna", variants: ["low", "medium"] },
+		]),
+	).toMatchObject({ model: "openai/luna", variant: "medium" });
+	await expect(
+		route({ ...task, model: "openai/luna", variant: "ultra" }, [{ id: "openai/luna", variants: ["low", "medium"] }]),
+	).rejects.toThrow("unavailable");
+});
+
+test("Jev chooses a connected model and supported thinking level together", async () => {
+	const f = routerFixture((keys) => result(keys, "candidate_1"));
+	const selected = await f.route(task, [{ id: "openai/luna", variants: ["low", "medium"] }]);
+	expect(selected).toMatchObject({ model: "openai/luna", variant: "medium", routing: { selectedVariant: "medium" } });
+	expect(Object.keys(f.requests[0].questions.model.criteria)).toEqual(["candidate_0", "candidate_1", "none"]);
+	expect(JSON.parse(f.requests[0].questions.model.criteria.candidate_1)).toMatchObject({ thinkingLevel: "medium" });
 });
 
 test("missing effort or key never inherits a model or invokes metadata services", async () => {
@@ -186,8 +220,12 @@ test("explicit abstention is distinguished from low-confidence selection", async
 test("Jev receives the previous model and direction when adjusting existing effort", async () => {
 	const f = routerFixture();
 	const adjustment = { previousModel: "openai/luna", previousEffort: 2 as const, direction: "up" as const };
-	await f.route({ ...task, effort: 3, adjustment }, models);
-	expect(f.requests[0].state).toMatchObject({ effort: 3, adjustment });
+	await f.route({ ...task, effort: 3, adjustment, userInstruction: "Use something stronger for this bug" }, models);
+	expect(f.requests[0].state).toMatchObject({
+		effort: 3,
+		adjustment,
+		userRequest: "Use something stronger for this bug",
+	});
 	expect(f.requests).toHaveLength(1);
 });
 

@@ -32,20 +32,15 @@ const RUNNER = new URL("./fixtures/mcp-proxy-runner.mjs", import.meta.url).pathn
 const CLIENT_TOKEN = "e2e-client-token";
 const WORKSPACE = "e2e-w";
 const LEADER_TOOLS = [
-	"neta_agent",
-	"neta_artifacts",
-	"neta_ask",
-	"neta_close",
-	"neta_history",
-	"neta_mission",
-	"neta_mode",
-	"neta_model",
-	"neta_pin",
-	"neta_ready",
-	"neta_scope",
-	"neta_send",
-	"neta_status",
-	"neta_superleader_answer",
+	"spawn_agent",
+	"artifacts",
+	"close",
+	"dispatch_mission",
+	"change_model",
+	"list_models",
+	"send_message",
+	"setup_diagnostic",
+	"mission_state",
 ];
 
 let dir = "";
@@ -87,6 +82,7 @@ afterEach(async () => {
 
 function settings(): Settings {
 	return {
+		meCurator: { enabled: false },
 		providers: {
 			fake: { command: process.execPath, args: [FAKE, "--launch-mcp"], resume: true, defaultModel: "" },
 		},
@@ -189,9 +185,6 @@ test("session tool wiring and end-to-end mission creation", async () => {
 		sessionId: leaderSession,
 		provider: "fake",
 		model: "test-model",
-		mode: "lead",
-		modeSince: new Date(0).toISOString(),
-		modeActiveMs: 0,
 		state: "running",
 	});
 	const base = await adaptStore(real);
@@ -362,7 +355,7 @@ test("session tool wiring and end-to-end mission creation", async () => {
 	const called = await proxy.call(
 		"tools/call",
 		{
-			name: "neta_mission",
+			name: "dispatch_mission",
 			arguments: {
 				name: "lens port",
 				objective: "port the lens",
@@ -407,7 +400,7 @@ test("session tool wiring and end-to-end mission creation", async () => {
 
 	// A revoked token is refused.
 	tokens.revoke(leaderSession);
-	const refused = await proxy.call("tools/call", { name: "neta_status", arguments: {} }, 4);
+	const refused = await proxy.call("tools/call", { name: "mission_state", arguments: {} }, 4);
 	const refusedResult = refused.result as { content: Array<{ text: string }>; isError: boolean };
 	expect(refusedResult.isError).toBe(true);
 	expect(refusedResult.content[0]?.text.startsWith("error notAuthorised:")).toBe(true);

@@ -18,6 +18,7 @@ export interface ConversationMeta {
 	sessionId: SessionId;
 	provider: string;
 	model: string;
+	variant?: string;
 	vendorSessionId?: string;
 	bindingGeneration?: string;
 	fallbackModels?: string[];
@@ -51,6 +52,7 @@ export interface ConversationStore {
 				ConversationMeta,
 				| "provider"
 				| "model"
+				| "variant"
 				| "vendorSessionId"
 				| "pendingHandoff"
 				| "pendingBrief"

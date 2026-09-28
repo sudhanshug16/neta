@@ -1,3 +1,5 @@
+> Historical plan. Superseded by [the current tools and communication contract](tools-and-communication.md). This document is not an active implementation requirement.
+
 # 07 — Lead and Lead++
 
 `src/modes/` owns leadership modes for workspace leaders and mission leads:

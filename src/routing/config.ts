@@ -6,15 +6,30 @@ export function parseRoutingConfig(raw: unknown): RoutingConfig {
 	const value = record(raw);
 	if (value.mode === "fixed") {
 		const models = record(value.models);
+		const variants = record(value.variants);
 		if (
-			Object.keys(value).some((key) => !["mode", "models"].includes(key)) ||
+			Object.keys(value).some((key) => !["mode", "models", "variants"].includes(key)) ||
 			Object.keys(models).length !== 5 ||
-			[1, 2, 3, 4, 5].some((level) => typeof models[level] !== "string" || !/^\S+\/\S+$/.test(String(models[level])))
+			[1, 2, 3, 4, 5].some(
+				(level) => typeof models[level] !== "string" || !/^\S+\/\S+$/.test(String(models[level])),
+			) ||
+			(value.variants !== undefined &&
+				(Object.keys(variants).some(
+					(key) =>
+						!["1", "2", "3", "4", "5"].includes(key) ||
+						typeof variants[key] !== "string" ||
+						!String(variants[key]).trim(),
+				) ||
+					Object.keys(variants).length === 0))
 		)
 			throw new Error(
-				"Fixed routing requires exactly five models, keyed 1 through 5, with exact provider/model IDs.",
+				"Fixed routing requires exactly five models, keyed 1 through 5, with exact provider/model IDs; optional variants must name supported thinking levels.",
 			);
-		return { mode: "fixed", models: { ...models } as Record<Effort, string> };
+		return {
+			mode: "fixed",
+			models: { ...models } as Record<Effort, string>,
+			...(value.variants === undefined ? {} : { variants: { ...variants } as Partial<Record<Effort, string>> }),
+		};
 	}
 	if (
 		value.mode !== "jev" ||

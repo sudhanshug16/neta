@@ -1,0 +1,4 @@
+[submodule "vendor/opencode/upstream"]
+	path = vendor/opencode/upstream
+	url = https://github.com/anomalyco/opencode.git
+	branch = v2

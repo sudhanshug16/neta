@@ -8,7 +8,6 @@ import type {
 	InboxMessage,
 	IsoTime,
 	Leader,
-	LeaderMode,
 	Machine,
 	Mission,
 	MissionId,
@@ -21,7 +20,7 @@ import type {
 	WorkspaceId,
 } from "../core/types.ts";
 
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 
 export type ClientKind = "cli" | "desktop" | "tools";
 
@@ -177,7 +176,7 @@ export interface SnapshotResult {
 	missions: Mission[];
 	hasOlder: boolean;
 	agents: Agent[];
-	completedCounts: Record<MissionId, number>;
+	stoppedCounts: Record<MissionId, number>;
 	events: Event[];
 	attention: Mission[];
 	windowDays: number;
@@ -309,6 +308,7 @@ export interface ModelInfo {
 	name: string;
 	provider: string;
 	description?: string;
+	variants?: string[];
 }
 
 export interface ModelsListParams {
@@ -338,26 +338,6 @@ export interface ConversationSetProviderResult {
 	provider: string;
 	model: string;
 	contextReset: true;
-}
-
-export interface LeaderSetModeParams {
-	workspaceId: WorkspaceId;
-	mode: LeaderMode;
-	missionId?: MissionId;
-}
-
-export interface LeaderSetModeResult {
-	leader: Leader;
-}
-
-export interface MissionPinParams {
-	missionId: MissionId;
-	pinned: boolean;
-}
-
-export interface MissionPinResult {
-	missionId: MissionId;
-	pinned: boolean;
 }
 
 export interface AgentArchiveParams {

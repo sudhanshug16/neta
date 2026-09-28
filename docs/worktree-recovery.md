@@ -1,6 +1,6 @@
 # Recovering a partial Worktrunk setup
 
-If `neta_mission` reports `error setupFailed`, no mission is registered and no
+If `dispatch_mission` reports `error setupFailed`, no mission is registered and no
 agent or provider session started. The private diagnostic path and safe output
 excerpts identify the failed Worktrunk setup.
 
@@ -35,7 +35,7 @@ Worktrunk 0.72.0 reproduced partial creation with a failing **pre-start** hook.
 A failing post-start hook returned success and is not an equivalent reproduction.
 
 After independently handling setup or explicitly deciding to waive it, the
-workspace leader may repeat the intended `neta_mission` staffing request, using
+coordinator may repeat the intended `dispatch_mission` staffing request, using
 the original mission name `Migrate product GPT workloads` and this additional
 field (shown for 34):
 

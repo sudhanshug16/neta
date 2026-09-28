@@ -173,21 +173,13 @@ function formatDetail(
 	const lead = mission.lead;
 	lines.push(
 		lead.kind === "leader"
-			? "Lead: workspace leader (shared conversation)"
+			? "Lead: coordinator (shared conversation)"
 			: `Lead: agent ${agents.find((agent) => agent.id === lead.agentId)?.name ?? lead.agentId}`,
 	);
 	if (mission.worktree !== undefined) {
 		lines.push(`Worktree: ${mission.worktree.path}  ${mission.worktree.branch} off ${mission.worktree.base}`);
 	}
 	lines.push(`Objective: ${mission.objective}`);
-	if (mission.changes.length === 0) {
-		lines.push("Changes: none");
-	} else {
-		lines.push("Changes:");
-		for (const change of mission.changes) {
-			lines.push(`  ${change.at}  ${change.text}`);
-		}
-	}
 	if (agents.length === 0) {
 		lines.push("Agents: none");
 	} else {

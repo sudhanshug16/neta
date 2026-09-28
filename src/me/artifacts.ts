@@ -8,10 +8,9 @@ import { encodeWorkspaceId, paths } from "../store/paths.ts";
 
 const MAX_FILE_BYTES = 5 * 1024 * 1024;
 const MAX_INLINE_BYTES = 32 * 1024;
-const MAX_OPEN_BYTES = 16 * 1024;
+const MAX_OPEN_BYTES = 2 * 1024;
 const ALLOWED_MIME = new Set(["text/plain", "text/markdown", "text/csv", "application/json"]);
 
-export type ArtifactAudience = "parent" | "neta" | "user";
 export interface NetaArtifact {
 	id: string;
 	workspaceId: string;
@@ -21,7 +20,6 @@ export interface NetaArtifact {
 	producerKind: "leader" | "lead" | "agent";
 	title: string;
 	mimeType: string;
-	audience: ArtifactAudience;
 	size: number;
 	hash: string;
 	preview: string;
@@ -82,12 +80,10 @@ export async function publishArtifact(input: {
 	text?: string;
 	title: string;
 	mimeType: string;
-	audience: ArtifactAudience;
 	previousId?: string;
 }): Promise<NetaArtifact> {
 	if ((input.path === undefined) === (input.text === undefined))
 		throw new Error("publish exactly one of path or text");
-	if (!["parent", "neta", "user"].includes(input.audience)) throw new Error("invalid artifact audience");
 	if (input.actor.kind === "neta") throw new Error("Neta cannot publish execution artifacts");
 	const artifactTitle = title(input.title);
 	let bytes: Buffer;
@@ -146,7 +142,6 @@ export async function publishArtifact(input: {
 		producerKind: input.actor.kind,
 		title: artifactTitle,
 		mimeType: input.mimeType,
-		audience: input.audience,
 		size: bytes.length,
 		hash: createHash("sha256").update(bytes).digest("hex"),
 		preview: decoded.slice(0, 512),
@@ -170,17 +165,13 @@ export async function inspectArtifact(
 	artifact: NetaArtifact;
 	text?: string;
 	nextOffset?: number;
+	truncated?: boolean;
+	nextCursor?: string;
 }> {
-	const artifact = await readJson<NetaArtifact>(metadataPath(actor.workspaceId, id));
+	const artifact = await readJson<NetaArtifact & { audience?: string }>(metadataPath(actor.workspaceId, id));
 	if (!artifact || artifact.machineId !== actor.machineId)
 		throw new Error("artifact is unavailable in this workspace copy");
-	const sameMission = actor.missionId !== undefined && actor.missionId === artifact.missionId;
-	const allowed =
-		actor.actorId === artifact.producerActorId ||
-		(actor.kind === "lead" && sameMission) ||
-		(actor.kind === "leader" && (artifact.producerKind === "lead" || artifact.audience !== "parent")) ||
-		(actor.kind === "neta" && (artifact.audience === "neta" || artifact.audience === "user"));
-	if (!allowed) throw new Error("artifact audience does not include this actor");
+	delete artifact.audience;
 	if (!openRange) return { artifact };
 	if (
 		!Number.isSafeInteger(openRange.offset) ||
@@ -203,11 +194,14 @@ export async function inspectArtifact(
 	if (bytes.length !== artifact.size || createHash("sha256").update(bytes).digest("hex") !== artifact.hash)
 		throw new Error("artifact bytes are missing or changed");
 	const start = Math.min(bytes.length, openRange.offset);
-	const end = Math.min(bytes.length, start + openRange.limit);
+	if (start < bytes.length && ((bytes[start] ?? 0) & 0xc0) === 0x80) throw new Error("invalid artifact text offset");
+	let end = Math.min(bytes.length, start + openRange.limit);
+	while (end < bytes.length && end > start && ((bytes[end] ?? 0) & 0xc0) === 0x80) end--;
 	const text = bytes.toString("utf8", start, end);
 	return {
 		artifact,
 		text,
-		...(end < bytes.length ? { nextOffset: end } : {}),
+		truncated: end < bytes.length,
+		...(end < bytes.length ? { nextOffset: end, nextCursor: String(end) } : {}),
 	};
 }

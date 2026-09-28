@@ -13,7 +13,7 @@ export interface Measurement {
 
 export type RoutingConfig =
 	| { mode: "jev"; model?: string; maxReferencePrice?: number }
-	| { mode: "fixed"; models: Record<Effort, string> };
+	| { mode: "fixed"; models: Record<Effort, string>; variants?: Partial<Record<Effort, string>> };
 
 export interface ModelFacts {
 	id: string;
@@ -35,8 +35,9 @@ export interface CatalogSnapshot {
 
 export interface RoutingDecision {
 	effort: Effort;
-	method: "jev" | "fixed";
+	method: "jev" | "fixed" | "explicit";
 	selectedModel: string;
+	selectedVariant?: string;
 	candidates: string[];
 	reason: string;
 	warnings: string[];
@@ -51,6 +52,8 @@ export interface RouteTask {
 	objective: string;
 	effort?: Effort;
 	model?: string;
+	variant?: string;
+	userInstruction?: string;
 	provider?: string;
 	adjustment?: { previousModel: string; previousEffort?: Effort; direction?: "up" | "down" };
 }

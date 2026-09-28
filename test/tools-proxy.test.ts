@@ -11,7 +11,7 @@ const TOKEN = "proxy-test-token";
 const ACTOR = "actor-1";
 const ACTOR_TOKEN = "actor-token-1";
 
-const STUB_TOOLS = [{ name: "neta_status", description: "open-mission state", inputSchema: { type: "object" } }];
+const STUB_TOOLS = [{ name: "mission_state", description: "open-mission state", inputSchema: { type: "object" } }];
 
 type Handler = (ctx: NodeContext, params: unknown, conn: Connection) => Promise<unknown>;
 
@@ -193,7 +193,7 @@ describe("stdio MCP proxy", () => {
 		const seen = { list: [] as unknown[], call: [] as unknown[] };
 		await startStub(seen);
 		const h = harness();
-		h.send("tools/call", { name: "neta_mission", arguments: { name: "x" } }, 1);
+		h.send("tools/call", { name: "dispatch_mission", arguments: { name: "x" } }, 1);
 		const answered = await h.response(1);
 		expect(answered.result).toEqual({
 			content: [{ type: "text", text: "called" }],
@@ -201,7 +201,7 @@ describe("stdio MCP proxy", () => {
 			structuredContent: { missions: [{ number: 25 }] },
 		});
 		expect(seen.call).toEqual([
-			{ name: "neta_mission", arguments: { name: "x" }, actorId: ACTOR, token: ACTOR_TOKEN },
+			{ name: "dispatch_mission", arguments: { name: "x" }, actorId: ACTOR, token: ACTOR_TOKEN },
 		]);
 		h.stdin.end();
 		await expect(h.done).resolves.toBe(0);
@@ -220,7 +220,7 @@ describe("stdio MCP proxy", () => {
 
 	test("a refused connection yields an unavailable response rather than a crash", async () => {
 		const h = harness({ socketPath: join(dir, "missing.sock") });
-		h.send("tools/call", { name: "neta_status", arguments: {} }, 1);
+		h.send("tools/call", { name: "mission_state", arguments: {} }, 1);
 		const answered = await h.response(1);
 		const result = answered.result as { content: Array<{ text: string }>; isError: boolean };
 		expect(result.isError).toBe(true);

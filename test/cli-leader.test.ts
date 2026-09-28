@@ -1,4 +1,4 @@
-// T8.7: `neta mode`, `neta models` and `neta model <id>` through the built
+// T8.7: `neta models` and `neta model <id>` through the built
 // bundle against a temp `NETA_DIR` (the T8.2 harness). The harness seeds one
 // OpenCode's fixture model and another model for selection policy.
 import { afterAll, describe, expect, test } from "bun:test";
@@ -33,58 +33,6 @@ async function ensureSetup(): Promise<Harness> {
 afterAll(async () => {
 	await harness?.stop();
 	harness = undefined;
-});
-
-describe("mode", () => {
-	test.skipIf(!nativeHarnessReady)(
-		"mode prints lead on a fresh leader",
-		async () => {
-			const h = await ensureSetup();
-			const result = await h.run(["mode"]);
-			expect(result.code).toBe(0);
-			expect(result.stdout.trim()).toBe("lead");
-		},
-		120000,
-	);
-
-	test.skipIf(!nativeHarnessReady)(
-		"mode lead++ without an active mission is refused",
-		async () => {
-			const h = await ensureSetup();
-			const set = await h.run(["mode", "lead++"]);
-			expect(set.code).toBe(1);
-			expect(set.stderr).toContain("Lead++ requires an active mission");
-			const read = await h.run(["mode"]);
-			expect(read.code).toBe(0);
-			expect(read.stdout.trim()).toBe("lead");
-		},
-		120000,
-	);
-
-	test.skipIf(!nativeHarnessReady)(
-		"mode lead exits 0 and a following mode reflects it",
-		async () => {
-			const h = await ensureSetup();
-			const set = await h.run(["mode", "lead"]);
-			expect(set.code).toBe(0);
-			expect(set.stdout.trim()).toBe("mode lead");
-			const read = await h.run(["mode"]);
-			expect(read.code).toBe(0);
-			expect(read.stdout.trim()).toBe("lead");
-		},
-		120000,
-	);
-
-	test.skipIf(!nativeHarnessReady)(
-		"mode --mission with an unknown number exits 1",
-		async () => {
-			const h = await ensureSetup();
-			const result = await h.run(["mode", "lead", "--mission", "99"]);
-			expect(result.code).toBe(1);
-			expect(result.stderr).toContain("neta: no mission #99 in this workspace");
-		},
-		120000,
-	);
 });
 
 describe("models", () => {

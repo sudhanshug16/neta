@@ -3,7 +3,7 @@ import { ulid } from "../src/core/ids.ts";
 import type { Mission, MissionState } from "../src/core/types.ts";
 import { createMissionIndex, missionCursor } from "../src/store/mission-index.ts";
 
-const STATES: MissionState[] = ["running", "blocked", "failed", "readyToClose", "mergedNotClosed", "closed"];
+const STATES: MissionState[] = ["open", "open", "open", "open", "open", "closed"];
 
 function makeMissions(count: number): Mission[] {
 	const base = Date.parse("2026-09-01T00:00:00.000Z");
@@ -18,7 +18,6 @@ function makeMissions(count: number): Mission[] {
 			machineId: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
 			name: `mission ${n}`,
 			objective: "Do it.",
-			changes: [],
 			lead: { kind: "leader" },
 			agentIds: [],
 			access: "readOnly",
@@ -75,9 +74,9 @@ describe("mission index", () => {
 		const seen: string[] = [];
 		let cursor: string | undefined;
 		for (;;) {
-			const page = index.list({ states: ["blocked"], limit: 50, cursor });
+			const page = index.list({ states: ["open"], limit: 50, cursor });
 			for (const m of page.missions) {
-				expect(m.state).toBe("blocked");
+				expect(m.state).toBe("open");
 				seen.push(m.id);
 			}
 			if (page.cursor === undefined) {
@@ -85,7 +84,7 @@ describe("mission index", () => {
 			}
 			cursor = page.cursor;
 		}
-		expect(seen).toEqual(missions.filter((m) => m.state === "blocked").map((m) => m.id));
+		expect(seen).toEqual(missions.filter((m) => m.state === "open").map((m) => m.id));
 	});
 
 	test("put of an update keeps its slot and refreshes all three indexes", () => {
@@ -96,10 +95,10 @@ describe("mission index", () => {
 		}
 		const target = missions[4];
 		const before = index.all().map((m) => m.id);
-		index.put({ ...target, state: "failed", attention: "boom" });
+		index.put({ ...target, state: "open", attention: "boom" });
 		expect(index.all().map((m) => m.id)).toEqual(before);
 		expect(index.get(target.id)?.attention).toBe("boom");
-		expect(index.byNumber(target.number)?.state).toBe("failed");
+		expect(index.byNumber(target.number)?.state).toBe("open");
 		expect(missionCursor(target)).toBe(`${target.createdAt}|${target.id}`);
 		expect(() => index.put({ ...target, createdAt: "2027-01-01T00:00:00.000Z" })).toThrow();
 	});

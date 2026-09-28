@@ -28,18 +28,14 @@ export interface Machine {
 	createdAt: IsoTime;
 }
 
-export type LeaderMode = "lead" | "leadPlus";
+/** Execution coordinator. The saved record and wire key remain `leader`. */
 export interface Leader {
 	workspaceId: WorkspaceId;
 	machineId: MachineId;
-	name: string; // personal name from the pool, fixed at creation
+	name: string; // fixed Coordinator label
 	sessionId: SessionId; // the one continuous conversation
 	provider: string; // provider name from settings
 	model: string; // concrete model id
-	mode: LeaderMode;
-	modeSince: IsoTime;
-	modeActiveMs: number; // active connected time in leadPlus
-	activeMissionId?: MissionId; // mission the leader works in directly
 	state: "idle" | "running" | "failed";
 	currentTurnId?: TurnId;
 	bindingGeneration?: string;
@@ -48,15 +44,9 @@ export interface Leader {
 
 export type Access = "readOnly" | "readWrite";
 
-export type MissionState = "running" | "blocked" | "failed" | "readyToClose" | "mergedNotClosed" | "closed";
+export type MissionState = "open" | "closed";
 export type Disposition = "merged" | "completed" | "abandoned";
 
-export interface MissionChange {
-	// append-only accepted scope change
-	at: IsoTime;
-	text: string;
-	turnId?: TurnId;
-}
 export interface Worktree {
 	provider: "worktrunk";
 	path: string;
@@ -72,14 +62,13 @@ export interface Mission {
 	machineId: MachineId;
 	name: string; // 2–6 words, operational
 	objective: string; // immutable original objective
-	changes: MissionChange[];
 	lead: MissionLead;
 	agentIds: AgentId[];
 	access: Access; // what the mission may do at most
 	worktree?: Worktree; // present for git missions
 	worktreeRecovery?: { setupDisposition: "handled" | "waived"; at: IsoTime }; // explicit adoption, not setup success
 	state: MissionState;
-	attention?: string; // one line: the question, the error
+	attention?: string; // runtime or integration detail
 	createdAt: IsoTime;
 	closedAt?: IsoTime;
 	disposition?: Disposition;
@@ -88,18 +77,10 @@ export interface Mission {
 	continuesMissionId?: MissionId;
 }
 
-export type AgentState =
-	| "queued"
-	| "idle"
-	| "starting"
-	| "running"
-	| "blocked"
-	| "failed"
-	| "completed"
-	| "interrupted"
-	| "archived";
+export type AgentState = "queued" | "idle" | "starting" | "running" | "failed" | "interrupted" | "archived";
 
 export interface Agent {
+	runtimeError?: string;
 	id: AgentId;
 	missionId: MissionId;
 	workspaceId: WorkspaceId;
@@ -108,6 +89,7 @@ export interface Agent {
 	access: Access;
 	provider: string;
 	model: string;
+	variant?: string;
 	skills: string[]; // skill names attached
 	sessionId: SessionId;
 	canSpawn: boolean; // true only for mission leads
@@ -122,51 +104,24 @@ export interface Agent {
 	lastReportedTurnId?: TurnId;
 	pendingParentTurn?: Turn;
 	stateBefore?: AgentState; // set when interrupted
-	activity?: { text: string; at: IsoTime };
-	pendingQuestion?: string;
-	pendingQuestionId?: string;
-	pendingQuestionAt?: IsoTime;
 	startedAt: IsoTime;
 	endedAt?: IsoTime;
-	outcome?: string; // final report, one paragraph
-}
-
-export interface DecisionRecord {
-	// Lead++ request, manifesto list
-	objective: string;
-	whyLeadInsufficient: string;
-	missionId: MissionId;
-	worktreePath?: string;
-	mutationKind: string;
-	estimatedFiles: number;
-	validation: string;
-	estimatedMinutes: number;
-	externalEffects: string; // "none" is a valid answer
 }
 
 export type EventKind =
 	| "mission.created"
-	| "mission.changed"
-	| "mission.blocked"
-	| "mission.unblocked"
 	| "mission.failed"
 	| "worktree.setupFailed"
 	| "artifact.published"
-	| "artifact.reviewed"
-	| "mission.readyToClose"
 	| "mission.merged"
 	| "mission.closed"
 	| "agent.spawned"
-	| "agent.finished"
 	| "agent.archived"
 	| "agent.modelChanged"
 	| "routing.failed"
-	| "leader.modeChanged"
-	| "leader.modeReminder"
 	| "base.integrated"
 	| "charter.changed"
-	| "node.restarted"
-	| "user.pinned";
+	| "node.restarted";
 
 export interface Event {
 	seq: number; // monotonic per workspace
@@ -202,6 +157,7 @@ export interface InboxMessage {
 	attachments: PromptAttachment[];
 	status: InboxMessageStatus;
 	deliveredAt?: IsoTime;
+	consumedAt?: IsoTime;
 	turnId?: TurnId;
 }
 export interface Block {
@@ -214,6 +170,8 @@ export interface Block {
 	data?: Record<string, string | number | boolean | null>;
 }
 export interface Turn {
+	finalReply?: string; // authoritative final visible native assistant message
+	superseded?: boolean; // a later admitted internal message must be considered before reporting this reply
 	id: TurnId;
 	sessionId: SessionId;
 	startedAt: IsoTime;

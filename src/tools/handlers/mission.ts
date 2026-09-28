@@ -1,4 +1,4 @@
-// `neta_mission` and `neta_agent`: one call creates, isolates, starts work.
+// `dispatch_mission` and `spawn_agent`: one call creates, isolates, starts work.
 // The Node wires the ports in T5.9 (06 supplies worktrees and leases, 03 the
 // sessions, T5.8 the skills); tests stub them. Everything validated before
 // anything is spawned, so a refusal leaves no sessions behind.
@@ -18,7 +18,7 @@ import type {
 	WorkspaceId,
 } from "../../core/types.ts";
 import type { Effort, RoutingDecision } from "../../routing/types.ts";
-import { WorktreeSetupError } from "../../worktrees/setup-diagnostics.ts";
+import { safeExcerpt, WorktreeSetupError } from "../../worktrees/setup-diagnostics.ts";
 import { resolveMission } from "../mission-reference.ts";
 import type { ToolContext, ToolDeps, ToolHandlers, ToolResult } from "../router.ts";
 import type { AgentParams, AgentSpec, LeadSpec, MissionParams } from "../schemas.ts";
@@ -34,6 +34,7 @@ export interface SessionLaunch {
 	access: Access;
 	provider: string;
 	model: string;
+	variant?: string;
 	fallbackModels?: string[];
 	skills: string[];
 	canSpawn: boolean;
@@ -53,10 +54,11 @@ export interface MissionPorts {
 			workspaceId: WorkspaceId;
 			provider: string;
 			model?: string;
+			variant?: string;
 			task: string;
 			objective: string;
 			effort?: Effort;
-		}): Promise<{ provider: string; model: string; routing?: RoutingDecision } | undefined>;
+		}): Promise<{ provider: string; model: string; variant?: string; routing?: RoutingDecision } | undefined>;
 		selectModel?(input: {
 			workspaceId: WorkspaceId;
 			provider: string;
@@ -135,6 +137,7 @@ async function launchAgent(
 		access: Access;
 		provider: string;
 		model: string;
+		variant?: string;
 		fallbackModels?: string[];
 		skills: string[];
 		canSpawn: boolean;
@@ -173,6 +176,7 @@ async function launchAgent(
 		access: input.access,
 		provider: input.provider,
 		model: input.model,
+		variant: input.variant,
 		fallbackModels: input.fallbackModels ?? [],
 		skills: input.skills,
 		canSpawn: input.canSpawn,
@@ -190,6 +194,7 @@ async function launchAgent(
 		access: input.access,
 		provider: input.provider,
 		model: input.model,
+		variant: input.variant,
 		fallbackModels: input.fallbackModels ?? [],
 		skills: input.skills,
 		sessionId,
@@ -212,7 +217,7 @@ async function launchAgent(
 			if (input.canSpawn && created.sessionId === ctx.deps.store.getLeader(workspace.id)?.sessionId) {
 				aliasedSession = true;
 				throw new MissionLeadSessionAliasError(
-					"Mission lead session aliases the workspace leader; use a separate lead session.",
+					"Mission lead session aliases the coordinator; use a separate lead session.",
 				);
 			}
 			live = created.sessionId === sessionId ? reserved : { ...reserved, sessionId: created.sessionId };
@@ -220,10 +225,10 @@ async function launchAgent(
 			await ctx.deps.sessions.brief({ ...launch, sessionId: live.sessionId });
 			return ctx.deps.store.getAgent(live.id) ?? live;
 		} catch (error) {
-			// The returned identity might belong to the workspace leader. Never
+			// The returned identity might belong to the coordinator. Never
 			// close or brief that session, or bind the mission actor to it.
 			if (!aliasedSession) await ctx.deps.sessions.close(live.sessionId).catch(() => undefined);
-			const failed = { ...live, state: "failed" as const, endedAt: nowIso(), outcome: String(error) };
+			const failed = { ...live, state: "failed" as const, endedAt: nowIso(), runtimeError: String(error) };
 			await ctx.deps.store.putAgent(failed);
 			await ctx.deps.sessions.failed(failed);
 			if (aliasedSession) throw error;
@@ -252,7 +257,7 @@ async function createMissionUnlocked(ctx: MissionToolContext, params: MissionPar
 	}
 	// Old clients can bypass the published schema. Refuse before routing, number
 	// allocation, worktree preparation, reservation or launch.
-	if (params.lead === "self" || typeof params.lead !== "object" || params.lead === null) {
+	if (typeof params.lead !== "object" || params.lead === null) {
 		return refused(
 			"lead: self is no longer supported. Supply a separate mission lead with a task and effort (1–5 unless a model is explicit).",
 		);
@@ -290,17 +295,25 @@ async function createMissionUnlocked(ctx: MissionToolContext, params: MissionPar
 	}
 
 	// Resolve once before side effects. The launch path only validates the resolved ID.
-	const resolved = new Map<LeadSpec | AgentSpec, { provider: string; model: string; routing?: RoutingDecision }>();
+	const resolved = new Map<
+		LeadSpec | AgentSpec,
+		{ provider: string; model: string; variant?: string; routing?: RoutingDecision }
+	>();
+	if (!ctx.deps.sessions.routeModel && [leadSpec, ...(params.agents ?? [])].some((spec) => spec.variant !== undefined))
+		return refused("Thinking-level selection requires an OpenCode model and connected variant catalog.");
 	if (ctx.deps.sessions.routeModel) {
 		for (const spec of [leadSpec, ...(params.agents ?? [])]) {
 			const selection = await ctx.deps.sessions.routeModel({
 				workspaceId: workspace.id,
 				provider: spec.provider ?? leader.provider,
 				model: spec.model,
+				variant: spec.variant,
 				task: spec.task,
 				objective: params.objective,
 				effort: spec.effort,
 			});
+			if (spec.variant !== undefined && !selection)
+				return refused("Thinking-level selection requires an OpenCode model and connected variant catalog.");
 			if (selection) resolved.set(spec, selection);
 		}
 	}
@@ -338,7 +351,7 @@ async function createMissionUnlocked(ctx: MissionToolContext, params: MissionPar
 		leadIdentity.id === leadIdentity.sessionId
 	)
 		return refused(
-			"Mission lead must have a distinct actor and session from the workspace leader. Retry with a separate lead task and effort.",
+			"Mission lead must have a distinct actor and session from the coordinator. Retry with a separate lead task and effort.",
 		);
 	const number = params.recoverWorktree?.number ?? (await ctx.deps.numbers.allocateNumber(workspace.id));
 	const createdAt = nowIso();
@@ -349,11 +362,10 @@ async function createMissionUnlocked(ctx: MissionToolContext, params: MissionPar
 		machineId: ctx.deps.store.machine().id,
 		name: params.name,
 		objective: params.objective,
-		changes: [],
 		lead: { kind: "agent", agentId: leadIdentity.id },
 		agentIds: [],
 		access: params.access,
-		state: "running",
+		state: "open",
 		createdAt,
 		continuesMissionId: params.continues === undefined ? undefined : resolveMission(ctx, params.continues)?.id,
 	};
@@ -394,8 +406,14 @@ async function createMissionUnlocked(ctx: MissionToolContext, params: MissionPar
 						exitCode: diagnostic.exitCode,
 						diagnostic: error.diagnosticPath,
 						persistenceError: error.persistenceError,
-						stdout: diagnostic.stdout,
-						stderr: diagnostic.stderr,
+						diagnosticId: diagnostic.number,
+						error:
+							safeExcerpt(diagnostic.stderr)
+								.split("\n")
+								.find((line) => line.trim() && !line.includes("[truncated]"))
+								?.slice(0, 300) ?? "setup failed",
+						logTruncated:
+							diagnostic.stderr.includes("[output truncated]") || diagnostic.stderr.includes("[truncated]"),
 						missionRegistered: false,
 						agentsLaunched: false,
 					}),
@@ -406,9 +424,7 @@ async function createMissionUnlocked(ctx: MissionToolContext, params: MissionPar
 			throw error;
 		}
 	}
-	// The leader's own name is spoken for: two "Halden"s in the mission bar
-	// and on the spine would name one person twice.
-	const taken = new Set<string>([leader.name]);
+	const taken = new Set<string>();
 	const launched: Agent[] = [];
 	{
 		let lead: Agent;
@@ -420,10 +436,11 @@ async function createMissionUnlocked(ctx: MissionToolContext, params: MissionPar
 				{
 					task: leadSpec.task,
 					// Mission leads begin in Lead. The mission's write allowance is a
-					// ceiling; it does not grant effective writer access until Lead++.
-					access: "readOnly",
+					// ceiling; writer ownership is acquired before each writing turn.
+					access: mission.access,
 					provider: resolved.get(leadSpec)?.provider ?? leadSpec.provider ?? leader.provider,
 					model: resolved.get(leadSpec)?.model ?? leadSpec.model ?? leader.model,
+					variant: resolved.get(leadSpec)?.variant,
 					routing: resolved.get(leadSpec)?.routing,
 					fallbackModels: leadSpec.fallbackModels,
 					skills: leadSpec.skills ?? [],
@@ -438,7 +455,7 @@ async function createMissionUnlocked(ctx: MissionToolContext, params: MissionPar
 			);
 		} catch (error) {
 			if (!(error instanceof MissionLeadSessionAliasError)) throw error;
-			mission = { ...mission, state: "failed", attention: error.message };
+			mission = { ...mission, state: "open", attention: error.message };
 			await ctx.deps.missions.save(mission);
 			await ctx.deps.store.appendEvent({
 				workspaceId: workspace.id,
@@ -447,7 +464,7 @@ async function createMissionUnlocked(ctx: MissionToolContext, params: MissionPar
 				data: { number: mission.number, name: mission.name },
 			});
 			return refused(
-				`${error.message} Mission #${mission.number} remains failed and can be closed without touching the workspace leader's session.`,
+				`${error.message} Mission #${mission.number} remains failed and can be closed without touching the coordinator's session.`,
 			);
 		}
 		launched.push(lead);
@@ -462,6 +479,7 @@ async function createMissionUnlocked(ctx: MissionToolContext, params: MissionPar
 				access: spec.access,
 				provider: resolved.get(spec)?.provider ?? spec.provider ?? leader.provider,
 				model: resolved.get(spec)?.model ?? spec.model ?? leader.model,
+				variant: resolved.get(spec)?.variant,
 				routing: resolved.get(spec)?.routing,
 				fallbackModels: spec.fallbackModels,
 				skills: spec.skills ?? [],
@@ -501,6 +519,7 @@ async function createMissionUnlocked(ctx: MissionToolContext, params: MissionPar
 				id: agent.id,
 				name: agent.name,
 				model: agent.model,
+				variant: agent.variant,
 				routing: agent.routing,
 			})),
 			...(queued ? { queued: true as const } : {}),
@@ -516,7 +535,7 @@ async function createAgentUnlocked(ctx: MissionToolContext, params: AgentParams)
 	if (mission === undefined) {
 		return params.missionId === undefined
 			? refused(
-					"No active mission. Use neta_mission with a lead task to create and start a new delegation, or pass an existing mission number as missionId.",
+					"No active mission. Use dispatch_mission with a lead task to create and start a new delegation, or pass an existing mission number as missionId.",
 				)
 			: notFound(`no such mission in this workspace: ${params.missionId}`);
 	}
@@ -564,15 +583,19 @@ async function createAgentUnlocked(ctx: MissionToolContext, params: AgentParams)
 		workspaceId: workspace.id,
 		provider: params.provider ?? caller?.provider ?? "unknown",
 		model: params.model,
+		variant: params.variant,
 		task: params.task,
 		objective: mission.objective,
 		effort: params.effort,
 	});
+	if (params.variant !== undefined && !selection)
+		return refused("Thinking-level selection requires an OpenCode model and connected variant catalog.");
 	const spawned = await launchAgent(ctx, mission, workspace, {
 		task: params.task,
 		access: params.access,
 		provider: selection?.provider ?? params.provider ?? caller?.provider ?? "unknown",
 		model: selection?.model ?? params.model ?? caller?.model ?? "unknown",
+		variant: selection?.variant,
 		routing: selection?.routing,
 		fallbackModels: params.fallbackModels,
 		skills: params.skills ?? [],
@@ -630,7 +653,7 @@ async function createAgent(ctx: MissionToolContext, params: AgentParams): Promis
 	}
 }
 
-export const missionHandlers: Pick<ToolHandlers, "neta_mission" | "neta_agent"> = {
-	neta_mission: (ctx, args) => createMission(ctx as MissionToolContext, args),
-	neta_agent: (ctx, args) => createAgent(ctx as MissionToolContext, args),
+export const missionHandlers: Pick<ToolHandlers, "dispatch_mission" | "spawn_agent"> = {
+	dispatch_mission: (ctx, args) => createMission(ctx as MissionToolContext, args),
+	spawn_agent: (ctx, args) => createAgent(ctx as MissionToolContext, args),
 };

@@ -2,16 +2,15 @@
 
 Read [MANIFESTO.md](MANIFESTO.md) for scope and
 [docs/how-it-works.md](docs/how-it-works.md) for the current architecture
-before non-trivial work. The v3 rebuild is specified in
-[docs/plan/README.md](docs/plan/README.md); each workstream file there is the
-engineering spec for its tasks, and the manifesto wins when they disagree. Do
+before non-trivial work. Current implementation plans are indexed in
+[docs/plan/README.md](docs/plan/README.md); historical workstreams are reference
+only, and the manifesto wins when documents disagree. Do
 not expand the product beyond those boundaries without the operator saying so.
 
 ## Development agent workflow
 
 This repository is developed in regular Codex sessions, outside Neta itself.
-Neta's runtime leader modes, mission hierarchy, worker tools, writer leases,
-and progress protocol describe the product; they are not prerequisites for
+Neta's mission hierarchy, worker tools, and writer leases describe the product; they are not prerequisites for
 working on this repository.
 
 - Codex may read, investigate, edit, and verify directly. Delegation is optional;
@@ -23,6 +22,11 @@ working on this repository.
 - Preserve unrelated uncommitted work. Serialize edits to shared files and
   verify the resulting diff. Do not commit unless the user asks.
 - Report concrete results and blockers using the current Codex session's tools.
+- Neta currently has one user, who can reset chats for breaking changes. Prefer
+  simpler implementations over backward compatibility for tool names and chat
+  protocols; do not add legacy aliases or parallel compatibility workflows by
+  default. Preserve saved work, worktrees, artifacts, and history unless their
+  deletion is explicitly requested.
 
 ## Conversational Style
 
@@ -37,6 +41,10 @@ working on this repository.
 
 ## Code Quality
 
+- Use OpenCode's native chat for every conversation, including Neta.
+  Do not build a parallel chat UI, composer, message queue, transcript renderer,
+  or chat interaction layer in Neta. Neta may provide context, routing, and
+  durable ownership behind the native session, but OpenCode owns chat UX.
 - TypeScript, strict. No `any` unless absolutely necessary.
 - No inline imports (`await import()`, `import("pkg").Type`). Top-level
   imports only.

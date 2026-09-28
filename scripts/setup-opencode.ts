@@ -5,9 +5,12 @@ import {
 	managedOpenCodeDir,
 	overlayPath,
 	readPin,
+	repositoryRoot,
 	type OpenCodePin,
 	verifyCheckout,
 } from "./opencode-pin.ts";
+
+const upstream = join(repositoryRoot, "vendor/opencode/upstream");
 
 export interface CheckoutSetup {
 	fork: string;
@@ -60,12 +63,17 @@ async function temporaryPath(parent: string, prefix: string): Promise<string> {
 }
 
 async function createCheckout(fork: string, pin: OpenCodePin): Promise<void> {
+	const submoduleCommit = await git(upstream, ["rev-parse", "HEAD"]).then((value) => value.trim()).catch(() => {
+		throw new Error("OpenCode submodule is missing. Run git submodule update --init vendor/opencode/upstream.");
+	});
+	if (submoduleCommit !== pin.commit)
+		throw new Error("OpenCode submodule differs from the reviewed integration pin. Run git submodule update --init vendor/opencode/upstream.");
 	const parent = resolve(fork, "..");
 	await mkdir(parent, { recursive: true });
 	const candidate = await mkdtemp(join(parent, ".neta-opencode-"));
 	try {
 		await git(candidate, ["init", "--quiet"]);
-		await git(candidate, ["fetch", "--depth", "1", pin.repository, pin.commit]);
+		await git(candidate, ["fetch", "--depth", "1", upstream, pin.commit]);
 		await git(candidate, ["checkout", "--detach", "FETCH_HEAD"]);
 		await git(candidate, ["apply", "--check", overlayPath]);
 		await git(candidate, ["apply", overlayPath]);

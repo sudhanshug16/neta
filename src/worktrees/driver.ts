@@ -19,6 +19,7 @@ export interface CreateInput {
 	number: number;
 	slug: string;
 	base?: string;
+	runHooks?: boolean;
 }
 
 export interface WorktreeEntry {
@@ -147,7 +148,16 @@ export class WorktrunkDriver implements WorktreeDriver {
 		const branch = missionBranch(input.number, input.slug);
 		const base = input.base ?? (await this.defaultBase(input.repoRoot));
 		const payload = await runWtJson(
-			["switch", "--create", branch, "--base", base, "--no-cd", "--format=json"],
+			[
+				"switch",
+				"--create",
+				branch,
+				"--base",
+				base,
+				"--no-cd",
+				...(input.runHooks === false ? ["--no-hooks"] : []),
+				"--format=json",
+			],
 			this.wtOptions(input.repoRoot),
 		);
 		// Never compute the path: it comes out of the JSON.

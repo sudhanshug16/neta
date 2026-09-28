@@ -1,3 +1,5 @@
+> Historical plan. Superseded by [the current tools and communication contract](tools-and-communication.md). This document is not an active implementation requirement.
+
 # Unrestricted leaders fix — 2026-09-05
 
 The delivery is `/Users/runner/NetaDesktop-yolo-leaders.zip`. Its SHA-256 is

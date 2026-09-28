@@ -80,17 +80,16 @@ describe("OpenCode settings", () => {
 		expect(warnings.some((warning) => warning.includes("direct control"))).toBe(true);
 	});
 
-	test("leader name layers and wrong type are handled", () => {
+	test("old coordinator names in settings are ignored", () => {
 		const dir = mkdtempSync(join(tmpdir(), "neta-settings-"));
 		const root = mkdtempSync(join(tmpdir(), "neta-ws-"));
 		writeFileSync(join(dir, "settings.json"), JSON.stringify({ leader: { name: "Halden" } }));
 		mkdirSync(join(root, ".neta"), { recursive: true });
 		writeFileSync(join(root, ".neta", "settings.json"), JSON.stringify({ leader: { name: "Wren" } }));
-		expect(loadSettings({ netaDir: dir, workspaceRoot: root }).settings.leader.name).toBe("Wren");
+		expect(loadSettings({ netaDir: dir, workspaceRoot: root }).settings.leader).toEqual({ provider: "opencode" });
 		writeFileSync(join(dir, "settings.json"), JSON.stringify({ leader: { name: 7 } }));
 		const invalid = loadSettings({ netaDir: dir });
-		expect(invalid.settings.leader.name).toBeUndefined();
-		expect(invalid.warnings.some((warning) => warning.includes("leader name is not a string"))).toBe(true);
+		expect(invalid.settings.leader).toEqual({ provider: "opencode" });
 	});
 
 	test("bad JSON and wrong typed fields preserve lower settings", () => {

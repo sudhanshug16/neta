@@ -20,11 +20,10 @@ function mission(): Mission {
 		machineId: "m",
 		name: "host mission",
 		objective: "o",
-		changes: [],
 		lead: { kind: "leader" },
 		agentIds: [],
 		access: "readWrite",
-		state: "running",
+		state: "open",
 		createdAt: new Date(0).toISOString(),
 	};
 }
@@ -55,10 +54,6 @@ const LEADER: Leader = {
 	sessionId: ulid(),
 	provider: "fake",
 	model: "test-model",
-	mode: "lead",
-	modeSince: new Date(0).toISOString(),
-	modeActiveMs: 0,
-	activeMissionId: MISSION,
 	state: "running",
 };
 
@@ -83,14 +78,7 @@ function fixture(): Fixture {
 	const events: EventKind[] = [];
 	const eventData: unknown[] = [];
 	const calls: string[] = [];
-	const sessions: CoordinationPorts["sessions"] = {
-		cancel: async (sessionId) => {
-			calls.push(`cancel:${sessionId}`);
-		},
-		prompt: async (sessionId, text) => {
-			calls.push(`prompt:${sessionId}:${text}`);
-		},
-	};
+	const sessions: CoordinationPorts["sessions"] = {};
 
 	const store: NodeStore = {
 		machine: () => ({ id: "m", name: "test", createdAt: new Date(0).toISOString() }),
@@ -129,21 +117,21 @@ function fixture(): Fixture {
 }
 
 function ctx(f: Fixture, actor: Actor): CoordinationToolContext {
-	return { actor, deps: { store: f.store, sessions: f.sessions, missions: f.missions } };
+	return { actor, deps: { store: f.store, sessions: f.sessions } };
 }
 
 function leadActor(agent: Agent): Actor {
 	return { kind: "lead", workspaceId: WORKSPACE, missionId: MISSION, agentId: agent.id, sessionId: agent.sessionId };
 }
 
-describe("neta_send", () => {
-	test.each(["running", "idle", "completed"] as const)(
+describe("send_message", () => {
+	test.each(["running", "idle", "idle"] as const)(
 		"self-send from %s refuses before touching the session",
 		async (state) => {
 			const f = fixture();
 			const self = makeAgent(ulid(), state, { canSpawn: true, name: "Britt" });
 			f.agents.set(self.id, self);
-			const result = await coordinationHandlers.neta_send(ctx(f, leadActor(self)), {
+			const result = await coordinationHandlers.send_message(ctx(f, leadActor(self)), {
 				agentId: self.id,
 				text: "Continue the implementation",
 			});
@@ -157,279 +145,13 @@ describe("neta_send", () => {
 
 	test("completed follow-up requires a runtime resume port", async () => {
 		const f = fixture();
-		const done = makeAgent(ulid(), "completed");
+		const done = makeAgent(ulid(), "idle");
 		f.agents.set(done.id, done);
 		const actor = leadActor(makeAgent(ulid(), "running"));
-		const result = await coordinationHandlers.neta_send(ctx(f, actor), { agentId: done.id, text: "late" });
+		const result = await coordinationHandlers.send_message(ctx(f, actor), { agentId: done.id, text: "late" });
 		expect(result.ok).toBe(false);
 		expect(f.calls).toEqual([]);
 	});
-});
-
-describe("neta_progress and neta_ask", () => {
-	test("progress writes activity", async () => {
-		const f = fixture();
-		const worker = makeAgent(ulid(), "running");
-		f.agents.set(worker.id, worker);
-		const result = await coordinationHandlers.neta_progress(ctx(f, leadActor(worker)), { text: "started" });
-		expect(result).toEqual({ ok: true, data: { agentId: worker.id } });
-		expect(f.agents.get(worker.id)?.activity?.text).toBe("started");
-	});
-
-	test("ask sets pendingQuestion, blocks the actor and emits mission.blocked", async () => {
-		const f = fixture();
-		const lead = makeAgent(ulid(), "running", { canSpawn: true });
-		f.agents.set(lead.id, lead);
-		const result = await coordinationHandlers.neta_ask(ctx(f, leadActor(lead)), { question: "ship it?" });
-		if (!result.ok || typeof result.data.questionId !== "string") throw new Error("missing question ID");
-		expect(result.data.questionId).toHaveLength(26);
-		expect(f.agents.get(lead.id)?.pendingQuestion).toBe("ship it?");
-		expect(f.agents.get(lead.id)?.pendingQuestionId).toBe(result.data.questionId);
-		expect(f.agents.get(lead.id)?.state).toBe("blocked");
-		expect(f.events).toEqual(["mission.blocked"]);
-	});
-});
-
-describe("neta_done", () => {
-	test("records the outcome, completes, emits agent.finished, leaves the mission open", async () => {
-		const f = fixture();
-		const worker = makeAgent(ulid(), "running");
-		f.agents.set(worker.id, worker);
-		const result = await coordinationHandlers.neta_done(ctx(f, leadActor(worker)), { outcome: "ported" });
-		expect(result).toEqual({ ok: true, data: { agentId: worker.id, state: "completed" } });
-		expect(f.agents.get(worker.id)?.outcome).toBe("ported");
-		expect(f.events).toEqual(["agent.finished"]);
-		expect(f.store.listMissions()[0]?.state).toBe("running");
-	});
-
-	test("done twice is refused", async () => {
-		const f = fixture();
-		const worker = makeAgent(ulid(), "running");
-		f.agents.set(worker.id, worker);
-		const actor = leadActor(worker);
-		await coordinationHandlers.neta_done(ctx(f, actor), { outcome: "ported" });
-		const again = await coordinationHandlers.neta_done(ctx(f, actor), { outcome: "ported again" });
-		expect(again.ok).toBe(false);
-		expect(f.agents.get(worker.id)?.outcome).toBe("ported");
-		expect(f.events).toEqual(["agent.finished"]);
-	});
-});
-
-test("the workspace leader can ask for a delegated mission without activeMissionId", async () => {
-	const f = fixture();
-	const lead = makeAgent(ulid(), "idle", { canSpawn: true });
-	f.agents.set(lead.id, lead);
-	await f.missions.save({ ...mission(), lead: { kind: "agent", agentId: lead.id } });
-	f.store.getLeader = () => ({ ...LEADER, activeMissionId: undefined });
-	const actor: Actor = { kind: "leader", workspaceId: WORKSPACE, sessionId: LEADER.sessionId };
-	const result = await coordinationHandlers.neta_ask(ctx(f, actor), {
-		missionId: 1,
-		question: "Apply to production?",
-	});
-	expect(result).toMatchObject({ ok: true, data: { missionId: 1, questionId: expect.any(String) } });
-	expect(f.agents.get(lead.id)?.pendingQuestion).toBe("Apply to production?");
-	expect(f.agents.get(lead.id)?.state).toBe("blocked");
-	expect(f.eventData).toContainEqual({
-		questionId: result.ok ? result.data.questionId : undefined,
-		question: "Apply to production?",
-		userEscalation: true,
-		needsReply: true,
-	});
-});
-
-test("a worker question keeps one ID through lead, leader, and the answer back down", async () => {
-	const f = fixture();
-	const lead = makeAgent(ulid(), "running", { canSpawn: true });
-	const worker = makeAgent(ulid(), "running");
-	f.agents.set(lead.id, lead);
-	f.agents.set(worker.id, worker);
-	await f.missions.save({ ...mission(), lead: { kind: "agent", agentId: lead.id }, agentIds: [lead.id, worker.id] });
-	const workerActor: Actor = {
-		kind: "agent",
-		workspaceId: WORKSPACE,
-		missionId: MISSION,
-		agentId: worker.id,
-		sessionId: worker.sessionId,
-	};
-	const leaderActor: Actor = { kind: "leader", workspaceId: WORKSPACE, sessionId: LEADER.sessionId };
-	const question = "Which version should ship?";
-	const workerAsk = await coordinationHandlers.neta_ask(ctx(f, workerActor), { question });
-	if (!workerAsk.ok || typeof workerAsk.data.questionId !== "string") throw new Error("missing worker question ID");
-	const questionId = workerAsk.data.questionId;
-	expect(f.eventData[0]).toMatchObject({ questionId, userEscalation: false, needsReply: false });
-	const leadAsk = await coordinationHandlers.neta_ask(ctx(f, leadActor(lead)), { question, questionId });
-	expect(leadAsk).toMatchObject({ ok: true, data: { questionId } });
-	expect(f.eventData[1]).toMatchObject({ questionId, userEscalation: false, needsReply: false });
-	expect(
-		await coordinationHandlers.neta_ask(ctx(f, leaderActor), { missionId: 1, question, questionId }),
-	).toMatchObject({
-		ok: true,
-		data: { questionId },
-	});
-	expect(f.eventData[2]).toMatchObject({ questionId, userEscalation: true, needsReply: true });
-	const sent: string[] = [];
-	f.sessions.send = async (agent, text) => {
-		sent.push(`${agent.id}:${text}`);
-		return {
-			id: ulid(),
-			sessionId: agent.sessionId,
-			createdAt: new Date().toISOString(),
-			text,
-			attachments: [],
-			status: "queued",
-		};
-	};
-	expect(
-		(await coordinationHandlers.neta_send(ctx(f, leaderActor), { agentId: lead.id, text: "Ship v2", questionId })).ok,
-	).toBe(true);
-	expect(
-		(
-			await coordinationHandlers.neta_send(ctx(f, leadActor(lead)), {
-				agentId: worker.id,
-				text: "Ship v2",
-				questionId,
-			})
-		).ok,
-	).toBe(true);
-	expect(sent).toHaveLength(2);
-	expect(sent.every((text) => text.includes(questionId) && text.includes("Ship v2"))).toBe(true);
-	expect(
-		(
-			await coordinationHandlers.neta_send(ctx(f, leaderActor), {
-				agentId: lead.id,
-				text: "Wrong",
-				questionId: ulid(),
-			})
-		).ok,
-	).toBe(false);
-	expect(
-		(
-			await coordinationHandlers.neta_progress(ctx(f, workerActor), {
-				text: "Applied v2",
-				resolvedQuestionId: questionId,
-			})
-		).ok,
-	).toBe(true);
-	expect(
-		(
-			await coordinationHandlers.neta_progress(ctx(f, leadActor(lead)), {
-				text: "Worker applied v2",
-				resolvedQuestionId: questionId,
-			})
-		).ok,
-	).toBe(true);
-	expect(f.agents.get(worker.id)?.pendingQuestionId).toBeUndefined();
-	expect(f.agents.get(lead.id)?.pendingQuestionId).toBeUndefined();
-	expect(f.events.filter((kind) => kind === "mission.unblocked")).toHaveLength(2);
-});
-
-test("a leader directly owning a mission can escalate its worker's exact question", async () => {
-	const f = fixture();
-	const worker = makeAgent(ulid(), "running");
-	f.agents.set(worker.id, worker);
-	const workerActor: Actor = {
-		kind: "agent",
-		workspaceId: WORKSPACE,
-		missionId: MISSION,
-		agentId: worker.id,
-		sessionId: worker.sessionId,
-	};
-	const leaderActor: Actor = { kind: "leader", workspaceId: WORKSPACE, sessionId: LEADER.sessionId };
-	const question = "Which release branch?";
-	const asked = await coordinationHandlers.neta_ask(ctx(f, workerActor), { question });
-	if (!asked.ok || typeof asked.data.questionId !== "string") throw new Error("missing question ID");
-	expect(
-		(
-			await coordinationHandlers.neta_ask(ctx(f, leaderActor), {
-				missionId: 1,
-				question,
-				questionId: asked.data.questionId,
-			})
-		).ok,
-	).toBe(true);
-	expect(f.eventData[1]).toMatchObject({ questionId: asked.data.questionId, userEscalation: true, needsReply: true });
-	expect((await coordinationHandlers.neta_ask(ctx(f, leaderActor), { missionId: 1, question })).ok).toBe(false);
-	expect(f.store.getMission(MISSION)?.state).toBe("blocked");
-	expect(
-		(
-			await coordinationHandlers.neta_progress(ctx(f, workerActor), {
-				text: "Used the release branch",
-				resolvedQuestionId: asked.data.questionId,
-			})
-		).ok,
-	).toBe(true);
-	expect(f.store.getMission(MISSION)?.state).toBe("running");
-	expect(f.eventData[2]).toMatchObject({ questionId: asked.data.questionId, resolution: "Used the release branch" });
-});
-
-test("a stalled worker question can receive the user's exact answer through its lead", async () => {
-	const f = fixture();
-	const lead = makeAgent(ulid(), "running", { canSpawn: true });
-	const worker = makeAgent(ulid(), "running");
-	f.agents.set(lead.id, lead);
-	f.agents.set(worker.id, worker);
-	await f.missions.save({ ...mission(), lead: { kind: "agent", agentId: lead.id }, agentIds: [lead.id, worker.id] });
-	const workerActor: Actor = {
-		kind: "agent",
-		workspaceId: WORKSPACE,
-		missionId: MISSION,
-		agentId: worker.id,
-		sessionId: worker.sessionId,
-	};
-	const leaderActor: Actor = { kind: "leader", workspaceId: WORKSPACE, sessionId: LEADER.sessionId };
-	const asked = await coordinationHandlers.neta_ask(ctx(f, workerActor), { question: "Which branch?" });
-	if (!asked.ok || typeof asked.data.questionId !== "string") throw new Error("missing question ID");
-	const questionId = asked.data.questionId;
-	const sent: string[] = [];
-	f.sessions.send = async (agent, text) => {
-		sent.push(`${agent.id}:${text}`);
-		return {
-			id: ulid(),
-			sessionId: agent.sessionId,
-			createdAt: new Date().toISOString(),
-			text,
-			attachments: [],
-			status: "queued",
-		};
-	};
-	expect(
-		(
-			await coordinationHandlers.neta_send(ctx(f, leaderActor), {
-				agentId: lead.id,
-				text: "Use release/2",
-				questionId,
-			})
-		).ok,
-	).toBe(true);
-	expect(
-		(
-			await coordinationHandlers.neta_send(ctx(f, leadActor(lead)), {
-				agentId: worker.id,
-				text: "Use release/2",
-				questionId,
-			})
-		).ok,
-	).toBe(true);
-	expect(sent).toHaveLength(2);
-	expect(sent.every((message) => message.includes(questionId))).toBe(true);
-	expect(
-		(
-			await coordinationHandlers.neta_send(ctx(f, leaderActor), {
-				agentId: lead.id,
-				text: "wrong",
-				questionId: ulid(),
-			})
-		).ok,
-	).toBe(false);
-});
-test("asking about an invalid or another mission cannot redirect a lead's question", async () => {
-	const f = fixture();
-	const lead = makeAgent(ulid(), "running", { canSpawn: true });
-	f.agents.set(lead.id, lead);
-	expect((await coordinationHandlers.neta_ask(ctx(f, leadActor(lead)), { missionId: 99, question: "ship?" })).ok).toBe(
-		false,
-	);
-	expect(f.agents.get(lead.id)?.state).toBe("running");
 });
 test("durable follow-ups return receipts, deduplicate retries, and never cancel busy recipients", async () => {
 	const f = fixture();
@@ -449,7 +171,9 @@ test("durable follow-ups return receipts, deduplicate retries, and never cancel 
 	};
 	const context = ctx(f, leadActor(makeAgent(ulid(), "running")));
 	const results = await Promise.all(
-		[1, 2].map(() => coordinationHandlers.neta_send(context, { agentId: worker.id, text: "Review the edge cases" })),
+		[1, 2].map(() =>
+			coordinationHandlers.send_message(context, { agentId: worker.id, text: "Review the edge cases" }),
+		),
 	);
 	expect(ids[0]).toBe(ids[1]);
 	expect(ids[0]).toStartWith("followup:");

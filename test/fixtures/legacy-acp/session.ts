@@ -37,7 +37,7 @@ export interface StartOptions {
 export type SessionEvent = (
 	| { type: "turn"; turn: Turn }
 	| { type: "block"; block: Block }
-	| { type: "turnEnd"; turnId: TurnId; stopReason: string; cancelled: boolean }
+	| { type: "turnEnd"; finalReply?: string; turnId: TurnId; stopReason: string; cancelled: boolean }
 	| { type: "model"; model: string }
 	| { type: "mode"; modeId: string }
 	| { type: "interrupted"; turnId?: TurnId; exit: ExitInfo }
@@ -130,6 +130,7 @@ async function startInner(opts: StartOptions): Promise<AcpSession> {
 	const turnEndWaiters: Array<() => void> = [];
 	let seq = 0;
 	let last: LastBlock | undefined;
+	let finalReply = "";
 	let keyed = new Map<string, LastBlock>();
 	let pendingUsage: BlockDraft | undefined;
 	let closed = false;
@@ -174,6 +175,7 @@ async function startInner(opts: StartOptions): Promise<AcpSession> {
 		if (targetTurnId === undefined) {
 			return;
 		}
+		if (draft.kind === "text" && draft.role === "agent") finalReply += draft.text;
 		const prior = draft.key === undefined ? undefined : keyed.get(draft.key);
 		if (prior !== undefined) {
 			const next = { ...draft, text: draft.text === "" ? prior.block.text : draft.text };
@@ -483,6 +485,7 @@ async function startInner(opts: StartOptions): Promise<AcpSession> {
 			const turn: Turn = { id: turnId, sessionId, startedAt: nowIso(), role: "user", bindingGeneration };
 			openTurnId = turnId;
 			last = undefined;
+			finalReply = "";
 			keyed = new Map();
 			pendingUsage = undefined;
 			push({ type: "turn", turn });
@@ -539,6 +542,7 @@ async function startInner(opts: StartOptions): Promise<AcpSession> {
 					type: "turnEnd",
 					turnId,
 					stopReason: response.stopReason,
+					finalReply,
 					cancelled: response.stopReason === "cancelled",
 				});
 				clearTurn();

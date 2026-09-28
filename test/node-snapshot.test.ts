@@ -28,9 +28,6 @@ function leader(workspaceId: string): Leader {
 		sessionId: ulid(),
 		provider: "test",
 		model: "m",
-		mode: "lead",
-		modeSince: daysAgo(60),
-		modeActiveMs: 0,
 		state: "idle",
 	};
 }
@@ -46,7 +43,6 @@ function mission(workspaceId: string, state: MissionState, createdDaysAgo: numbe
 		machineId: MACHINE_ID,
 		name: `mission ${missionNumber}`,
 		objective: "test",
-		changes: [],
 		lead: { kind: "leader" },
 		agentIds: [],
 		access: "readOnly",
@@ -80,24 +76,24 @@ const W2 = ulid();
 const W3 = ulid();
 
 // The world: 3 workspaces, 20 missions, 40 agents.
-const M1 = mission(W1, "running", 10);
-const M2 = mission(W1, "blocked", 1);
-const M3 = mission(W1, "readyToClose", 2);
-const M4 = mission(W1, "failed", 3);
-const M5 = mission(W1, "mergedNotClosed", 4);
+const M1 = mission(W1, "open", 10);
+const M2 = mission(W1, "open", 1, { attention: "Runtime detail" });
+const M3 = mission(W1, "open", 2, { attention: "Runtime detail" });
+const M4 = mission(W1, "open", 3, { attention: "Runtime detail" });
+const M5 = mission(W1, "open", 4, { attention: "Runtime detail" });
 const M6 = mission(W1, "closed", 18, { closedAt: daysAgo(5) });
 const M7 = mission(W1, "closed", 19, { closedAt: daysAgo(13.99) });
 const M8 = mission(W1, "closed", 20, { closedAt: daysAgo(14.01) });
-const M9 = mission(W1, "running", 6);
-const M10 = mission(W2, "running", 11);
-const M11 = mission(W2, "blocked", 5);
+const M9 = mission(W1, "open", 6);
+const M10 = mission(W2, "open", 11);
+const M11 = mission(W2, "open", 5, { attention: "Runtime detail" });
 const M12 = mission(W2, "closed", 12, { closedAt: daysAgo(2) });
-const M13 = mission(W2, "running", 12);
-const M14 = mission(W2, "running", 12);
-const M15 = mission(W2, "failed", 7);
-const M16 = mission(W3, "running", 13);
-const M17 = mission(W3, "running", 13);
-const M18 = mission(W3, "blocked", 8);
+const M13 = mission(W2, "open", 12);
+const M14 = mission(W2, "open", 12);
+const M15 = mission(W2, "open", 7, { attention: "Runtime detail" });
+const M16 = mission(W3, "open", 13);
+const M17 = mission(W3, "open", 13);
+const M18 = mission(W3, "open", 8, { attention: "Runtime detail" });
 const M19 = mission(W3, "closed", 14, { closedAt: daysAgo(1) });
 const M20 = mission(W3, "closed", 50, { closedAt: daysAgo(40) });
 
@@ -105,9 +101,7 @@ const MISSIONS = [M1, M2, M3, M4, M5, M6, M7, M8, M9, M10, M11, M12, M13, M14, M
 
 // Twelve completed agents with distinct end times, plus one archived
 // completed and one live runner, all on M9.
-const BIG_COMPLETED = Array.from({ length: 12 }, (_, i) =>
-	agent(M9.id, W1, "completed", { endedAt: hoursAgo(12 - i) }),
-);
+const BIG_COMPLETED = Array.from({ length: 12 }, (_, i) => agent(M9.id, W1, "idle", { endedAt: hoursAgo(12 - i) }));
 const BIG_ARCHIVED = agent(M9.id, W1, "archived", { endedAt: hoursAgo(1) });
 const BIG_RUNNER = agent(M9.id, W1, "running");
 
@@ -115,32 +109,32 @@ const AGENTS: Agent[] = [
 	...BIG_COMPLETED,
 	BIG_ARCHIVED,
 	BIG_RUNNER,
-	agent(M2.id, W1, "blocked"),
+	agent(M2.id, W1, "idle"),
 	agent(M2.id, W1, "running"),
 	agent(M4.id, W1, "failed"),
 	agent(M4.id, W1, "archived"),
 	agent(M5.id, W1, "running"),
-	agent(M3.id, W1, "completed", { endedAt: daysAgo(1) }),
-	agent(M11.id, W2, "blocked"),
+	agent(M3.id, W1, "idle", { endedAt: daysAgo(1) }),
+	agent(M11.id, W2, "idle"),
 	agent(M11.id, W2, "starting"),
 	agent(M15.id, W2, "failed"),
-	agent(M15.id, W2, "completed", { endedAt: daysAgo(2) }),
+	agent(M15.id, W2, "idle", { endedAt: daysAgo(2) }),
 	agent(M15.id, W2, "archived"),
-	agent(M18.id, W3, "blocked"),
+	agent(M18.id, W3, "idle"),
 	agent(M1.id, W1, "running"),
 	agent(M1.id, W1, "running"),
-	agent(M6.id, W1, "completed", { endedAt: daysAgo(4) }),
-	agent(M7.id, W1, "completed", { endedAt: daysAgo(13) }),
+	agent(M6.id, W1, "idle", { endedAt: daysAgo(4) }),
+	agent(M7.id, W1, "idle", { endedAt: daysAgo(13) }),
 	agent(M8.id, W1, "running"),
 	agent(M8.id, W1, "running"),
 	agent(M20.id, W3, "running"),
 	agent(M10.id, W2, "running"),
-	agent(M12.id, W2, "completed", { endedAt: daysAgo(1) }),
+	agent(M12.id, W2, "idle", { endedAt: daysAgo(1) }),
 	agent(M13.id, W2, "running"),
 	agent(M14.id, W2, "interrupted", { stateBefore: "running" }),
 	agent(M16.id, W3, "running"),
 	agent(M17.id, W3, "running"),
-	agent(M19.id, W3, "completed", { endedAt: hoursAgo(20) }),
+	agent(M19.id, W3, "idle", { endedAt: hoursAgo(20) }),
 ];
 
 function event(workspaceId: string, seq: number): Event {
@@ -236,7 +230,7 @@ describe("buildSnapshot", () => {
 		expect(snapshot.windowDays).toBe(45);
 	});
 
-	test("a mission with 12 completed agents yields 8 and completedCounts 12", async () => {
+	test("a mission with 12 completed agents yields 8 and stoppedCounts 12", async () => {
 		const snapshot = await buildSnapshot(testCtx(), {});
 		const ids = new Set(snapshot.agents.map((a) => a.id));
 		const newestEight = BIG_COMPLETED.slice(4).map((a) => a.id);
@@ -248,7 +242,7 @@ describe("buildSnapshot", () => {
 			expect(ids.has(id)).toBe(false);
 		}
 		expect(ids.has(BIG_RUNNER.id)).toBe(true);
-		expect(snapshot.completedCounts[M9.id]).toBe(12);
+		expect(snapshot.stoppedCounts[M9.id]).toBe(12);
 	});
 
 	test("unresolved delivery stays visible even outside completed-agent history window", async () => {
@@ -260,7 +254,7 @@ describe("buildSnapshot", () => {
 			list(missionId).map((actor) => (actor.id === oldest.id ? { ...actor, deliveryStatus: "uncertain" } : actor));
 		const snapshot = await buildSnapshot(ctx, {});
 		expect(snapshot.agents.find((actor) => actor.id === oldest.id)?.deliveryStatus).toBe("uncertain");
-		expect(snapshot.completedCounts[M9.id]).toBe(12);
+		expect(snapshot.stoppedCounts[M9.id]).toBe(12);
 	});
 
 	test("archived agents never appear, anywhere", async () => {
@@ -274,8 +268,8 @@ describe("buildSnapshot", () => {
 			expect(agentRecord.state === "archived").toBe(false);
 		}
 		// Archived completed agents do not count either.
-		expect(snapshot.completedCounts[M9.id]).toBe(12);
-		expect(Object.values(snapshot.completedCounts).reduce((sum, n) => sum + n, 0)).toBe(18);
+		expect(snapshot.stoppedCounts[M9.id]).toBe(12);
+		expect(Object.values(snapshot.stoppedCounts).reduce((sum, n) => sum + n, 0)).toBe(21);
 	});
 
 	test("agents of omitted missions stay out while recent missions survive the window", async () => {
@@ -292,7 +286,7 @@ describe("buildSnapshot", () => {
 				mission(workspaceId, "closed", 40 + index, { closedAt: daysAgo(30 + index) }),
 			),
 		);
-		const open = mission(W1, "running", 100);
+		const open = mission(W1, "open", 100);
 		ctx.store.listMissions = (workspaceId) =>
 			[...history, open].reverse().filter((entry) => !workspaceId || entry.workspaceId === workspaceId);
 		ctx.store.listAgents = () => [];

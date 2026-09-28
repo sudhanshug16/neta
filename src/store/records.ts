@@ -3,8 +3,7 @@ import { hostname } from "node:os";
 import { join } from "node:path";
 import { ulid } from "../core/ids.ts";
 import { nowIso } from "../core/time.ts";
-import type { AgentId, Leader, Machine, Workspace, WorkspaceId } from "../core/types.ts";
-import type { LeadMode } from "../modes/records.ts";
+import type { Leader, Machine, Workspace, WorkspaceId } from "../core/types.ts";
 import { createMutex, type Mutex, readJson, writeJsonAtomic } from "./files.ts";
 import { paths } from "./paths.ts";
 
@@ -19,12 +18,7 @@ export interface WorkspaceStore {
 	list(): Promise<Workspace[]>;
 }
 
-// The document 02 persists in `leaders/<workspaceId>.json`: the Leader plus
-// 07's optional leadModes. 01's Leader is untouched; callers keep passing a
-// plain Leader and keep getting one back.
-export interface LeaderDocument extends Leader {
-	leadModes?: Record<AgentId, LeadMode>;
-}
+export type LeaderDocument = Leader;
 
 export interface LeaderStore {
 	load(id: WorkspaceId, defaults: () => Leader): Promise<LeaderDocument>;
@@ -88,26 +82,7 @@ export function openWorkspaceStore(): WorkspaceStore {
 export function openLeaderStore(): LeaderStore {
 	const mutex = createMutex();
 	return {
-		load: (id, defaults) => loadOrCreate<LeaderDocument>(paths().leader(id), mutex, defaults),
-		save: (l) =>
-			mutex(async () => {
-				const path = paths().leader(l.workspaceId);
-				const doc: LeaderDocument = { ...(l as LeaderDocument) };
-				if (!("leadModes" in l)) {
-					// Most callers hold a plain `Leader` (01) and know nothing
-					// about 07's lead modes, which live in the same file. 02
-					// round-trips the field for them rather than letting a
-					// session or activeMissionId write erase a mission lead's
-					// mode; only a caller that names `leadModes` replaces it.
-					const existing = await readJson<LeaderDocument>(path);
-					if (existing?.leadModes !== undefined) {
-						doc.leadModes = existing.leadModes;
-					}
-				}
-				if (doc.leadModes !== undefined && Object.keys(doc.leadModes).length === 0) {
-					delete doc.leadModes;
-				}
-				return writeJsonAtomic(path, doc);
-			}),
+		load: (id, defaults) => loadOrCreate<Leader>(paths().leader(id), mutex, defaults),
+		save: (leader) => mutex(() => writeJsonAtomic(paths().leader(leader.workspaceId), leader)),
 	};
 }

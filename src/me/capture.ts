@@ -10,102 +10,27 @@ export interface MeEventSourceContext {
 	missions: readonly Mission[];
 }
 
-const relevantKinds = new Set<Event["kind"]>([
-	"mission.blocked",
-	"mission.unblocked",
-	"mission.failed",
-	"worktree.setupFailed",
-	"artifact.published",
-	"artifact.reviewed",
-	"mission.readyToClose",
-	"mission.merged",
-	"agent.finished",
-	"routing.failed",
-	"node.restarted",
-]);
+const relevantKinds = new Set<Event["kind"]>(["mission.failed", "worktree.setupFailed", "routing.failed"]);
 
-/** Capture only attention-relevant Neta lifecycle events; Luna makes the fallible feed decision later. */
 export async function captureMeEvent(store: MeStore, event: Event, context: MeEventSourceContext): Promise<boolean> {
 	if (!relevantKinds.has(event.kind)) return false;
-	const workspace = context.workspaces.find((item) => item.id === event.workspaceId);
-	const leader = context.leaders.find((item) => item.workspaceId === event.workspaceId);
+	const workspace = context.workspaces.find((w) => w.id === event.workspaceId);
+	const leader = context.leaders.find((l) => l.workspaceId === event.workspaceId);
 	if (!workspace || !leader) return false;
-	const agent = event.agentId ? context.agents.find((item) => item.id === event.agentId) : undefined;
-	const mission = event.missionId ? context.missions.find((item) => item.id === event.missionId) : undefined;
-	if (event.kind === "mission.blocked" && agent && event.data.userEscalation !== true) return false; // Questions travel through the parent chain before Neta sees them.
-	if (
-		event.kind === "mission.unblocked" &&
-		agent &&
-		!agent.canSpawn &&
-		mission?.lead.kind !== "leader" &&
-		(typeof event.data.questionId !== "string" ||
-			!(await store.hasVisibleQuestion(event.workspaceId, event.data.questionId)))
-	)
-		return false;
-	const sessionId = event.sessionId ?? agent?.sessionId ?? leader.sessionId;
-	const actorKind = sessionId === leader.sessionId ? "leader" : agent?.canSpawn ? "missionLead" : "agent";
-	const explicit = event.data.userEscalation === true || event.data.needsReply === true;
-	const kind: MeSource["kind"] =
-		event.kind === "mission.failed" || event.kind === "worktree.setupFailed" || event.kind === "routing.failed"
-			? "failure"
-			: "event";
-	const text = [
-		event.kind,
-		event.kind === "worktree.setupFailed" && typeof event.data.number === "number"
-			? `Mission setup #${event.data.number} failed before registration`
-			: undefined,
-		mission ? `Mission #${mission.number}: ${mission.name}` : undefined,
-		agent ? `Agent: ${agent.name}` : undefined,
-		event.kind === "artifact.published" && typeof event.data.artifactId === "string"
-			? `Artifact ${event.data.artifactId}: ${typeof event.data.title === "string" ? event.data.title : "untitled"}`
-			: undefined,
-		event.kind === "artifact.reviewed" && typeof event.data.artifactId === "string"
-			? `Artifact ${event.data.artifactId} review: ${String(event.data.verdict)}. ${typeof event.data.note === "string" ? event.data.note.slice(0, 1_200) : ""}`
-			: undefined,
-		event.kind === "worktree.setupFailed" && typeof event.data.stderr === "string"
-			? event.data.stderr.slice(0, 4_096)
-			: undefined,
-		event.kind === "worktree.setupFailed" && typeof event.data.diagnosticPath === "string"
-			? `Diagnostic: ${event.data.diagnosticPath}`
-			: undefined,
-		typeof event.data.question === "string"
-			? `Question${typeof event.data.questionId === "string" ? ` ${event.data.questionId}` : ""}: ${event.data.question}`
-			: undefined,
-		typeof event.data.resolution === "string" ? `Resolution: ${event.data.resolution.slice(0, 1_200)}` : undefined,
-	]
-		.filter((part): part is string => part !== undefined)
-		.join(" · ");
-	if (!text) return false;
-	const destinations = [...new Set([sessionId, leader.sessionId])];
-	const captured = await store.capture({
+	const saved = await store.capture({
 		id: "",
-		workspaceId: event.workspaceId,
-		...(context.machineId
-			? { machineId: context.machineId }
-			: mission?.machineId
-				? { machineId: mission.machineId }
-				: {}),
+		workspaceId: workspace.id,
 		workspaceName: workspace.name,
-		sessionId,
-		actorKind,
-		kind,
+		machineId: context.machineId,
+		sessionId: event.sessionId ?? leader.sessionId,
+		actorKind: "leader",
+		kind: "failure",
 		at: event.at,
-		text: text.slice(0, 8_000),
-		eventId:
-			event.kind === "artifact.reviewed" && typeof event.data.artifactId === "string"
-				? `artifact-review:${event.data.artifactId}`
-				: `${event.workspaceId}:${event.seq}`,
-		explicit,
-		...(explicit || event.kind === "worktree.setupFailed" ? { forceVisible: true } : {}),
-		destinationSessionIds: destinations,
-		...(event.missionId ? { missionId: event.missionId } : {}),
-		...(typeof event.data.questionId === "string" ? { questionId: event.data.questionId } : {}),
-		...((event.kind === "artifact.published" || event.kind === "artifact.reviewed") &&
-		typeof event.data.artifactId === "string"
-			? { artifactIds: [event.data.artifactId] }
-			: {}),
+		text: `Runtime failure: ${event.kind}\n${JSON.stringify(event.data)}`,
+		eventId: `${event.workspaceId}:${event.seq}`,
+		missionId: event.missionId,
 	});
-	return captured.id.length > 0;
+	return !!saved.id;
 }
 
 /** Replay strictly after the durable high-water mark and checkpoint only after capture succeeds. */
@@ -144,19 +69,23 @@ export async function captureMeLeaderTurn(input: {
 	turn: Turn;
 	blocks: readonly Block[];
 }): Promise<boolean> {
-	if (!input.turn.endedAt || input.turn.cancelled || input.turn.sessionId !== input.sessionId) return false;
+	if (!input.turn.endedAt || input.turn.sessionId !== input.sessionId) return false;
 	const blocks = input.blocks.filter(
 		(block) => block.turnId === input.turn.id && block.role === "agent" && block.kind === "text",
 	);
-	const text = blocks.map((block) => block.text).join("\n\n");
-	if (!text.trim() && !input.turn.failed && !input.turn.readerDirected) return false;
+	const text = input.turn.finalReply ?? "";
+	if (!text.trim() && !input.turn.failed && !input.turn.cancelled) return false;
 	const firstSeq = blocks[0]?.seq;
 	const lastSeq = blocks.at(-1)?.seq;
 	const sourceText =
-		text ||
 		(input.turn.failed
-			? "Workspace leader runtime turn failed."
-			: "Workspace leader turn completed without a text report. Work outcome is unknown.");
+			? `Coordinator turn failed.\n${text}`
+			: input.turn.cancelled
+				? `Coordinator turn interrupted.\n${text}`
+				: text) ||
+		(input.turn.failed
+			? "Coordinator runtime turn failed."
+			: "Coordinator turn completed without a text report. Work outcome is unknown.");
 	const sourceHash = createHash("sha256").update(sourceText).digest("hex");
 	const captured = await input.store.capture({
 		id: "",
@@ -165,12 +94,11 @@ export async function captureMeLeaderTurn(input: {
 		workspaceName: input.workspace.name,
 		sessionId: input.sessionId,
 		actorKind: "leader",
-		kind: input.turn.failed ? "failure" : "message",
+		kind: input.turn.failed || input.turn.cancelled ? "failure" : "message",
 		at: input.turn.endedAt,
-		text: sourceText.slice(0, 8_000),
+		text: sourceText,
 		turnId: input.turn.id,
-		explicit: false,
-		destinationSessionIds: [input.sessionId],
+
 		...(firstSeq === undefined || lastSeq === undefined
 			? {}
 			: { transcriptPointer: { sessionId: input.sessionId, turnId: input.turn.id, firstSeq, lastSeq, sourceHash } }),
@@ -208,9 +136,7 @@ export async function captureMePermissionRequest(input: {
 		at: new Date().toISOString(),
 		text: text.slice(0, 8_000),
 		eventId: `permission:${input.request.id}`,
-		explicit: true,
-		forceVisible: true,
-		destinationSessionIds: [input.sessionId],
+
 		...(input.missionId ? { missionId: input.missionId } : {}),
 	});
 }
@@ -227,20 +153,25 @@ export async function replayMeLeaderTurns(input: {
 	const cursors =
 		(await input.store.getCheckpoint()).workspaces.find((item) => item.workspaceId === input.workspace.id)?.turns ??
 		[];
-	let cursor = Math.max(
+	// Block sequences can restart with a new native provider binding. A byte
+	// cursor tracks the durable conversation file across those resets.
+	let pageCursor = Math.max(
 		0,
-		...cursors.filter((item) => item.sessionId === input.sessionId).map((item) => item.blockSeq ?? 0),
+		...cursors.filter((item) => item.sessionId === input.sessionId).map((item) => item.fileCursor ?? 0),
 	);
-	let pageCursor = 0;
+	const initialCursor = pageCursor;
+	let pendingStartCursor = pageCursor;
 	let pending: Block[] = [];
 	let pendingTurn: Turn | undefined;
 	let captured = 0;
+	let lastTurnId: string | undefined;
+	let endCursor = pageCursor;
 	for (;;) {
+		const pageStart = pageCursor;
 		const page = await input.read(pageCursor);
 		for (const block of page.blocks) {
-			if (block.seq <= cursor) continue;
 			if (pendingTurn && pendingTurn.id !== block.turnId) {
-				await captureMeLeaderTurn({
+				const didCapture = await captureMeLeaderTurn({
 					store: input.store,
 					workspace: input.workspace,
 					machineId: input.machineId,
@@ -248,28 +179,24 @@ export async function replayMeLeaderTurns(input: {
 					turn: pendingTurn,
 					blocks: pending,
 				});
-				cursor = pending.at(-1)?.seq ?? cursor;
-				await input.store.setCheckpoint({
-					workspaces: [
-						{
-							workspaceId: input.workspace.id,
-							eventSeq: 0,
-							turns: [{ sessionId: input.sessionId, turnId: pendingTurn.id, blockSeq: cursor }],
-						},
-					],
-				});
-				captured++;
+				lastTurnId = pendingTurn.id;
+				if (didCapture) captured++;
 				pending = [];
 				pendingTurn = undefined;
 			}
-			if (!pendingTurn) pendingTurn = await input.getTurn(block.turnId);
+			if (!pendingTurn) {
+				pendingTurn = await input.getTurn(block.turnId);
+				pendingStartCursor = pageStart;
+			}
 			if (pendingTurn) pending.push(block);
 		}
+		endCursor = page.cursor;
 		if (!page.more) break;
+		if (page.cursor <= pageCursor) throw new Error("conversation replay did not advance");
 		pageCursor = page.cursor;
 	}
-	if (pendingTurn && pending.length) {
-		await captureMeLeaderTurn({
+	if (pendingTurn && pending.length && pendingTurn.endedAt) {
+		const didCapture = await captureMeLeaderTurn({
 			store: input.store,
 			workspace: input.workspace,
 			machineId: input.machineId,
@@ -277,17 +204,20 @@ export async function replayMeLeaderTurns(input: {
 			turn: pendingTurn,
 			blocks: pending,
 		});
-		cursor = pending.at(-1)?.seq ?? cursor;
+		lastTurnId = pendingTurn.id;
+		if (didCapture) captured++;
+	}
+	const safeCursor = pendingTurn && !pendingTurn.endedAt ? pendingStartCursor : endCursor;
+	if (safeCursor > initialCursor && lastTurnId) {
 		await input.store.setCheckpoint({
 			workspaces: [
 				{
 					workspaceId: input.workspace.id,
 					eventSeq: 0,
-					turns: [{ sessionId: input.sessionId, turnId: pendingTurn.id, blockSeq: cursor }],
+					turns: [{ sessionId: input.sessionId, turnId: lastTurnId, fileCursor: safeCursor }],
 				},
 			],
 		});
-		captured++;
 	}
 	return captured;
 }

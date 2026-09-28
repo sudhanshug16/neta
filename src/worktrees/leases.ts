@@ -157,7 +157,7 @@ export class LeaseManager {
 	}
 
 	// Unlike `release`, this affects one known lease key only. Recovery uses it
-	// for a stale workspace-leader reservation so an unrelated lease held by the
+	// for a stale coordinator reservation so an unrelated lease held by the
 	// same mission id cannot be released incidentally.
 	releaseKey(w: WorkspaceId, a: AgentId, key: string): Promise<{ released: boolean; promoted?: AgentId }> {
 		return this.enqueue(w, async () => {

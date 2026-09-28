@@ -173,11 +173,15 @@ describe("conversation store", () => {
 		});
 		const next = await store.setMeta(sessionId, {
 			model: "opus",
+			variant: "medium",
 			vendorSessionId: "v-1",
 			bindingGeneration: "runtime-2",
 		});
 		expect((await store.meta(sessionId))?.bindingGeneration).toBe("runtime-2");
 		expect(next.model).toBe("opus");
+		expect((await openConversationStore().meta(sessionId))?.variant).toBe("medium");
+		await store.setMeta(sessionId, { variant: undefined });
+		expect((await openConversationStore().meta(sessionId))?.variant).toBeUndefined();
 		expect(next.vendorSessionId).toBe("v-1");
 		expect(next.createdAt).toBe("2026-09-03T17:00:00.000Z");
 	});

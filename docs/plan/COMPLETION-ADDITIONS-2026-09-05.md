@@ -1,3 +1,5 @@
+> Historical plan. Superseded by [the current tools and communication contract](tools-and-communication.md). This document is not an active implementation requirement.
+
 # Current-app completion additions
 
 The user explicitly added these requirements during the desktop completion

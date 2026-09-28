@@ -6,15 +6,14 @@ import { join, resolve } from "node:path";
 import { managedOpenCodeDir } from "../scripts/opencode-pin.ts";
 import { ulid } from "../src/core/ids.ts";
 import type { Leader, Workspace } from "../src/core/types.ts";
+import { openMeStore } from "../src/me/store.ts";
 import { connectNode, type NodeClient } from "../src/node/client.ts";
 import { type Node as NetaNode, startNode } from "../src/node/lifecycle.ts";
 import type { SnapshotResult } from "../src/node/protocol.ts";
 import type { OpenCodeAttachment } from "../src/opencode/attachment.ts";
-import { openCodeEndpoint } from "../src/opencode/attachment.ts";
 import { openCodeInvocation } from "../src/opencode/runtime.ts";
 import { type RuntimeSession, type SessionEvent, type StartOptions, startSession } from "../src/session/runtime.ts";
 import { writeSystemContext } from "../src/session/system-context.ts";
-import { spawnProvider } from "./fixtures/legacy-acp/process.ts";
 import { startLegacySession } from "./fixtures/legacy-acp-runtime.ts";
 import { visualProxy } from "./fixtures/neta-visual-proxy.ts";
 
@@ -177,21 +176,21 @@ test.skipIf(!nativeReady)(
 					enabled_providers: ["test", "other"],
 					formatter: false,
 					lsp: false,
-						provider: {
-							other: {
-								name: "Alternative fixture provider",
-								npm: "@ai-sdk/openai-compatible",
-								env: [],
-								options: { apiKey: "fixture", baseURL: llm.url.href },
-								models: {
-									"backup-model": {
-										name: "Alternative fixture model",
-										limit: { context: 100000, output: 10000 },
-										cost: { input: 0, output: 0 },
-									},
+					provider: {
+						other: {
+							name: "Alternative fixture provider",
+							npm: "@ai-sdk/openai-compatible",
+							env: [],
+							options: { apiKey: "fixture", baseURL: llm.url.href },
+							models: {
+								"backup-model": {
+									name: "Alternative fixture model",
+									limit: { context: 100000, output: 10000 },
+									cost: { input: 0, output: 0 },
 								},
 							},
-							test: {
+						},
+						test: {
 							name: "Fixture",
 							npm: "@ai-sdk/openai-compatible",
 							env: [],
@@ -199,7 +198,7 @@ test.skipIf(!nativeReady)(
 							models: {
 								"test-model": {
 									name: "Fixture",
-									variants: { high: {}, xhigh: {} },
+									variants: { medium: {}, high: {}, xhigh: {} },
 									limit: { context: 100000, output: 10000 },
 									cost: { input: 0, output: 0 },
 								},
@@ -252,6 +251,11 @@ test.skipIf(!nativeReady)(
 			node = await startNode({ sessionFactory: legacyFactory });
 			client = await connectNode();
 			const old = await client.request<{ leader: Leader }>("workspace.open", { path: work, provider: "opencode" });
+			await openMeStore().bindWorkspaceLeaderRuntime({
+				workspaceId: old.leader.workspaceId,
+				provider: "opencode",
+				model: "test/test-model",
+			});
 			const oldNative = await client.request<OpenCodeAttachment>("conversation.native", {
 				sessionId: old.leader.sessionId,
 			});
@@ -299,7 +303,10 @@ test.skipIf(!nativeReady)(
 			const send = await fetch(`${native.url}/api/session/${native.sessionId}/neta-prompt`, {
 				method: "POST",
 				headers,
-				body: JSON.stringify({ text: "Fix issue 4041. Add tests for duplicate webhook delivery." }),
+				body: JSON.stringify({
+					id: `msg_${randomBytes(16).toString("hex")}`,
+					text: "Fix issue 4041. Add tests for duplicate webhook delivery.",
+				}),
 			});
 			expect(send.status).toBe(200);
 			let transcript = "";
@@ -316,6 +323,16 @@ test.skipIf(!nativeReady)(
 				await Bun.sleep(100);
 			}
 			expect(transcript).toContain("Native fixture reply");
+			let leaderState = "running";
+			const settledBy = Date.now() + 10_000;
+			while (Date.now() < settledBy) {
+				const current = await client.request<SnapshotResult>("snapshot");
+				leaderState =
+					current.leaders.find((leader) => leader.sessionId === opened.leader.sessionId)?.state ?? "missing";
+				if (leaderState === "idle") break;
+				await Bun.sleep(100);
+			}
+			expect(leaderState).toBe("idle");
 			expect(
 				await (await fetch(`${native.url}/api/session/${native.sessionId}/message`, { headers })).text(),
 			).toContain("Native fixture reply");
@@ -355,11 +372,11 @@ test.skipIf(!nativeReady)(
 					const ready = Date.now() + 25000;
 					while (Date.now() < ready) {
 						screen = await tmux("capture-pane", "-p", "-t", "migration");
-						if (screen.includes("Workspace leader") && screen.includes("Native fixture reply")) break;
+						if (screen.includes("Coordinator") && screen.includes("Native fixture reply")) break;
 						await Bun.sleep(200);
 					}
 					await writeFile("/tmp/neta-opencode-v2-smoke.txt", screen);
-					expect(screen).toContain("Workspace leader");
+					expect(screen).toContain("Coordinator");
 					expect(screen).toContain("Native fixture reply");
 					expect(screen).not.toContain("workspace/neta");
 					expect(screen).toContain("SPINE");
@@ -437,20 +454,19 @@ test.skipIf(!nativeReady)(
 							);
 							expect(frame).toContain("[ mac-mini ▾ ]");
 							expect(frame).toContain("[ all states ▾ ]");
-							expect(frame).toMatch(/├ [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Sol · lead · RUNNING/);
-							expect(frame).toContain("└ ◷ Terra · QUEUED");
-							expect(frame).toContain("! BLOCKED");
-							expect(frame).toContain("□ ARCHIVED");
+							expect(frame).toMatch(/├ [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Neta · lead · RUNNING/);
+							expect(frame).toContain("└ ○ Terra · NOT RUNNING");
+							expect(frame).toContain("○ NOT RUNNING");
 							expect(frame).toContain("[ Jump to leader ]");
 							expect(frame).toContain("[ tabs ▾ ]");
 							const color = await tmux("capture-pane", "-e", "-p", "-t", "migration:visual");
-							for (const rgb of ["17;19;21", "232;184;109", "54;59;64", "48;48;48", "35;35;35", "50;42;30"])
+							for (const rgb of ["17;19;21", "54;59;64", "48;48;48", "35;35;35"])
 								expect(color).toContain(`;2;${rgb}m`);
 							const rows = frame.split("\n");
 							expect(rows.find((row) => row.includes("14:58"))?.indexOf("14:58")).toBe(
 								rows.find((row) => row.includes("14:54"))?.indexOf("14:54"),
 							);
-							expect(rows.find((row) => row.includes("BLOCKED · 1 agent"))?.indexOf("BLOCKED")).toBe(
+							expect(rows.find((row) => row.includes("NOT RUNNING · 1 agent"))?.indexOf("NOT RUNNING")).toBe(
 								rows.find((row) => row.includes("RUNNING · 2 agents"))?.indexOf("RUNNING"),
 							);
 							await writeFile(join(process.env.NETA_TUI_CAPTURE_DIR, "mission.ansi"), color);
@@ -494,7 +510,7 @@ test.skipIf(!nativeReady)(
 							await tmux("send-keys", "-t", "migration:visual", "Enter");
 							const archive = await waitVisual("The pasted image is attached once.");
 							expect(archive).toContain("Saved transcript");
-							expect(archive).toContain("[ Back to workspace leader ]");
+							expect(archive).toContain("[ Back to coordinator ]");
 							expect(archive).toContain("The pasted image is attached once.");
 							expect(archive).toContain("ARCHIVED · 18 Sep, 12:28");
 							expect(archive).toContain("Session ended · 18 Sep, 12:28");
@@ -586,10 +602,10 @@ test.skipIf(!nativeReady)(
 					let idleScreen = "";
 					while (Date.now() < idleDeadline) {
 						idleScreen = await tmux("capture-pane", "-p", "-t", "migration");
-						if (idleScreen.includes(`${opened.leader.name} · IDLE`)) break;
+						if (idleScreen.includes(`${opened.leader.name} · NOT RUNNING`)) break;
 						await Bun.sleep(100);
 					}
-					expect(idleScreen).toContain(`${opened.leader.name} · IDLE`);
+					expect(idleScreen).toContain(`${opened.leader.name} · NOT RUNNING`);
 					expect(idleScreen).toContain("0 running");
 					if (process.env.NETA_TUI_CAPTURE_DIR)
 						await writeFile(
@@ -708,6 +724,18 @@ test.skipIf(!nativeReady)(
 				(await fetch(`${native.url}/api/session/${native.sessionId}/interrupt`, { method: "POST", headers }))
 					.status,
 			).toBe(200);
+			const interruptedDeadline = Date.now() + 15000;
+			let interrupted = false;
+			while (Date.now() < interruptedDeadline) {
+				const tail = await client.request<{ turns: Array<{ cancelled?: boolean; endedAt?: string }> }>(
+					"conversation.tail",
+					{ sessionId: opened.leader.sessionId },
+				);
+				interrupted = tail.turns.at(-1)?.cancelled === true && tail.turns.at(-1)?.endedAt !== undefined;
+				if (interrupted) break;
+				await Bun.sleep(100);
+			}
+			expect(interrupted).toBe(true);
 			for (const [mode, cause] of [
 				["auth", "Fixture sign-in expired"],
 				["rate", "Fixture rate limit"],
@@ -746,7 +774,8 @@ test.skipIf(!nativeReady)(
 			const recoveredDeadline = Date.now() + 10000;
 			while (Date.now() < recoveredDeadline) {
 				const tail = await client.request<{ turns: Array<{ model?: string; endedAt?: string }> }>(
-					"conversation.tail", { sessionId: opened.leader.sessionId },
+					"conversation.tail",
+					{ sessionId: opened.leader.sessionId },
 				);
 				if (tail.turns.at(-1)?.endedAt) {
 					expect(tail.turns.at(-1)?.model).toBe("test/test-model");
@@ -754,9 +783,11 @@ test.skipIf(!nativeReady)(
 				}
 				await Bun.sleep(100);
 			}
-			expect((await client.request<{ leaders: Leader[] }>("snapshot")).leaders.find(
-				(leader) => leader.workspaceId === opened.workspace.id,
-			)?.state).toBe("idle");
+			expect(
+				(await client.request<{ leaders: Leader[] }>("snapshot")).leaders.find(
+					(leader) => leader.workspaceId === opened.workspace.id,
+				)?.state,
+			).toBe("idle");
 			let count = requests;
 			await client.request("conversation.reset", { sessionId: opened.leader.sessionId });
 			await client.request("workspace.reset", { workspaceId: opened.workspace.id, confirm: true });
@@ -807,9 +838,7 @@ test.skipIf(!nativeReady)(
 			});
 			expect(resumed.sessionId).toBe(fresh.sessionId);
 			expect(requests).toBe(count);
-			// Reproduce a still-running older Node launching the new native
-			// executable after reset: plaintext file and no generation identity.
-			const legacyFile = join(dir, "legacy-reset-context.txt");
+			// The current native protocol requires a bound instruction context.
 			const invocation = openCodeInvocation();
 			const legacyProvider = {
 				command: invocation.command,
@@ -824,45 +853,6 @@ test.skipIf(!nativeReady)(
 					OPENCODE_SERVER_PASSWORD: randomBytes(32).toString("hex"),
 				},
 			};
-			for (const agreement of ["Legacy workspace agreement", "Fresh legacy reset agreement"]) {
-				const requestStart = modelInputs.length;
-				await writeFile(legacyFile, agreement);
-				const legacy = await spawnProvider({
-					provider: legacyProvider,
-					access: "readOnly",
-					cwd: work,
-					env: {
-						NETA_SYSTEM_CONTEXT_FILE: legacyFile,
-						NETA_NATIVE_LEADER: "1",
-						NETA_SYSTEM_CONTEXT_ACTOR_ID: undefined,
-						NETA_SYSTEM_CONTEXT_SESSION_ID: undefined,
-						NETA_SYSTEM_CONTEXT_GENERATION: undefined,
-					},
-					handlers: {
-						onSessionUpdate() {},
-						requestPermission: async () => ({ outcome: { outcome: "cancelled" } }),
-					},
-				});
-				try {
-					expect(openCodeEndpoint(legacy.initialize._meta)?.contract).toBeUndefined();
-					const session = await legacy.connection.agent.request("session/new", { cwd: work, mcpServers: [] });
-					const result = await legacy.connection.agent.request("session/prompt", {
-						sessionId: session.sessionId,
-						prompt: [{ type: "text", text: "First prompt after legacy workspace reset" }],
-					});
-					expect(result.stopReason).toBe("end_turn");
-					expect(
-						JSON.stringify(
-							modelInputs
-								.slice(requestStart)
-								.flatMap((body) => body.messages?.filter((message) => message.role === "system") ?? []),
-						),
-					).toContain(agreement);
-					expect(existsSync(`${legacyFile}.applied.json`)).toBe(false);
-				} finally {
-					await legacy.kill();
-				}
-			}
 
 			// Exercise the actual OpenCode external-directory permission through
 			// Neta's read-only ACP handler, without a real provider or user data.
@@ -911,6 +901,14 @@ for await (const line of createInterface({ input: process.stdin })) {
 			try {
 				const endpoint = reader.nativeAttachment;
 				if (!endpoint) throw new Error("Direct OpenCode session has no endpoint");
+				expect(reader.listModels().find((model) => model.id === "test/test-model")?.variants).toEqual([
+					"medium",
+					"high",
+					"xhigh",
+				]);
+				await reader.setConfigOption("effort", "high");
+				expect(reader.configOptions.find((option) => option.id === "effort")?.currentValue).toBe("high");
+				await reader.setConfigOption("neta_effort", "");
 				const mcpUrl = `${endpoint.url}/api/mcp?location%5Bdirectory%5D=${encodeURIComponent(work)}`;
 				const mcpHeaders = { Authorization: endpoint.authorization };
 				const mcpState = async () =>
@@ -967,7 +965,12 @@ for await (const line of createInterface({ input: process.stdin })) {
 				expect(permissionRequests).toContainEqual(
 					expect.objectContaining({ action: "external_directory", decision: "once" }),
 				);
-				expect(events.at(-1)).toMatchObject({ type: "turnEnd", stopReason: "end_turn", cancelled: false });
+				expect(events.at(-1)).toMatchObject({
+					type: "turnEnd",
+					stopReason: "end_turn",
+					cancelled: false,
+					finalReply: expect.stringContaining("Native fixture reply"),
+				});
 				expect(events.some((event) => event.type === "turn" && event.turn.failed)).toBe(false);
 				expect(
 					modelInputs
@@ -990,7 +993,7 @@ for await (const line of createInterface({ input: process.stdin })) {
 					body.messages?.some(
 						(message) =>
 							message.role === "system" &&
-							JSON.stringify(message.content).includes("# Leader working agreement"),
+							JSON.stringify(message.content).includes("# Coordinator working agreement"),
 					),
 				),
 			).toBe(true);
@@ -1000,7 +1003,7 @@ for await (const line of createInterface({ input: process.stdin })) {
 						!body.messages?.some(
 							(message) =>
 								message.role === "user" &&
-								JSON.stringify(message.content).includes("# Leader working agreement"),
+								JSON.stringify(message.content).includes("# Coordinator working agreement"),
 						),
 				),
 			).toBe(true);

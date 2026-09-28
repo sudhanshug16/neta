@@ -224,7 +224,9 @@ process.on("exit", () => {
 
 function persist() {
 	if (!sessionStore) return;
-	const latest = existsSync(sessionStore) ? JSON.parse(readFileSync(sessionStore, "utf-8")) : { counter: 0, sessions: {} };
+	const latest = existsSync(sessionStore)
+		? JSON.parse(readFileSync(sessionStore, "utf-8"))
+		: { counter: 0, sessions: {} };
 	for (const id of ownedSessions) latest.sessions[id] = stored.sessions[id];
 	latest.counter = Math.max(latest.counter, stored.counter);
 	writeFileSync(sessionStore, JSON.stringify(latest), "utf-8");
@@ -275,10 +277,12 @@ function configOptions(current, thoughtLevel = "medium", mode = "ask") {
 			options: [
 				{ value: "fixture-default", name: "Fixture Default" },
 				{ value: "fixture-fast", name: "Fixture Fast" },
-				...(process.argv.includes("--opencode-models") ? [
-					{ value: "openai/gpt-5.6-luna", name: "Luna fixture" },
-					{ value: "openai/gpt-6-astra", name: "Astra fixture" },
-				] : []),
+				...(process.argv.includes("--opencode-models")
+					? [
+							{ value: "openai/gpt-5.6-luna", name: "Luna fixture" },
+							{ value: "openai/gpt-6-astra", name: "Astra fixture" },
+						]
+					: []),
 				{ value: "gpt-5.6-luna", name: "GPT 5.6 Luna" },
 				{ value: "gpt-5.6-terra", name: "GPT 5.6 Terra" },
 				{ value: "gpt-5.6-sol", name: "GPT 5.6 Sol" },
@@ -329,12 +333,13 @@ async function waitForBarrier(signal) {
 async function runPrompt(params, cx, signal) {
 	if (promptMarker) writeFileSync(promptMarker, "prompted\n", "utf-8");
 	const sessionId = params.sessionId;
-	const text = params.prompt.map((block) => (block.type === "text" ? block.text : "")).join("");
+	const rawText = params.prompt.map((block) => (block.type === "text" ? block.text : "")).join("");
+	const text = rawText.split("\n\nIncoming context (preserve the user's wording and constraints):")[0];
 	if (promptCapture) appendFileSync(promptCapture, `${JSON.stringify(text)}\n`, "utf8");
 	const attachmentKinds = params.prompt.filter((block) => block.type !== "text").map((block) => block.type);
 	const saved = stored.sessions[sessionId];
 	if (saved) {
-		saved.history.push(text);
+		saved.history.push(rawText);
 		persist();
 	}
 	if (text.includes("HISTORY")) {
@@ -419,7 +424,7 @@ async function runPrompt(params, cx, signal) {
 		let result;
 		try {
 			result = toolData(
-				await callNetaTool("neta_mission", {
+				await callNetaTool("dispatch_mission", {
 					name: "Checkout verification",
 					objective: "Exercise the Neta mission lifecycle",
 					access: "readOnly",
@@ -445,7 +450,6 @@ async function runPrompt(params, cx, signal) {
 	if (text.includes("MCP_E2E_BLOCK")) {
 		const current = missionState();
 		saveMissionState({ ...current, agentId: mcpActorId(), stage: "blocking" });
-		await callNetaTool("neta_ask", { question: "Choose the checkout refund policy" });
 		saveMissionState({ ...missionState(), stage: "blocked" });
 		await say(cx, sessionId, "waiting for refund policy");
 		return { stopReason: "end_turn" };
@@ -453,7 +457,7 @@ async function runPrompt(params, cx, signal) {
 	if (text.includes("MCP_E2E_RUN")) {
 		const current = missionState();
 		if (!current.agentId) throw new Error("MCP_E2E agent did not report its actor id");
-		await callNetaTool("neta_send", { agentId: current.agentId, text: "MCP_E2E_COMPLETE_WAIT" });
+		await callNetaTool("send_message", { agentId: current.agentId, text: "MCP_E2E_COMPLETE_WAIT" });
 		await say(cx, sessionId, "agent resumed");
 		return { stopReason: "end_turn" };
 	}
@@ -464,23 +468,14 @@ async function runPrompt(params, cx, signal) {
 		const release = `${missionControl}/complete.release`;
 		while (!existsSync(release) && !signal.aborted) await new Promise((resolve) => setTimeout(resolve, 20));
 		if (signal.aborted) return { stopReason: "cancelled" };
-		await callNetaTool("neta_done", { outcome: "Checkout behavior verified" });
 		saveMissionState({ ...missionState(), stage: "completed" });
 		await say(cx, sessionId, "checkout verified");
-		return { stopReason: "end_turn" };
-	}
-	if (text.includes("MCP_E2E_READY")) {
-		const current = missionState();
-		if (!current.missionId) throw new Error("MCP_E2E has no mission id");
-		await callNetaTool("neta_ready", { missionId: current.missionId, summary: "Checkout behavior verified" });
-		saveMissionState({ ...missionState(), stage: "ready" });
-		await say(cx, sessionId, "ready to close");
 		return { stopReason: "end_turn" };
 	}
 	if (text.includes("MCP_E2E_CLOSE")) {
 		const current = missionState();
 		if (!current.missionId) throw new Error("MCP_E2E has no mission id");
-		await callNetaTool("neta_close", {
+		await callNetaTool("close", {
 			missionId: current.missionId,
 			disposition: "abandoned",
 			reason: "fixture complete",
@@ -715,7 +710,8 @@ acp.agent({ name: "fake-acp-agent" })
 	.onRequest("session/new", (ctx) => {
 		mcpServers = ctx.params.mcpServers ?? [];
 		launchMcpServers(mcpServers);
-		if (sessionStore && existsSync(sessionStore)) stored.counter = Math.max(stored.counter, JSON.parse(readFileSync(sessionStore, "utf-8")).counter);
+		if (sessionStore && existsSync(sessionStore))
+			stored.counter = Math.max(stored.counter, JSON.parse(readFileSync(sessionStore, "utf-8")).counter);
 		const nextSession = ++stored.counter;
 		const sessionId = uuidSession
 			? `00000000-0000-4000-8000-${String(nextSession).padStart(12, "0")}`
@@ -779,7 +775,9 @@ acp.agent({ name: "fake-acp-agent" })
 		if (!selected) throw new Error("config options are not supported");
 		if (ctx.params.configId === "neta_refresh_models") {
 			const options = configOptions(selected.model, selected.thoughtLevel, selected.mode);
-			options.find((option) => option.id === "model").options.push({ value: "xai/new-model", name: "New connected model" });
+			options
+				.find((option) => option.id === "model")
+				.options.push({ value: "xai/new-model", name: "New connected model" });
 			return { configOptions: options };
 		}
 		if (ctx.params.configId === "model") selected.model = ctx.params.value;
@@ -798,7 +796,8 @@ acp.agent({ name: "fake-acp-agent" })
 		if (useConfigOptions || claudeShaped) throw new Error("legacy set_model is not supported");
 		const saved = stored.sessions[ctx.params.sessionId];
 		if (!saved) throw new Error(`unknown session ${ctx.params.sessionId}`);
-		if (!["test-model", "legacy-other"].includes(ctx.params.modelId)) throw new Error("legacy model is not advertised");
+		if (!["test-model", "legacy-other"].includes(ctx.params.modelId))
+			throw new Error("legacy model is not advertised");
 		selectedLegacyModel = ctx.params.modelId;
 		saved.model = ctx.params.modelId;
 		persist();
@@ -808,7 +807,11 @@ acp.agent({ name: "fake-acp-agent" })
 		const saved = stored.sessions[ctx.params.sessionId];
 		if (!saved || ctx.params.modeId !== "test-mode") throw new Error("legacy mode is not advertised");
 		saved.mode = ctx.params.modeId;
-		selectedConfig.set(ctx.params.sessionId, { model: saved.model, thoughtLevel: saved.thoughtLevel, mode: saved.mode });
+		selectedConfig.set(ctx.params.sessionId, {
+			model: saved.model,
+			thoughtLevel: saved.thoughtLevel,
+			mode: saved.mode,
+		});
 		persist();
 		return {};
 	})

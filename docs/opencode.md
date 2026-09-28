@@ -11,17 +11,18 @@ In Neta, run:
 
 ```sh
 bun install --frozen-lockfile
+git submodule update --init vendor/opencode/upstream
 bun run setup:opencode
 bun run build
 bun src/cli/main.ts tui
 ```
 
-`setup:opencode` creates the repository-owned generated checkout at
-`vendor/opencode/runtime/` from the exact upstream commit and reviewed source
-overlay in `vendor/opencode/integration.json`, verifies its hashes, and installs
-locked dependencies. This ignored directory is reproducible from the committed
-pin, not an independently maintained sibling fork. Normal source launches use
-it and perform the same full pin check. `NETA_OPENCODE_DIR` remains an explicit
+The `vendor/opencode/upstream` submodule records one commit from OpenCode's `v2`
+branch. `setup:opencode` copies that commit into the repository-owned generated
+checkout at `vendor/opencode/runtime/`, applies the reviewed source overlay in
+`vendor/opencode/integration.json`, verifies its hashes, and installs locked
+dependencies. The submodule stays unmodified. Normal source launches perform
+the same full pin check. `NETA_OPENCODE_DIR` remains an explicit
 advanced override; it is checked and is never reset or overwritten.
 
 Running `neta tui` starts a missing local Node, reuses a compatible one, and
@@ -80,20 +81,13 @@ model access still depends on the connected provider.
 | Open leader, mission lead, or active agent conversation | Select it in the left spine |
 | Inspect inactive workers or archived conversations | **Help · actions** |
 
-Mission rows and agent rows share status indicators. The left spine is the
-only Neta navigation surface: mission leads and active agents stay visible;
-other workers expand from their mission without duplicate rows. Running and starting actors use OpenCode's one-cell loader;
-it respects the native animations setting. An open mission only animates when
-one of its actors is working; otherwise it shows idle, queued, or interrupted.
-Text labels remain visible alongside the marks.
-
-| Mark | Status |
-|---|---|
-| Animated dots | Running or starting |
-| `!` / `×` | Blocked / failed |
-| `✓` / `□` | Completed / archived |
-| `○` / `◷` / `‖` | Idle / queued / interrupted |
-| `◇` / `◆` | Ready to close / merged, awaiting closeout |
+Mission rows and agent rows show only observed activity: **RUNNING** or **NOT RUNNING**.
+The left spine is the only Neta navigation surface: mission leads and active
+agents stay visible; other workers expand from their mission without duplicate
+rows. A running actor uses OpenCode's one-cell loader, respecting the native
+animations setting. A mission runs when one of its agents is active, or when
+the coordinator is active on that specific mission. Completion, questions,
+and failures remain available in mission details and native chat.
 
 Drafts survive switching tabs and workspaces within the client. Failed sends
 restore the draft when the composer is empty. New text is never overwritten by
@@ -139,7 +133,7 @@ produce an error without closing the current chat. No remote install occurs.
    automatically.
 
 The fork baseline is OpenCode commit
-`7a31b5c0f76ce1c06befacc09b47b4fc3c71c408` (package version 2.0.3), recorded in
+`46e53e3f2be79cf271d51410b87f979ce2b96cc3` (package version 2.0.18), recorded in
 `neta-fork.json`. Keep the integration version aligned on both machines. The
 initial implementation deliberately uses per-actor processes rather than a shared
 OpenCode service: MCP configuration in this baseline is directory-scoped.
@@ -189,11 +183,11 @@ smoke test are separate follow-up work.
 In an OpenCode workspace, workers always use the OpenCode runtime. Model choices
 come from enabled models on connected integrations or providers with configured
 credentials. Legacy `codex` and `claude` runtime selections are normalized to
-OpenCode; an unavailable requested worker model is rejected instead of silently replaced. Use neta_status.modelCatalog to choose an exact connected model.
+OpenCode; an unavailable requested worker model is rejected instead of silently replaced. Use mission_state.modelCatalog to choose an exact connected model.
 
 On authentication, quota, rate-limit, missing-model, transport, or execution
 failure, the turn stops on its selected model. The failure and model are recorded
-in the transcript and reported to the parent; a workspace leader failure is
+in the transcript and reported to the parent; a coordinator failure is
 visible directly in its conversation and state. Neta does not replay a failed
 prompt or select an alternate provider. Resume uses the same session and model
 after the underlying problem is resolved. `/connect` is suggested only for
@@ -201,12 +195,13 @@ authentication evidence; network outages are reported as transport failures.
 
 ### Reset choices
 
-`/reset` offers **Reset chat** (blank selected conversation, missions unchanged)
-and **Reset workspace** (archive all workspace missions and workers, stop their
-sessions, return to a blank leader chat). Workspace reset preserves worktrees
-and stored history; archived work is no longer active. Both choices describe
-their effects before confirmation. A failed stop is reported rather than marking
-that worker archived or releasing its writer lease.
+`/reset` offers **Reset chat** (blank workspace leader and coordinator
+conversations and refresh their filter, missions unchanged) and **Reset workspace** (blank those chats,
+archive all workspace missions and workers, and stop their sessions). On an
+agent or filter conversation, Reset chat blanks only that conversation. Workspace reset
+preserves stored history; archived work is no longer active. Both choices
+describe their effects before confirmation. A failed stop is reported rather
+than marking that worker archived or releasing its writer lease.
 
 Neta leaders use unrestricted provider access with a reminder injected each turn to keep sustained implementation in missions and coordinate writers. Read-only workers retain direct-edit denial but may use shell tools for inspection; their read-only shell behavior is instruction-based, not a filesystem sandbox. Native OpenCode subagents remain disabled so Neta owns the worker hierarchy.
 
@@ -214,16 +209,19 @@ Neta refreshes the actor working agreement, charter, skills, and mission context
 
 ## Result supervision
 
-Use `/updates` to catch up on completed workspace-leader replies inside the
-existing OpenCode conversation. The view preserves reading position and read
-markers and supports referenced replies through the native composer. See
-[leader updates](updates.md) for controls, queue receipts and persistence scope.
+The spine opens **Workspace leader**, **Filter**, and **Coordinator**, in that order.
+Each entry attaches to its existing native OpenCode conversation. The filter entry
+uses the same session as background filtering; viewing it does not trigger a turn.
+Its regular composer remains available. Use `/leader`, `/filter`, or `/coordinator`
+to switch chats. Replies and reading position stay in native chat.
 
 Worker results are delivered to mission leaders, and mission leader results to
-workspace leaders. The runtime wakes an idle parent; leaders do not poll or
-call a wait tool. Inbox receipt does not mean a task is completed or reviewed.
-The spine and `/delivery` distinguish queued, received, uncertain, and failed
-parent delivery. Retry only resubmits unsent reports. An uncertain provider
+coordinators. A running parent receives reports at the next safe model step; an
+idle parent resumes after writer admission. Leaders do not poll or call a wait
+tool. Inbox admission and context inclusion have separate receipts. Neither
+means a task is completed or reviewed.
+The `/delivery` view distinguishes queued, received, uncertain, and failed
+parent delivery; the spine omits delivery receipts. Retry only resubmits unsent reports. An uncertain provider
 prompt requires inspection of the parent conversation; it is not blindly replayed.
 
 `fallbackModels` is a deprecated compatibility field. New nonempty lists are

@@ -39,15 +39,11 @@ function testMission(): Mission {
 		machineId: "m",
 		name: "lens port",
 		objective: "port the lens",
-		changes: [
-			{ at: new Date(0).toISOString(), text: "first change" },
-			{ at: new Date(1).toISOString(), text: "second change" },
-		],
 		lead: { kind: "leader" },
 		agentIds: [],
 		access: "readWrite",
 		worktree: { provider: "worktrunk", path: "/tmp/wt-7", branch: "neta/7", base: "main" },
-		state: "running",
+		state: "open",
 		createdAt: new Date(0).toISOString(),
 	};
 }
@@ -59,12 +55,6 @@ describe("working agreements", () => {
 			expect(lineCount(text)).toBeLessThanOrEqual(BUDGET[kind]);
 			expect(bannedHits(text)).toEqual([]);
 		}
-	});
-
-	test("the agent agreement permits parent questions without granting agent creation", () => {
-		const text = agreement("agent");
-		expect(text).not.toContain("neta_agent");
-		expect(text).toContain("neta_ask");
 	});
 });
 
@@ -187,19 +177,19 @@ describe("context composition", () => {
 		expect(text).toContain("port the lens");
 	});
 
-	test("the brief keeps accepted changes in order with access and worktree", () => {
+	test("the brief carries the objective, access and worktree", () => {
 		const text = composeContext({
 			kind: "lead",
 			self: { id: "britt-id", name: "Britt" },
+			access: "readWrite",
 			mission: testMission(),
 			task: "run it",
 		});
 		expect(text).toContain("You are Britt. Your actor ID is britt-id");
 		expect(text).toContain("Do not send messages to yourself");
-		expect(text.indexOf("port the lens")).toBeLessThan(text.indexOf("first change"));
-		expect(text.indexOf("first change")).toBeLessThan(text.indexOf("second change"));
+		expect(text).toContain("port the lens");
 		expect(text).toContain("Mission access ceiling: readWrite");
-		expect(text).toContain("Assigned access: readOnly");
+		expect(text).toContain("Assigned access: readWrite");
 		expect(text).toContain("disposable and isolated");
 		expect(text).toContain("/tmp/wt-7");
 	});

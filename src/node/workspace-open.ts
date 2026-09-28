@@ -13,14 +13,11 @@ import { execFile } from "node:child_process";
 import { realpath, stat } from "node:fs/promises";
 import { basename } from "node:path";
 import { ulid } from "../core/ids.ts";
-import { distinctMissionLead } from "../core/mission-lead.ts";
-import { pickName } from "../core/names.ts";
 import { nowIso } from "../core/time.ts";
 import type { Leader, Workspace, WorkspaceKind } from "../core/types.ts";
 import { canonicalRemote, workspaceIdFor } from "../core/workspace-id.ts";
 import { providerErrorMessage, redactProviderText } from "../session/errors.ts";
 import { loadSettings, providerFor } from "../session/settings.ts";
-import { createFileLeaseStore, LeaseManager, leaseKeyFor } from "../worktrees/index.ts";
 import { asOptionalString, asString, parseParams } from "./handlers-registry.ts";
 import { netaDir } from "./lockfile.ts";
 import { NodeError } from "./protocol.ts";
@@ -82,39 +79,6 @@ export async function detectWorkspace(path: string): Promise<DetectedWorkspace> 
 	return { kind: "git", remote: rawRemote, name: basename(toplevel), root: toplevel };
 }
 
-// Names already spoken for in this workspace: every agent on every mission
-// it has. A fresh workspace has none; a workspace whose leader record was
-// lost keeps the live agents' names off the leader.
-function takenNames(ctx: NodeContext, workspaceId: string): Set<string> {
-	const taken = new Set<string>();
-	for (const mission of ctx.store.listMissions(workspaceId)) {
-		for (const agent of ctx.store.listAgents(mission.id)) {
-			taken.add(agent.name);
-		}
-	}
-	return taken;
-}
-
-// The leader is a person to talk to, not the workspace: it gets its own name
-// from the pool, seeded by the workspace id so the same workspace always draws
-// the same one. `leader.name` in settings overrides it, and the workspace's
-// own `<root>/.neta/settings.json` layer wins over the user's. The name is
-// written into the record and never picked again.
-function leaderName(ctx: NodeContext, workspaceId: string, workspaceRoot: string): string {
-	const { settings } = loadSettings({ netaDir: netaDir(), workspaceRoot });
-	const override = settings.leader.name?.trim() ?? "";
-	return override === "" ? pickName(takenNames(ctx, workspaceId), workspaceId) : override;
-}
-
-// A leader record written before `name` existed decodes as a `Leader` with the
-// field missing, and the desktop's `Leader` requires it: the whole snapshot
-// then fails to decode and the app shows an empty window. Read the field back
-// as unknown so a record off disk is judged by what it holds, not by its type.
-function storedName(leader: Leader): string {
-	const raw: unknown = leader.name;
-	return typeof raw === "string" ? raw.trim() : "";
-}
-
 async function createLeader(
 	ctx: NodeContext,
 	workspaceId: string,
@@ -128,7 +92,6 @@ async function createLeader(
 		(preferredProvider === undefined ? settings.leader.model : undefined) ??
 		settings.providers[providerName]?.defaultModel ??
 		"";
-	const name = leaderName(ctx, workspaceId, cwd);
 	// The leader is an actor: 03 mints its token under the session id it is
 	// about to create and builds the `neta` MCP entry from it, so nothing
 	// here has to guess an actor id.
@@ -136,13 +99,10 @@ async function createLeader(
 	const candidate: Leader = {
 		workspaceId,
 		machineId,
-		name,
+		name: "Coordinator",
 		sessionId,
 		provider: providerName,
 		model,
-		mode: "lead",
-		modeSince: nowIso(),
-		modeActiveMs: 0,
 		state: "failed",
 	};
 	let leader = candidate;
@@ -161,7 +121,7 @@ async function createLeader(
 			cwd,
 			provider: providerName,
 			model,
-			access: "readOnly",
+			access: "readWrite",
 			unsandboxed: true,
 			netaTools: true,
 		});
@@ -190,7 +150,7 @@ async function createLeader(
 // session back — resumed through the provider when the vendor session allows
 // it, else re-created under a fresh id, which is recorded on the leader and
 // announced so open clients follow the new conversation.
-async function reviveLeader(ctx: NodeContext, leader: Leader, workspace: Workspace, cwd: string): Promise<Leader> {
+async function reviveLeader(ctx: NodeContext, leader: Leader, cwd: string): Promise<Leader> {
 	let effective = leader;
 	if (leader.provider === "pi" && ctx.pi !== undefined) {
 		ctx.runtime.prepareExternalActor?.(leader.sessionId);
@@ -200,43 +160,7 @@ async function reviveLeader(ctx: NodeContext, leader: Leader, workspace: Workspa
 		ctx.hub.broadcast("state", { kind: "leader", record: revived });
 		return revived;
 	}
-	let sessionCwd = cwd;
-	if (leader.mode === "leadPlus") {
-		const mission = leader.activeMissionId === undefined ? undefined : ctx.store.getMission(leader.activeMissionId);
-		if (
-			mission === undefined ||
-			mission.state === "closed" ||
-			!distinctMissionLead(
-				mission,
-				leader,
-				mission.lead.kind === "agent" ? ctx.store.getAgent(mission.lead.agentId) : undefined,
-			)
-		) {
-			effective = {
-				...leader,
-				mode: "lead",
-				modeSince: nowIso(),
-				modeActiveMs: 0,
-				...(mission && mission.state !== "closed"
-					? {
-							startupError: `Mission #${mission.number} cannot resume self-led work. Close it and create a new mission with a separate lead task and effort.`,
-						}
-					: {}),
-			};
-			await ctx.store.putLeader(effective);
-			ctx.hub.broadcast("state", { kind: "leader", record: effective });
-		} else {
-			sessionCwd = mission.worktree?.path ?? cwd;
-			const leases = new LeaseManager(createFileLeaseStore(netaDir()));
-			const key = leaseKeyFor({ kind: workspace.kind, worktreePath: mission.worktree?.path, root: cwd });
-			if ((await leases.acquire(workspace.id, mission.id, key)) !== "active") {
-				await leases.release(workspace.id, mission.id);
-				effective = { ...leader, mode: "lead", modeSince: nowIso(), modeActiveMs: 0 };
-				await ctx.store.putLeader(effective);
-				ctx.hub.broadcast("state", { kind: "leader", record: effective });
-			}
-		}
-	}
+	const sessionCwd = cwd;
 	let live: { sessionId: string; provider: string; model: string };
 	try {
 		live = await ctx.runtime.ensureSession({
@@ -245,7 +169,7 @@ async function reviveLeader(ctx: NodeContext, leader: Leader, workspace: Workspa
 			cwd: sessionCwd,
 			provider: effective.provider,
 			model: effective.model,
-			access: effective.mode === "leadPlus" ? "readWrite" : "readOnly",
+			access: "readWrite",
 			unsandboxed: true,
 			netaTools: true,
 		});
@@ -253,12 +177,6 @@ async function reviveLeader(ctx: NodeContext, leader: Leader, workspace: Workspa
 		// The provider is gone from settings, or will not start: the
 		// workspace still opens, and the mute leader says so on the next
 		// prompt rather than failing the open.
-		if (effective.mode === "leadPlus" && effective.activeMissionId !== undefined) {
-			await new LeaseManager(createFileLeaseStore(netaDir())).release(workspace.id, effective.activeMissionId);
-			effective = { ...effective, mode: "lead", modeSince: nowIso(), modeActiveMs: 0, state: "failed" };
-			await ctx.store.putLeader(effective);
-			ctx.hub.broadcast("state", { kind: "leader", record: effective });
-		}
 		effective = {
 			...effective,
 			state: "failed",
@@ -333,15 +251,13 @@ export async function openWorkspace(
 		if (leader === undefined) {
 			leader = await createLeader(ctx, id, machineId, detected.root, preferredProvider);
 		} else {
-			if (storedName(leader) === "") {
-				// Backfill on read: a record from before the field existed keeps
-				// its session, mode and counters and gains a name here, once, so
-				// nothing downstream ever sees a leader without one.
-				leader = { ...leader, name: leaderName(ctx, id, detected.root) };
+			if (leader.name !== "Coordinator") {
+				// Keep the existing conversation while normalizing old personal names.
+				leader = { ...leader, name: "Coordinator" };
 				await ctx.store.putLeader(leader);
 				ctx.hub.broadcast("state", { kind: "leader", record: leader });
 			}
-			leader = await reviveLeader(ctx, leader, workspace, detected.root);
+			leader = await reviveLeader(ctx, leader, detected.root);
 		}
 		return { workspace, leader };
 	});

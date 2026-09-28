@@ -40,9 +40,6 @@ async function fixture() {
 		name: "Parent",
 		provider: "fake",
 		model: "small",
-		mode: "lead",
-		modeSince: "2026-01-01",
-		modeActiveMs: 0,
 		state: "idle",
 	};
 	const mission: Mission = {
@@ -52,11 +49,10 @@ async function fixture() {
 		machineId: "local",
 		name: "Inspect",
 		objective: "inspect",
-		changes: [],
 		lead: { kind: "agent", agentId: "child" },
 		agentIds: ["child"],
 		access: "readOnly",
-		state: "running",
+		state: "open",
 		createdAt: "2026-01-01",
 	};
 	const receipts = new Map<string, InboxMessage>();

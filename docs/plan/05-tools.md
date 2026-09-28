@@ -1,3 +1,5 @@
+> Historical plan. Superseded by [the current tools and communication contract](tools-and-communication.md). This document is not an active implementation requirement.
+
 # 05 — Neta tools
 
 `src/tools/` is the only surface an ACP session has on Neta: leader, mission
@@ -20,11 +22,11 @@ decisions. Every `tools/list` and `tools/call` is forwarded to the Node over
 `~/.neta/node.sock` with the actor's token. The Node authorises, by kind:
 
 - `leader` — the workspace leader's session. Everything, including
-  `neta_mission` and `neta_close`.
+  `dispatch_mission` and `close`.
 - `lead` — an Agent with `canSpawn: true`. Runs its mission: spawn agents,
   wait, steer, record scope, mark ready.
 - `agent` — an ordinary Agent. Reports only: progress and done. It gets neither
-  `neta_agent` nor `neta_ask` — the hierarchy cannot grow without bound and a
+  `spawn_agent` nor `neta_ask` — the hierarchy cannot grow without bound and a
   stuck agent reports rather than asks; the router refuses both again anyway.
 
 `actorId` is the leader's `sessionId` or the agent's `agentId`. The token is 32
@@ -44,12 +46,12 @@ isError}`.
 
 Thirteen tools, with the one-line description each is given to the model:
 
-- leader only — `neta_mission` create and start a mission, the only way one
-  starts · `neta_close` close it as merged or abandoned · `neta_pin` pin a turn.
-- leader and lead — `neta_agent` add an agent · `neta_wait` block until an
-  agent finishes, fails or asks · `neta_send` answer or redirect an agent ·
+- leader only — `dispatch_mission` create and start a mission, the only way one
+  starts · `close` close it as merged or abandoned · `neta_pin` pin a turn.
+- leader and lead — `spawn_agent` add an agent · `neta_wait` block until an
+  agent finishes, fails or asks · `send_message` answer or redirect an agent ·
   `neta_scope` record accepted scope · `neta_ready` hand over, ready to close ·
-  `neta_mode` switch Lead / Lead++ · `neta_status` open-mission state ·
+  `neta_mode` switch Lead / Lead++ · `mission_state` open-mission state ·
   `neta_ask` ask the user.
 - lead and agent — `neta_progress` a start, a major step or a surprise ·
   `neta_done` the final outcome.
@@ -73,26 +75,26 @@ for validation. Every schema below, and every object inside one, carries
  "decisionRecord": {…}},   // the `DecisionRecord` of 01: every field required
                           // but `worktreePath`, the two estimates integers
 
-"neta_mission": {"required":["name","objective","access","lead"],"properties":{
+"dispatch_mission": {"required":["name","objective","access","lead"],"properties":{
    "name":{"type":"string","minLength":1,"maxLength":60},
    "objective":{"type":"string","minLength":1,"maxLength":2000},
    "access":{"$ref":"#/$defs/access"},
    "lead":{"oneOf":[{"const":"self"},{"$ref":"#/$defs/leadSpec"}]},
    "agents":{"type":"array","maxItems":8,"items":{"$ref":"#/$defs/agentSpec"}},
    "continues":{"$ref":"#/$defs/ulid"}}},
-"neta_agent": {"required":["task","access"],"properties":{"task":{"$ref":"#/$defs/task"},
+"spawn_agent": {"required":["task","access"],"properties":{"task":{"$ref":"#/$defs/task"},
    "missionId":{"$ref":"#/$defs/ulid"},"access":{"$ref":"#/$defs/access"},
    "provider":{"type":"string"},"model":{"type":"string"},"skills":{"$ref":"#/$defs/skills"}}},
 "neta_wait": {"properties":{"missionId":{"$ref":"#/$defs/ulid"},
    "agentIds":{"type":"array","maxItems":32,"items":{"$ref":"#/$defs/ulid"}},
    "timeoutMs":{"type":"integer","minimum":1000,"maximum":1800000}}},
-"neta_send": {"required":["agentId","text"],"properties":{"agentId":{"$ref":"#/$defs/ulid"},
+"send_message": {"required":["agentId","text"],"properties":{"agentId":{"$ref":"#/$defs/ulid"},
    "text":{"type":"string","minLength":1,"maxLength":4000}}},
 "neta_scope": {"required":["missionId","text"],"properties":{"missionId":{"$ref":"#/$defs/ulid"},
    "text":{"type":"string","minLength":1,"maxLength":1000}}},
 "neta_ready": {"required":["missionId","summary"],"properties":{
    "missionId":{"$ref":"#/$defs/ulid"},"summary":{"type":"string","minLength":1,"maxLength":2000}}},
-"neta_close": {"required":["missionId","disposition","reason"],"properties":{
+"close": {"required":["missionId","disposition","reason"],"properties":{
    "missionId":{"$ref":"#/$defs/ulid"},"evidence":{"type":"string","maxLength":1000},
    "disposition":{"type":"string","enum":["merged","abandoned"]},
    "reason":{"type":"string","minLength":1,"maxLength":1000}}},
@@ -100,7 +102,7 @@ for validation. Every schema below, and every object inside one, carries
    "record":{"$ref":"#/$defs/decisionRecord"}}},
 "neta_pin": {"required":["turnId","text"],"properties":{"turnId":{"$ref":"#/$defs/ulid"},
    "text":{"type":"string","minLength":1,"maxLength":400}}},
-"neta_status": {"properties":{}},
+"mission_state": {"properties":{}},
 "neta_progress": {"required":["text"],"properties":{"text":{"$ref":"#/$defs/task"}}},
 "neta_ask": {"required":["question"],"properties":{
    "question":{"type":"string","minLength":1,"maxLength":1000}}},
@@ -144,7 +146,7 @@ name in `skills` resolves `<workspace root>/.neta/skills/<name>.md`, then
 is a `missingSkill` error and the agent is not spawned. The workspace root is
 the one on this machine, never the Node's working directory: a detached Node
 runs from wherever it was started, and both the check and the context load
-resolve against the same root, so what `neta_mission` accepts is what the agent
+resolve against the same root, so what `dispatch_mission` accepts is what the agent
 is briefed with.
 
 ## Ports
@@ -222,7 +224,7 @@ every keyword the block uses.
 Tests: every schema round-trips a valid literal of its params type and rejects
 an unknown property, a missing required one and a wrong type;
 `toolsFor("agent")` is exactly `neta_progress`, `neta_done`, `toolsFor("lead")`
-excludes `neta_mission`, `neta_close`, `neta_pin`, and `toolsFor("leader")`
+excludes `dispatch_mission`, `close`, `neta_pin`, and `toolsFor("leader")`
 excludes `neta_progress`, `neta_done`.
 Commit: `feat(tools): tool schemas and actor tool sets`
 
@@ -263,7 +265,7 @@ Steps: verify the token in constant time; resolve the actor from the store
 refuse an unknown name or one outside `toolsFor(kind)` with `notAuthorised`;
 validate; dispatch; render with `reminder` for leader and lead.
 Tests: a wrong or stale token gives `notAuthorised` and never reaches a
-handler; an ordinary agent calling `neta_agent` or `neta_ask` is refused; bad
+handler; an ordinary agent calling `spawn_agent` or `neta_ask` is refused; bad
 params give `badParams` naming the failing property; a handler failure becomes
 `isError: true`; leader and lead responses carry the reminder, an agent's does
 not; `revoke` invalidates immediately.
@@ -289,12 +291,12 @@ name, arguments, actor and token verbatim, a refused connection yields an
 Commit: `feat(tools): stdio MCP proxy`
 
 ### T5.5 mission and agent tools
-Goal: `neta_mission` and `neta_agent`: one call creates, isolates, starts work.
+Goal: `dispatch_mission` and `spawn_agent`: one call creates, isolates, starts work.
 Reads: this file, `docs/plan/06-worktrees.md`, `src/tools/router.ts`.
 Writes: `src/tools/handlers/mission.ts`, `test/tools-mission.test.ts`.
 Contract: all exported — `const missionHandlers: Pick<ToolHandlers,
-"neta_mission" | "neta_agent">`; `neta_mission` returns `{number, id, worktree}`
-(`null` in a folder workspace), `neta_agent` `{agentId, name, missionId}`.
+"dispatch_mission" | "spawn_agent">`; `dispatch_mission` returns `{number, id, worktree}`
+(`null` in a folder workspace), `spawn_agent` `{agentId, name, missionId}`.
 Steps: reject `lead: "self"` before routing or any creation side effects; require
 a separate lead task and effort (unless model is explicit), and persist a lead
 actor/session distinct from the workspace leader. Allocate the next number from
@@ -304,7 +306,7 @@ spawn each `agents` entry at its own
 access, never above the mission's; append `mission.created` then one
 `agent.spawned` per session; a readWrite mission in a folder workspace that
 cannot take the lease is created and queued as `{ queued: true }`; `continues`
-sets `continuesMissionId`, `notFound` when unknown; `neta_agent` defaults
+sets `continuesMissionId`, `notFound` when unknown; `spawn_agent` defaults
 `missionId` to the caller's, refusing another mission for a lead.
 Tests: a git workspace creates a worktree and a folder one does not; numbers
 are monotonic and never reused; `mission.created` precedes every
@@ -313,18 +315,18 @@ mission, and a missing skill are each refused, the last spawning nothing.
 Commit: `feat(tools): mission and agent creation tools`
 
 ### T5.6 waiting, steering and reporting tools
-Goal: `neta_wait`, `neta_send`, `neta_progress`, `neta_ask`, `neta_done`.
+Goal: `neta_wait`, `send_message`, `neta_progress`, `neta_ask`, `neta_done`.
 Reads: this file, `docs/plan/03-acp.md`, `src/tools/router.ts`.
 Writes: `src/tools/handlers/coordination.ts`,
 `test/tools-coordination.test.ts`.
 Contract: all exported — `const coordinationHandlers: Pick<ToolHandlers,
-"neta_wait" | "neta_send" | "neta_progress" | "neta_ask" | "neta_done">`; the
+"neta_wait" | "send_message" | "neta_progress" | "neta_ask" | "neta_done">`; the
 first, second and last return `{ changed: Agent[]; timedOut: boolean }`,
 `{ agentId, delivered: "answered" | "resteered" }` and `{ agentId, state }`.
 Steps: `neta_wait` subscribes to agent state changes for the mission or the
 listed ids, returns at once if one is already terminal or blocked, else blocks
 to `timeoutMs` (default 600000) and returns `timedOut: true` with the current
-records, never an error; `neta_send` answers a blocked agent by resolving its
+records, never an error; `send_message` answers a blocked agent by resolving its
 pending question after admission. Follow-ups are durably queued before admission,
 return a message ID/status, and never cancel a running recipient. Retry identity,
 restart recovery, and writer admission belong to the runtime;
@@ -333,7 +335,7 @@ actor to `blocked`, emits `mission.blocked`; `neta_done` records `outcome`,
 moves to `completed`, emits `agent.finished`, leaving a lead's mission open.
 Tests: `neta_wait` returns immediately for an already blocked agent, when a
 fake-agent session finishes, and on timeout with `timedOut: true` and no error;
-`neta_send` to a blocked agent clears `pendingQuestion` and emits
+`send_message` to a blocked agent clears `pendingQuestion` and emits
 `mission.unblocked`; sends to running actors queue without cancellation. Verify
 concurrent sends, retry deduplication, restart-visible messages, and failed writer
 admission against the fake agent; `neta_done` twice is refused.
@@ -345,12 +347,12 @@ Reads: this file, `docs/plan/06-worktrees.md`, `docs/plan/07-modes.md`,
 `src/tools/router.ts`.
 Writes: `src/tools/handlers/lifecycle.ts`, `test/tools-lifecycle.test.ts`.
 Contract: all exported — `const lifecycleHandlers: Pick<ToolHandlers,
-"neta_scope" | "neta_ready" | "neta_close" | "neta_pin" | "neta_status" |
-"neta_mode">`; `neta_status` returns `{ missions: { number, name, state,
+"neta_scope" | "neta_ready" | "close" | "neta_pin" | "mission_state" |
+"neta_mode">`; `mission_state` returns `{ missions: { number, name, state,
 attention?, agents: number }[], mode, modeActiveMs }`.
 Steps: `neta_scope` appends a `MissionChange`, never edits `objective`, emits
 `mission.changed`; `neta_ready` sets the ready flag and summary, emits
-`mission.readyToClose`; `neta_close` delegates to 06's `WorktreeService.close` and refuses
+`mission.readyToClose`; `close` delegates to 06's `WorktreeService.close` and refuses
 when `disposition: "merged"` carries no `evidence`, when the mission is already
 closed, or when 06 reports a dirty or unmerged worktree without explicit
 abandonment; `neta_pin` emits `user.pinned`; `neta_mode` delegates to
@@ -360,7 +362,7 @@ rendering `unavailable` as an error.
 Tests: scope is append-only (objective unchanged after two calls, order kept);
 merged without evidence refused, with evidence closes and emits
 `mission.closed`; abandoned needs none; closing twice, and a lead closing at
-all, are refused; `neta_status` lists open missions only, needs-person first.
+all, are refused; `mission_state` lists open missions only, needs-person first.
 Commit: `feat(tools): mission lifecycle tools`
 
 ### T5.8 working agreements, charter and skills
@@ -392,7 +394,7 @@ as above, sha256 from `node:crypto`, rejecting a name with `/` or `..`;
 skills, the mission brief (objective, accepted changes, access, worktree path)
 and the task.
 Tests: each agreement is inside its line budget and free of banned words; the
-agent agreement names neither `neta_agent` nor `neta_ask`; the workspace
+agent agreement names neither `spawn_agent` nor `neta_ask`; the workspace
 charter precedes the user one and the hash changes when either file changes,
 and no charter gives `undefined`; a missing skill reports the name and the
 available list, a traversing name is rejected; an ordinary agent's context has
@@ -417,7 +419,7 @@ session on the fake agent with `--launch-mcp`; prompt `MCP` and assert the
 echoed config carries the actor id, a fresh token and the socket path, and that
 the fixture launched the proxy without it exiting; then drive the proxy as a
 provider would — spawn, `initialize`, `tools/list` returns the leader set,
-`tools/call neta_mission` with a two-agent brief returns `{ number: 1, id,
+`tools/call dispatch_mission` with a two-agent brief returns `{ number: 1, id,
 worktree: null }`, the mission is in `snapshot` with two agents, and the log
 holds `mission.created` and two `agent.spawned`; a revoked token is refused.
 Commit: `feat(tools): session tool wiring and end-to-end mission creation`

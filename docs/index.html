@@ -38,7 +38,7 @@
       <div>
         <div class="kicker"><span class="deva">नेता</span> · Hindi: leader</div>
         <h1>You talk to a leader.<br>It runs the missions.</h1>
-        <p class="lead">Neta keeps a long-lived Node for every workspace. The workspace leader reasons, opens missions, and directs mission leads; each mission lead works directly or with agents of its own — every mission numbered, every outcome closed out.</p>
+        <p class="lead">Neta keeps a long-lived Node for every workspace. The coordinator reasons, opens missions, and directs mission leads; each mission lead works directly or with agents of its own — every mission numbered, every outcome closed out.</p>
         <p class="sublead">One Node serves every client. The terminal attaches to the leader's conversation, and the desktop draws the same state as a spine of missions, a mission bar for work that needs you, and chat on the exact same sessions. Close any client and the work keeps running.</p>
         <div class="chips">
           <span class="chip brass">MIT</span>
@@ -52,7 +52,7 @@
           <div><span class="t-muted">$</span> npm i -g @intervene/neta</div>
           <div><span class="t-muted">$</span> neta open ~/your-repo</div>
           <div></div>
-          <div class="t-muted">attaching to workspace leader · Lead, read-only</div>
+          <div class="t-muted">attaching to coordinator · Lead, read-only</div>
           <div></div>
           <div class="t-paper"><span class="t-brass">›</span> the signup flow drops 4% of users at the email</div>
           <div class="t-paper">  step. find out why and fix it.</div>
@@ -79,7 +79,7 @@
       <div class="principle">
         <div class="num">01</div>
         <h3>A leader, not just a chatter</h3>
-        <p>The workspace leader stays available in one continuous conversation and routes sustained work into missions. A small bounded task it handles itself; anything that writes becomes a mission, so isolation, access, and closeout stay visible.</p>
+        <p>The coordinator stays available in one continuous conversation and routes sustained work into missions. A small bounded task it handles itself; anything that writes becomes a mission, so isolation, access, and closeout stay visible.</p>
       </div>
       <div class="principle">
         <div class="num">02</div>
@@ -108,7 +108,7 @@
     </div>
     <div class="card-grid">
       <div class="card tier-muted">
-        <div class="tier-head"><span class="swatch"></span>workspace leader</div>
+        <div class="tier-head"><span class="swatch"></span>coordinator</div>
         <p>One continuous conversation per workspace. It opens missions, sets access, and owns closeout — merged or abandoned, with evidence, for every mission.</p>
       </div>
       <div class="card tier-steel">
@@ -124,7 +124,7 @@
         <p>A bounded helper beneath a mission lead. It receives a task, read-only or read-write access, a provider and a model — and creates nothing further.</p>
       </div>
     </div>
-    <p class="followup">Agents take display names from a fixed pool, unique across the workspace's open missions. A snapshot carries running, blocked, and failed agents plus the most recent completed ones; archiving hides an agent from the canvas but keeps its conversation and outcome.</p>
+    <p class="followup">Agents take display names from a fixed pool, unique across the workspace's open missions. Activity shows Running or Not running from actual execution. Archiving hides an agent from the sidebar and preserves its conversation.</p>
   </div>
 </section>
 
@@ -173,7 +173,7 @@
     <div class="two-col">
       <div>
         <p>Every leader, mission lead, and agent holds a real OpenCode conversation owned by the Node. Selecting it — in the terminal or on the canvas — opens that exact session with its full history. No dummy surfaces, no second orchestration path.</p>
-        <p>The desktop draws the spine with its missions, the mission bar with the workspace leader and every open mission that needs a person, and a navigator that jumps anywhere. The terminal attaches to the same leader conversation the desktop shows, so both views see each other's turns.</p>
+        <p>The desktop draws the spine with its missions, the mission bar with the coordinator and every open mission that needs a person, and a navigator that jumps anywhere. The terminal attaches to the same leader conversation the desktop shows, so both views see each other's turns.</p>
         <div class="cmdlist">
           <div class="cmd-row"><span class="cmd">neta</span><span class="what">attach to the leader, starting the Node if needed</span></div>
           <div class="cmd-row"><span class="cmd">neta open .</span><span class="what">open this workspace and its leader</span></div>
@@ -222,7 +222,7 @@
       <div class="card">
         <h3>Every agent runs in OpenCode</h3>
         <div class="card-list">
-          <div>One transport for the workspace leader, mission leads, and agents — clicking any of them opens that exact session.</div>
+          <div>One transport for the coordinator, mission leads, and agents — clicking any of them opens that exact session.</div>
           <div>Each provider has a configured default model; the mission lead may override it for an individual agent.</div>
           <div>Provider, model, access, and conversation identity persist with the session. Interrupted work is marked honestly, never replayed.</div>
         </div>

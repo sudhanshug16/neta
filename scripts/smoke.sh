@@ -6,10 +6,9 @@
 #
 # The node is started explicitly so the bundle is the process under test.
 #
-# The fake model does not call neta_mission. After one real chat prompt
-# through OpenCode, this script persists exactly what a leader-led
-# neta_mission with no agents would have written (mission row #1 plus one
-# mission.created event) while the node is stopped, restarts the node, and
+# After one real chat prompt through OpenCode, this script seeds a historical
+# saved mission and mission.created event while the node is stopped, restarts
+# the node to exercise one-time record normalization, and
 # proves the bundle serves it back via `neta missions` and the event log.
 set -euo pipefail
 
@@ -180,7 +179,7 @@ const machine = JSON.parse(readFileSync(join(netaDir, "machine.json"), "utf8"));
 const enc = encodeURIComponent(workspace.id);
 const at = new Date().toISOString();
 
-// Mirrors what neta_mission persists for lead "self" with no agents.
+// Historical saved record: normalized once without losing mission history.
 const mission = {
 	id: ulid(),
 	number: 1,

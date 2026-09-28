@@ -1,10 +1,11 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { ulid } from "../core/ids.ts";
 import { nowIso } from "../core/time.ts";
 import type { Access, Block, PromptAttachment, Turn, TurnId } from "../core/types.ts";
 import { type BlockDraft, canCoalesce } from "../session/block-draft.ts";
 import { ForbiddenModelError, type ModelOption, UnknownModelError } from "../session/models.ts";
 import {
+	type NativeVisibleMessage,
 	ResumeFailedError,
 	type RuntimeSession,
 	SessionClosedError,
@@ -57,23 +58,24 @@ interface SessionConfigOption {
 }
 
 const sessionPath = (id: string): string => `/api/session/${encodeURIComponent(id)}`;
-const SUPERLEADER_PERMISSIONS = new Set([
-	"neta_superleader_missions",
-	"neta_superleader_feed",
-	"neta_superleader_ask",
-	"neta_superleader_questions",
-	"neta_superleader_user_turns",
-	"neta_superleader_attention",
-	"neta_superleader_evidence",
-	"neta_superleader_route",
-	"neta_present",
+const NETA_PERMISSIONS = new Set([
+	"neta_missions",
+	"neta_mission",
+	"neta_send_message",
 	"neta_artifacts",
+	"neta_dispatch_mission",
+	"neta_spawn_agent",
+	"neta_close",
+	"neta_mission_state",
+	"neta_list_models",
+	"neta_setup_diagnostic",
+	"neta_change_model",
 ]);
 
-export function nativePermissionReply(action: string, access: Access, unsandboxed: boolean): "once" | "reject" {
-	return unsandboxed ||
-		access === "readWrite" ||
-		SUPERLEADER_PERMISSIONS.has(action) ||
+export function nativePermissionReply(action: string, access: Access, _unsandboxed: boolean): "once" | "reject" {
+	if (action === "question") return "reject";
+	return access === "readWrite" ||
+		NETA_PERMISSIONS.has(action) ||
 		[
 			"execute",
 			"read",
@@ -115,7 +117,6 @@ function parseModel(id: string, catalog: Catalog): ModelRef {
 }
 
 async function loadCatalog(api: NativeApi, cwd: string, forbidden: readonly string[]): Promise<Catalog> {
-	await api.request("POST", "/api/plugin/await-activation", undefined, cwd);
 	const deadline = Date.now() + 5000;
 	let last = "No models are available";
 	while (Date.now() < deadline) {
@@ -280,6 +281,9 @@ export async function startOpenCodeSession(opts: StartOptions): Promise<RuntimeS
 	let cancelled = false;
 	let desiredModelId = opts.model || provider.defaultModel;
 	const ownedMcp = new Set<string>();
+	const internalIds = new Map<string, string>();
+	const nativeInternalId = (id: string): string =>
+		`msg_${createHash("sha256").update(`${vendorSessionId}:${id}`).digest("hex").slice(0, 32)}`;
 
 	const push = (event: SessionEvent): void => {
 		if (streamEnded) return;
@@ -339,7 +343,7 @@ export async function startOpenCodeSession(opts: StartOptions): Promise<RuntimeS
 			const existing = live.find((item) => item.name === spec.name);
 			const status = record(existing?.status).status;
 			if (ownedMcp.has(spec.name) && status === "connected") continue;
-			const path = `/api/mcp/${encodeURIComponent(spec.name)}`;
+			const path = `/api/experimental/mcp/${encodeURIComponent(spec.name)}`;
 			if (!ownedMcp.has(spec.name) || !existing) {
 				await api.request(
 					"PUT",
@@ -347,6 +351,7 @@ export async function startOpenCodeSession(opts: StartOptions): Promise<RuntimeS
 					{
 						config: {
 							type: "local",
+							...(spec.codemode === false ? { codemode: false } : {}),
 							command: [spec.command, ...spec.args],
 							environment: Object.fromEntries(spec.env.map((item) => [item.name, item.value])),
 						},
@@ -457,15 +462,23 @@ export async function startOpenCodeSession(opts: StartOptions): Promise<RuntimeS
 
 	await launch(opts.resumeVendorSessionId);
 
-	async function runPrompt(turnId: TurnId, text: string, attachments: PromptAttachment[]): Promise<void> {
+	async function runPrompt(
+		turnId: TurnId,
+		text: string,
+		attachments: PromptAttachment[],
+		internal?: readonly { id: string; text: string; attachments: PromptAttachment[] }[],
+	): Promise<void> {
 		const api = server?.api;
 		if (!api) throw new SessionClosedError();
-		const messageId = `msg_${randomUUID().replaceAll("-", "")}`;
-		const prepared = promptPayload(text, attachments, messageId);
+		const prepared = internal
+			? undefined
+			: promptPayload(text, attachments, `msg_${randomUUID().replaceAll("-", "")}`);
+		const messageId = internal ? nativeInternalId(internal[0]?.id ?? "") : (prepared?.body.id as string);
 		const abort = new AbortController();
 		activeAbort = abort;
 		const tools = new Map<string, ToolState>();
 		let started = false;
+		let reply = "";
 		let assistantId: string | undefined;
 		let finish: string | undefined;
 		let failure: string | undefined;
@@ -489,28 +502,11 @@ export async function startOpenCodeSession(opts: StartOptions): Promise<RuntimeS
 					if (data.sessionID !== vendorSessionId) continue;
 					if (event.type === "permission.asked") {
 						const action = string(data.action) ?? "";
-						const reply =
-							opts.unsandboxed ||
-							access === "readWrite" ||
-							[
-								"execute",
-								"read",
-								"search",
-								"fetch",
-								"external_directory",
-								"bash",
-								"shell",
-								"grep",
-								"glob",
-								"webfetch",
-								"websearch",
-							].includes(action)
-								? "once"
-								: "reject";
+						const reply = nativePermissionReply(action, access, opts.unsandboxed === true);
 						await api.request(
 							"POST",
 							`${sessionPath(vendorSessionId)}/permission/${encodeURIComponent(string(data.id) ?? "")}/reply`,
-							{ reply },
+							{ decision: reply },
 						);
 						try {
 							const message = string(data.message);
@@ -543,8 +539,10 @@ export async function startOpenCodeSession(opts: StartOptions): Promise<RuntimeS
 								.catch(() => undefined);
 						continue;
 					}
-					if (event.type === "session.inbox.delivered" && data.inboxID === messageId) {
-						started = true;
+					if (event.type === "session.inbox.delivered") {
+						const internalId = internalIds.get(string(data.inboxID) ?? "");
+						if (internalId) push({ type: "inboxConsumed", messageId: internalId, turnId });
+						if (data.inboxID === messageId) started = true;
 						continue;
 					}
 					if (!started) continue;
@@ -619,12 +617,38 @@ export async function startOpenCodeSession(opts: StartOptions): Promise<RuntimeS
 			})();
 			void consume.catch(() => undefined);
 			submitted = true;
-			await api.request("POST", `${sessionPath(vendorSessionId)}/${prepared.path}`, prepared.body);
+			if (internal) {
+				for (const [index, message] of internal.entries()) {
+					if (message.attachments.length) throw new Error("Native synthetic input cannot carry attachments");
+					const id = nativeInternalId(message.id);
+					internalIds.set(id, message.id);
+					await api.request("POST", `${sessionPath(vendorSessionId)}/synthetic`, {
+						id,
+						text: message.text,
+						description: "Neta message",
+						metadata: { netaInboxId: message.id },
+						delivery: "steer",
+						resume: index === internal.length - 1,
+					});
+				}
+			} else if (prepared) {
+				await api.request("POST", `${sessionPath(vendorSessionId)}/${prepared.path}`, prepared.body);
+			}
 			await consume;
 			if (assistantId) {
 				const info = dataOf(
 					await api.request("GET", `${sessionPath(vendorSessionId)}/message/${encodeURIComponent(assistantId)}`),
 				);
+				const finalReply =
+					info.type === "assistant" && info.finish !== "tool-calls" && Array.isArray(info.content)
+						? info.content
+								.flatMap((part: unknown) => {
+									const p = record(part);
+									return p.type === "text" && typeof p.text === "string" ? [p.text] : [];
+								})
+								.join("\n\n")
+						: "";
+				reply = finalReply;
 				const tokens = record(info.tokens);
 				const cache = record(tokens.cache);
 				const input = number(tokens.input) ?? 0;
@@ -675,7 +699,7 @@ export async function startOpenCodeSession(opts: StartOptions): Promise<RuntimeS
 							: finish === "content-filter"
 								? "refusal"
 								: "end_turn";
-			push({ type: "turnEnd", turnId, stopReason, cancelled: stopReason === "cancelled" });
+			push({ type: "turnEnd", turnId, finalReply: reply, stopReason, cancelled: stopReason === "cancelled" });
 		} catch (error) {
 			if (openTurnId !== turnId || closed) return;
 			const message = error instanceof Error ? error.message : String(error);
@@ -688,9 +712,9 @@ export async function startOpenCodeSession(opts: StartOptions): Promise<RuntimeS
 					},
 					turnId,
 				);
-				push({ type: "turnEnd", turnId, stopReason: "error", cancelled: false });
+				await server?.close();
 				clearTurn();
-				await server?.close().catch(() => undefined);
+				push({ type: "turnEnd", turnId, stopReason: "error", cancelled: false });
 				return;
 			}
 			block({ role: "agent", kind: "status", text: message }, turnId);
@@ -764,7 +788,73 @@ export async function startOpenCodeSession(opts: StartOptions): Promise<RuntimeS
 			return { image: true, embeddedContext: true };
 		},
 		get steeringSupported() {
-			return false;
+			return true;
+		},
+		async visibleMessages(): Promise<NativeVisibleMessage[]> {
+			if (!server) throw new SessionClosedError();
+			const response = record(await server.api.request("GET", `${sessionPath(vendorSessionId)}/context`));
+			if (!Array.isArray(response.data)) throw new Error("Invalid OpenCode context response");
+			const messages = response.data;
+			return messages.flatMap((value): NativeVisibleMessage[] => {
+				const message = record(value);
+				const id = string(message.id);
+				const at = number(record(message.time).created);
+				if (!id || at === undefined) return [];
+				if (message.type === "user" || message.type === "synthetic") {
+					const body = string(message.text);
+					if (!body) return [];
+					return [
+						{
+							id,
+							at: new Date(at).toISOString(),
+							role: message.type === "user" ? "human" : "internal",
+							text: body,
+							boundary: "input",
+							origin: string(record(message.metadata).netaInboxId),
+						},
+					];
+				}
+				if (message.type === "assistant") {
+					const body = Array.isArray(message.content)
+						? message.content
+								.map(record)
+								.filter((part) => part.type === "text" && typeof part.text === "string")
+								.map((part) => part.text as string)
+								.join("\n\n")
+						: "";
+					if (!body) return [];
+					return [
+						{
+							id,
+							at: new Date(at).toISOString(),
+							role: "assistant",
+							text: body,
+							boundary: message.finish && message.finish !== "tool-calls" ? "final" : "intermediate",
+						},
+					];
+				}
+				if (message.type === "compaction" && message.status === "completed") {
+					const summary = string(message.summary);
+					return summary
+						? [{ id, at: new Date(at).toISOString(), role: "summary", text: summary, boundary: "summary" }]
+						: [];
+				}
+				return [];
+			});
+		},
+		async internalDeliveryState(messageId) {
+			if (!server) throw new SessionClosedError();
+			const id = nativeInternalId(messageId);
+			const inbox = record(await server.api.request("GET", `${sessionPath(vendorSessionId)}/inbox`));
+			if (!Array.isArray(inbox.data)) throw new Error("Invalid OpenCode inbox response");
+			if (inbox.data.some((item: unknown) => record(item).id === id)) return "admitted";
+			try {
+				const found = dataOf(await server.api.request("GET", `${sessionPath(vendorSessionId)}/message/${id}`));
+				return found.type === "synthetic" ? "consumed" : "missing";
+			} catch (error) {
+				if (error instanceof Error && error.message.includes("Message not found")) return "missing";
+				throw error;
+			}
 		},
 		prompt(text, attachments = []) {
 			if (closed) throw new SessionClosedError();
@@ -780,8 +870,35 @@ export async function startOpenCodeSession(opts: StartOptions): Promise<RuntimeS
 			void runPrompt(turnId, text, attachments);
 			return turnId;
 		},
-		async steer() {
-			return "promptRequired";
+		promptInternal(messages) {
+			if (closed) throw new SessionClosedError();
+			if (openTurnId) throw new TurnInProgressError(openTurnId);
+			if (!messages.length) throw new Error("No internal messages to deliver");
+			const turnId = ulid();
+			openTurnId = turnId;
+			seq = 0;
+			last = undefined;
+			keyed.clear();
+			cancelled = false;
+			push({ type: "turn", turn: { id: turnId, sessionId, startedAt: nowIso(), role: "user", bindingGeneration } });
+			void runPrompt(turnId, "", [], messages);
+			return turnId;
+		},
+		async steer(messageId, text, attachments = []) {
+			if (closed || !server) return "failed";
+			if (!openTurnId) return "promptRequired";
+			if (attachments.length) return "failed";
+			const id = nativeInternalId(messageId);
+			internalIds.set(id, messageId);
+			await server.api.request("POST", `${sessionPath(vendorSessionId)}/synthetic`, {
+				id,
+				text,
+				description: "Neta message",
+				metadata: { netaInboxId: messageId },
+				delivery: "steer",
+				resume: false,
+			});
+			return "injected";
 		},
 		async cancel() {
 			if (!openTurnId || !server) return;
@@ -793,7 +910,11 @@ export async function startOpenCodeSession(opts: StartOptions): Promise<RuntimeS
 			}
 		},
 		listModels(): ModelOption[] {
-			return catalog.models.map((item) => ({ id: `${item.providerID}/${item.id}`, name: item.name }));
+			return catalog.models.map((item) => ({
+				id: `${item.providerID}/${item.id}`,
+				name: item.name,
+				variants: item.variants.map((variant) => variant.id),
+			}));
 		},
 		async setModel(wanted) {
 			if (closed || !server) throw new SessionClosedError();
@@ -820,16 +941,17 @@ export async function startOpenCodeSession(opts: StartOptions): Promise<RuntimeS
 			}
 			if (id === "neta_effort" && value === "") {
 				const { variant: _variant, ...base } = model;
+				await server.api.request("POST", `${sessionPath(vendorSessionId)}/model`, { model: base });
 				model = base;
-				await server.api.request("POST", `${sessionPath(vendorSessionId)}/model`, { model });
 				return;
 			}
 			if (id === "effort" && typeof value === "string") {
 				const current = catalog.models.find((item) => item.providerID === model.providerID && item.id === model.id);
 				if (value !== "default" && !current?.variants.some((item) => item.id === value))
 					throw new Error(`Invalid effort: ${value}`);
-				model = { ...model, variant: value };
-				await server.api.request("POST", `${sessionPath(vendorSessionId)}/model`, { model });
+				const selected = { ...model, variant: value };
+				await server.api.request("POST", `${sessionPath(vendorSessionId)}/model`, { model: selected });
+				model = selected;
 				return;
 			}
 			if (id === "mode" && typeof value === "string") {

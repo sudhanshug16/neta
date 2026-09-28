@@ -72,6 +72,7 @@ async function buildBundleOnce(): Promise<string> {
 function settingsJson(dir: string, modelUrl: string): string {
 	return JSON.stringify(
 		{
+			meCurator: { enabled: false },
 			providers: {
 				opencode: {
 					command: "opencode",

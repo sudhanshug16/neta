@@ -28,7 +28,8 @@ export interface StartOptions {
 export type SessionEvent = (
 	| { type: "turn"; turn: Turn }
 	| { type: "block"; block: Block }
-	| { type: "turnEnd"; turnId: TurnId; stopReason: string; cancelled: boolean }
+	| { type: "inboxConsumed"; messageId: string; turnId: TurnId }
+	| { type: "turnEnd"; finalReply?: string; turnId: TurnId; stopReason: string; cancelled: boolean }
 	| { type: "model"; model: string }
 	| { type: "mode"; modeId: string }
 	| { type: "interrupted"; turnId?: TurnId; exit: { code: number | null; signal: string | null; at: string } }
@@ -38,6 +39,15 @@ export interface ExitInfo {
 	code: number | null;
 	signal: string | null;
 	at: string;
+}
+
+export interface NativeVisibleMessage {
+	id: string;
+	at: string;
+	role: "human" | "internal" | "assistant" | "summary";
+	text: string;
+	boundary: "input" | "intermediate" | "final" | "summary";
+	origin?: string;
 }
 
 export interface RuntimeSession {
@@ -55,12 +65,15 @@ export interface RuntimeSession {
 	readonly configOptions: readonly { id: string; currentValue: string | boolean }[];
 	readonly promptCapabilities: { image: boolean; embeddedContext: boolean };
 	readonly steeringSupported: boolean;
+	visibleMessages?(): Promise<NativeVisibleMessage[]>;
 	prompt(text: string, attachments?: PromptAttachment[]): TurnId;
 	steer(
 		messageId: string,
 		text: string,
 		attachments?: PromptAttachment[],
 	): Promise<"injected" | "promptRequired" | "failed">;
+	promptInternal?(messages: readonly { id: string; text: string; attachments: PromptAttachment[] }[]): TurnId;
+	internalDeliveryState?(messageId: string): Promise<"missing" | "admitted" | "consumed">;
 	cancel(): Promise<void>;
 	listModels(): ModelOption[];
 	setModel(model: string): Promise<void>;

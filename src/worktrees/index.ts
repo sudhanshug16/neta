@@ -1,6 +1,6 @@
 // The one object the Node holds for Git isolation and mission closeout.
 // Only four callers reach merge detection through here: agent finish,
-// `neta_ready`, `neta_close` and `workspace.open`. No timer, interval or
+// `close` and `workspace.open`. No timer, interval or
 // watcher may call it.
 import { realpath, stat } from "node:fs/promises";
 import type {
@@ -100,6 +100,7 @@ export function createWorktreeService(deps: WorktreeServiceDeps): WorktreeServic
 				number: mission.number,
 				slug: slugify(mission.name),
 				base: mission.worktree?.base,
+				runHooks: mission.access !== "readOnly",
 			};
 			if (opts?.recovery !== undefined) {
 				const recovery = opts.recovery;

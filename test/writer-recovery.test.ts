@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Agent, Mission } from "../src/core/types.ts";
+import { openMeStore } from "../src/me/store.ts";
 import { toolMount } from "../src/node/handlers-tools.ts";
 import { type AdaptedRuntime, adaptStore } from "../src/node/lifecycle.ts";
 import type { TurnNotification } from "../src/node/protocol.ts";
@@ -11,11 +12,7 @@ import { openStore } from "../src/store/index.ts";
 import { createTokenTable } from "../src/tools/router.ts";
 import { createFileLeaseStore, LeaseManager } from "../src/worktrees/leases.ts";
 
-test.each([
-	[false, false],
-	[true, false],
-	[false, true],
-])("writer recovery (close fails: %s, restart: %s)", async (failClose, restart) => {
+test.each([false, true])("writer admission releases after the turn boundary (restart: %s)", async (restart) => {
 	const previous = process.env.NETA_DIR;
 	const dir = await mkdtemp(join(tmpdir(), "neta-writer-recovery-"));
 	process.env.NETA_DIR = dir;
@@ -39,9 +36,6 @@ test.each([
 			name: "Lead",
 			provider: "fake",
 			model: "fake",
-			mode: "lead",
-			modeSince: new Date(0).toISOString(),
-			modeActiveMs: 0,
 			state: "idle",
 		});
 		const mission: Mission = {
@@ -51,11 +45,10 @@ test.each([
 			machineId: machine.id,
 			name: "Test",
 			objective: "Test",
-			changes: [],
 			lead: { kind: "agent", agentId: "fixture-mission-lead" },
 			agentIds: ["first", "second"],
 			access: "readWrite",
-			state: "running",
+			state: "open",
 			createdAt: new Date(0).toISOString(),
 		};
 		await real.missions.create(mission);
@@ -88,7 +81,6 @@ test.each([
 			},
 			close: async (id: string) => {
 				actions.push(`close:${id}`);
-				if (failClose) throw new Error("close unconfirmed");
 			},
 			createSession: async (input: { sessionId: string }) => {
 				actions.push(`start:${input.sessionId}`);
@@ -99,6 +91,7 @@ test.each([
 				return "turn2";
 			},
 			listInbox: async () => [],
+			wakeInbox: (id: string) => actions.push(`wake:${id}`),
 		} as unknown as AdaptedRuntime;
 		mount = toolMount({
 			real,
@@ -115,6 +108,26 @@ test.each([
 		expect(await mount.canDeliverInbox(followup)).toBe(true);
 		expect(await mount.canDeliverInbox({ ...followup, sourceId: "unknown-source" })).toBe(false);
 		expect(await mount.canDeliverInbox({ ...followup, sourceId: "b".repeat(64) })).toBe(false);
+		const me = openMeStore();
+		const filter = await me.filterIdentity("w");
+		const source = await me.capture({
+			id: "",
+			workspaceId: "w",
+			workspaceName: "test",
+			sessionId: "leader",
+			actorKind: "leader",
+			kind: "message",
+			at: new Date().toISOString(),
+			text: "Report ready",
+			turnId: "report-turn",
+		});
+		expect(
+			await mount.canDeliverInbox({
+				...followup,
+				sessionId: filter.sessionId,
+				sourceId: `filter-decision:${source.id}:2`,
+			}),
+		).toBe(true);
 		await real.inbox.markDiscarded("s1", followup.id);
 		const event: TurnNotification = {
 			sessionId: "s1",
@@ -130,12 +143,19 @@ test.each([
 		if (restart) {
 			await leases.interrupt("w", "first");
 			await mount.recover();
-		} else for (const listener of listeners) listener(event);
-		for (let i = 0; i < 100 && !actions.includes(failClose ? "close:s1" : "prompt:s2"); i++)
-			await new Promise((resolve) => setTimeout(resolve, 10));
-		expect(actions[0]).toBe(restart ? "start:s2" : "close:s1");
-		expect(await leases.holder("w", dir)).toBe(failClose ? "first" : "second");
-		expect(actions.includes("prompt:s2")).toBe(!failClose);
+		} else {
+			expect(await mount.beforeTurn("s1")).toBe(true);
+			if (!event.turn) throw new Error("Fixture turn missing");
+			for (const listener of listeners) listener({ ...event, turn: { ...event.turn, endedAt: undefined } });
+			expect(await leases.holder("w", dir)).toBe("first");
+			await mount.afterTurn("s1");
+		}
+		expect(actions[0]).toBe("start:s2");
+		expect(await leases.holder("w", dir)).toBe("second");
+		expect(actions).toContain("prompt:s2");
+		// Parent wakeup has to wait for this writer; idle parent is not a second writer.
+		expect(await mount.beforeTurn("leader")).toBe(false);
+		expect(await leases.holder("w", dir)).toBe("second");
 	} finally {
 		mount?.stop();
 		await real.close();

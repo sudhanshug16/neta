@@ -33,13 +33,13 @@ describe("conversation inbox", () => {
 		expect((await stat(paths().conversationInbox("s1"))).mode & 0o777).toBe(0o600);
 	});
 
-	test("never compacts nonterminal messages and counts uncertain payload bytes", async () => {
+	test("retains pending messages beyond the old count limit", async () => {
 		dir = await mkdtemp(join(tmpdir(), "neta-inbox-"));
 		process.env.NETA_DIR = dir;
 		const store = openConversationInboxStore();
-		for (let index = 0; index < 20; index++) await store.enqueue("s", String(index), []);
-		await expect(store.enqueue("s", "overflow", [])).rejects.toThrow("20 messages");
-		expect((await store.list("s")).filter((item) => item.status === "queued")).toHaveLength(20);
+		for (let index = 0; index < 25; index++) await store.enqueue("s", String(index), []);
+		const reopened = openConversationInboxStore();
+		expect((await reopened.list("s")).filter((item) => item.status === "queued")).toHaveLength(25);
 	});
 
 	test("restart-visible delivering entries become uncertain without retry data loss", async () => {
@@ -52,6 +52,21 @@ describe("conversation inbox", () => {
 		expect((await reopened.list("s"))[0]?.status).toBe("delivering");
 		await reopened.markUncertain("s", item.id);
 		expect((await reopened.list("s"))[0]?.status).toBe("uncertain");
+	});
+
+	test("missing native admission changes an unread receipt to uncertain without replay", async () => {
+		dir = await mkdtemp(join(tmpdir(), "neta-inbox-"));
+		process.env.NETA_DIR = dir;
+		const store = openConversationInboxStore();
+		const source = { readerDirected: false, sourceId: "worker/final" };
+		const item = await store.enqueue("s", "report", [], source);
+		await store.markDelivered("s", item.id, "turn");
+		await store.markUncertain("s", item.id);
+		const reopened = openConversationInboxStore();
+		const retry = await reopened.enqueue("s", "report", [], source);
+		expect(retry.id).toBe(item.id);
+		expect(retry.status).toBe("uncertain");
+		expect(retry.deliveredAt).toBeDefined();
 	});
 });
 

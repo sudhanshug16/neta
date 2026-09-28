@@ -37,15 +37,14 @@ function fixture() {
 		machineId: "machine",
 		name: "Change overview",
 		objective: "Summarize local changes",
-		changes: [],
 		lead: { kind: "agent", agentId: "cove" },
 		agentIds: ["cove"],
 		access: "readOnly",
-		state: "running",
+		state: "open",
 		createdAt: agent.startedAt,
 	};
 	const routes: RouteTask[] = [];
-	const applied: { session: string; model: string }[] = [];
+	const applied: { session: string; model: string; variant?: string }[] = [];
 	const events: Array<Omit<Event, "seq" | "at">> = [];
 	const published: Agent[] = [];
 	const store = {
@@ -83,13 +82,13 @@ function fixture() {
 			if (controls.routingError) throw new Error(controls.routingError);
 			return route(
 				input,
-				Object.values(models).map((id) => ({ id })),
+				Object.values(models).map((id) => ({ id, variants: ["low", "medium", "high"] })),
 				{ mode: "fixed", models },
 			);
 		},
-		apply: async (current, model) => {
+		apply: async (current, model, variant) => {
 			if (controls.applyError) throw new Error(controls.applyError);
-			applied.push({ session: current.sessionId, model });
+			applied.push({ session: current.sessionId, model, ...(variant ? { variant } : {}) });
 			controls.duringApply?.();
 		},
 		publish: (updated) => {
@@ -121,7 +120,7 @@ function fixture() {
 test("a mission upgrade and named-worker downgrade reroute without replacing the conversation", async () => {
 	const f = fixture();
 	const original = f.agent();
-	const up = await modelHandlers.neta_model(f.context, { missionId: 4, change: "up" });
+	const up = await modelHandlers.change_model(f.context, { missionId: 4, change: "up" });
 	expect(up.ok).toBe(true);
 	expect(f.agent()).toMatchObject({
 		id: original.id,
@@ -137,7 +136,7 @@ test("a mission upgrade and named-worker downgrade reroute without replacing the
 		adjustment: { previousModel: "test/small", previousEffort: 2, direction: "up" },
 	});
 	expect(f.routes[0].model).toBeUndefined();
-	const down = await modelHandlers.neta_model(f.context, { agentId: "cOvE", change: "down" });
+	const down = await modelHandlers.change_model(f.context, { agentId: "cOvE", change: "down" });
 	expect(down.ok).toBe(true);
 	expect(f.agent().model).toBe("test/small");
 	expect(f.agent().routing?.effort).toBe(2);
@@ -161,6 +160,34 @@ test("queued workers change their saved selection without starting a session", a
 		model: "test/max",
 		routing: { effort: 5 },
 	});
+	expect(f.applied).toEqual([]);
+});
+
+test("a leader's exact model and thinking level override routing in the same conversation", async () => {
+	const f = fixture();
+	const result = await modelHandlers.change_model(f.context, { missionId: 4, model: "test/large", variant: "medium" });
+	expect(result).toMatchObject({ ok: true, data: { model: "test/large", variant: "medium", changed: true } });
+	expect(f.agent()).toMatchObject({ sessionId: "same-session", model: "test/large", variant: "medium" });
+	expect(f.agent().routing).toMatchObject({
+		effort: 2,
+		method: "explicit",
+		selectedModel: "test/large",
+		selectedVariant: "medium",
+	});
+	expect(f.routes[0]).toMatchObject({ model: "test/large", variant: "medium" });
+	expect(f.applied).toEqual([{ session: "same-session", model: "test/large", variant: "medium" }]);
+	expect(f.events[0]?.data).toMatchObject({ method: "explicit", variant: "medium" });
+	await expect(f.adjust("cove", { model: "test/small", variant: "ultra" })).rejects.toThrow("unavailable");
+	expect(f.agent().model).toBe("test/large");
+	expect(f.applied).toHaveLength(1);
+});
+
+test("an exact model and thinking level persist for a queued worker", async () => {
+	const f = fixture();
+	f.patch({ state: "queued" });
+	const result = await f.adjust("cove", { model: "test/medium", variant: "high" });
+	expect(result).toMatchObject({ applies: "on launch", variant: "high" });
+	expect(f.agent()).toMatchObject({ state: "queued", model: "test/medium", variant: "high" });
 	expect(f.applied).toEqual([]);
 });
 
@@ -199,13 +226,13 @@ test("routing and provider failures preserve the previous effort, model and sess
 
 test("relative adjustments serialize, preserving concurrent completion updates", async () => {
 	const f = fixture();
-	f.controls.duringApply = () => f.patch({ state: "completed", outcome: "Read complete" });
+	f.controls.duringApply = () => f.patch({ state: "idle", endedAt: "2026-09-27T00:00:00Z" });
 	await Promise.all([f.adjust("cove", { change: "up" }), f.adjust("cove", { change: "up" })]);
 	expect(f.routes.map((route) => route.effort)).toEqual([3, 4]);
 	expect(f.agent()).toMatchObject({
 		sessionId: "same-session",
-		state: "completed",
-		outcome: "Read complete",
+		state: "idle",
+		endedAt: "2026-09-27T00:00:00Z",
 		model: "test/large",
 		routing: { effort: 4 },
 	});
@@ -243,14 +270,33 @@ test("mission leads can adjust themselves but cannot cross mission or workspace 
 		missionId: "mission",
 		sessionId: "same-session",
 	};
-	expect((await modelHandlers.neta_model(f.context, { change: "up" })).ok).toBe(true);
+	expect((await modelHandlers.change_model(f.context, { change: "up" })).ok).toBe(true);
 	f.context.actor = { ...f.context.actor, missionId: "other-mission" };
-	expect((await modelHandlers.neta_model(f.context, { missionId: 4, change: "down" })).ok).toBe(false);
+	expect((await modelHandlers.change_model(f.context, { missionId: 4, change: "down" })).ok).toBe(false);
 	f.context.actor = { ...f.context.actor, kind: "agent" };
-	expect((await modelHandlers.neta_model(f.context, { agentId: "cove", effort: 4 })).ok).toBe(false);
+	expect((await modelHandlers.change_model(f.context, { agentId: "cove", effort: 4 })).ok).toBe(false);
 	f.context.actor = { kind: "leader", workspaceId: "other-workspace", sessionId: "other-session" };
-	expect((await modelHandlers.neta_model(f.context, { agentId: "cove", effort: 4 })).ok).toBe(false);
+	expect((await modelHandlers.change_model(f.context, { agentId: "cove", effort: 4 })).ok).toBe(false);
 	expect(f.routes).toHaveLength(1);
+});
+
+test("a mission lead can set a subordinate's exact model and thinking level", async () => {
+	const f = fixture();
+	f.mission.lead = { kind: "agent", agentId: "lead" };
+	f.context.actor = {
+		kind: "lead",
+		agentId: "lead",
+		workspaceId: "workspace",
+		missionId: "mission",
+		sessionId: "lead-session",
+	};
+	const result = await modelHandlers.change_model(f.context, {
+		agentId: "cove",
+		model: "test/large",
+		variant: "medium",
+	});
+	expect(result).toMatchObject({ ok: true, data: { model: "test/large", variant: "medium" } });
+	expect(f.agent()).toMatchObject({ model: "test/large", variant: "medium", sessionId: "same-session" });
 });
 
 test("a worker can adjust itself on request but cannot target its lead or peers", async () => {
@@ -265,9 +311,9 @@ test("a worker can adjust itself on request but cannot target its lead or peers"
 		sessionId: "same-session",
 	};
 	for (const target of [{ agentId: "mission-lead" }, { agentId: "peer" }, { missionId: 4 }])
-		expect((await modelHandlers.neta_model(f.context, { ...target, change: "up" })).ok).toBe(false);
+		expect((await modelHandlers.change_model(f.context, { ...target, change: "up" })).ok).toBe(false);
 	expect(f.routes).toEqual([]);
-	expect((await modelHandlers.neta_model(f.context, { change: "up" })).ok).toBe(true);
+	expect((await modelHandlers.change_model(f.context, { change: "up" })).ok).toBe(true);
 	expect(f.agent()).toMatchObject({ sessionId: "same-session", model: "test/medium", routing: { effort: 3 } });
 	expect(f.mission.lead).toEqual({ kind: "agent", agentId: "mission-lead" });
 });

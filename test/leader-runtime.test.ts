@@ -11,9 +11,6 @@ function fixture() {
 		sessionId: "session",
 		provider: "fake",
 		model: "test-model",
-		mode: "lead",
-		modeSince: at,
-		modeActiveMs: 0,
 		state: "idle",
 	};
 	const changed: Leader[] = [];

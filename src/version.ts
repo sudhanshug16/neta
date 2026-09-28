@@ -9,7 +9,7 @@
 // so it works both from `src/` and from the bundled `dist/main.js`.
 // Anywhere else it reports `"0.0.0-dev"` instead of throwing.
 import { createHash } from "node:crypto";
-import { readFileSync, readdirSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -59,7 +59,10 @@ const runtimeBuild = (() => {
 	const hash = createHash("sha256");
 	if (file.endsWith(".ts")) {
 		const root = dirname(file);
-		for (const relative of readdirSync(root, { recursive: true }).filter((name) => /\.(ts|md|json)$/.test(String(name))).map(String).sort()) {
+		for (const relative of readdirSync(root, { recursive: true })
+			.filter((name) => /\.(ts|md|json)$/.test(String(name)))
+			.map(String)
+			.sort()) {
 			hash.update(relative);
 			hash.update(readFileSync(join(root, relative)));
 		}

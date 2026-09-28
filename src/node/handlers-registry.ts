@@ -1,8 +1,4 @@
-// Registry handlers: paging over history and the small mutations. Every
-// handler parses with `parseParams`, so bad params always give -32602.
-// Mutations append one event and broadcast one `state`, and nothing else.
-import { nowIso } from "../core/time.ts";
-import type { LeaderMode, Mission, MissionState } from "../core/types.ts";
+import type { Mission, MissionState } from "../core/types.ts";
 import { NodeError } from "./protocol.ts";
 import type { NodeHandlers } from "./server.ts";
 
@@ -71,14 +67,7 @@ export function parseParams<T extends Record<string, unknown>>(
 	return out;
 }
 
-const MISSION_STATES: readonly MissionState[] = [
-	"running",
-	"blocked",
-	"failed",
-	"readyToClose",
-	"mergedNotClosed",
-	"closed",
-];
+const MISSION_STATES: readonly MissionState[] = ["open", "closed"];
 
 function asLimit(value: number | undefined, fallback: number, name: string): number {
 	const limit = value ?? fallback;
@@ -190,23 +179,6 @@ export const registryHandlers: NodeHandlers = {
 			: { events: page.events, nextCursor: page.nextCursor };
 	},
 
-	"mission.pin": async (ctx, params) => {
-		const parsed = parseParams({ missionId: asString, pinned: asBoolean }, params);
-		const mission = ctx.store.getMission(parsed.missionId);
-		if (mission === undefined) {
-			throw new NodeError("NOT_FOUND", `no such mission: ${parsed.missionId}`);
-		}
-		// Pinning changes no Mission field: the event is the whole mutation.
-		const event = await ctx.store.appendEvent({
-			workspaceId: mission.workspaceId,
-			kind: "user.pinned",
-			missionId: mission.id,
-			data: { pinned: parsed.pinned },
-		});
-		ctx.hub.broadcast("event", { event });
-		return { missionId: mission.id, pinned: parsed.pinned };
-	},
-
 	"agent.archive": async (ctx, params) => {
 		const parsed = parseParams({ agentId: asString, confirm: asOptionalBoolean }, params);
 		const agent = ctx.store.getAgent(parsed.agentId);
@@ -229,29 +201,6 @@ export const registryHandlers: NodeHandlers = {
 		});
 		ctx.hub.broadcast("state", { kind: "agent", record: archived });
 		return { agent: archived };
-	},
-
-	"leader.setMode": async (ctx, params) => {
-		const parsed = parseParams({ workspaceId: asString, mode: asString, missionId: asOptionalString }, params);
-		const mode = parsed.mode as LeaderMode;
-		if (mode !== "lead" && mode !== "leadPlus") {
-			throw new NodeError("INVALID_PARAMS", "leader.setMode mode is lead or leadPlus");
-		}
-		const leader = ctx.store.getLeader(parsed.workspaceId);
-		if (leader === undefined) {
-			throw new NodeError("NOT_FOUND", `no leader for workspace: ${parsed.workspaceId}`);
-		}
-		// The stub-store body: a real Node mounts the tools, and `toolMount`
-		// overrides this method with 07's `ModeService.setMode`, which starts
-		// the Lead++ clock and honours `missionId` by moving that mission's
-		// lead instead of the workspace leader. Without the mount there is no
-		// mode service, so the mode is recorded and announced and nothing
-		// counts.
-		const updated = { ...leader, mode, modeSince: nowIso() };
-		await ctx.store.putLeader(updated);
-		await ctx.store.appendEvent({ workspaceId: leader.workspaceId, kind: "leader.modeChanged", data: { mode } });
-		ctx.hub.broadcast("state", { kind: "leader", record: updated });
-		return { leader: updated };
 	},
 
 	"runtime.upgrade.prepare": async (ctx, params) => {

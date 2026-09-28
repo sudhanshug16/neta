@@ -17,7 +17,7 @@ function cwdFor(ctx: NodeContext, sessionId: string): string {
 	}
 	const agent = ctx.store.listAgents().find((item) => item.sessionId === sessionId && item.provider === "pi");
 	if (agent !== undefined) {
-		if (agent.state === "completed" || agent.state === "archived") {
+		if (agent.state === "idle" || agent.state === "archived") {
 			throw new NodeError("NOT_FOUND", `Pi agent session is closed: ${sessionId}`);
 		}
 		const mission = ctx.store.getMission(agent.missionId);

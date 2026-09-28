@@ -1,3 +1,5 @@
+> Historical plan. Superseded by [the current tools and communication contract](tools-and-communication.md). This document is not an active implementation requirement.
+
 # Plan consistency review
 
 Edits across `docs/plan/`, by class. Appendices untouched.

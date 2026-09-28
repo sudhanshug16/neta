@@ -9,3 +9,5 @@ dist/
 .cache/
 target/
 vendor/opencode/runtime/
+vendor/opencode/.neta-opencode-*/
+__pycache__/

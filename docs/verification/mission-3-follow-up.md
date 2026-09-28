@@ -46,7 +46,7 @@ The remaining exact failures are:
 14. `concurrent attaches start one process and only the latest connection owns input` — `posix_spawnp failed`.
 15. `closing one Pi session rejects stale input without affecting another` — `posix_spawnp failed`.
 16. `Claude discovery augments rather than replaces an explicit bridge configuration` — `posix_spawnp failed`.
-17. `session tool wiring and end-to-end mission creation` — unexpected `neta_model` tool.
+17. `session tool wiring and end-to-end mission creation` — unexpected `change_model` tool.
 18. `prototypes/tui-framework-evaluation/opentui/smoke.test.ts` — `@opentui/core` cannot resolve (the suite's one module-resolution error).
 
 Raw logs are retained outside the repository at:

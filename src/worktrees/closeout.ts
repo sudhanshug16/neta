@@ -11,6 +11,7 @@ import type { IntegrationResult, isIntegrated } from "./integration.ts";
 import { BASE_LEASE, type LeaseManager } from "./leases.ts";
 
 export interface CloseMissionInput {
+	writerSessionId?: string;
 	mission: Mission;
 	disposition: Disposition;
 	reason: string;
@@ -50,7 +51,9 @@ export async function closeMission(i: CloseMissionInput, d: CloseoutDeps): Promi
 	// BASE_LEASE first, so two closeouts never merge concurrently. The holder
 	// is the mission id: a closeout owner marker, not an agent. Freed on
 	// every exit path below.
-	if ((await d.leases.acquire(w, i.mission.id, BASE_LEASE)) !== "active") {
+	const ownsBase = i.writerSessionId !== undefined && (await d.leases.holder(w, BASE_LEASE)) === i.writerSessionId;
+	if (!ownsBase && (await d.leases.acquire(w, i.mission.id, BASE_LEASE)) !== "active") {
+		await d.leases.release(w, i.mission.id);
 		return refuse(i.mission, "another closeout is integrating");
 	}
 	try {

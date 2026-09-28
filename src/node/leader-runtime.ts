@@ -2,7 +2,7 @@ import type { Leader } from "../core/types.ts";
 import type { TurnNotification } from "./protocol.ts";
 import type { NodeStore } from "./server.ts";
 
-/** Workspace leaders consume the same turn events as mission agents. */
+/** Coordinators consume the same turn events as mission agents. */
 export async function recordLeaderRuntime(
 	input: TurnNotification,
 	ports: {

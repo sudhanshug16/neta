@@ -1,5 +1,5 @@
 import { nowIso } from "../core/time.ts";
-import type { Agent, Leader, Mission } from "../core/types.ts";
+import type { Agent, Mission } from "../core/types.ts";
 import type { CloseMissionInput, CloseOutcome } from "../tools/handlers/lifecycle.ts";
 import { NodeError } from "./protocol.ts";
 import type { NodeContext } from "./server.ts";
@@ -7,22 +7,20 @@ import type { NodeContext } from "./server.ts";
 export interface WorkspaceResetPorts {
 	save(mission: Mission): Promise<void>;
 	release(workspaceId: string, holder: string): Promise<void>;
-	// The authoritative mission-close pipeline (closeout locks, mode handling
+	// The authoritative mission-close pipeline (closeout locks
 	// and teardown included). Reset never removes a worktree itself.
 	close(input: CloseMissionInput): Promise<CloseOutcome>;
 }
 
 // A mission is active when its stored agents are queued, starting or running,
-// when the workspace leader still holds it as its Lead++ mission, or when a
+// or when a
 // runtime turn is executing on one of its sessions even though the stored
 // record already reads idle. Snapshotted before reset stops anything.
 function missionIsActive(
 	agents: Agent[],
 	mission: Mission,
-	leader: Leader | undefined,
 	isTurnActive: ((sessionId: string) => boolean) | undefined,
 ): boolean {
-	if (leader?.activeMissionId === mission.id) return true;
 	return agents.some((agent) => {
 		if (agent.missionId !== mission.id) return false;
 		if (["queued", "starting", "running"].includes(agent.state)) return true;
@@ -38,7 +36,7 @@ export async function archiveWorkspace(
 ): Promise<void> {
 	const leader = ctx.store.getLeader(workspaceId);
 	const workspace = ctx.store.getWorkspace(workspaceId);
-	if (!leader || !workspace) throw new NodeError("NOT_FOUND", "workspace leader not found");
+	if (!leader || !workspace) throw new NodeError("NOT_FOUND", "coordinator not found");
 	const root = workspace.roots.find((item) => item.machineId === leader.machineId)?.path;
 	if (!root) throw new NodeError("NOT_FOUND", "workspace path not found");
 	const missions = ctx.store.listMissions(workspaceId);
@@ -47,15 +45,13 @@ export async function archiveWorkspace(
 		ctx.runtime.isTurnActive === undefined
 			? undefined
 			: (sessionId: string) => ctx.runtime.isTurnActive?.(sessionId) === true;
-	const wasActive = new Map(
-		missions.map((mission) => [mission.id, missionIsActive(agents, mission, leader, isTurnActive)]),
-	);
+	const wasActive = new Map(missions.map((mission) => [mission.id, missionIsActive(agents, mission, isTurnActive)]));
 	// Quiesce in strict phases. First stop every session and archive every
 	// agent with NO lease released: releasing the first writer while a second
 	// is still queued would promote (start) it mid-reset. Only once nothing
 	// remains queued are the agent leases released, which makes promotion a
 	// no-op. (Admission of new work is already blocked by the caller, which
-	// clears this workspace's pending closes, modes and releases and rejects
+	// clears this workspace's pending releases and rejects
 	// new mission/agent/model calls while resetting.)
 	if (ctx.runtime.isTurnActive?.(leader.sessionId)) await ctx.runtime.cancel(leader.sessionId);
 	const quiesced: Agent[] = [];
@@ -123,19 +119,15 @@ export async function archiveWorkspace(
 		cwd: root,
 		provider: leader.provider,
 		model: leader.model,
-		access: "readOnly",
+		access: "readWrite",
 		unsandboxed: true,
 		netaTools: true,
 		forceRelaunch: true,
 		allowFresh: true,
 	});
-	const { activeMissionId: _active, ...rest } = leader;
 	const updated = {
-		...rest,
+		...leader,
 		sessionId: fresh.sessionId,
-		mode: "lead" as const,
-		modeSince: nowIso(),
-		modeActiveMs: 0,
 		state: "idle" as const,
 	};
 	await ctx.store.putLeader(updated);

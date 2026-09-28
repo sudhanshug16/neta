@@ -1,5 +1,5 @@
-import { netaBuildId } from "../version.ts";
 import { spawn } from "node:child_process";
+import { netaBuildId } from "../version.ts";
 import { openCodeInvocation } from "./runtime.ts";
 
 /** OpenTUI is a client of the Node-owned OpenCode session, never its owner. */

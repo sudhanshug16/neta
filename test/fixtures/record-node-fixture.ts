@@ -140,11 +140,11 @@ interface MissionSpec {
 }
 
 const SPECS: MissionSpec[] = [
-	{ state: "running", createdHoursAgo: 50, agents: ["running", "running"] },
-	{ state: "blocked", createdHoursAgo: 5, attention: "Which API should the widget use?", agents: ["blocked"] },
-	{ state: "readyToClose", createdHoursAgo: 30, agents: ["completed"] },
-	{ state: "mergedNotClosed", createdHoursAgo: 40, merged: true, agents: ["running"] },
-	{ state: "failed", createdHoursAgo: 20, attention: "Provider quota exhausted, retry?", agents: ["failed"] },
+	{ state: "open", createdHoursAgo: 50, agents: ["running", "running"] },
+	{ state: "open", createdHoursAgo: 5, attention: "Which API should the widget use?", agents: ["idle"] },
+	{ state: "open", createdHoursAgo: 30, agents: ["idle"] },
+	{ state: "open", createdHoursAgo: 40, merged: true, agents: ["running"] },
+	{ state: "open", createdHoursAgo: 20, attention: "Provider quota exhausted, retry?", agents: ["failed"] },
 	{
 		state: "closed",
 		createdHoursAgo: 60,
@@ -152,32 +152,32 @@ const SPECS: MissionSpec[] = [
 		disposition: "merged",
 		closeReason: "merged",
 		merged: true,
-		agents: ["completed", "completed"],
+		agents: ["idle", "idle"],
 	},
 	{
-		state: "running",
+		state: "open",
 		createdHoursAgo: 10,
 		agents: [
-			"completed",
-			"completed",
-			"completed",
-			"completed",
-			"completed",
-			"completed",
-			"completed",
-			"completed",
-			"completed",
-			"completed",
-			"completed",
-			"completed",
+			"idle",
+			"idle",
+			"idle",
+			"idle",
+			"idle",
+			"idle",
+			"idle",
+			"idle",
+			"idle",
+			"idle",
+			"idle",
+			"idle",
 			"running",
 		],
 	},
-	{ state: "running", createdHoursAgo: 55, agents: ["running"] },
-	{ state: "blocked", createdHoursAgo: 8, attention: "Waiting on design review.", agents: ["blocked"] },
-	{ state: "failed", createdHoursAgo: 25, agents: ["failed"] },
-	{ state: "readyToClose", createdHoursAgo: 35, agents: ["completed"] },
-	{ state: "mergedNotClosed", createdHoursAgo: 45, merged: true, agents: ["running"] },
+	{ state: "open", createdHoursAgo: 55, agents: ["running"] },
+	{ state: "open", createdHoursAgo: 8, attention: "Waiting on design review.", agents: ["idle"] },
+	{ state: "open", createdHoursAgo: 25, agents: ["failed"] },
+	{ state: "open", createdHoursAgo: 35, agents: ["idle"] },
+	{ state: "open", createdHoursAgo: 45, merged: true, agents: ["running"] },
 	{
 		state: "closed",
 		createdHoursAgo: 70,
@@ -197,14 +197,7 @@ const SPECS: MissionSpec[] = [
 	},
 ];
 
-const STATE_EVENTS: Record<Mission["state"], EventKind | undefined> = {
-	running: undefined,
-	blocked: "mission.blocked",
-	failed: "mission.failed",
-	readyToClose: "mission.readyToClose",
-	mergedNotClosed: "mission.merged",
-	closed: "mission.closed",
-};
+const STATE_EVENTS: Record<Mission["state"], EventKind | undefined> = { open: undefined, closed: "mission.closed" };
 
 async function drive(real: Store, port: AdaptedStore, workspaceId: string): Promise<void> {
 	const taken = new Set<string>();
@@ -218,7 +211,6 @@ async function drive(real: Store, port: AdaptedStore, workspaceId: string): Prom
 			machineId: MACHINE_ID,
 			name: `mission ${number}`,
 			objective: `Objective ${number}.`,
-			changes: [],
 			lead: { kind: "leader" },
 			agentIds: [],
 			access: "readOnly",
@@ -252,23 +244,39 @@ async function drive(real: Store, port: AdaptedStore, workspaceId: string): Prom
 				model: "test-model",
 				skills: [],
 				sessionId: ulid(),
-				canSpawn: false,
+				canSpawn: index === 0,
 				state,
 				startedAt,
-				...(state === "completed" || state === "failed"
+				...(state === "idle" || state === "failed"
 					? {
 							endedAt: iso(-spec.createdHoursAgo * HOUR + (2 + index) * HOUR),
-							outcome:
-								state === "completed" ? "Done: the objective is met." : "Failed: provider quota exhausted.",
+							...(state === "failed" ? { runtimeError: "Provider quota exhausted" } : {}),
 						}
 					: {}),
 			};
 		});
+		if (!agents.length)
+			agents.push({
+				id: ulid(),
+				missionId: mission.id,
+				workspaceId,
+				name: pickName(taken, mission.id),
+				task: "Historical mission lead",
+				access: "readOnly",
+				provider: "fake",
+				model: "test-model",
+				skills: [],
+				sessionId: ulid(),
+				canSpawn: true,
+				state: "idle",
+				startedAt: mission.createdAt,
+			});
+		mission.lead = { kind: "agent", agentId: agents[0].id };
 		mission.agentIds = agents.map((agent) => agent.id);
-		await real.missions.create(mission);
 		for (const agent of agents) {
 			await port.putAgent(agent);
 		}
+		await real.missions.create(mission);
 		await port.appendEvent({ workspaceId, kind: "mission.created", missionId: mission.id, data: {} });
 		for (const agent of agents) {
 			await port.appendEvent({
@@ -278,10 +286,10 @@ async function drive(real: Store, port: AdaptedStore, workspaceId: string): Prom
 				agentId: agent.id,
 				data: {},
 			});
-			if (agent.state === "completed" || agent.state === "failed") {
+			if (agent.state === "failed") {
 				await port.appendEvent({
 					workspaceId,
-					kind: "agent.finished",
+					kind: "mission.failed",
 					missionId: mission.id,
 					agentId: agent.id,
 					data: {},

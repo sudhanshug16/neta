@@ -2,6 +2,7 @@ export interface ModelOption {
 	id: string;
 	name: string;
 	description?: string;
+	variants?: string[];
 }
 
 // Which wire shape the provider speaks.

@@ -38,10 +38,6 @@ function leader(id: string): Leader {
 		sessionId: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
 		provider: "claude",
 		model: "sonnet",
-		mode: "leadPlus",
-		modeSince: "2026-09-03T17:00:00.000Z",
-		modeActiveMs: 74000,
-		activeMissionId: "01ARZ3NDEKTSV4RRFFQ69G5FAW",
 		state: "running",
 	};
 }
@@ -92,7 +88,5 @@ describe("leader store", () => {
 		await store.save(leader(id));
 		const back = await store.load(id, () => leader("other"));
 		expect(back).toEqual(leader(id));
-		expect(back.modeActiveMs).toBe(74000);
-		expect(back.activeMissionId).toBe("01ARZ3NDEKTSV4RRFFQ69G5FAW");
 	});
 });

@@ -32,9 +32,6 @@ function fixture(canSpawn = true) {
 		sessionId: "workspace-session",
 		provider: "opencode",
 		model: "astra",
-		mode: "lead",
-		modeSince: at,
-		modeActiveMs: 0,
 		state: "idle",
 	};
 	const mission: Mission = {
@@ -44,11 +41,10 @@ function fixture(canSpawn = true) {
 		machineId: "host",
 		name: "Review",
 		objective: "inspect",
-		changes: [],
 		lead: { kind: "agent", agentId: canSpawn ? "child" : "lead" },
 		agentIds: [...agents.keys()],
 		access: "readOnly",
-		state: "running",
+		state: "open",
 		createdAt: at,
 	};
 	const sent: Array<{ id: string; text: string }> = [];
@@ -88,32 +84,25 @@ function fixture(canSpawn = true) {
 	};
 	const end = {
 		sessionId: agent.sessionId,
-		turn: { id: "turn", sessionId: agent.sessionId, role: "user" as const, startedAt: at, endedAt: at },
+		turn: {
+			id: "turn",
+			sessionId: agent.sessionId,
+			role: "user" as const,
+			startedAt: at,
+			endedAt: at,
+			finalReply: "Branch needs one fix.",
+		},
 	};
 	return { agents, mission, sent, ports, end, reports, results };
 }
-
-test("mission leader stopping without neta_done wakes workspace leader with actual model and report", async () => {
-	const f = fixture();
-	await reportAgentRuntime({ sessionId: "child-session", model: "google/gemini-flash" }, f.ports);
-	await reportAgentRuntime(f.end, f.ports);
-	expect(f.agents.get("child")?.model).toBe("google/gemini-flash");
-	expect(f.agents.get("child")?.state).toBe("idle");
-	expect(f.sent[0]?.text).toContain("State: idle");
-	expect(f.sent[0]?.id).toBe("workspace-session");
-	expect(f.sent[0]?.text).toContain("google/gemini-flash");
-	expect(f.sent[0]?.text).toContain("Branch needs one fix.");
-	await reportAgentRuntime(f.end, f.ports);
-	expect(f.sent).toHaveLength(1);
-});
-test("worker stops report to mission leader, including cancellation and explicit done", async () => {
+test("worker stops report to mission leader, including cancellation", async () => {
 	const f = fixture(false);
 	const child = f.agents.get("child");
 	if (!child) throw new Error("Missing fixture child");
-	f.agents.set("child", { ...child, state: "completed", outcome: "Finished inspection" });
+	f.agents.set("child", { ...child, state: "idle" });
 	await reportAgentRuntime({ ...f.end, turn: { ...f.end.turn, cancelled: true } }, f.ports);
 	expect(f.sent[0]?.id).toBe("lead-session");
-	expect(f.sent[0]?.text).toContain("Finished inspection");
+	expect(f.sent[0]?.text).toContain("Branch needs one fix.");
 	expect(f.sent[0]?.text).toContain("Turn interrupted.");
 });
 
@@ -157,11 +146,11 @@ test("an idle mission lead cannot hide missing workers behind its final prose", 
 			at: f.end.turn.endedAt,
 		},
 	];
+	f.end.turn.finalReply = "The worker is still running.";
 	await reportAgentRuntime(f.end, f.ports);
 	expect(f.sent[0]?.text).toContain("0 other agents executing, 0 queued");
 	expect(f.sent[0]?.text).toContain("No other agents exist in this mission");
-	expect(f.sent[0]?.text).toContain("idle with unfinished work");
-	expect(f.sent[0]?.text).toContain("Agent-reported result");
+	expect(f.sent[0]?.text).toContain("Final reply");
 	expect(f.sent[0]?.text).toContain("The worker is still running.");
 });
 
@@ -267,14 +256,14 @@ test("a continued agent cannot report a previous turn's completion as its new re
 	const f = fixture();
 	const agent = f.agents.get("child");
 	if (!agent) throw new Error("Missing fixture child");
-	f.agents.set(agent.id, { ...agent, state: "completed", outcome: "Old result" });
+	f.agents.set(agent.id, { ...agent, state: "idle" });
 	await reportAgentRuntime({ ...f.end, turn: { ...f.end.turn, endedAt: undefined } }, f.ports);
 	await reportAgentRuntime(f.end, f.ports);
 	expect(f.sent[0]?.text).toContain("Branch needs one fix.");
 	expect(f.sent[0]?.text).not.toContain("Old result");
 });
 
-test("execution errors remain failures and notify the parent without an explicit done tool", async () => {
+test("execution errors remain failures and notify the parent without a reporting tool", async () => {
 	const f = fixture(false);
 	await reportAgentRuntime({ ...f.end, turn: { ...f.end.turn, failed: true } }, f.ports);
 	expect(f.agents.get("child")?.state).toBe("failed");
@@ -282,19 +271,15 @@ test("execution errors remain failures and notify the parent without an explicit
 	expect(f.sent[0]?.text).toContain("State: failed");
 });
 
-test.each([true, false])("only resuming the mission lead clears blocked state (lead: %s)", async (isLead) => {
-	const f = fixture(isLead);
-	f.mission.state = "blocked";
-	const resumed: Mission[] = [];
-	await reportAgentRuntime(
-		{ ...f.end, turn: { ...f.end.turn, endedAt: undefined } },
-		{
-			...f.ports,
-			resumed: async (mission) => {
-				resumed.push(mission);
-			},
-		},
-	);
-	expect(resumed).toHaveLength(isLead ? 1 : 0);
-	if (isLead) expect(resumed[0]?.state).toBe("running");
+test("a question leaves the active turn running and waits only after that turn ends", async () => {
+	const f = fixture();
+	await reportAgentRuntime({ ...f.end, turn: { ...f.end.turn, endedAt: undefined } }, f.ports);
+	const active = f.agents.get("child");
+	if (!active) throw new Error("missing agent");
+	f.end.turn.finalReply = "Which option?";
+	expect(f.agents.get("child")?.state).toBe("running");
+	await reportAgentRuntime(f.end, f.ports);
+	expect(f.agents.get("child")?.state).toBe("idle");
+	expect(f.agents.get("child")?.currentTurnId).toBeUndefined();
+	expect(f.agents.get("child")?.endedAt).toBe(f.end.turn.endedAt);
 });

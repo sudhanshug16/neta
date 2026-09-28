@@ -1,3 +1,5 @@
+> Historical plan. Superseded by [the current tools and communication contract](tools-and-communication.md). This document is not an active implementation requirement.
+
 # 00 — Reset
 
 Retire the v2 tree and scaffold v3. T0.1 and T0.2 are destructive; the

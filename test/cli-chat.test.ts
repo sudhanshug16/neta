@@ -1,4 +1,4 @@
-// T8.4: the terminal chat attaches to the workspace leader's conversation.
+// T8.4: the terminal chat attaches to the coordinator's conversation.
 // `renderBlock` is pinned per BlockKind in TTY and non-TTY mode; the rest
 // drives the built bundle against a temp `NETA_DIR` (the T8.2 harness): a
 // piped prompt reaches the fake agent and its reply streams to stdout, a

@@ -1,3 +1,5 @@
+> Historical plan. Superseded by [the current tools and communication contract](tools-and-communication.md). This document is not an active implementation requirement.
+
 # Neta reliability plan
 
 Neta should retain its machine-local Node, native OpenCode execution, mission hierarchy, and file-backed records. The immediate investment is reliable ownership, delivery, and recovery. Omnigent supplies useful mechanisms and failure tests; adopting its broader multi-harness deployment architecture is unnecessary.
@@ -159,9 +161,9 @@ Move Neta-only injection/reminder code into a dedicated module with narrow regis
 
 **Operator decision.** Remove `neta_wait`; do not introduce a cursor-based replacement. The original assessment found that polling returned the same settled actor repeatedly. Durable results and automatic parent wake now replace that workflow.
 
-**Change.** Remove the tool name, schema, handler, Node adapter, generated tool lists, and active prompt instructions. Leaders should end their turn when delegated work is outstanding and continue when the runtime delivers results. `neta_status` remains an explicit status query, not a polling loop. Parent receipt never means the child assignment or mission is complete.
+**Change.** Remove the tool name, schema, handler, Node adapter, generated tool lists, and active prompt instructions. Leaders should end their turn when delegated work is outstanding and continue when the runtime delivers results. `mission_state` remains an explicit status query, not a polling loop. Parent receipt never means the child assignment or mission is complete.
 
-Expose concise delivery states in the existing spine and `/delivery`: result queued, received by parent inbox, delivery uncertain, and parent unavailable. The dialog opens the child or parent conversation and retries only pending outbox records. An uncertain provider prompt is never automatically resent. Include delivery failures in the attention filter, and show requested versus actual worker model. No second result queue or inbox-reading tool is needed.
+Expose concise delivery states in `/delivery`: result queued, received by parent inbox, delivery uncertain, and parent unavailable. Keep them out of the spine. The dialog opens the child or parent conversation and retries only pending outbox records. An uncertain provider prompt is never automatically resent. Include delivery failures in the attention filter, and show requested versus actual worker model. No second result queue or inbox-reading tool is needed.
 
 Diagnostics should retain classified cause, runtime instance, actor/session/turn IDs, instruction revision, requested/actual model, and permitted recovery action. Redact credentials and preserve the full-snapshot reconnect contract. Runtime messages retain their provenance rather than becoming human authorization.
 

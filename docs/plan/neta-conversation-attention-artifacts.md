@@ -1,4 +1,6 @@
-# Neta conversation, attention filter, and artifacts
+> Historical plan. Superseded by [the current tools and communication contract](tools-and-communication.md). This document is not an active implementation requirement.
+
+# Neta chat, filter, and artifacts
 
 Status: implementation in the local checkout, 2026-09-24. This records the
 requested product direction and acceptance contract. The role, filter,
@@ -12,18 +14,18 @@ The user talks to **Neta**, a native OpenCode conversation. Neta may answer from
 verified current state or send the user's instruction to the appropriate
 workspace leader. Neta does not create missions, hire agents, take writer
 authority, or grant permissions. The workspace leader owns work and creates
-missions; each mission lead owns its workers. A separate internal **attention
-filter** judges what information from the leader and its tree needs Neta's
+missions; each mission lead owns its workers. A separate internal **filter**
+judges what information from the leader and its tree needs Neta's
 attention. Neta Node owns durable transport, identity, evidence, and receipts.
 
 The existing name **Neta Node** continues to mean the machine service. The
-current user-facing **Superleader** becomes **Neta**. The filter is an internal
+former user-facing label **Neta** is **Neta**. The filter is an internal
 OpenCode session, not another user chat or another execution leader. The
 filter's model can judge relevance, combine related updates, and ask for bounded
 evidence. Node validation and delivery remain deterministic.
 
 The operator chose **one Neta conversation per workspace copy on a machine**.
-The attention filter also keeps separate session context and decisions for
+The filter also keeps separate session context and decisions for
 that workspace/machine pair. Every record carries both identities. Two copies
 of the same repository on different machines have distinct Neta chats,
 leaders, routes, notices, and artifacts. No cross-workspace or cross-machine
@@ -85,20 +87,19 @@ levels by reference unless an actor deliberately opens it.
    setup is captured even though no mission record or agent exists.
 3. **Classify incrementally.** On a meaningful source or a small batch of
    related sources, the filter receives bounded new evidence, current work
-   state, and a compact ledger of source IDs already presented by Neta. It
+   state, and a compact ledger of source references in notices already
+   presented through Neta. It
    chooses `surface`, `update`, `defer`, `resolve`, or `request_detail`, with
    source IDs, a concern key, a brief reason, and whether the user owes an
    answer. It cannot execute workspace tools, assign work, approve access, or
    treat a worker's text as the user's instruction.
 4. **Present through native chat.** A `surface` or `update` decision creates
-   one durable notice to Neta's OpenCode inbox. Neta reads the cited evidence,
-   writes the user-facing answer in its native chat, and can open referenced
-   artifacts. Neta declares the notice and source IDs it used with a
-   `neta_present` tool call bound to that native turn. The send carries the
-   stable notice ID so recovery can inspect the exact turn. Node records those
-   IDs only after the same turn commits with user-facing text. If the
-   declaration is missing, the notice remains pending and reconciliation
-   examines the saved turn before any retry. An uncertain committed send is
+   one durable update notice to Neta's native OpenCode session. Neta writes the
+   user-facing answer in its native chat and can open referenced artifacts.
+   Node ties the notice and its saved evidence to that native turn automatically.
+   The send carries a stable notice identity internally so recovery can inspect
+   the exact turn. Only a completed turn with user-facing text records a
+   presentation. An uncertain committed send is
    held for reconciliation rather than automatically repeated. The receipt
    points to the exact native message and stores its hash and a bounded digest
    of what Neta actually said, so the filter can distinguish an update from a
@@ -129,8 +130,8 @@ queue. Add bounded metadata records with these meanings:
 | Route | ID, exact user turn, workspace/machine, leader, derived text, admission and delivery receipts, linked work IDs, latest work state. `delivered` means transport only. |
 | Source | Stable ID and sequence, source kind, event/turn pointer, actor and parent, workspace/machine, route/mission IDs, session generation, short preview, artifact IDs, time. Source text is untrusted evidence. |
 | Filter decision | Source IDs, action, concern key, reason, priority, user question state, model/turn ID, decision time. The Node validates evidence and audience. |
-| Neta notice | Source IDs, pending/queued/committed/resolved status, native Neta turn and message IDs, message hash, bounded presentation digest, committed time. A UI read receipt, if available, is a separate fact. |
-| Artifact | Immutable ID, content hash, MIME type, byte size, title, producer actor/turn, workspace/machine/mission, audience, storage location, bounded preview, creation time. |
+| Update notice | Source IDs, pending/queued/committed/resolved status, native Neta turn and message IDs, message hash, bounded presentation digest, committed time. A UI read receipt, if available, is a separate fact. |
+| Artifact | Immutable ID, content hash, MIME type, byte size, title, producer actor/turn, workspace/machine/mission, storage location, bounded preview, creation time. |
 
 Use source IDs and receipts for deduplication. Do not deduplicate by paraphrased
 text. A route, leader acknowledgement, mission creation, lead result, and
@@ -150,25 +151,26 @@ requires a bound native leader turn. These are transport and execution facts,
 not claims about the model's understanding. A filter decision may cite either,
 but it cannot report completed work from `leaderReceived` alone.
 
-## `neta_artifacts` tool
+## `artifacts` tool
 
-Add an actor-scoped MCP tool with publish and inspect/open actions. A worker or
+Add a workspace-scoped MCP tool with publish and inspect/open actions. A worker or
 lead may publish an artifact to Neta Node, but publication alone does not
 expose it to the user or bypass the parent chain. The owner lead decides
 whether it is valid for the task; the filter decides when its reference should
 reach Neta. Neta may present it with a native file/link preview.
 
-- `publish({path, title, mimeType, audience})` copies a local file into private
+- `publish({path, title, mimeType})` copies a local file into private
   immutable storage and returns only `{id, hash, size, preview}`. This is the
   preferred path for tables: bytes never pass through model tool arguments.
-- `publish({text, title, mimeType, audience})` is allowed only for a small
+- `publish({text, title, mimeType})` is allowed only for a small
   bounded text payload. Support UTF-8 plain text, Markdown, CSV, and JSON
   first. Large content must use a file; binary formats need a separate
   renderer/preview contract before enablement.
 - Node resolves and checks the source path under the actor's assigned
   workspace/worktree, rejects symlink escapes and known secret/config paths,
   enforces type and byte caps, writes mode `0600`, and verifies the stored
-  hash. Reads check workspace, machine, actor, and audience. A reference from
+  hash. Every actor in the workspace copy can read it, including across missions.
+  Reads still check workspace and machine. A reference from
   an offline machine remains visible as unavailable, never an empty file.
 - A correction creates a new artifact ID linked to the old one. Existing
   evidence and displayed user messages keep their original version. Retention
@@ -186,9 +188,11 @@ artifact cannot claim mission completion.
 The filter chooses relevance, grouping, wording, and urgency. Node enforces
 these minimum guarantees:
 
-- Explicit user questions, unresolved blockers, startup/setup failures,
-  permission needs, uncertain execution, and terminal outcomes remain durable
-  until resolved or presented. They cannot disappear through `suppress`.
+- Capture explicit user questions, blockers, startup/setup failures, permission
+  records, uncertain execution, and terminal outcomes durably. The filter may
+  suppress stale or already handled records after reading their actual evidence;
+  source kinds alone do not force a chat update. An unanswered question or
+  required user decision remains visible until answered or resolved.
 - A route with no bound leader turn or work progress by its deadline creates
   an attention source. The source includes the actual leader/session state;
   delivery alone is never treated as progress. Slow active work uses its
@@ -237,7 +241,7 @@ these minimum guarantees:
 | User edits/cancels the request during execution | Append scope change/cancellation to the route; leader decides effect on work. Late outputs carry their original scope and cannot be reported as current without reconciliation. |
 | Direct answer without mission | Leader turn can yield a cited result; route still gets a terminal outcome separate from its first acknowledgement. |
 | Artifact large, duplicate, changed, missing, or malicious | Enforce caps/hash/access; same bytes may dedupe storage, but each publication retains provenance. A change is a new version. Missing bytes are a visible failure. |
-| Artifact contains instructions or sensitive content | Treat bytes as untrusted data, scan/preview conservatively, and require explicit audience before user exposure. No execution from an artifact. |
+| Artifact contains instructions or sensitive content | Treat bytes as untrusted data and scan/preview conservatively before user exposure. No execution from an artifact. |
 | Neta chat reset or context compaction | Durable ledgers remain. New session resumes pending notices and reads a bounded summary; no historical instruction replay. |
 | Model/Node outage or machine disconnect | Preserve sources and statuses; replay after recovery. Show machine offline, not completed or zero results. |
 | User reads leader chat but not Neta chat | Track chat presentation separately from any UI read receipt. Do not infer user read state from leader turn capture. |
@@ -261,8 +265,8 @@ files if a later instruction authorizes a commit.
    states. Test the mission #52 sequence and direct leader work.
 3. **Presentation ledger and wake.** On completed leader turns and attention
    events, reconcile the matching route immediately and enqueue one Neta
-   notice. Add `neta_present`; a committed Neta native turn with a bound
-   declaration writes the presentation receipt.
+   notice. A completed Neta native turn with a bound notice delivery writes the
+   presentation receipt automatically.
    Prove the native `sourceId` to persisted message/turn mapping under a crash
    before enabling automatic retries. Test busy sessions, uncertain sends,
    restart, duplicate notifications, reset, and late/stale turns. A first
@@ -273,7 +277,7 @@ files if a later instruction authorizes a commit.
    retry, and urgent fallback. Test model failure and invalid/suppressing
    decisions without paid model calls.
 5. **Artifact publication.** Add private immutable storage, actor-scoped
-   `neta_artifacts`, metadata/previews, version links, access checks, and a
+   `artifacts`, metadata/previews, version links, access checks, and a
    native presentation path. Test a worker CSV moving by reference through
    lead, leader, filter, and Neta; assert the full bytes enter no parent model
    context merely because the reference traveled upward. A parent or Neta can

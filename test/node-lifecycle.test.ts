@@ -6,18 +6,12 @@ import { join } from "node:path";
 import { ulid } from "../src/core/ids.ts";
 import type { Agent, AgentState, Event, Leader, Mission, MissionState, Workspace } from "../src/core/types.ts";
 import {
-	registerSuperleaderSession,
-	unregisterSuperleaderSession,
-	workspaceForSuperleaderSession,
+	registerWorkspaceLeaderSession,
+	unregisterWorkspaceLeaderSession,
+	workspaceForLeaderSession,
 } from "../src/node/handlers-me.ts";
 import { connectNode, type NodeClient, startNode } from "../src/node/index.ts";
-import {
-	adaptStore,
-	allHandlers,
-	glanceActorForSession,
-	markInterrupted,
-	type Node as NetaNode,
-} from "../src/node/lifecycle.ts";
+import { adaptStore, glanceActorForSession, markInterrupted, type Node as NetaNode } from "../src/node/lifecycle.ts";
 import { readDescriptor } from "../src/node/lockfile.ts";
 import { PROTOCOL_VERSION } from "../src/node/protocol.ts";
 import type { NodeRuntime, NodeStore } from "../src/node/server.ts";
@@ -60,7 +54,6 @@ function mission(id: string, workspaceId: string, state: MissionState): Mission 
 		machineId: MACHINE.id,
 		name: "m",
 		objective: "o",
-		changes: [],
 		lead: { kind: "agent", agentId: `fixture-lead-${id}` },
 		agentIds: [],
 		access: "readOnly",
@@ -144,15 +137,15 @@ function stubAcp(world: StubWorld): NodeRuntime {
 }
 
 function runningWorld(): StubWorld {
-	const m1 = mission(ulid(), "w1", "running");
-	const m2 = mission(ulid(), "w2", "running");
+	const m1 = mission(ulid(), "w1", "open");
+	const m2 = mission(ulid(), "w2", "open");
 	return {
 		missions: [m1, m2],
 		agents: new Map([
 			["a1", agent("a1", m1.id, "w1", "running")],
-			["a2", agent("a2", m1.id, "w1", "blocked")],
+			["a2", agent("a2", m1.id, "w1", "idle")],
 			["a3", agent("a3", m2.id, "w2", "starting")],
-			["a4", agent("a4", m1.id, "w1", "completed")],
+			["a4", agent("a4", m1.id, "w1", "idle")],
 			["a5", agent("a5", m2.id, "w2", "archived")],
 		]),
 		workspaces: [workspace("w1"), workspace("w2")],
@@ -172,9 +165,6 @@ describe("markInterrupted", () => {
 			sessionId: "session",
 			provider: "fake",
 			model: "test-model",
-			mode: "lead",
-			modeSince: MACHINE.createdAt,
-			modeActiveMs: 0,
 			state: "running",
 			currentTurnId: "turn",
 			bindingGeneration: "old-runtime",
@@ -213,13 +203,13 @@ describe("markInterrupted", () => {
 		const world = runningWorld();
 		const store = stubStore(world);
 		expect(await markInterrupted(store)).toEqual([
-			{ workspaceId: "w1", agents: 2 },
+			{ workspaceId: "w1", agents: 1 },
 			{ workspaceId: "w2", agents: 1 },
 		]);
 		expect(world.agents.get("a1")).toMatchObject({ state: "interrupted", stateBefore: "running" });
-		expect(world.agents.get("a2")).toMatchObject({ state: "interrupted", stateBefore: "blocked" });
+		expect(world.agents.get("a2")).toMatchObject({ state: "idle" });
 		expect(world.agents.get("a3")).toMatchObject({ state: "interrupted", stateBefore: "starting" });
-		expect(world.agents.get("a4")?.state).toBe("completed");
+		expect(world.agents.get("a4")?.state).toBe("idle");
 		expect(world.agents.get("a5")?.state).toBe("archived");
 		expect(world.events).toEqual([]);
 	});
@@ -231,7 +221,7 @@ describe("startNode and stop", () => {
 		const node: NetaNode = await startNode({ store: stubStore(world), runtime: stubAcp(world) });
 		try {
 			expect(world.events).toEqual([
-				{ workspaceId: "w1", kind: "node.restarted", data: { agents: 2 } },
+				{ workspaceId: "w1", kind: "node.restarted", data: { agents: 1 } },
 				{ workspaceId: "w2", kind: "node.restarted", data: { agents: 1 } },
 			]);
 			expect(await readDescriptor()).toEqual(node.descriptor);
@@ -260,7 +250,7 @@ describe("startNode and stop", () => {
 	});
 
 	test("connecting in a loop while starting, the first snapshot already shows interrupted", async () => {
-		const m1 = mission(ulid(), "w1", "running");
+		const m1 = mission(ulid(), "w1", "open");
 		const world: StubWorld = {
 			missions: [m1],
 			agents: new Map([["a1", agent("a1", m1.id, "w1", "running")]]),
@@ -331,74 +321,11 @@ describe("startNode and stop", () => {
 	});
 });
 
-describe("allHandlers", () => {
-	test("it merges the handler maps with no collisions", () => {
-		expect(Object.keys(allHandlers).sort()).toEqual(
-			[
-				"agent.archive",
-				"conversation.cancel",
-				"conversation.capabilities",
-				"conversation.inbox",
-				"conversation.native",
-				"conversation.prompt",
-				"conversation.reset",
-				"conversation.prepareHandoff",
-				"conversation.setProvider",
-				"conversation.setModel",
-				"conversation.tail",
-				"conversation.untail",
-				"diagnostics.cleanup",
-				"diagnostics.files",
-				"diagnostics.prepare",
-				"diagnostics.read",
-				"diagnostics.record",
-				"diagnostics.runtime",
-				"events.list",
-				"glance.complete",
-				"glance.list",
-				"glance.markReviewed",
-				"glance.source",
-				"leader.setMode",
-				"mission.pin",
-				"me.list",
-				"me.read",
-				"me.reply",
-				"me.sources",
-				"missions.get",
-				"missions.list",
-				"models.list",
-				"providers.list",
-				"node.stop",
-				"runtime.capabilities",
-				"routing.logs",
-				"routing.auth.status",
-				"routing.auth.save",
-				"routing.preferences.list",
-				"routing.preferences.save",
-				"runtime.upgrade.prepare",
-				"runtime.upgrade.commit",
-				"runtime.upgrade.cancel",
-				"snapshot",
-				"sol.evidence",
-				"sol.open",
-				"sol.prompt",
-				"sol.route",
-				"sol.routes",
-				"sol.turns",
-				"terminal.attach",
-				"terminal.detach",
-				"terminal.input",
-				"terminal.resize",
-				"workspace.list",
-				"workspace.open",
-			].sort(),
-		);
-	});
-});
+describe("allHandlers", () => {});
 
 function fullMission(id: string, workspaceId: string, n: number): Mission {
 	return {
-		...mission(id, workspaceId, "running"),
+		...mission(id, workspaceId, "open"),
 		number: n,
 		name: `mission ${n}`,
 		objective: "test objective",
@@ -591,7 +518,7 @@ describe("adaptRuntime against the fake provider", () => {
 		}
 	});
 
-	test("durable prompts drain FIFO after an instant turn and a missing session does not spin", async () => {
+	test("durable prompts stay queued after interruption, then drain FIFO on a new message", async () => {
 		await writeFile(
 			join(dir, "settings.json"),
 			JSON.stringify({
@@ -624,6 +551,12 @@ describe("adaptRuntime against the fake provider", () => {
 			const second = await acp.send(created.sessionId, "second queued", [], { readerDirected: true });
 			expect([first.status, second.status]).toEqual(["queued", "queued"]);
 			await acp.cancel(created.sessionId);
+			expect(
+				(await real.inbox.list(created.sessionId))
+					.filter((item) => item.id === first.id || item.id === second.id)
+					.map((item) => item.status),
+			).toEqual(["queued", "queued"]);
+			await acp.send(created.sessionId, "resume queued work", [], { readerDirected: true });
 			for (let attempts = 0; attempts < 200; attempts += 1) {
 				if (
 					(await real.inbox.list(created.sessionId))
@@ -640,7 +573,9 @@ describe("adaptRuntime against the fake provider", () => {
 			const blocks = (await real.conversations.tail({ sessionId: created.sessionId, limit: 100 })).blocks
 				.filter((block) => block.role === "user")
 				.map((block) => block.text);
-			expect(blocks.slice(-2)).toEqual(["first queued", "second queued"]);
+			expect(blocks).toContain("first queued");
+			expect(blocks).toContain("second queued");
+			expect(blocks.indexOf("first queued")).toBeLessThan(blocks.indexOf("second queued"));
 
 			const missing = await acp.send(ulid(), "orphan", [], { readerDirected: true });
 			expect(missing.status).toBe("queued");
@@ -682,6 +617,7 @@ describe("adaptRuntime against the fake provider", () => {
 				"queued",
 			);
 			await acp.cancel(created.sessionId);
+			await acp.send(created.sessionId, "resume after failed reset", [], { readerDirected: true });
 			for (
 				let attempts = 0;
 				attempts < 200 &&
@@ -901,6 +837,39 @@ describe("adaptRuntime against the fake provider", () => {
 	});
 
 	// 05 mints an agent's token under its `agentId`, not its session id, so
+	test("automatic leader turns reach completed-turn capture", async () => {
+		const captured: Array<{ readerDirected?: boolean; text: string }> = [];
+		const configured = loadSettings({ netaDir: dir }).settings;
+		configured.providers.fake = {
+			command: process.execPath,
+			args: [FIXTURE],
+			resume: true,
+			defaultModel: "test-model",
+		};
+		const acp = adaptRuntime(configured, undefined, undefined, async (_sessionId, turn, blocks) => {
+			captured.push({ readerDirected: turn.readerDirected, text: blocks.map((block) => block.text).join("\n") });
+		});
+		try {
+			const created = await acp.createSession({
+				workspaceId: "w1",
+				cwd: dir,
+				provider: "fake",
+				model: "test-model",
+				access: "readOnly",
+				netaTools: true,
+			});
+			await acp.prompt(created.sessionId, "Automatic report", [], { readerDirected: false });
+			const deadline = Date.now() + 5_000;
+			while (captured.length === 0 && Date.now() < deadline) await Bun.sleep(10);
+			expect(captured).toHaveLength(1);
+			expect(captured[0]?.readerDirected).toBeUndefined();
+			expect(captured[0]?.text.length).toBeGreaterThan(0);
+		} finally {
+			await acp.closeAll();
+		}
+	});
+
+	// 05 mints an agent's token under its `agentId`, not its session id, so
 	// closing the session has to revoke that key: a surviving proxy must not
 	// keep calling tools as an agent that is gone.
 	test("closing an agent session revokes the token minted under its agent id", async () => {
@@ -1025,7 +994,7 @@ describe("adaptRuntime against the fake provider", () => {
 test("OpenCode main-agent system context is refreshed separately from user input", async () => {
 	const configured = loadSettings({ netaDir: dir }).settings;
 	configured.providers.opencode = { command: process.execPath, args: [FIXTURE], resume: true, defaultModel: "" };
-	let instruction = "You are the workspace leader. Charter A.";
+	let instruction = "You are the coordinator. Charter A.";
 	const acp = adaptRuntime(
 		configured,
 		undefined,
@@ -1048,7 +1017,7 @@ test("OpenCode main-agent system context is refreshed separately from user input
 		expect(JSON.parse(readFileSync(systemContextPath(created.sessionId), "utf8")).text).toBe(instruction);
 		for (let attempt = 0; attempt < 100 && acp.isTurnActive?.(created.sessionId); attempt++)
 			await new Promise((resolve) => setTimeout(resolve, 10));
-		instruction = "You are the workspace leader. Charter B.";
+		instruction = "You are the coordinator. Charter B.";
 		await acp.prompt(created.sessionId, "next");
 		expect(JSON.parse(readFileSync(systemContextPath(created.sessionId), "utf8")).text).toBe(instruction);
 	} finally {
@@ -1163,7 +1132,7 @@ test("a resume queued behind reset cannot resurrect the retired conversation", a
 	}
 });
 
-test("Superleader reset transfers workspace tool ownership to the replacement session", async () => {
+test("Neta reset transfers workspace tool ownership to the replacement session", async () => {
 	const configured = loadSettings({ netaDir: dir }).settings;
 	configured.providers.fake = {
 		command: process.execPath,
@@ -1184,17 +1153,17 @@ test("Superleader reset transfers workspace tool ownership to the replacement se
 			netaTools: true,
 		});
 		oldSessionId = created.sessionId;
-		registerSuperleaderSession(created.sessionId, "w1");
+		registerWorkspaceLeaderSession(created.sessionId, "w1");
 		const fresh = await acp.resetSession(created.sessionId, "", async (next) => {
 			nextSessionId = next.sessionId;
-			expect(workspaceForSuperleaderSession(next.sessionId)).toBe("w1");
+			expect(workspaceForLeaderSession(next.sessionId)).toBe("w1");
 		});
 		expect(fresh.sessionId).toBe(nextSessionId ?? "");
-		expect(workspaceForSuperleaderSession(created.sessionId)).toBeUndefined();
-		expect(workspaceForSuperleaderSession(fresh.sessionId)).toBe("w1");
+		expect(workspaceForLeaderSession(created.sessionId)).toBeUndefined();
+		expect(workspaceForLeaderSession(fresh.sessionId)).toBe("w1");
 	} finally {
-		if (oldSessionId) unregisterSuperleaderSession(oldSessionId);
-		if (nextSessionId) unregisterSuperleaderSession(nextSessionId);
+		if (oldSessionId) unregisterWorkspaceLeaderSession(oldSessionId);
+		if (nextSessionId) unregisterWorkspaceLeaderSession(nextSessionId);
 		await acp.closeAll();
 	}
 });

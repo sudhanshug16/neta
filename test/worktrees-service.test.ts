@@ -41,11 +41,10 @@ function mission(extra?: Partial<Mission>): Mission {
 		machineId: "m",
 		name: "lens port",
 		objective: "port the lens",
-		changes: [],
 		lead: { kind: "leader" },
 		agentIds: [],
 		access: "readOnly",
-		state: "running",
+		state: "open",
 		createdAt: new Date(0).toISOString(),
 		...extra,
 	};

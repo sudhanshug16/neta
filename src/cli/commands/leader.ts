@@ -1,5 +1,5 @@
-// `neta mode`, `neta models` and `neta model <id>` (08, T8.7): thin clients
-// of `leader.setMode`, `models.list` and `conversation.setModel` plus
+// `neta models` and `neta model <id>`: thin clients
+// of `models.list` and `conversation.setModel` plus
 // formatting. Only `neta` and `neta open` start the Node, so these connect
 // with `start: false` and report an unreachable Node as exit 2. Text goes to
 // stdout, errors to stderr as `neta: <msg>`.
@@ -10,21 +10,15 @@
 // match). The forbidden check therefore happens client-side and exits 3
 // without calling the Node.
 
-import type { Leader } from "../../core/types.ts";
 import { netaDir } from "../../node/lockfile.ts";
 import type {
 	ConversationSetModelResult,
-	LeaderSetModeResult,
-	MissionsListResult,
 	ModelInfo,
 	ModelsListResult,
 	WorkspaceOpenResult,
 } from "../../node/protocol.ts";
 import { loadSettings } from "../../session/settings.ts";
 import { CliError, type NodeClient } from "../client.ts";
-
-const COUNT_RE = /^[1-9][0-9]*$/;
-const LIST_LIMIT = 200;
 
 function messageOf(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
@@ -39,80 +33,8 @@ function fail(error: unknown): number {
 	return 1;
 }
 
-// `lead`, or `lead++  12m active` in whole active minutes.
-function formatModeLine(leader: Leader): string {
-	if (leader.mode === "leadPlus") {
-		const minutes = Math.floor(Math.max(0, leader.modeActiveMs) / 60000);
-		return `lead++  ${minutes}m active`;
-	}
-	return "lead";
-}
-
 async function openLeader(client: NodeClient): Promise<WorkspaceOpenResult> {
 	return client.request<WorkspaceOpenResult>("workspace.open", { path: process.cwd() });
-}
-
-// A `--mission <n>` number to its mission id; an unknown number is exit 1,
-// the same message `mission <n>` prints.
-async function resolveMissionId(client: NodeClient, workspaceId: string, raw: string): Promise<string> {
-	if (!COUNT_RE.test(raw)) {
-		throw new CliError(1, `bad mission number: ${raw}`);
-	}
-	const number = Number.parseInt(raw, 10);
-	let cursor: string | undefined;
-	for (;;) {
-		const page = await client.request<MissionsListResult>("missions.list", {
-			workspaceId,
-			limit: LIST_LIMIT,
-			...(cursor === undefined ? {} : { cursor }),
-		});
-		const found = page.missions.find((mission) => mission.number === number);
-		if (found !== undefined) {
-			return found.id;
-		}
-		if (page.nextCursor === undefined) {
-			break;
-		}
-		cursor = page.nextCursor;
-	}
-	throw new CliError(1, `no mission #${number} in this workspace`);
-}
-
-export async function modeCommand(
-	client: NodeClient,
-	arg: string | undefined,
-	flags: Record<string, string | true>,
-): Promise<number> {
-	try {
-		if (arg !== undefined && arg !== "lead" && arg !== "lead++") {
-			throw new CliError(1, `bad mode: ${arg}`);
-		}
-		const opened = await openLeader(client);
-		let missionId: string | undefined;
-		if (typeof flags.mission === "string") {
-			missionId = await resolveMissionId(client, opened.workspace.id, flags.mission);
-		}
-		if (arg === undefined) {
-			// The protocol has no read path for a mission lead's mode, so a
-			// read always reports the workspace leader (after validating the
-			// `--mission` number above).
-			process.stdout.write(`${formatModeLine(opened.leader)}\n`);
-			return 0;
-		}
-		// The manual path (07): the person's own choice, no decision record —
-		// a record belongs to the leader's own `neta_mode` requests, never to
-		// a client. `lead++` on the wire is `leadPlus`.
-		const mode = arg === "lead++" ? "leadPlus" : "lead";
-		await client.request<LeaderSetModeResult>("leader.setMode", {
-			workspaceId: opened.workspace.id,
-			mode,
-			...(missionId === undefined ? {} : { missionId }),
-		});
-		process.stdout.write(`mode ${arg}\n`);
-		return 0;
-	} catch (error) {
-		return fail(error);
-	}
 }
 
 export interface ModelRow {

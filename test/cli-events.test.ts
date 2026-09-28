@@ -80,11 +80,10 @@ async function seed(dir: string, workspace: string): Promise<void> {
 				machineId: ulid(),
 				name: MISSION_NAME,
 				objective: "Port the lens to the new runtime.",
-				changes: [],
 				lead: { kind: "agent", agentId: `fixture-lead-${workspace}` },
 				agentIds: [],
 				access: "readOnly",
-				state: "running",
+				state: "open",
 				createdAt: new Date().toISOString(),
 			};
 			await store.missions.create(mission);
@@ -103,14 +102,14 @@ async function seed(dir: string, workspace: string): Promise<void> {
 			});
 			await store.events.append({
 				workspaceId: workspace,
-				kind: "user.pinned",
+				kind: "artifact.published",
 				missionId: mission.id,
 				data: { text: PIN_TEXT },
 			});
 			await store.events.append({
 				workspaceId: workspace,
-				kind: "leader.modeChanged",
-				data: { mode: "leadPlus" },
+				kind: "agent.modelChanged",
+				data: {},
 			});
 			await store.events.append({
 				workspaceId: workspace,
@@ -177,15 +176,15 @@ describe("formatEvent", () => {
 		);
 	});
 
-	test("leader.modeChanged with no mission shows - and an empty summary", () => {
-		expect(formatEvent(sampleEvent({ seq: 2, kind: "leader.modeChanged", data: { mode: "leadPlus" } }))).toBe(
-			"2026-09-01T00:00:00.000Z       2  leader.modeChanged    -      ",
+	test("agent.modelChanged with no mission shows - and an empty summary", () => {
+		expect(formatEvent(sampleEvent({ seq: 2, kind: "agent.modelChanged", data: {} }))).toBe(
+			"2026-09-01T00:00:00.000Z       2  agent.modelChanged    -      ",
 		);
 	});
 
 	test("an event with empty data shows - and an empty summary", () => {
-		expect(formatEvent(sampleEvent({ seq: 3, kind: "agent.finished", missionId: "m9", data: {} }))).toBe(
-			"2026-09-01T00:00:00.000Z       3  agent.finished        -      ",
+		expect(formatEvent(sampleEvent({ seq: 3, kind: "agent.archived", missionId: "m9", data: {} }))).toBe(
+			"2026-09-01T00:00:00.000Z       3  agent.archived        -      ",
 		);
 	});
 });
@@ -204,8 +203,8 @@ describe("events list", () => {
 			expect(parsed.map((event) => event.kind)).toEqual([
 				"mission.created",
 				"agent.spawned",
-				"user.pinned",
-				"leader.modeChanged",
+				"artifact.published",
+				"agent.modelChanged",
 			]);
 			const seqs = parsed.map((event) => event.seq);
 			expect([...seqs].sort((a, b) => a - b)).toEqual(seqs);
@@ -225,7 +224,7 @@ describe("events list", () => {
 			expect(result.stdout).toContain(MISSION_NAME);
 			expect(result.stdout).toContain(AGENT_NAME);
 			expect(result.stdout).toContain(PIN_TEXT);
-			expect(result.stdout).toContain("leader.modeChanged");
+			expect(result.stdout).toContain("agent.modelChanged");
 			expect(result.stdout).not.toContain(OLD_REASON);
 		},
 		120000,

@@ -5,7 +5,6 @@ import type { InboxMessage, PromptAttachment, SessionId, TurnId } from "../core/
 import { createMutex, type Mutex, readJson, writeJsonAtomic } from "./files.ts";
 import { paths } from "./paths.ts";
 
-export const MAX_INBOX_MESSAGES = 20;
 export const MAX_INBOX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 
 export interface ConversationInboxStore {
@@ -25,7 +24,8 @@ export interface ConversationInboxStore {
 	markDiscarded(sessionId: SessionId, id: string): Promise<InboxMessage>;
 	markDelivering(sessionId: SessionId, id: string): Promise<InboxMessage>;
 	markQueued(sessionId: SessionId, id: string): Promise<InboxMessage>;
-	markDelivered(sessionId: SessionId, id: string, turnId: TurnId): Promise<InboxMessage>;
+	markDelivered(sessionId: SessionId, id: string, turnId?: TurnId): Promise<InboxMessage>;
+	markConsumed(sessionId: SessionId, id: string): Promise<InboxMessage>;
 	markUncertain(sessionId: SessionId, id: string): Promise<InboxMessage>;
 	discardQueued(sessionId: SessionId): Promise<InboxMessage[]>;
 	discardAll(sessionId: SessionId): Promise<InboxMessage[]>;
@@ -86,7 +86,7 @@ export function openConversationInboxStore(): ConversationInboxStore {
 				if (index < 0) throw new Error(`unknown inbox message ${id}`);
 				const current = items[index];
 				if (current === undefined) throw new Error(`unknown inbox message ${id}`);
-				if (current.status === "delivered" || current.status === "discarded") {
+				if (current.status === "discarded" || (current.status === "delivered" && status !== "uncertain")) {
 					updated.push(current);
 					continue;
 				}
@@ -121,6 +121,17 @@ export function openConversationInboxStore(): ConversationInboxStore {
 		if (!message) throw new Error(`unknown inbox message ${id}`);
 		return message;
 	};
+	const markConsumed = async (sessionId: SessionId, id: string): Promise<InboxMessage> =>
+		lock(sessionId)(async () => {
+			const items = await read(sessionId);
+			const index = items.findIndex((item) => item.id === id);
+			const current = items[index];
+			if (!current) throw new Error(`unknown inbox message ${id}`);
+			const next = { ...current, consumedAt: current.consumedAt ?? nowIso() };
+			items[index] = next;
+			await write(sessionId, items);
+			return next;
+		});
 
 	return {
 		list: (id) => lock(id)(() => read(id)),
@@ -137,12 +148,12 @@ export function openConversationInboxStore(): ConversationInboxStore {
 				if (existing) {
 					if (existing.sourceHash && existing.sourceHash !== sourceHash)
 						throw new Error("Message ID was reused with different content");
+
 					return existing;
 				}
 				const active = items.filter(
 					(item) => item.status === "queued" || item.status === "delivering" || item.status === "uncertain",
 				);
-				if (active.length >= MAX_INBOX_MESSAGES) throw new Error("conversation inbox holds 20 messages");
 				const item: InboxMessage = {
 					id: ulid(),
 					...origin,
@@ -164,6 +175,7 @@ export function openConversationInboxStore(): ConversationInboxStore {
 		markDelivering: (sessionId, id) => updateOne(sessionId, id, "delivering"),
 		markQueued: (sessionId, id) => updateOne(sessionId, id, "queued"),
 		markDelivered: (sessionId, id, turnId) => updateOne(sessionId, id, "delivered", turnId),
+		markConsumed,
 		markUncertain: (sessionId, id) => updateOne(sessionId, id, "uncertain"),
 		discardQueued: (sessionId) =>
 			lock(sessionId)(async () => {

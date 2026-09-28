@@ -9,6 +9,7 @@ export interface McpEnvVar {
 // proxy per OpenCode actor that needs tools.
 export interface McpServerSpec {
 	name: string;
+	codemode?: boolean;
 	command: string;
 	args: string[];
 	env: McpEnvVar[];

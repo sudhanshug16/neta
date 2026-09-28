@@ -70,14 +70,14 @@ export function openMissionRegistry(identities: RegistryIdentityLookup = durable
 	async function requireDistinctLead(mission: Mission): Promise<void> {
 		if (mission.lead.kind !== "agent") {
 			throw new Error(
-				"A mission needs a separate mission lead. Supply a lead task and effort; the workspace leader cannot lead its own mission.",
+				"A mission needs a separate mission lead. Supply a lead task and effort; the coordinator cannot lead its own mission.",
 			);
 		}
 		const leader = await identities.leader(mission.workspaceId);
 		const agent = leader === undefined ? undefined : await identities.agent(mission.lead.agentId);
 		if (!distinctMissionLead(mission, leader, agent)) {
 			throw new Error(
-				"Mission lead actor and session must differ from the workspace leader. Supply a separate lead task and effort.",
+				"Mission lead actor and session must differ from the coordinator. Supply a separate lead task and effort.",
 			);
 		}
 	}

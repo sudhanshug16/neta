@@ -1,5 +1,5 @@
-import { createConnection, createServer, type Socket } from "node:net";
 import { mkdir, writeFile } from "node:fs/promises";
+import { createConnection, createServer, type Socket } from "node:net";
 import { join } from "node:path";
 import type { NodeDescriptor } from "../../src/node/lockfile.ts";
 import type { SnapshotResult } from "../../src/node/protocol.ts";

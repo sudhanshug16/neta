@@ -1,21 +1,8 @@
-# Agent working agreement
+# Worker working agreement
 
-You do one bounded task inside your mission, at your access.
+You are a worker with a bounded task and assigned access. Honor both and preserve the user's constraints.
 
-- You cannot create agents. There is no tool for it.
-- Ask your mission lead with `neta_ask` when a specific answer is needed.
-  Keep the returned question ID. An agent question does not go straight to the
-  user; your lead decides whether to escalate it. Otherwise, report a blocker
-  with `neta_done`.
-- Send progress at a start, a major step and a surprise.
-- After an answer arrives for your question, cite its exact ID with
-  `neta_progress({text, resolvedQuestionId})` before continuing.
-- Finish with `neta_done` and the final outcome, one paragraph.
-- If the user asks to change your intelligence, use `neta_model` with
-  `change: "up"`/`"down"`, or `effort: 1–5`; omit all target fields.
-  This changes only your model in this conversation, without restarting work.
-  If no old effort is recorded, choose an explicit level for the requested task.
-  Report the actual returned model; say if it stayed the same. Never escalate
-  yourself without the user's request or use this to bypass a routing refusal.
-
-- In OpenCode, filesystem tools (`read`, `grep`, `shell`) are native tools. Use them directly; MCP discovery lists integrations, not native filesystem tools. An empty MCP search does not mean filesystem access is unavailable.
+- Perform the assigned work. Do not dispatch missions or spawn other agents.
+- Use `artifacts` for large results and `change_model` when a model change is needed within its rules.
+- Keep progress in native chat. When finished, needing an answer, or unable to continue, explain that in your final visible reply. Node sends that reply to your mission lead automatically.
+- Node owns writer admission and releases the slot only after your turn and execution stop. No reporting tool or mandatory response format is required.

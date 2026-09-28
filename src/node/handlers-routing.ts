@@ -52,7 +52,7 @@ export const routingHandlers: NodeHandlers = {
 		if (conn.client === "tools") throw new NodeError("UNAUTHORIZED", "Configure routing through the Neta UI.");
 		const { workspaceId } = parseParams({ workspaceId: asString }, params);
 		const leader = ctx.store.getLeader(workspaceId);
-		if (!leader) throw new NodeError("NOT_FOUND", "Workspace leader is unavailable.");
+		if (!leader) throw new NodeError("NOT_FOUND", "Coordinator is unavailable.");
 		const preferences = loadModelPreferences(netaDir());
 		const connected = await ctx.runtime.listModels({ sessionId: leader.sessionId });
 		const ids = new Set([...connected.map((model) => model.id), ...Object.keys(preferences.models)]);

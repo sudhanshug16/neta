@@ -11,7 +11,7 @@ import { netaVersion } from "../version.ts";
 import { attach } from "./chat.ts";
 import { CliError, NodeClient } from "./client.ts";
 import { eventsCommand } from "./commands/events.ts";
-import { modeCommand, modelCommand, modelsCommand } from "./commands/leader.ts";
+import { modelCommand, modelsCommand } from "./commands/leader.ts";
 import { mcpCommand } from "./commands/mcp.ts";
 import { missionCommand, missionsCommand } from "./commands/missions.ts";
 import { nodeCommand, openCommand } from "./commands/node.ts";
@@ -24,7 +24,6 @@ export type Command = {
 		| "missions"
 		| "mission"
 		| "events"
-		| "mode"
 		| "models"
 		| "model"
 		| "mcp"
@@ -42,7 +41,7 @@ const COUNT_RE = /^[1-9][0-9]*$/;
 
 const COMMAND_TABLE = `usage: neta [command] [options]
 
-  neta                                   attach to the workspace leader's conversation
+  neta                                   attach to the coordinator's conversation
   neta chat                              use the plain terminal conversation client
   neta node start [--detach]             run the Node
   neta node stop                         stop the Node
@@ -51,7 +50,6 @@ const COMMAND_TABLE = `usage: neta [command] [options]
   neta missions [--all | --since <dur>] [--json]
   neta mission <number> [--json]         one mission: record, agents, recent events
   neta events [--follow] [--since <dur>] [--json]
-  neta mode [lead | lead++] [--mission <n>]
   neta models [--json]                   providers and their models
   neta model <id>                        set the model of the attached conversation
   neta mcp --actor <id> --token <t>      stdio MCP server for one OpenCode actor
@@ -186,19 +184,6 @@ function parseEvents(tokens: string[]): Command | Usage {
 	return { name: "events", args: [], flags: split.flags };
 }
 
-function parseMode(tokens: string[]): Command | Usage {
-	const split = splitFlags(tokens, {
-		booleans: [],
-		values: { mission: (value) => COUNT_RE.test(value) },
-	});
-	if ("usage" in split) return split;
-	if (split.args.length > 1) return { usage: "neta mode takes lead or lead++" };
-	if (split.args.length === 1 && split.args[0] !== "lead" && split.args[0] !== "lead++") {
-		return { usage: `bad mode: ${split.args[0]}` };
-	}
-	return { name: "mode", args: split.args, flags: split.flags };
-}
-
 function parseModels(tokens: string[]): Command | Usage {
 	const split = splitFlags(tokens, { booleans: ["json"], values: {} });
 	if ("usage" in split) return split;
@@ -243,8 +228,6 @@ export function parse(argv: string[]): Command | Usage {
 			return parseMission(rest);
 		case "events":
 			return parseEvents(rest);
-		case "mode":
-			return parseMode(rest);
 		case "models":
 			return parseModels(rest);
 		case "model":
@@ -313,7 +296,6 @@ const handlers: Record<Command["name"], (cmd: Command) => number | Promise<numbe
 	missions: (cmd) => withClient((client) => missionsCommand(client, cmd.flags)),
 	mission: (cmd) => withClient((client) => missionCommand(client, Number(cmd.args[0]), cmd.flags)),
 	events: (cmd) => withClient((client) => eventsCommand(client, cmd.flags)),
-	mode: (cmd) => withClient((client) => modeCommand(client, cmd.args[0], cmd.flags)),
 	models: (cmd) => withClient((client) => modelsCommand(client, cmd.flags)),
 	model: (cmd) => withClient((client) => modelCommand(client, cmd.args[0] as string)),
 	mcp: (cmd) => mcpCommand(cmd.flags),

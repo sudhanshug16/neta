@@ -5,7 +5,10 @@ import type { ModelParams } from "../schemas.ts";
 
 export interface ModelPorts {
 	models: {
-		adjust(agentId: string, params: Pick<ModelParams, "effort" | "change">): Promise<Record<string, unknown>>;
+		adjust(
+			agentId: string,
+			params: Pick<ModelParams, "effort" | "change" | "model" | "variant" | "userInstruction">,
+		): Promise<Record<string, unknown>>;
 	};
 }
 export interface ModelToolContext extends ToolContext {
@@ -59,7 +62,7 @@ async function adjust(ctx: ModelToolContext, params: ModelParams): Promise<ToolR
 				return {
 					ok: false,
 					code: "badParams",
-					message: "Agent name is ambiguous. Use the exact agentId from neta_status.",
+					message: "Agent name is ambiguous. Use the exact agentId from mission_state.",
 				};
 			agent = matches[0];
 		}
@@ -69,19 +72,19 @@ async function adjust(ctx: ModelToolContext, params: ModelParams): Promise<ToolR
 			ok: false,
 			code: "refused",
 			message:
-				"This mission uses the workspace leader's shared conversation. Use /models there; there is no separate mission-lead session to adjust.",
+				"This mission uses the coordinator's shared conversation. Use /models there; there is no separate mission-lead session to adjust.",
 		};
 	if (!agent || agent.workspaceId !== ctx.actor.workspaceId || (mission && agent.missionId !== mission.id))
 		return {
 			ok: false,
 			code: "notFound",
-			message: "Choose an existing mission number or agent ID/name from neta_status.",
+			message: "Choose an existing mission number or agent ID/name from mission_state.",
 		};
 	if (ctx.actor.kind === "lead" && agent.missionId !== ctx.actor.missionId)
 		return { ok: false, code: "notAuthorised", message: "a mission lead adjusts its own mission only" };
 	return { ok: true, data: await ctx.deps.models.adjust(agent.id, params) };
 }
 
-export const modelHandlers: Pick<ToolHandlers, "neta_model"> = {
-	neta_model: (ctx, args) => adjust(ctx as ModelToolContext, args),
+export const modelHandlers: Pick<ToolHandlers, "change_model"> = {
+	change_model: (ctx, args) => adjust(ctx as ModelToolContext, args),
 };

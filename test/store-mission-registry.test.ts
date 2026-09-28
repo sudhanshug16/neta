@@ -22,7 +22,7 @@ function useTempDir(): void {
 	process.env.NETA_DIR = mkdtempSync(join(tmpdir(), "neta-registry-"));
 }
 
-function mission(workspaceId: string, number: number, state: Mission["state"] = "running"): Mission {
+function mission(workspaceId: string, number: number, state: Mission["state"] = "open"): Mission {
 	return {
 		id: ulid(),
 		number,
@@ -30,7 +30,6 @@ function mission(workspaceId: string, number: number, state: Mission["state"] = 
 		machineId: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
 		name: `mission ${number}`,
 		objective: "Do it.",
-		changes: [],
 		lead: { kind: "agent", agentId: ulid() },
 		agentIds: [],
 		access: "readOnly",
@@ -40,7 +39,7 @@ function mission(workspaceId: string, number: number, state: Mission["state"] = 
 }
 
 describe("mission registry", () => {
-	test("direct create and reassignment reject workspace leader actor and session aliases", async () => {
+	test("direct create and reassignment reject coordinator actor and session aliases", async () => {
 		useTempDir();
 		const ws = "git:github.com/org/repo";
 		const leaderSession = ulid();
@@ -101,7 +100,7 @@ describe("mission registry", () => {
 		const reopened = openMissionRegistry();
 		const back = await reopened.byNumber(ws, 1);
 		expect(back?.number).toBe(1);
-		expect(back?.state).toBe("running");
+		expect(back?.state).toBe("open");
 		expect(back?.worktreeRecovery).toEqual(recovered.worktreeRecovery);
 		expect(await reopened.isAllocated(ws, number)).toBe(false);
 	});

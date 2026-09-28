@@ -96,17 +96,7 @@ describe("cli command table", () => {
 		});
 	});
 
-	test("mode read and set", () => {
-		expect(commandOf(["mode"])).toEqual({ name: "mode", args: [], flags: {} });
-		expect(commandOf(["mode", "lead"])).toEqual({ name: "mode", args: ["lead"], flags: {} });
-		expect(commandOf(["mode", "lead++"])).toEqual({ name: "mode", args: ["lead++"], flags: {} });
-		expect(commandOf(["mode", "--mission", "3"])).toEqual({ name: "mode", args: [], flags: { mission: "3" } });
-		expect(commandOf(["mode", "lead", "--mission", "3"])).toEqual({
-			name: "mode",
-			args: ["lead"],
-			flags: { mission: "3" },
-		});
-	});
+	test("mode command is removed", () => expect(parse(["mode"])).toHaveProperty("usage"));
 
 	test("models and model", () => {
 		expect(commandOf(["models"])).toEqual({ name: "models", args: [], flags: {} });
@@ -162,7 +152,7 @@ describe("cli usage errors", () => {
 		expect(usageOf(["version", "--json"])).toContain("takes no arguments");
 		expect(usageOf(["model", "x", "--json"])).toContain("unknown flag");
 		expect(usageOf(["open", "--json"])).toContain("unknown flag");
-		expect(usageOf(["mode", "--json"])).toContain("unknown flag");
+		expect(usageOf(["mode", "--json"])).toContain("unknown command");
 		expect(usageOf(["node", "start", "--json"])).toContain("unknown flag");
 		expect(usageOf(["node", "stop", "--detach"])).toContain("takes no arguments");
 		expect(usageOf(["mcp", "--actor", "a", "--token", "t", "--json"])).toContain("unknown flag");
@@ -174,7 +164,7 @@ describe("cli usage errors", () => {
 		expect(usageOf(["mission"])).toContain("needs a number");
 		expect(usageOf(["mission", "abc"])).toContain("bad mission number");
 		expect(usageOf(["mission", "1", "2"])).toContain("bad mission number");
-		expect(usageOf(["mode", "turbo"])).toContain("bad mode");
+		expect(usageOf(["mode", "turbo"])).toContain("unknown command");
 		expect(usageOf(["model"])).toContain("needs an id");
 		expect(usageOf(["mcp", "--actor", "a"])).toContain("--token");
 		expect(usageOf(["mcp", "--token", "t"])).toContain("--actor");

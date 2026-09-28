@@ -19,12 +19,11 @@ function mission(worktree?: Mission["worktree"], extra?: Partial<Mission>): Miss
 		machineId: "m",
 		name: "lens port",
 		objective: "port the lens",
-		changes: [],
 		lead: { kind: "leader" },
 		agentIds: [ulid(), ulid()],
 		access: "readWrite",
 		worktree,
-		state: "running",
+		state: "open",
 		createdAt: new Date(0).toISOString(),
 		...extra,
 	};
@@ -201,7 +200,7 @@ describe("mission closeout", () => {
 		expect(outcome).toMatchObject({
 			ok: false,
 			attention: "could not confirm removed worktree evidence 1234567 against main",
-			mission: { state: "running", worktree: start.worktree },
+			mission: { state: "open", worktree: start.worktree },
 		});
 		expect(f.removes).toHaveLength(0);
 	});
@@ -217,7 +216,7 @@ describe("mission closeout", () => {
 			ok: false,
 			attention:
 				"completed needs its recorded worktree; only merged closeout can recover confirmed evidence after cleanup",
-			mission: { state: "running", worktree: start.worktree },
+			mission: { state: "open", worktree: start.worktree },
 		});
 		expect(f.removes).toHaveLength(0);
 	});
@@ -235,7 +234,7 @@ describe("mission closeout", () => {
 		expect(missing).toMatchObject({
 			ok: false,
 			attention: "merged needs evidence naming a commit",
-			mission: { state: "running", worktree: start.worktree },
+			mission: { state: "open", worktree: start.worktree },
 		});
 		const unrelated = await closeMission(
 			{
@@ -250,7 +249,7 @@ describe("mission closeout", () => {
 		expect(unrelated).toMatchObject({
 			ok: false,
 			attention: "could not confirm removed worktree evidence 1234567 against main",
-			mission: { state: "running", worktree: start.worktree },
+			mission: { state: "open", worktree: start.worktree },
 		});
 		expect(f.removes).toHaveLength(0);
 	});
@@ -274,7 +273,7 @@ describe("mission closeout", () => {
 				throw new Error("expected refusal");
 			}
 			expect(stray.attention).toContain("not merged");
-			expect(stray.mission.state).toBe("running");
+			expect(stray.mission.state).toBe("open");
 			expect(stray.mission.closedAt).toBeUndefined();
 			expect(stray.mission.attention).toBe(stray.attention);
 
@@ -285,7 +284,7 @@ describe("mission closeout", () => {
 			expect(empty.ok).toBe(false);
 			if (!empty.ok) {
 				expect(empty.attention).toContain("reason");
-				expect(empty.mission.state).toBe("running");
+				expect(empty.mission.state).toBe("open");
 			}
 			expect(f.removes).toHaveLength(0);
 			expect(f.closed).toHaveLength(0);
@@ -344,7 +343,7 @@ describe("mission closeout", () => {
 			throw new Error("expected refusal");
 		}
 		expect(refused.attention).toContain("discardUncommitted");
-		expect(refused.mission.state).toBe("running");
+		expect(refused.mission.state).toBe("open");
 		expect(refused.mission.worktree).toEqual(start.worktree);
 		expect(f.closed).toHaveLength(0);
 		const confirmed = await closeMission(
@@ -373,7 +372,7 @@ describe("mission closeout", () => {
 			throw new Error("expected refusal");
 		}
 		expect(outcome.attention).toBe("worktree is dirty");
-		expect(outcome.mission.state).toBe("running");
+		expect(outcome.mission.state).toBe("open");
 		expect(outcome.mission.closedAt).toBeUndefined();
 		expect(outcome.mission.worktree).toEqual(start.worktree);
 		expect(f.closed).toHaveLength(0);
@@ -467,7 +466,7 @@ for (const scenario of [
 				expect((await runGit(["rev-parse", "--verify", worktree.branch], repo.root)).code).not.toBe(0);
 			} else {
 				expect(result.ok).toBe(false);
-				expect(result.mission.state).toBe("running");
+				expect(result.mission.state).toBe("open");
 				expect(result.mission.worktree).toEqual(worktree);
 				expect(f.closed).toHaveLength(0);
 				await expect(stat(worktree.path)).resolves.toBeDefined();
@@ -506,7 +505,7 @@ test("completed keeps a dirty worktree open until it is committed or explicitly 
 	const result = await closeMission({ mission: start, disposition: "completed", reason: "checked" }, f.deps);
 	expect(result.ok).toBe(false);
 	expect(result.mission.worktree).toEqual(start.worktree);
-	expect(result.mission.state).toBe("running");
+	expect(result.mission.state).toBe("open");
 	expect(f.closed).toHaveLength(0);
 });
 
@@ -546,7 +545,7 @@ for (const outcome of ["deferred", "not_attempted"] as const) {
 			throw new Error("expected refusal");
 		}
 		expect(first.attention).toContain("retry the close");
-		expect(first.mission.state).toBe("running");
+		expect(first.mission.state).toBe("open");
 		expect(first.mission.worktree).toEqual(start.worktree);
 		expect(f.closed).toHaveLength(0);
 		const retry = await closeMission({ mission: first.mission, disposition: "completed", reason: "checked" }, f.deps);

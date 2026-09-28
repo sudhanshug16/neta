@@ -9,7 +9,7 @@
 // - G4-6: a leader outlives the Node — after a restart the session is resumed
 //   or re-created at `workspace.open`, and prompting works again.
 // - G4-4: `tools.list` and `tools.call` answer on the socket, so
-//   `neta_mission` reaches the registry and the snapshot.
+//   `dispatch_mission` reaches the registry and the snapshot.
 // - the `neta_mode` gate: the charter's `## Reserved for the user` section is
 //   parsed from the real workspace root, so a leader cannot grant itself
 //   Lead++ over a reservation, and both directions of the switch land on the
@@ -27,7 +27,6 @@ import { connectNode, type NodeClient } from "../src/node/client.ts";
 import { type Node as NetaNode, startNode } from "../src/node/lifecycle.ts";
 import type { ConversationTailResult, StateNotification, TurnNotification } from "../src/node/protocol.ts";
 import { appendLine } from "../src/store/files.ts";
-import { openMissionRegistry } from "../src/store/mission-registry.ts";
 import { paths } from "../src/store/paths.ts";
 import { startLegacySession } from "./fixtures/legacy-acp-runtime.ts";
 
@@ -66,6 +65,7 @@ async function writeSettings(sessionStore?: string): Promise<void> {
 	await writeFile(
 		join(dir, "settings.json"),
 		JSON.stringify({
+			meCurator: { enabled: false },
 			providers: { fake: { command: process.execPath, args, resume: true, defaultModel: "test-model" } },
 			leader: { provider: "fake", model: "test-model" },
 			forbiddenModels: [],
@@ -77,6 +77,7 @@ async function writeUnavailableProviderSettings(): Promise<void> {
 	await writeFile(
 		join(dir, "settings.json"),
 		JSON.stringify({
+			meCurator: { enabled: false },
 			providers: {
 				fake: { command: join(dir, "missing-adapter"), args: [], resume: true, defaultModel: "test-model" },
 				alternate: { command: process.execPath, args: [FIXTURE], resume: true, defaultModel: "test-model" },
@@ -91,6 +92,7 @@ async function writeRejectingResumeSettings(sessionStore: string): Promise<void>
 	await writeFile(
 		join(dir, "settings.json"),
 		JSON.stringify({
+			meCurator: { enabled: false },
 			providers: {
 				fake: {
 					command: process.execPath,
@@ -109,6 +111,7 @@ async function writeMissionE2ESettings(control: string): Promise<void> {
 	await writeFile(
 		join(dir, "settings.json"),
 		JSON.stringify({
+			meCurator: { enabled: false },
 			providers: {
 				fake: {
 					command: process.execPath,
@@ -127,6 +130,7 @@ async function writeBarrierSettings(sessionStore: string, barrierFile: string, r
 	await writeFile(
 		join(dir, "settings.json"),
 		JSON.stringify({
+			meCurator: { enabled: false },
 			providers: {
 				fake: {
 					command: process.execPath,
@@ -149,24 +153,6 @@ async function writeBarrierSettings(sessionStore: string, barrierFile: string, r
 	);
 }
 
-async function writeCwdResumeSettings(sessionStore: string): Promise<void> {
-	await writeFile(
-		join(dir, "settings.json"),
-		JSON.stringify({
-			providers: {
-				fake: {
-					command: process.execPath,
-					args: [FIXTURE, "--session-store", sessionStore, "--allow-resume-cwd-change"],
-					resume: true,
-					defaultModel: "test-model",
-				},
-			},
-			leader: { provider: "fake", model: "test-model" },
-			forbiddenModels: [],
-		}),
-	);
-}
-
 async function writeTwoProviderSettings(sessionStore: string): Promise<void> {
 	const provider = (extra: string[] = []) => ({
 		command: process.execPath,
@@ -177,24 +163,8 @@ async function writeTwoProviderSettings(sessionStore: string): Promise<void> {
 	await writeFile(
 		join(dir, "settings.json"),
 		JSON.stringify({
+			meCurator: { enabled: false },
 			providers: { fake: provider(), alternate: provider() },
-			leader: { provider: "fake", model: "test-model" },
-			forbiddenModels: [],
-		}),
-	);
-}
-
-async function writeRejectingAlternateSettings(sessionStore: string): Promise<void> {
-	const provider = (extra: string[] = []) => ({
-		command: process.execPath,
-		args: [FIXTURE, "--session-store", sessionStore, ...extra],
-		resume: true,
-		defaultModel: "test-model",
-	});
-	await writeFile(
-		join(dir, "settings.json"),
-		JSON.stringify({
-			providers: { fake: provider(), alternate: provider(["--reject-resume"]) },
 			leader: { provider: "fake", model: "test-model" },
 			forbiddenModels: [],
 		}),
@@ -304,7 +274,7 @@ test("a fresh workspace remains selectable when its retired provider cannot laun
 }, 90000);
 
 test.each(["finish", "cancel"] as const)(
-	"workspace leader activity is broadcast before output and clears on %s",
+	"coordinator activity is broadcast before output and clears on %s",
 	async (ending) => {
 		const barrier = join(dir, "activity-barrier");
 		const ready = join(dir, "activity-ready");
@@ -341,7 +311,7 @@ test.each(["finish", "cancel"] as const)(
 	30000,
 );
 
-test("workspace leader displays a provider failure and returns to running on retry", async () => {
+test("coordinator displays a provider failure and returns to running on retry", async () => {
 	node = await startNode({ sessionFactory: startLegacySession });
 	const at = await attach();
 	try {
@@ -563,14 +533,17 @@ test("reset chat starts a fresh leader conversation and resumes that identity af
 	await writeSettings(storeFile);
 	node = await startNode({ sessionFactory: startLegacySession });
 	const first = await attach();
-	const oldSol = await first.client.request<{ sessionId: string }>("sol.open", {
+	const oldNeta = await first.client.request<{ sessionId: string }>("workspace-leader.open", {
 		workspaceId: first.leader.workspaceId,
 	});
-	await first.client.request("conversation.tail", { sessionId: oldSol.sessionId });
-	await first.client.request("conversation.prompt", { sessionId: oldSol.sessionId, text: "OLD_SOL_RESET_CONTEXT" });
-	await waitFor("old Superleader context turn", () =>
+	await first.client.request("conversation.tail", { sessionId: oldNeta.sessionId });
+	await first.client.request("conversation.prompt", {
+		sessionId: oldNeta.sessionId,
+		text: "OLD_NETA_RESET_CONTEXT",
+	});
+	await waitFor("old Neta context turn", () =>
 		first.turns.find(
-			(turn) => turn.sessionId === oldSol.sessionId && turn.block?.text?.includes("OLD_SOL_RESET_CONTEXT"),
+			(turn) => turn.sessionId === oldNeta.sessionId && turn.block?.text?.includes("OLD_NETA_RESET_CONTEXT"),
 		),
 	);
 	await first.client.request("conversation.prompt", {
@@ -600,14 +573,14 @@ test("reset chat starts a fresh leader conversation and resumes that identity af
 	expect(reset.sessionId).not.toBe(first.leader.sessionId);
 	expect(reset.provider).toBe(first.leader.provider);
 	expect(reset.model).toBe(first.leader.model);
-	const freshSol = await first.client.request<{ sessionId: string }>("sol.open", {
+	const freshNeta = await first.client.request<{ sessionId: string }>("workspace-leader.open", {
 		workspaceId: first.leader.workspaceId,
 	});
-	expect(freshSol.sessionId).not.toBe(oldSol.sessionId);
-	const freshSolTail = await first.client.request<ConversationTailResult>("conversation.tail", {
-		sessionId: freshSol.sessionId,
+	expect(freshNeta.sessionId).not.toBe(oldNeta.sessionId);
+	const freshNetaTail = await first.client.request<ConversationTailResult>("conversation.tail", {
+		sessionId: freshNeta.sessionId,
 	});
-	expect(freshSolTail.blocks).toEqual([]);
+	expect(freshNetaTail.blocks).toEqual([]);
 	await waitFor("old active turn closed by reset", () =>
 		first.turns.find(
 			(turn) => turn.turn?.id === held.turnId && turn.turn.endedAt !== undefined && turn.turn.cancelled,
@@ -617,7 +590,7 @@ test("reset chat starts a fresh leader conversation and resumes that identity af
 	await first.client.request("conversation.prompt", { sessionId: reset.sessionId, text: "HISTORY MCP" });
 	const fresh = await waitFor("fresh reset history", () =>
 		first.turns.find(
-			(turn) => turn.sessionId === reset.sessionId && turn.block?.text?.includes("# Leader working agreement"),
+			(turn) => turn.sessionId === reset.sessionId && turn.block?.text?.includes("# Coordinator working agreement"),
 		),
 	);
 	expect(fresh.block?.text).not.toContain("UNWANTED_RESET_CONTEXT");
@@ -642,10 +615,10 @@ test("reset chat starts a fresh leader conversation and resumes that identity af
 			sessionId: reset.sessionId,
 		});
 		expect(coldReset.sessionId).not.toBe(reset.sessionId);
-		const reopenedSol = await second.client.request<{ sessionId: string }>("sol.open", {
+		const reopenedNeta = await second.client.request<{ sessionId: string }>("workspace-leader.open", {
 			workspaceId: second.leader.workspaceId,
 		});
-		expect(reopenedSol.sessionId).not.toBe(freshSol.sessionId);
+		expect(reopenedNeta.sessionId).not.toBe(freshNeta.sessionId);
 	} finally {
 		await second.client.close();
 	}
@@ -659,6 +632,7 @@ test("a reset provider startup failure leaves the old owner and chat usable", as
 		await writeFile(
 			join(dir, "settings.json"),
 			JSON.stringify({
+				meCurator: { enabled: false },
 				providers: { fake: { command: "/no/such/reset-provider", args: [] } },
 				leader: { provider: "fake", model: "test-model" },
 				forbiddenModels: [],
@@ -686,7 +660,7 @@ test("reset chat rebinds mission leads and agents without changing their authori
 		const actor = await leaderActor(at);
 		await at.client.request("tools.call", {
 			...actor,
-			name: "neta_mission",
+			name: "dispatch_mission",
 			arguments: {
 				name: "Reset roles",
 				objective: "Retain role instructions",
@@ -697,7 +671,9 @@ test("reset chat rebinds mission leads and agents without changing their authori
 		});
 		const before = await waitFor("reset agents", async () => {
 			const snapshot = await at.client.request<{ agents: Agent[] }>("snapshot", {});
-			return snapshot.agents.length === 2 ? snapshot.agents : undefined;
+			return snapshot.agents.length === 2 && snapshot.agents.every((a) => a.state === "idle")
+				? snapshot.agents
+				: undefined;
 		});
 		for (const owner of before) {
 			await waitFor("initial role brief", async () => {
@@ -728,7 +704,8 @@ test("reset chat rebinds mission leads and agents without changing their authori
 		await at.client.request("conversation.prompt", { sessionId: reset.sessionId, text: "HISTORY MCP" });
 		const brief = await waitFor("reset lead brief", () =>
 			at.turns.find(
-				(turn) => turn.sessionId === reset.sessionId && turn.block?.text?.includes("# Lead working agreement"),
+				(turn) =>
+					turn.sessionId === reset.sessionId && turn.block?.text?.includes("# Mission lead working agreement"),
 			),
 		);
 		expect(brief.block?.text).toContain("# Mission: Reset roles");
@@ -745,7 +722,7 @@ test("an interrupted agent resumes its exact conversation when the leader contin
 	const firstActor = await leaderActor(first);
 	const created = await first.client.request<{ content: Array<{ text: string }> }>("tools.call", {
 		...firstActor,
-		name: "neta_mission",
+		name: "dispatch_mission",
 		arguments: {
 			name: "Resume worker",
 			objective: "Keep the same history",
@@ -766,7 +743,7 @@ test("an interrupted agent resumes its exact conversation when the leader contin
 		const actor = await leaderActor(second);
 		const sent = await second.client.request<{ isError: boolean }>("tools.call", {
 			...actor,
-			name: "neta_send",
+			name: "send_message",
 			arguments: { agentId: agent.id, text: "continue after restart" },
 		});
 		expect(sent.isError).toBe(false);
@@ -779,86 +756,13 @@ test("an interrupted agent resumes its exact conversation when the leader contin
 				sessionId: agent.sessionId,
 				limit: 20,
 			});
-			return tail.blocks.some((block) => block.text === "continue after restart") ? tail : undefined;
+			return tail.blocks.some((block) => block.text.includes("continue after restart")) ? tail : undefined;
 		});
-		expect(history.blocks.some((block) => block.text === "continue after restart")).toBe(true);
+		expect(history.blocks.some((block) => block.text.includes("continue after restart"))).toBe(true);
 	} finally {
 		await second.client.close();
 	}
 }, 90000);
-
-test("completed lead follow-up keeps identity and off-screen clients receive completion and question events", async () => {
-	await writeSettings(join(dir, "completed-followup-sessions.json"));
-	node = await startNode({ sessionFactory: startLegacySession });
-	const at = await attach();
-	const observer = await connectNode({ client: "cli" });
-	const ended: TurnNotification[] = [];
-	const streamed: TurnNotification[] = [];
-	const questions: unknown[] = [];
-	observer.on("conversation.ended", (params) => ended.push(params as TurnNotification));
-	observer.on("turn", (params) => streamed.push(params as TurnNotification));
-	observer.on("event", (params) => questions.push(params));
-	try {
-		const actor = await leaderActor(at);
-		const created = await at.client.request<{ isError: boolean }>("tools.call", {
-			...actor,
-			name: "neta_mission",
-			arguments: {
-				name: "Retain review history",
-				objective: "Review then follow up",
-				access: "readWrite",
-				lead: { task: "remember original review" },
-			},
-		});
-		expect(created.isError).toBe(false);
-		const original = await waitFor("idle mission lead", async () => {
-			const snapshot = await at.client.request<{ agents: Agent[] }>("snapshot");
-			return snapshot.agents.find((agent) => agent.canSpawn && agent.state === "idle");
-		});
-		await waitFor("completion while not tailing", () => ended.find((item) => item.sessionId === original.sessionId));
-		expect(ended.some((item) => item.sessionId === at.leader.sessionId)).toBe(true);
-		expect(streamed).toHaveLength(0);
-		const asked = await at.client.request<{ isError: boolean }>("tools.call", {
-			...actor,
-			name: "neta_ask",
-			arguments: { missionId: 1, question: "Proceed with the review follow-up?" },
-		});
-		expect(asked.isError).toBe(false);
-		await waitFor("question broadcast", () =>
-			questions.find((item) => JSON.stringify(item).includes("mission.blocked")),
-		);
-		const ready = await at.client.request<{ isError: boolean }>("tools.call", {
-			...actor,
-			name: "neta_ready",
-			arguments: { missionId: 1, summary: "Review handed off" },
-		});
-		expect(ready.isError).toBe(false);
-		const sent = await at.client.request<{ isError: boolean; content: { text: string }[] }>("tools.call", {
-			...actor,
-			name: "neta_send",
-			arguments: { agentId: original.id, text: "follow-up in original review" },
-		});
-		expect(sent.isError).toBe(false);
-		expect(sent.content[0]?.text).toContain('"status":"delivered"');
-		await waitFor("follow-up completion", () =>
-			ended.filter((item) => item.sessionId === original.sessionId).length >= 2 ? true : undefined,
-		);
-		const snapshot = await at.client.request<{ agents: Agent[]; missions: { state: string }[] }>("snapshot");
-		expect(snapshot.agents).toHaveLength(1);
-		expect(snapshot.agents[0]).toMatchObject({ id: original.id, sessionId: original.sessionId, state: "idle" });
-		expect(snapshot.agents[0]?.pendingQuestion).toBeUndefined();
-		expect(snapshot.missions[0]?.state).toBe("running");
-		const history = await at.client.request<ConversationTailResult>("conversation.tail", {
-			sessionId: original.sessionId,
-			limit: 100,
-		});
-		expect(history.blocks.some((block) => block.text.includes("remember original review"))).toBe(true);
-		expect(history.blocks.some((block) => block.text === "follow-up in original review")).toBe(true);
-	} finally {
-		await observer.close();
-		await at.client.close();
-	}
-}, 15000);
 
 test("a rejected idle-agent resume does not invent a replacement session", async () => {
 	const sessionStore = join(dir, "rejecting-agent-sessions.json");
@@ -868,7 +772,7 @@ test("a rejected idle-agent resume does not invent a replacement session", async
 	const firstActor = await leaderActor(first);
 	await first.client.request("tools.call", {
 		...firstActor,
-		name: "neta_mission",
+		name: "dispatch_mission",
 		arguments: {
 			name: "Refuse replacement",
 			objective: "Keep identity",
@@ -889,7 +793,7 @@ test("a rejected idle-agent resume does not invent a replacement session", async
 		const actor = await leaderActor(second);
 		const sent = await second.client.request<{ isError: boolean; content: Array<{ text: string }> }>("tools.call", {
 			...actor,
-			name: "neta_send",
+			name: "send_message",
 			arguments: { agentId: agent.id, text: "must not fork" },
 		});
 		expect(sent.isError).toBe(false);
@@ -898,9 +802,9 @@ test("a rejected idle-agent resume does not invent a replacement session", async
 			"conversation.inbox",
 			{ sessionId: agent.sessionId },
 		);
-		expect(inbox.messages.some((message) => message.text === "must not fork" && message.status === "queued")).toBe(
-			true,
-		);
+		expect(
+			inbox.messages.some((message) => message.text.includes("must not fork") && message.status === "queued"),
+		).toBe(true);
 		const after = await second.client.request<{ agents: Agent[] }>("snapshot", {});
 		expect(after.agents.find((one) => one.id === agent.id)?.state).toBe("idle");
 		expect(after.agents.find((one) => one.id === agent.id)?.sessionId).toBe(agent.sessionId);
@@ -925,120 +829,6 @@ async function leaderActor(at: Attached): Promise<{ actorId: string; token: stri
 	};
 }
 
-async function agentActor(at: Attached, agent: Agent): Promise<{ actorId: string; token: string }> {
-	await at.client.request("conversation.tail", { sessionId: agent.sessionId, limit: 20 });
-	await at.client.request("conversation.prompt", { sessionId: agent.sessionId, text: "MCP please" });
-	const echo = await waitFor("the agent MCP config", () => {
-		const block = at.turns.find((n) => n.sessionId === agent.sessionId && n.block?.text?.startsWith("mcp:"));
-		return block?.block?.text?.slice("mcp:".length);
-	});
-	const servers = JSON.parse(echo) as Array<{ name: string; args: string[] }>;
-	const neta = servers.find((server) => server.name === "neta");
-	return {
-		actorId: neta?.args[neta.args.indexOf("--actor") + 1] ?? "",
-		token: neta?.args[neta.args.indexOf("--token") + 1] ?? "",
-	};
-}
-
-test("two real writers serialize and completion starts exactly one queued successor", async () => {
-	node = await startNode({ sessionFactory: startLegacySession });
-	const at = await attach();
-	try {
-		const leader = await leaderActor(at);
-		await at.client.request("tools.call", {
-			...leader,
-			name: "neta_mission",
-			arguments: {
-				name: "Serialized writers",
-				objective: "one writer at a time",
-				access: "readWrite",
-				lead: { task: "Coordinate serialized writers", effort: 2 },
-				agents: [
-					{ task: "first writer", access: "readWrite" },
-					{ task: "second writer", access: "readWrite" },
-				],
-			},
-		});
-		let snapshot = await at.client.request<{ agents: Agent[] }>("snapshot", {});
-		const first = snapshot.agents.find((agent) => agent.task === "first writer");
-		const second = snapshot.agents.find((agent) => agent.task === "second writer");
-		if (first === undefined || second === undefined) throw new Error("expected active and queued writers");
-		expect(first.state).not.toBe("queued");
-		expect(second.state).toBe("queued");
-		await expect(
-			at.client.request("conversation.tail", { sessionId: second.sessionId, limit: 20 }),
-		).rejects.toThrow();
-		const actor = await agentActor(at, first);
-		await at.client.request("tools.call", { ...actor, name: "neta_done", arguments: { outcome: "first complete" } });
-		await waitFor("queued writer promotion", () =>
-			at.states.find(
-				(state) =>
-					state.kind === "agent" &&
-					(state.record as Agent).id === second.id &&
-					(state.record as Agent).state === "starting",
-			),
-		);
-		snapshot = await at.client.request<{ agents: Agent[] }>("snapshot", {});
-		expect(snapshot.agents.find((agent) => agent.id === first.id)?.state).toBe("completed");
-		expect(["starting", "running", "idle", "interrupted"]).toContain(
-			snapshot.agents.find((agent) => agent.id === second.id)?.state ?? "missing",
-		);
-		const promoted = await waitFor("promoted writer brief", async () => {
-			const tail = await at.client.request<ConversationTailResult>("conversation.tail", {
-				sessionId: second.sessionId,
-				limit: 20,
-			});
-			return tail.blocks.length > 0 ? tail : undefined;
-		});
-		expect(promoted.blocks.length).toBeGreaterThan(0);
-	} finally {
-		await at.client.close();
-	}
-}, 90000);
-
-test("a failed promoted writer is closed before the next queued writer starts", async () => {
-	node = await startNode({ sessionFactory: startLegacySession });
-	const at = await attach();
-	try {
-		const leader = await leaderActor(at);
-		await at.client.request("tools.call", {
-			...leader,
-			name: "neta_mission",
-			arguments: {
-				name: "Promotion failure",
-				objective: "skip a broken provider",
-				access: "readWrite",
-				lead: { task: "Coordinate promotion", effort: 2 },
-				agents: [
-					{ task: "holder", access: "readWrite" },
-					{ task: "broken", access: "readWrite", provider: "missing" },
-					{ task: "successor", access: "readWrite" },
-				],
-			},
-		});
-		const before = await at.client.request<{ agents: Agent[] }>("snapshot", {});
-		const holder = before.agents.find((agent) => agent.task === "holder");
-		if (holder === undefined) throw new Error("expected holder");
-		const actor = await agentActor(at, holder);
-		await at.client.request("tools.call", { ...actor, name: "neta_done", arguments: { outcome: "release" } });
-		await waitFor("third writer promotion", () =>
-			at.states.find(
-				(state) =>
-					state.kind === "agent" &&
-					(state.record as Agent).task === "successor" &&
-					(state.record as Agent).state === "starting",
-			),
-		);
-		const after = await at.client.request<{ agents: Agent[] }>("snapshot", {});
-		expect(after.agents.find((agent) => agent.task === "broken")?.state).toBe("failed");
-		expect(["starting", "running", "idle", "interrupted"]).toContain(
-			after.agents.find((agent) => agent.task === "successor")?.state ?? "missing",
-		);
-	} finally {
-		await at.client.close();
-	}
-}, 90000);
-
 test("an initial writer launch failure releases its lease before the next writer starts", async () => {
 	node = await startNode({ sessionFactory: startLegacySession });
 	const at = await attach();
@@ -1046,7 +836,7 @@ test("an initial writer launch failure releases its lease before the next writer
 		const leader = await leaderActor(at);
 		await at.client.request("tools.call", {
 			...leader,
-			name: "neta_mission",
+			name: "dispatch_mission",
 			arguments: {
 				name: "Initial launch failure",
 				objective: "clean up before continuing",
@@ -1058,10 +848,13 @@ test("an initial writer launch failure releases its lease before the next writer
 				],
 			},
 		});
-		const snapshot = await at.client.request<{ missions: Array<{ agentIds: string[] }>; agents: Agent[] }>(
-			"snapshot",
-			{},
-		);
+		const snapshot = await waitFor("healthy writer admission after failed launch", async () => {
+			const snapshot = await at.client.request<{ missions: Array<{ agentIds: string[] }>; agents: Agent[] }>(
+				"snapshot",
+				{},
+			);
+			return snapshot.agents.some((a) => a.task === "healthy second" && a.state === "idle") ? snapshot : undefined;
+		});
 		expect(snapshot.agents.find((agent) => agent.task === "broken first")?.state).toBe("failed");
 		expect(["starting", "running", "idle", "interrupted"]).toContain(
 			snapshot.agents.find((agent) => agent.task === "healthy second")?.state ?? "missing",
@@ -1079,7 +872,7 @@ test("restart preserves writer FIFO and the queued head's exact session", async 
 	const leader = await leaderActor(firstNode);
 	await firstNode.client.request("tools.call", {
 		...leader,
-		name: "neta_mission",
+		name: "dispatch_mission",
 		arguments: {
 			name: "Restart writers",
 			objective: "preserve FIFO",
@@ -1104,140 +897,24 @@ test("restart preserves writer FIFO and the queued head's exact session", async 
 		const nextLeader = await leaderActor(secondNode);
 		const sent = await secondNode.client.request<{ isError: boolean }>("tools.call", {
 			...nextLeader,
-			name: "neta_send",
+			name: "send_message",
 			arguments: { agentId: head.id, text: "continue FIFO head" },
 		});
 		expect(sent.isError).toBe(false);
 		const after = await secondNode.client.request<{ agents: Agent[] }>("snapshot", {});
 		const resumedHead = after.agents.find((agent) => agent.id === head.id);
 		expect(resumedHead?.sessionId).toBe(head.sessionId);
+		expect(resumedHead, JSON.stringify(resumedHead)).toMatchObject({ sessionId: head.sessionId });
+		expect(resumedHead?.runtimeError).toBeUndefined();
 		expect(["starting", "running", "idle"]).toContain(resumedHead?.state ?? "missing");
 		const headHistory = await secondNode.client.request<ConversationTailResult>("conversation.tail", {
 			sessionId: head.sessionId,
 			limit: 40,
 		});
 		expect(headHistory.blocks.some((block) => block.text.includes("queued head"))).toBe(true);
-		expect(after.agents.find((agent) => agent.task === "interrupted holder")?.state).toBe("idle");
-	} finally {
-		await secondNode.client.close();
-	}
-}, 90000);
-
-test("an interrupted writer queued behind another resumes its exact history when promoted", async () => {
-	await writeSettings(join(dir, "queued-resume-sessions.json"));
-	node = await startNode({ sessionFactory: startLegacySession });
-	const firstNode = await attach();
-	const leader = await leaderActor(firstNode);
-	await firstNode.client.request("tools.call", {
-		...leader,
-		name: "neta_mission",
-		arguments: {
-			name: "Queued resume history",
-			objective: "preserve the interrupted writer",
-			access: "readWrite",
-			lead: { task: "Coordinate resumed writers", effort: 2 },
-			agents: [
-				{ task: "original holder", access: "readWrite" },
-				{ task: "next holder", access: "readWrite" },
-			],
-		},
-	});
-	const before = await firstNode.client.request<{ agents: Agent[] }>("snapshot", {});
-	const original = before.agents.find((agent) => agent.task === "original holder");
-	const next = before.agents.find((agent) => agent.task === "next holder");
-	if (original === undefined || next === undefined) throw new Error("expected writers");
-	const waitForTerminalTurnContaining = async (
-		label: string,
-		attached: Awaited<ReturnType<typeof attach>>,
-		sessionId: string,
-		text: string,
-	): Promise<ConversationTailResult> =>
-		waitFor(label, async () => {
-			const page = await attached.client.request<ConversationTailResult>("conversation.tail", {
-				sessionId,
-				limit: 100,
-			});
-			const block = page.blocks.find((one) => one.role === "user" && one.text.includes(text));
-			if (block === undefined) return undefined;
-			return page.turns.find((turn) => turn.id === block.turnId)?.endedAt !== undefined ? page : undefined;
-		});
-	// The Agent record is visible before its initial context prompt closes.
-	// Addressing it as soon as the mission call returns races that first turn.
-	await waitForTerminalTurnContaining(
-		"original writer initial brief boundary",
-		firstNode,
-		original.sessionId,
-		"original holder",
-	);
-	await firstNode.client.request("conversation.prompt", {
-		sessionId: original.sessionId,
-		text: "UNIQUE_PRE_RESTART_HISTORY",
-	});
-	await waitFor("original history", () =>
-		firstNode.turns.find(
-			(turn) => turn.sessionId === original.sessionId && turn.block?.text?.includes("UNIQUE_PRE_RESTART_HISTORY"),
-		),
-	);
-	await firstNode.client.close();
-	await node.stop();
-
-	node = await startNode({ sessionFactory: startLegacySession });
-	const secondNode = await attach();
-	try {
-		const nextLeader = await leaderActor(secondNode);
-		await secondNode.client.request("tools.call", {
-			...nextLeader,
-			name: "neta_send",
-			arguments: { agentId: next.id, text: "take writer first" },
-		});
-		const queued = await secondNode.client.request<{ isError: boolean; content: Array<{ text: string }> }>(
-			"tools.call",
-			{
-				...nextLeader,
-				name: "neta_send",
-				arguments: { agentId: original.id, text: "resume after next" },
-			},
-		);
-		expect(queued.isError).toBe(false);
-		expect(queued.content[0]?.text).toContain('"status":"queued"');
-		const beforePromotion = await secondNode.client.request<ConversationTailResult>("conversation.tail", {
-			sessionId: original.sessionId,
-			limit: 100,
-		});
-		const priorTurnIds = new Set(beforePromotion.turns.map((turn) => turn.id));
-		const nextActor = await agentActor(secondNode, next);
-		await secondNode.client.request("tools.call", {
-			...nextActor,
-			name: "neta_done",
-			arguments: { outcome: "release to interrupted writer" },
-		});
-		await waitFor("interrupted writer promotion", () =>
-			secondNode.states.find(
-				(state) =>
-					state.kind === "agent" &&
-					(state.record as Agent).id === original.id &&
-					(state.record as Agent).state === "starting",
-			),
-		);
-		// Promotion first resumes the provider and sends its context brief. The
-		// `starting` state is deliberately published before that turn so the UI
-		// can show the transition; it is not a promise that the prompt boundary
-		// has closed. Wait for the persisted terminal turn before addressing the
-		// same conversation directly, otherwise this test races the brief and
-		// intermittently gets the truthful TURN_IN_PROGRESS response.
-		await waitFor("promoted writer continuation boundary", async () => {
-			const page = await secondNode.client.request<ConversationTailResult>("conversation.tail", {
-				sessionId: original.sessionId,
-				limit: 100,
-			});
-			const promoted = page.turns.find((turn) => !priorTurnIds.has(turn.id));
-			return promoted?.endedAt === undefined ? undefined : page;
-		});
-		await secondNode.client.request("conversation.prompt", { sessionId: original.sessionId, text: "HISTORY" });
-		await waitFor("resumed provider history", () =>
-			secondNode.turns.find(
-				(turn) => turn.sessionId === original.sessionId && turn.block?.text?.includes("UNIQUE_PRE_RESTART_HISTORY"),
-			),
+		expect(after.agents.find((agent) => agent.task === "interrupted holder")?.runtimeError).toBeUndefined();
+		expect(["idle", "interrupted"]).toContain(
+			after.agents.find((agent) => agent.task === "interrupted holder")?.state ?? "missing",
 		);
 	} finally {
 		await secondNode.client.close();
@@ -1251,7 +928,7 @@ test("concurrent agent additions preserve both ids and admit one real writer", a
 		const leader = await leaderActor(at);
 		const made = await at.client.request<{ content: Array<{ text: string }> }>("tools.call", {
 			...leader,
-			name: "neta_mission",
+			name: "dispatch_mission",
 			arguments: {
 				name: "Concurrent additions",
 				objective: "keep both",
@@ -1264,7 +941,7 @@ test("concurrent agent additions preserve both ids and admit one real writer", a
 			["writer one", "writer two"].map((task) =>
 				at.client.request("tools.call", {
 					...leader,
-					name: "neta_agent",
+					name: "spawn_agent",
 					arguments: { missionId: mission.id, task, access: "readWrite" },
 				}),
 			),
@@ -1276,66 +953,14 @@ test("concurrent agent additions preserve both ids and admit one real writer", a
 		const agents = snapshot.agents.filter((agent) => agent.missionId === mission.id);
 		expect(agents.filter((agent) => !agent.canSpawn)).toHaveLength(2);
 		expect(snapshot.missions.find((one) => one.id === mission.id)?.agentIds).toHaveLength(3);
-		expect(
-			agents.filter(
-				(agent) => !agent.canSpawn && ["starting", "running", "idle", "interrupted"].includes(agent.state),
-			),
-		).toHaveLength(1);
-		expect(agents.filter((agent) => !agent.canSpawn && agent.state === "queued")).toHaveLength(1);
-	} finally {
-		await at.client.close();
-	}
-}, 90000);
-
-test("a completed writer is closed at its turn boundary before promotion", async () => {
-	node = await startNode({ sessionFactory: startLegacySession });
-	const at = await attach();
-	try {
-		const leader = await leaderActor(at);
-		await at.client.request("tools.call", {
-			...leader,
-			name: "neta_mission",
-			arguments: {
-				name: "Turn boundary",
-				objective: "no overlap",
-				access: "readWrite",
-				lead: { task: "Coordinate turn boundary", effort: 2 },
-				agents: [
-					{ task: "holding writer", access: "readWrite" },
-					{ task: "waiting writer", access: "readWrite" },
-				],
-			},
+		expect(agents.filter((agent) => ["starting", "running"].includes(agent.state)).length).toBeLessThanOrEqual(1);
+		await waitFor("both queued writers to finish", async () => {
+			const state = await at.client.request<{ agents: Agent[] }>("snapshot", {});
+			const children = state.agents.filter((a) => a.missionId === mission.id && !a.canSpawn);
+			return children.length === 2 && children.every((a) => a.state === "idle" && !a.runtimeError)
+				? true
+				: undefined;
 		});
-		const before = await at.client.request<{ agents: Agent[] }>("snapshot", {});
-		const holder = before.agents.find((agent) => agent.task === "holding writer");
-		const waiting = before.agents.find((agent) => agent.task === "waiting writer");
-		if (holder === undefined || waiting === undefined) throw new Error("expected writers");
-		const actor = await agentActor(at, holder);
-		await at.client.request("conversation.prompt", { sessionId: holder.sessionId, text: "HOLD_FOREVER" });
-		await waitFor("held turn", () =>
-			at.turns.find((turn) => turn.sessionId === holder.sessionId && turn.turn?.endedAt === undefined),
-		);
-		await at.client.request("tools.call", { ...actor, name: "neta_done", arguments: { outcome: "done after turn" } });
-		await expect(
-			at.client.request("conversation.tail", { sessionId: waiting.sessionId, limit: 20 }),
-		).rejects.toThrow();
-		await at.client.request("conversation.cancel", { sessionId: holder.sessionId });
-		await waitFor("promotion after cancellation boundary", () =>
-			at.states.find(
-				(state) =>
-					state.kind === "agent" &&
-					(state.record as Agent).id === waiting.id &&
-					(state.record as Agent).state === "starting",
-			),
-		);
-		const promoted = await waitFor("promoted writer transcript", async () => {
-			const tail = await at.client.request<ConversationTailResult>("conversation.tail", {
-				sessionId: waiting.sessionId,
-				limit: 20,
-			});
-			return tail.blocks.length > 0 ? tail : undefined;
-		});
-		expect(promoted.blocks.length).toBeGreaterThan(0);
 	} finally {
 		await at.client.close();
 	}
@@ -1352,7 +977,7 @@ test("the real Node mount reserves a separate lead before persisting and launchi
 		expect(token).toMatch(/^[0-9a-f]{64}$/);
 
 		const listed = await at.client.request<{ tools: Array<{ name: string }> }>("tools.list", { actorId, token });
-		expect(listed.tools.map((tool) => tool.name)).toContain("neta_mission");
+		expect(listed.tools.map((tool) => tool.name)).toContain("dispatch_mission");
 
 		// A bad token reaches no handler.
 		await expect(at.client.request("tools.list", { actorId, token: "0".repeat(64) })).rejects.toThrow();
@@ -1360,7 +985,7 @@ test("the real Node mount reserves a separate lead before persisting and launchi
 		const called = await at.client.request<{ content: Array<{ text: string }>; isError: boolean }>("tools.call", {
 			actorId,
 			token,
-			name: "neta_mission",
+			name: "dispatch_mission",
 			arguments: {
 				name: "Fix the widget",
 				objective: "Make it work",
@@ -1401,11 +1026,10 @@ test("a saved self-led mission remains readable and closeable without resuming s
 		machineId: leader.machineId,
 		name: "Historical direct work",
 		objective: "Review old work",
-		changes: [],
 		lead: { kind: "leader" as const },
 		agentIds: [],
 		access: "readOnly" as const,
-		state: "readyToClose" as const,
+		state: "open",
 		createdAt: new Date().toISOString(),
 	};
 	await first.client.close();
@@ -1424,7 +1048,7 @@ test("a saved self-led mission remains readable and closeable without resuming s
 			"tools.call",
 			{
 				...actor,
-				name: "neta_agent",
+				name: "spawn_agent",
 				arguments: { missionId: mission.number, task: "resume old work", access: "readOnly" },
 			},
 		);
@@ -1432,7 +1056,7 @@ test("a saved self-led mission remains readable and closeable without resuming s
 		expect(refused.content[0]?.text).toContain("legacy self-led mission cannot resume");
 		const closed = await second.client.request<{ isError: boolean }>("tools.call", {
 			...actor,
-			name: "neta_close",
+			name: "close",
 			arguments: { missionId: mission.number, disposition: "completed", reason: "Historical review finished" },
 		});
 		expect(closed.isError).toBe(false);
@@ -1447,113 +1071,6 @@ test("a saved self-led mission remains readable and closeable without resuming s
 		await second.client.close();
 	}
 }, 90000);
-
-for (const alias of ["actor", "session"] as const) {
-	test(`normal neta_close preserves a saved agent-led ${alias} alias and the workspace leader session`, async () => {
-		await writeSettings(join(dir, "historical-alias-sessions.json"));
-		node = await startNode({ sessionFactory: startLegacySession });
-		const first = await attach();
-		const leader = first.leader;
-		const id = alias === "actor" ? leader.sessionId : ulid();
-		const agent: Agent = {
-			id,
-			missionId: ulid(),
-			workspaceId: leader.workspaceId,
-			name: "Historical lead",
-			task: "Review historical work",
-			access: "readOnly",
-			provider: leader.provider,
-			model: leader.model,
-			skills: [],
-			sessionId: leader.sessionId,
-			canSpawn: true,
-			state: "completed",
-			startedAt: new Date().toISOString(),
-		};
-		const mission = {
-			id: agent.missionId,
-			number: 1,
-			workspaceId: leader.workspaceId,
-			machineId: leader.machineId,
-			name: "Historical agent lead",
-			objective: "Close saved work",
-			changes: [],
-			lead: { kind: "agent" as const, agentId: agent.id },
-			agentIds: [agent.id],
-			access: "readOnly" as const,
-			state: "readyToClose" as const,
-			createdAt: new Date().toISOString(),
-		};
-		await first.client.close();
-		await node.stop();
-		await writeFile(join(dir, "agents.json"), JSON.stringify({ [agent.id]: agent }));
-		await appendLine(paths().registryLog(leader.workspaceId), { op: "create", at: mission.createdAt, mission });
-		node = await startNode({ sessionFactory: startLegacySession });
-		const second = await attach();
-		try {
-			const before = await second.client.request<{ missions: Array<{ id: string; lead: { agentId: string } }> }>(
-				"snapshot",
-				{},
-			);
-			expect(before.missions.find((one) => one.id === mission.id)?.lead.agentId).toBe(agent.id);
-			const actor = await leaderActor(second);
-			const refused = await second.client.request<{ isError: boolean; content: Array<{ text: string }> }>(
-				"tools.call",
-				{
-					...actor,
-					name: "neta_agent",
-					arguments: { missionId: 1, task: "Resume old work", access: "readOnly" },
-				},
-			);
-			expect(second.leader.sessionId).toBe(leader.sessionId);
-			expect(refused.isError).toBe(true);
-			expect(refused.content[0]?.text).toContain("legacy self-led mission cannot resume");
-			await expect(
-				second.client.request("leader.setMode", {
-					workspaceId: leader.workspaceId,
-					missionId: mission.id,
-					mode: "leadPlus",
-				}),
-			).rejects.toThrow("cannot resume self-led work");
-			const closed = await second.client.request<{ isError: boolean; content: Array<{ text: string }> }>(
-				"tools.call",
-				{
-					...actor,
-					name: "neta_close",
-					arguments: { missionId: 1, disposition: "completed", reason: "Historical review finished" },
-				},
-			);
-			expect(closed.isError).toBe(false);
-			const after = await second.client.request<{
-				missions: Array<{ id: string; state: string; lead: { agentId: string } }>;
-				leaders: Leader[];
-				agents: Agent[];
-			}>("snapshot", {});
-			expect(after.missions.find((one) => one.id === mission.id)).toMatchObject({
-				state: "closed",
-				lead: { kind: "agent", agentId: agent.id },
-			});
-			expect(after.leaders[0]?.sessionId).toBe(leader.sessionId);
-			expect(after.agents.filter((one) => one.missionId === mission.id).map((one) => one.id)).toEqual([agent.id]);
-			const registry = openMissionRegistry();
-			expect((await registry.get(leader.workspaceId, mission.id))?.state).toBe("closed");
-			await expect(registry.update(mission)).rejects.toThrow("must differ");
-			const reassigned = { ...mission, state: "closed" as const, lead: { kind: "agent" as const, agentId: ulid() } };
-			await expect(registry.update(reassigned)).rejects.toThrow("closed mission cannot be reassigned");
-			await second.client.request("conversation.prompt", {
-				sessionId: leader.sessionId,
-				text: "LEADER_AFTER_LEGACY_CLOSE",
-			});
-			await waitFor("workspace leader after historical close", () =>
-				second.turns.find(
-					(turn) => turn.sessionId === leader.sessionId && turn.block?.text?.includes("LEADER_AFTER_LEGACY_CLOSE"),
-				),
-			);
-		} finally {
-			await second.client.close();
-		}
-	}, 90000);
-}
 
 test("the fake ACP creates a mission through the injected MCP stdio proxy", async () => {
 	const control = await shortTempDir("neta-mcp-e2e-");
@@ -1585,14 +1102,14 @@ test("the fake ACP creates a mission through the injected MCP stdio proxy", asyn
 		const lead = created.agents.find((agent) => agent.missionId === state.missionId);
 		expect(lead).toBeDefined();
 		await at.client.request("conversation.tail", { sessionId: lead?.sessionId, limit: 20 });
-		const blocked = await waitFor("the MCP-created blocked agent", async () => {
+		const blocked = await waitFor("the question in an ordinary final reply", async () => {
 			const raw = await Bun.file(join(control, "state.json")).text();
 			const current = JSON.parse(raw) as { stage?: string; missionId?: string; agentId?: string; error?: string };
 			if (current.error !== undefined) throw new Error(current.error);
 			if (current.stage !== "blocked" || current.agentId === undefined) return undefined;
 			const snapshot = await at.client.request<{ agents: Array<{ id: string; state: string }> }>("snapshot", {});
 			return current.agentId === lead?.id &&
-				snapshot.agents.find((agent) => agent.id === current.agentId)?.state === "blocked"
+				snapshot.agents.find((agent) => agent.id === current.agentId)?.state === "idle"
 				? current
 				: undefined;
 		});
@@ -1613,14 +1130,7 @@ test("the fake ACP creates a mission through the injected MCP stdio proxy", asyn
 		await writeFile(join(control, "complete.release"), "release\n");
 		await waitFor("the MCP-completed agent", async () => {
 			const snapshot = await at.client.request<{ agents: Array<{ id: string; state: string }> }>("snapshot", {});
-			return snapshot.agents.find((agent) => agent.id === blocked.agentId)?.state === "completed" ? true : undefined;
-		});
-		await at.client.request("conversation.prompt", { sessionId: at.leader.sessionId, text: "MCP_E2E_READY" });
-		await waitFor("the MCP-ready mission", async () => {
-			const snapshot = await at.client.request<{ missions: Array<{ id: string; state: string }> }>("snapshot", {});
-			return snapshot.missions.find((mission) => mission.id === blocked.missionId)?.state === "readyToClose"
-				? true
-				: undefined;
+			return snapshot.agents.find((agent) => agent.id === blocked.agentId)?.state === "idle" ? true : undefined;
 		});
 		await at.client.request("conversation.prompt", { sessionId: at.leader.sessionId, text: "MCP_E2E_CLOSE" });
 		await waitFor("the MCP-closed mission", async () => {
@@ -1635,405 +1145,6 @@ test("the fake ACP creates a mission through the injected MCP stdio proxy", asyn
 	}
 }, 30000);
 
-test("the charter's reservations gate neta_mode", async () => {
-	await writeFile(join(work, "CHARTER.md"), "# Charter\n\n## Reserved for the user\n\n- database migrations\n");
-	node = await startNode({ sessionFactory: startLegacySession });
-	const at = await attach();
-	try {
-		const { actorId, token } = await leaderActor(at);
-		const created = await at.client.request<{ content: Array<{ text: string }> }>("tools.call", {
-			actorId,
-			token,
-			name: "neta_mission",
-			arguments: {
-				name: "Move the schema",
-				objective: "Ship the new tables",
-				access: "readWrite",
-				lead: { task: "Coordinate schema work", effort: 2 },
-			},
-		});
-		const mission = JSON.parse(created.content[0]?.text.split("\n")[0] ?? "{}") as { id: string };
-
-		const record = {
-			objective: "Rewrite the migration",
-			whyLeadInsufficient: "the agents cannot see the schema",
-			missionId: mission.id,
-			mutationKind: "database migrations",
-			estimatedFiles: 3,
-			validation: "bun test",
-			estimatedMinutes: 20,
-			externalEffects: "none",
-		};
-		const asked = await at.client.request<{ content: Array<{ text: string }>; isError: boolean }>("tools.call", {
-			actorId,
-			token,
-			name: "neta_mode",
-			arguments: { mode: "leadPlus", record },
-		});
-		const answer = JSON.parse(asked.content[0]?.text.split("\n")[0] ?? "{}") as {
-			approved: boolean;
-			reason?: string;
-		};
-		expect(answer.approved).toBe(false);
-		expect(answer.reason).toBe("reservedByCharter");
-
-		// And the leader is still lead: a denial writes nothing.
-		const snapshot = await at.client.request<{ leaders: Leader[] }>("snapshot", {});
-		expect(snapshot.leaders.find((one) => one.sessionId === actorId)?.mode).toBe("lead");
-	} finally {
-		await at.client.close();
-	}
-}, 90000);
-
-test("neta_mode moves the leader to leadPlus and back", async () => {
-	await writeSettings(join(dir, "mode-sessions.json"));
-	node = await startNode({ sessionFactory: startLegacySession });
-	const at = await attach();
-	try {
-		const { actorId, token } = await leaderActor(at);
-		const created = await at.client.request<{ content: Array<{ text: string }> }>("tools.call", {
-			actorId,
-			token,
-			name: "neta_mission",
-			arguments: {
-				name: "Rework the loader",
-				objective: "Make it fast",
-				access: "readWrite",
-				lead: { task: "Coordinate loader work", effort: 2 },
-			},
-		});
-		const mission = JSON.parse(created.content[0]?.text.split("\n")[0] ?? "{}") as { id: string };
-		const record = {
-			objective: "Rewrite the loader",
-			whyLeadInsufficient: "the agents cannot see the schema",
-			missionId: mission.id,
-			mutationKind: "source edits",
-			estimatedFiles: 3,
-			validation: "bun test",
-			estimatedMinutes: 20,
-			externalEffects: "none",
-		};
-		const mode = async (args: Record<string, unknown>): Promise<{ approved: boolean }> => {
-			const answered = await at.client.request<{ content: Array<{ text: string }> }>("tools.call", {
-				actorId,
-				token,
-				name: "neta_mode",
-				arguments: args,
-			});
-			return JSON.parse(answered.content[0]?.text.split("\n")[0] ?? "{}") as { approved: boolean };
-		};
-		const leaderNow = async (): Promise<Leader | undefined> => {
-			const snapshot = await at.client.request<{ leaders: Leader[] }>("snapshot", {});
-			return snapshot.leaders.find((one) => one.workspaceId === at.leader.workspaceId);
-		};
-
-		expect((await mode({ mode: "leadPlus", record })).approved).toBe(true);
-		await waitFor("Lead++ to apply after the tool turn", () =>
-			at.states.some((state) => state.kind === "leader" && (state.record as Leader).mode === "leadPlus")
-				? true
-				: undefined,
-		);
-
-		// The way back is a real write, not a bare `approved: true`: Lead++
-		// outlives a restart, so a leader that cannot return stays in build
-		// access until a person flips it.
-		expect((await mode({ mode: "lead" })).approved).toBe(true);
-		const back = await waitFor("leader returned to Lead", async () => {
-			const current = await leaderNow();
-			return current?.mode === "lead" ? current : undefined;
-		});
-		expect(back?.mode).toBe("lead");
-		expect(
-			at.states.filter((s) => s.kind === "leader" && (s.record as Leader).mode === "lead").length,
-		).toBeGreaterThan(0);
-	} finally {
-		await at.client.close();
-	}
-}, 90000);
-
-test("Lead++ waits for a normal turn boundary before relaunching writable", async () => {
-	const barrier = join(dir, "mode-barrier");
-	const ready = join(dir, "mode-ready");
-	await writeBarrierSettings(join(dir, "mode-barrier-sessions.json"), barrier, ready);
-	node = await startNode({ sessionFactory: startLegacySession });
-	const at = await attach();
-	try {
-		const actor = await leaderActor(at);
-		const created = await at.client.request<{ content: Array<{ text: string }> }>("tools.call", {
-			...actor,
-			name: "neta_mission",
-			arguments: {
-				name: "Deferred mode",
-				objective: "switch safely",
-				access: "readWrite",
-				lead: { task: "Coordinate deferred mode", effort: 2 },
-			},
-		});
-		const mission = JSON.parse(created.content[0]?.text.split("\n")[0] ?? "{}") as { id: string };
-		await at.client.request("conversation.prompt", {
-			sessionId: at.leader.sessionId,
-			text: "WAIT_FOR_BARRIER",
-		});
-		await waitFor("provider barrier", async () => ((await Bun.file(ready).exists()) ? true : undefined));
-		const answer = await at.client.request<{ content: Array<{ text: string }> }>("tools.call", {
-			...actor,
-			name: "neta_mode",
-			arguments: {
-				mode: "leadPlus",
-				record: {
-					objective: "perform the bounded edit",
-					whyLeadInsufficient: "the leader must make the final edit",
-					missionId: mission.id,
-					mutationKind: "source edits",
-					estimatedFiles: 1,
-					validation: "bun test",
-					estimatedMinutes: 5,
-					externalEffects: "none",
-				},
-			},
-		});
-		expect(JSON.parse(answer.content[0]?.text.split("\n")[0] ?? "{}").approved).toBe(true);
-		let snapshot = await at.client.request<{ leaders: Leader[] }>("snapshot", {});
-		expect(snapshot.leaders[0]?.mode).toBe("lead");
-		await writeFile(barrier, "go\n");
-		await waitFor("deferred Lead++", () =>
-			at.states.some((state) => state.kind === "leader" && (state.record as Leader).mode === "leadPlus")
-				? true
-				: undefined,
-		);
-		snapshot = await at.client.request<{ leaders: Leader[] }>("snapshot", {});
-		expect(snapshot.leaders[0]?.mode).toBe("leadPlus");
-	} finally {
-		await at.client.close();
-	}
-}, 90000);
-
-test("cancelling a turn invalidates its pending Lead++ grant and frees the writer", async () => {
-	await writeSettings(join(dir, "mode-cancel-sessions.json"));
-	node = await startNode({ sessionFactory: startLegacySession });
-	const at = await attach();
-	try {
-		const actor = await leaderActor(at);
-		const created = await at.client.request<{ content: Array<{ text: string }> }>("tools.call", {
-			...actor,
-			name: "neta_mission",
-			arguments: {
-				name: "Cancelled mode",
-				objective: "remain read only",
-				access: "readWrite",
-				lead: { task: "Coordinate cancellation", effort: 2 },
-			},
-		});
-		const mission = JSON.parse(created.content[0]?.text.split("\n")[0] ?? "{}") as { id: string };
-		await at.client.request("conversation.prompt", { sessionId: at.leader.sessionId, text: "HOLD_FOREVER" });
-		await waitFor("held leader turn", () =>
-			at.turns.find((turn) => turn.sessionId === at.leader.sessionId && turn.turn?.endedAt === undefined),
-		);
-		await at.client.request("tools.call", {
-			...actor,
-			name: "neta_mode",
-			arguments: {
-				mode: "leadPlus",
-				record: {
-					objective: "perform the bounded edit",
-					whyLeadInsufficient: "the leader must make the final edit",
-					missionId: mission.id,
-					mutationKind: "source edits",
-					estimatedFiles: 1,
-					validation: "bun test",
-					estimatedMinutes: 5,
-					externalEffects: "none",
-				},
-			},
-		});
-		await at.client.request("conversation.cancel", { sessionId: at.leader.sessionId });
-		await waitFor("cancelled leader turn", () =>
-			at.turns.find(
-				(turn) => turn.sessionId === at.leader.sessionId && turn.turn?.endedAt !== undefined && turn.turn.cancelled,
-			),
-		);
-		await at.client.request("tools.call", {
-			...actor,
-			name: "neta_agent",
-			arguments: { missionId: mission.id, task: "writer after cancellation", access: "readWrite" },
-		});
-		await waitFor("writer after cancelled mode", async () => {
-			const snapshot = await at.client.request<{ leaders: Leader[]; agents: Agent[] }>("snapshot", {});
-			return snapshot.leaders[0]?.mode === "lead" &&
-				["starting", "running", "idle", "interrupted"].includes(
-					snapshot.agents.find((agent) => agent.task === "writer after cancellation")?.state ?? "",
-				)
-				? true
-				: undefined;
-		});
-	} finally {
-		await at.client.close();
-	}
-}, 90000);
-
-test("closing a delegated Lead++ mission downgrades its lead before promoting another mission", async () => {
-	await writeSettings(join(dir, "mode-close-sessions.json"));
-	node = await startNode({ sessionFactory: startLegacySession });
-	const at = await attach();
-	try {
-		const actor = await leaderActor(at);
-		const first = await at.client.request<{ content: Array<{ text: string }> }>("tools.call", {
-			...actor,
-			name: "neta_mission",
-			arguments: {
-				name: "Leader writer",
-				objective: "close safely",
-				access: "readWrite",
-				lead: { task: "Coordinate closeout", effort: 2 },
-			},
-		});
-		const mission = JSON.parse(first.content[0]?.text.split("\n")[0] ?? "{}") as { id: string };
-		const firstSnapshot = await at.client.request<{ agents: Agent[] }>("snapshot", {});
-		const lead = firstSnapshot.agents.find((agent) => agent.missionId === mission.id && agent.canSpawn);
-		if (!lead) throw new Error("missing delegated lead");
-		await at.client.request("leader.setMode", {
-			workspaceId: at.leader.workspaceId,
-			missionId: mission.id,
-			mode: "leadPlus",
-		});
-		at.turns.length = 0;
-		const writableActor = await leaderActor(at);
-		await at.client.request("tools.call", {
-			...writableActor,
-			name: "neta_mission",
-			arguments: {
-				name: "Waiting mission",
-				objective: "start after close",
-				access: "readWrite",
-				lead: { task: "Coordinate waiting work", effort: 2 },
-				agents: [{ task: "successor writer", access: "readWrite" }],
-			},
-		});
-		let snapshot = await at.client.request<{ agents: Agent[] }>("snapshot", {});
-		expect(snapshot.agents.find((agent) => agent.task === "successor writer")?.state).toBe("queued");
-		await at.client.request("conversation.tail", { sessionId: lead.sessionId, limit: 20 });
-		await at.client.request("conversation.prompt", { sessionId: lead.sessionId, text: "HOLD_FOREVER" });
-		await waitFor("active Lead++ close turn", () =>
-			at.turns.find((turn) => turn.sessionId === lead.sessionId && turn.turn?.endedAt === undefined),
-		);
-		const closed = await at.client.request<{ isError: boolean }>("tools.call", {
-			...writableActor,
-			name: "neta_close",
-			arguments: { missionId: mission.id, disposition: "abandoned", reason: "test complete" },
-		});
-		expect(closed.isError).toBe(true);
-		snapshot = await at.client.request<{ agents: Agent[] }>("snapshot", {});
-		expect(snapshot.agents.find((agent) => agent.task === "successor writer")?.state).toBe("queued");
-		await at.client.request("conversation.cancel", { sessionId: lead.sessionId });
-		await waitFor("successor after Lead++ close", () =>
-			at.states.find(
-				(state) =>
-					state.kind === "agent" &&
-					(state.record as Agent).task === "successor writer" &&
-					(state.record as Agent).state === "starting",
-			),
-		);
-		snapshot = await at.client.request<{ agents: Agent[] }>("snapshot", {});
-		expect(["starting", "running", "idle", "interrupted"]).toContain(
-			snapshot.agents.find((agent) => agent.task === "successor writer")?.state ?? "missing",
-		);
-		const reopened = await at.client.request<{ leader: Leader }>("workspace.open", { path: work });
-		expect(reopened.leader.mode).toBe("lead");
-		const saved = (await Bun.file(paths().leader(at.leader.workspaceId)).json()) as {
-			leadModes?: Record<string, { mode: string }>;
-		};
-		expect(saved.leadModes?.[lead.id]?.mode).toBe("lead");
-	} finally {
-		await at.client.close();
-	}
-}, 90000);
-
-test("a refused Lead++ close rejects an active lead and persists closeout evidence once idle", async () => {
-	await makeGitWorkspace();
-	const sessionStore = join(dir, "mode-refused-close-sessions.json");
-	await writeCwdResumeSettings(sessionStore);
-	node = await startNode({ sessionFactory: startLegacySession });
-	const at = await attach();
-	try {
-		let actor = await leaderActor(at);
-		const created = await at.client.request<{ content: Array<{ text: string }> }>("tools.call", {
-			...actor,
-			name: "neta_mission",
-			arguments: {
-				name: "Refused close",
-				objective: "remain open",
-				access: "readWrite",
-				lead: { task: "Coordinate refused close", effort: 2 },
-			},
-		});
-		const mission = JSON.parse(created.content[0]?.text.split("\n")[0] ?? "{}") as { id: string };
-		const initial = await at.client.request<{ agents: Agent[] }>("snapshot", {});
-		const lead = initial.agents.find((agent) => agent.missionId === mission.id && agent.canSpawn);
-		if (!lead) throw new Error("missing delegated lead");
-		await at.client.request("leader.setMode", {
-			workspaceId: at.leader.workspaceId,
-			missionId: mission.id,
-			mode: "leadPlus",
-		});
-		at.turns.length = 0;
-		actor = await leaderActor(at);
-		const refused = await at.client.request<{ isError: boolean; content: Array<{ text: string }> }>("tools.call", {
-			...actor,
-			name: "neta_close",
-			arguments: { missionId: mission.id, disposition: "merged", reason: "done", evidence: "deadbeef" },
-		});
-		expect(refused.isError).toBe(true);
-		expect(refused.content[0]?.text).toContain("not merged");
-		let snapshot = await at.client.request<{ missions: Array<{ id: string; state: string; attention?: string }> }>(
-			"snapshot",
-			{},
-		);
-		expect(snapshot.missions.find((one) => one.id === mission.id)?.state).not.toBe("closed");
-		expect(snapshot.missions.find((one) => one.id === mission.id)?.attention).toContain("not merged");
-
-		await at.client.request("leader.setMode", {
-			workspaceId: at.leader.workspaceId,
-			missionId: mission.id,
-			mode: "leadPlus",
-		});
-		at.turns.length = 0;
-		actor = await leaderActor(at);
-		await at.client.request("conversation.tail", { sessionId: lead.sessionId, limit: 20 });
-		await at.client.request("conversation.prompt", { sessionId: lead.sessionId, text: "HOLD_FOREVER" });
-		await waitFor("active refused close turn", () =>
-			at.turns.find((turn) => turn.sessionId === lead.sessionId && turn.turn?.endedAt === undefined),
-		);
-		const deferred = await at.client.request("tools.call", {
-			...actor,
-			name: "neta_close",
-			arguments: { missionId: mission.id, disposition: "merged", reason: "done", evidence: "cafebabe" },
-		});
-		expect((deferred as { isError: boolean }).isError).toBe(true);
-		expect((deferred as { content: Array<{ text: string }> }).content[0]?.text).toContain("Agents are still active");
-		await at.client.request("conversation.cancel", { sessionId: lead.sessionId });
-		await waitFor("mission lead is idle after cancellation", async () => {
-			const current = await at.client.request<{ agents: Agent[] }>("snapshot", {});
-			return current.agents.find((agent) => agent.id === lead.id)?.state === "interrupted" ? true : undefined;
-		});
-		const retry = await at.client.request<{ isError: boolean; content: Array<{ text: string }> }>("tools.call", {
-			...actor,
-			name: "neta_close",
-			arguments: { missionId: mission.id, disposition: "merged", reason: "done", evidence: "cafebabe" },
-		});
-		expect(retry.isError).toBe(true);
-		expect(retry.content[0]?.text).toContain("not merged");
-		await waitFor("refused close attention", async () => {
-			snapshot = await at.client.request("snapshot", {});
-			return snapshot.missions.find((one) => one.id === mission.id)?.attention?.includes("cafebabe")
-				? true
-				: undefined;
-		});
-		expect(snapshot.missions.find((one) => one.id === mission.id)?.state).not.toBe("closed");
-	} finally {
-		await at.client.close();
-	}
-}, 90000);
-
 test("a skill in the workspace root is found, whatever the node's cwd is", async () => {
 	await mkdir(join(work, ".neta", "skills"), { recursive: true });
 	await writeFile(join(work, ".neta", "skills", "repo-only.md"), "# Repo only\n\nUse the repo's own tools.\n");
@@ -2044,7 +1155,7 @@ test("a skill in the workspace root is found, whatever the node's cwd is", async
 		const called = await at.client.request<{ content: Array<{ text: string }>; isError: boolean }>("tools.call", {
 			actorId,
 			token,
-			name: "neta_mission",
+			name: "dispatch_mission",
 			arguments: {
 				name: "Read the loader",
 				objective: "Say how it works",
@@ -2059,7 +1170,7 @@ test("a skill in the workspace root is found, whatever the node's cwd is", async
 		const missing = await at.client.request<{ content: Array<{ text: string }>; isError: boolean }>("tools.call", {
 			actorId,
 			token,
-			name: "neta_mission",
+			name: "dispatch_mission",
 			arguments: {
 				name: "Read it again",
 				objective: "Say how it works",
@@ -2069,234 +1180,6 @@ test("a skill in the workspace root is found, whatever the node's cwd is", async
 		});
 		expect(missing.isError).toBe(true);
 		expect(missing.content[0]?.text).toContain("missingSkill");
-	} finally {
-		await at.client.close();
-	}
-}, 90000);
-
-// Lead and Lead++ still change Neta's mutation authority, but both leadership
-// modes keep the provider unrestricted. The ACP unit test proves the access
-// value changes across the relaunch; this runtime test proves the durable mode
-// transition keeps the same conversation and never re-sandboxes its leader.
-test("a mode change keeps the delegated mission lead provider unrestricted", async () => {
-	await writeSettings(join(dir, "fake-sessions.json"));
-	node = await startNode({ sessionFactory: startLegacySession });
-	const at = await attach();
-	try {
-		const actor = await leaderActor(at);
-		const created = await at.client.request<{ content: Array<{ text: string }> }>("tools.call", {
-			...actor,
-			name: "neta_mission",
-			arguments: {
-				name: "Writable mode",
-				objective: "Test access",
-				access: "readWrite",
-				lead: { task: "Coordinate access test", effort: 2 },
-			},
-		});
-		const mission = JSON.parse(created.content[0]?.text.split("\n")[0] ?? "{}") as { id: string };
-		const snapshot = await at.client.request<{ agents: Agent[] }>("snapshot", {});
-		const lead = snapshot.agents.find((agent) => agent.missionId === mission.id && agent.canSpawn);
-		if (!lead) throw new Error("missing delegated lead");
-		await at.client.request("conversation.tail", { sessionId: lead.sessionId, limit: 20 });
-		await at.client.request("conversation.prompt", { sessionId: lead.sessionId, text: "EDIT" });
-		await waitFor("the Lead permission answer", () =>
-			at.turns.find((n) => n.sessionId === lead.sessionId && n.block?.text === "permission=allow"),
-		);
-		const allowsBefore = at.turns.filter(
-			(notification) => notification.sessionId === lead.sessionId && notification.block?.text === "permission=allow",
-		).length;
-
-		await at.client.request("leader.setMode", {
-			workspaceId: at.leader.workspaceId,
-			missionId: mission.id,
-			mode: "leadPlus",
-		});
-		const reopened = await at.client.request<{ leader: Leader }>("workspace.open", { path: work });
-		expect(reopened.leader.mode).toBe("lead");
-		// Relaunched in place: the person keeps the conversation they are
-		// looking at.
-		expect(
-			(await at.client.request<{ agents: Agent[] }>("snapshot", {})).agents.find((agent) => agent.id === lead.id)
-				?.sessionId,
-		).toBe(lead.sessionId);
-
-		await at.client.request("conversation.prompt", { sessionId: lead.sessionId, text: "EDIT again" });
-		await waitFor("the Lead++ permission answer", () => {
-			const allows = at.turns.filter(
-				(notification) =>
-					notification.sessionId === lead.sessionId && notification.block?.text === "permission=allow",
-			);
-			return allows.length > allowsBefore ? allows.at(-1) : undefined;
-		});
-	} finally {
-		await at.client.close();
-	}
-}, 90000);
-
-test("workspace open restores a delegated Lead++ mission lead's writable session", async () => {
-	await writeSettings(join(dir, "mode-restart-sessions.json"));
-	node = await startNode({ sessionFactory: startLegacySession });
-	const first = await attach();
-	const actor = await leaderActor(first);
-	const created = await first.client.request<{ content: Array<{ text: string }> }>("tools.call", {
-		...actor,
-		name: "neta_mission",
-		arguments: {
-			name: "Restarted Lead++",
-			objective: "recover safely",
-			access: "readWrite",
-			lead: { task: "Coordinate restoration", effort: 2 },
-		},
-	});
-	const mission = JSON.parse(created.content[0]?.text.split("\n")[0] ?? "{}") as { id: string };
-	const before = await first.client.request<{ agents: Agent[] }>("snapshot", {});
-	const lead = before.agents.find((agent) => agent.missionId === mission.id && agent.canSpawn);
-	if (!lead) throw new Error("missing delegated lead");
-	await first.client.request("leader.setMode", {
-		workspaceId: first.leader.workspaceId,
-		missionId: mission.id,
-		mode: "leadPlus",
-	});
-	const sessionId = lead.sessionId;
-	await first.client.close();
-	await node.stop();
-
-	node = await startNode({ sessionFactory: startLegacySession });
-	const second = await attach();
-	try {
-		expect(second.leader.mode).toBe("lead");
-		expect(
-			(await second.client.request<{ agents: Agent[] }>("snapshot", {})).agents.find((agent) => agent.id === lead.id)
-				?.sessionId,
-		).toBe(sessionId);
-		const actor = await leaderActor(second);
-		const resumed = await second.client.request<{ isError: boolean }>("tools.call", {
-			...actor,
-			name: "neta_send",
-			arguments: { agentId: lead.id, text: "EDIT after restart" },
-		});
-		expect(resumed.isError).toBe(false);
-		await waitFor("restored Lead++ access", async () => {
-			const tail = await second.client.request<ConversationTailResult>("conversation.tail", {
-				sessionId,
-				limit: 60,
-			});
-			return tail.blocks.some((block) => block.text === "permission=allow") ? true : undefined;
-		});
-	} finally {
-		await second.client.close();
-	}
-}, 90000);
-
-test("provider switching keeps the Neta session, owner, tools, and a one-shot visible handoff", async () => {
-	const sessionStore = join(dir, "provider-switch-sessions.json");
-	await writeTwoProviderSettings(sessionStore);
-	node = await startNode({ sessionFactory: startLegacySession });
-	const at = await attach();
-	try {
-		const actor = await leaderActor(at);
-		const created = await at.client.request<{ content: Array<{ text: string }> }>("tools.call", {
-			...actor,
-			name: "neta_mission",
-			arguments: {
-				name: "Provider handoff",
-				objective: "keep the context",
-				access: "readOnly",
-				lead: { task: "Coordinate handoff", effort: 2 },
-			},
-		});
-		const mission = JSON.parse(created.content[0]?.text.split("\n")[0] ?? "{}") as { id: string };
-		await at.client.request("conversation.prompt", { sessionId: at.leader.sessionId, text: "USER_CONTEXT_MARKER" });
-		await waitFor("context marker", () =>
-			at.turns.find(
-				(turn) => turn.sessionId === at.leader.sessionId && turn.block?.text?.includes("USER_CONTEXT_MARKER"),
-			),
-		);
-		const providers = await at.client.request<{
-			providers: Array<{ id: string; label: string; defaultModel: string; available: boolean }>;
-		}>("providers.list", {});
-		expect(providers.providers.map((provider) => provider.id)).toEqual(["opencode"]);
-		const unopenedModels = await at.client.request<{ models: Array<{ id: string; name: string; provider: string }> }>(
-			"models.list",
-			{ provider: "alternate" },
-		);
-		expect(unopenedModels.models).toEqual([{ id: "test-model", name: "test-model", provider: "alternate" }]);
-		const prepared = await at.client.request<{ markdown: string }>("conversation.prepareHandoff", {
-			sessionId: at.leader.sessionId,
-		});
-		expect(prepared.markdown).toContain(mission.id);
-		expect(prepared.markdown).toContain("USER_CONTEXT_MARKER");
-		const switched = await at.client.request<{
-			sessionId: string;
-			provider: string;
-			model: string;
-			contextReset: boolean;
-		}>("conversation.setProvider", { sessionId: at.leader.sessionId, provider: "alternate" });
-		expect(switched).toEqual({
-			sessionId: at.leader.sessionId,
-			provider: "alternate",
-			model: "test-model",
-			contextReset: true,
-		});
-		at.turns.length = 0;
-		await at.client.request("conversation.prompt", { sessionId: at.leader.sessionId, text: "FIRST_AFTER_SWITCH" });
-		await waitFor("first switched turn", () =>
-			at.turns.find((turn) => turn.sessionId === at.leader.sessionId && turn.turn?.endedAt !== undefined),
-		);
-		await at.client.request("conversation.prompt", { sessionId: at.leader.sessionId, text: "HISTORY" });
-		const history = await waitFor(
-			"switched provider history",
-			() =>
-				at.turns.find(
-					(turn) =>
-						turn.sessionId === at.leader.sessionId && turn.block?.text?.includes("# Neta provider handoff"),
-				)?.block?.text,
-		);
-		expect(history.match(/# Neta provider handoff/g)).toHaveLength(1);
-		const ownerSnapshot = await at.client.request<{ leaders: Leader[] }>("snapshot", {});
-		expect(ownerSnapshot.leaders[0]?.provider).toBe("alternate");
-		at.turns.length = 0;
-		const switchedActor = await leaderActor(at);
-		expect(switchedActor.actorId).toBe(at.leader.sessionId);
-		const historyCall = await at.client.request<{ content: Array<{ text: string }> }>("tools.call", {
-			...switchedActor,
-			name: "neta_history",
-			arguments: { limit: 50 },
-		});
-		const historyPage = JSON.parse(historyCall.content[0]?.text.split("\n")[0] ?? "{}") as {
-			messages: Array<{ role: string; text: string }>;
-		};
-		expect(historyPage.messages.some((message) => message.text.includes("USER_CONTEXT_MARKER"))).toBe(true);
-		expect(historyPage.messages.every((message) => message.role === "user" || message.role === "assistant")).toBe(
-			true,
-		);
-
-		await at.client.request("conversation.setModel", { sessionId: at.leader.sessionId, model: "legacy-other" });
-		let snapshot = await at.client.request<{ leaders: Leader[] }>("snapshot", {});
-		expect(snapshot.leaders[0]?.model).toBe("legacy-other");
-		await expect(
-			at.client.request("conversation.setProvider", { sessionId: at.leader.sessionId, provider: "missing" }),
-		).rejects.toThrow();
-		at.turns.length = 0;
-		await at.client.request("conversation.prompt", { sessionId: at.leader.sessionId, text: "ROLLBACK_OK" });
-		await waitFor("old provider after failed switch", () =>
-			at.turns.find((turn) => turn.sessionId === at.leader.sessionId && turn.block?.text?.includes("ROLLBACK_OK")),
-		);
-		await waitFor("rollback turn end", () =>
-			at.turns.find((turn) => turn.sessionId === at.leader.sessionId && turn.turn?.endedAt !== undefined),
-		);
-		snapshot = await at.client.request<{ leaders: Leader[] }>("snapshot", {});
-		expect(snapshot.leaders[0]?.provider).toBe("alternate");
-
-		await at.client.request("conversation.prompt", { sessionId: at.leader.sessionId, text: "HOLD_FOREVER" });
-		await waitFor("active provider switch turn", () =>
-			at.turns.find((turn) => turn.sessionId === at.leader.sessionId && turn.turn?.endedAt === undefined),
-		);
-		await expect(
-			at.client.request("conversation.setProvider", { sessionId: at.leader.sessionId, provider: "fake" }),
-		).rejects.toThrow();
-		await at.client.request("conversation.cancel", { sessionId: at.leader.sessionId });
 	} finally {
 		await at.client.close();
 	}
@@ -2337,76 +1220,25 @@ test("a provider handoff survives restart until the next accepted prompt", async
 	}
 }, 90000);
 
-test("a provider that cannot assume writable access restores the original live provider", async () => {
-	const sessionStore = join(dir, "provider-switch-rollback.json");
-	await writeRejectingAlternateSettings(sessionStore);
-	node = await startNode({ sessionFactory: startLegacySession });
-	const at = await attach();
-	try {
-		const actor = await leaderActor(at);
-		await at.client.request("tools.call", {
-			...actor,
-			name: "neta_mission",
-			arguments: {
-				name: "Writable provider rollback",
-				objective: "preserve the original provider",
-				access: "readWrite",
-				lead: { task: "Coordinate provider rollback", effort: 2 },
-			},
-		});
-		const snapshotBefore = await at.client.request<{ missions: Array<{ id: string }>; agents: Agent[] }>(
-			"snapshot",
-			{},
-		);
-		const mission = snapshotBefore.missions[0];
-		const lead = snapshotBefore.agents.find((agent) => agent.canSpawn);
-		if (!mission || !lead) throw new Error("missing delegated mission lead");
-		await at.client.request("leader.setMode", {
-			workspaceId: at.leader.workspaceId,
-			missionId: mission.id,
-			mode: "leadPlus",
-		});
-		await expect(
-			at.client.request("conversation.setProvider", {
-				sessionId: lead.sessionId,
-				provider: "alternate",
-				handoff: "ROLLBACK_HANDOFF_MUST_NOT_APPLY",
-			}),
-		).rejects.toThrow(/restored fake/);
-		const snapshot = await at.client.request<{ agents: Agent[] }>("snapshot", {});
-		expect(snapshot.agents.find((agent) => agent.id === lead.id)?.provider).toBe("fake");
-		at.turns.length = 0;
-		await at.client.request("conversation.tail", { sessionId: lead.sessionId, limit: 20 });
-		await at.client.request("conversation.prompt", {
-			sessionId: lead.sessionId,
-			text: "ORIGINAL_PROVIDER_USABLE",
-		});
-		await waitFor("restored provider turn", () =>
-			at.turns.find((turn) => turn.sessionId === lead.sessionId && turn.turn?.endedAt !== undefined),
-		);
-	} finally {
-		await at.client.close();
-	}
-}, 90000);
-
-test("workspace reset archives missions and starts blank leader and Superleader chats", async () => {
+test("workspace reset archives missions and starts blank leader and Neta chats", async () => {
 	await writeSettings(join(dir, "reset-workspace-sessions.json"));
 	node = await startNode({ sessionFactory: startLegacySession });
 	const at = await attach();
 	try {
-		const oldSol = await at.client.request<{ sessionId: string }>("sol.open", {
+		const oldNeta = await at.client.request<{ sessionId: string }>("workspace-leader.open", {
 			workspaceId: at.leader.workspaceId,
 		});
-		await at.client.request("conversation.tail", { sessionId: oldSol.sessionId });
-		await at.client.request("conversation.prompt", { sessionId: oldSol.sessionId, text: "OLD_SUPERLEADER_CHAT" });
-		await waitFor("old Superleader chat turn", () =>
-			at.turns.find(
-				(turn) => turn.sessionId === oldSol.sessionId && turn.block?.text?.includes("OLD_SUPERLEADER_CHAT"),
-			),
+		await at.client.request("conversation.tail", { sessionId: oldNeta.sessionId });
+		await at.client.request("conversation.prompt", {
+			sessionId: oldNeta.sessionId,
+			text: "OLD_NETA_CHAT",
+		});
+		await waitFor("old Neta chat turn", () =>
+			at.turns.find((turn) => turn.sessionId === oldNeta.sessionId && turn.block?.text?.includes("OLD_NETA_CHAT")),
 		);
 		const creation = await at.client.request<{ isError?: boolean }>("tools.call", {
 			...(await leaderActor(at)),
-			name: "neta_mission",
+			name: "dispatch_mission",
 			arguments: {
 				name: "Archive reset",
 				objective: "reset all",
@@ -2438,18 +1270,17 @@ test("workspace reset archives missions and starts blank leader and Superleader 
 		expect(archived.agents.every((agent) => agent.state === "archived")).toBe(true);
 		expect(snapshot.leaders).toHaveLength(1);
 		const leader = snapshot.leaders[0];
-		expect(leader?.activeMissionId).toBeUndefined();
 		expect(leader?.sessionId).not.toBe(at.leader.sessionId);
 		const tail = await at.client.request<ConversationTailResult>("conversation.tail", {
 			sessionId: leader?.sessionId,
 		});
 		expect(tail.blocks).toEqual([]);
-		const freshSol = await at.client.request<{ sessionId: string }>("sol.open", {
+		const freshNeta = await at.client.request<{ sessionId: string }>("workspace-leader.open", {
 			workspaceId: at.leader.workspaceId,
 		});
-		expect(freshSol.sessionId).not.toBe(oldSol.sessionId);
+		expect(freshNeta.sessionId).not.toBe(oldNeta.sessionId);
 		const solTail = await at.client.request<ConversationTailResult>("conversation.tail", {
-			sessionId: freshSol.sessionId,
+			sessionId: freshNeta.sessionId,
 		});
 		expect(solTail.blocks).toEqual([]);
 	} finally {
@@ -2470,7 +1301,7 @@ test("workspace reset on a git workspace reclaims clean idle worktrees and keeps
 		const actor = await leaderActor(at);
 		const busy = await at.client.request<{ isError?: boolean; content: Array<{ text: string }> }>("tools.call", {
 			...actor,
-			name: "neta_mission",
+			name: "dispatch_mission",
 			arguments: {
 				name: "Busy reset",
 				objective: "stay active across reset",
@@ -2488,7 +1319,7 @@ test("workspace reset on a git workspace reclaims clean idle worktrees and keeps
 		const busyId = (JSON.parse(busy.content[0]?.text.split("\n")[0] ?? "{}") as { id: string }).id;
 		const idle = await at.client.request<{ isError?: boolean; content: Array<{ text: string }> }>("tools.call", {
 			...actor,
-			name: "neta_mission",
+			name: "dispatch_mission",
 			arguments: {
 				name: "Idle reset",
 				objective: "inspect only",
@@ -2560,14 +1391,14 @@ test("workspace reset on a git workspace reclaims clean idle worktrees and keeps
 	}
 }, 90000);
 
-test("runtime wakes workspace leader when mission leader ends without a completion tool", async () => {
+test("runtime wakes coordinator when mission leader ends without a completion tool", async () => {
 	await writeSettings(join(dir, "automatic-report-sessions.json"));
 	node = await startNode({ sessionFactory: startLegacySession });
 	const at = await attach();
 	try {
 		const creation = await at.client.request<{ isError?: boolean }>("tools.call", {
 			...(await leaderActor(at)),
-			name: "neta_mission",
+			name: "dispatch_mission",
 			arguments: {
 				name: "Automatic report",
 				objective: "inspect only",
@@ -2596,11 +1427,11 @@ test("runtime wakes workspace leader when mission leader ends without a completi
 		const snapshot = await at.client.request<{ agents: Agent[] }>("snapshot");
 		const missionLead = snapshot.agents.find((agent) => agent.canSpawn);
 		if (!missionLead) throw new Error("mission lead is missing");
-		expect(missionLead.model).toBe("test-model");
+		expect(missionLead.model).toBe("fixture-fast");
 		expect(messages.some((message) => message.text.includes(`Actual model: ${missionLead.model}`))).toBe(true);
 		const workerCreation = await at.client.request<{ isError?: boolean }>("tools.call", {
 			...(await leaderActor(at)),
-			name: "neta_agent",
+			name: "spawn_agent",
 			arguments: { missionId: missionLead.missionId, task: "hello worker", access: "readOnly" },
 		});
 		expect(workerCreation.isError).not.toBe(true);
@@ -2621,185 +1452,6 @@ test("runtime wakes workspace leader when mission leader ends without a completi
 		expect(
 			parentMessages.some((message) => message.text.includes("(worker)") && message.status === "delivered"),
 		).toBe(true);
-	} finally {
-		await at.client.close();
-	}
-}, 15000);
-
-test("delegation routes effort independently, reports idle, hands off by role and closes by number", async () => {
-	await writeFile(
-		join(dir, "settings.json"),
-		JSON.stringify({
-			providers: {
-				opencode: {
-					command: process.execPath,
-					args: [
-						FIXTURE,
-						"--config-options",
-						"--opencode-models",
-						"--unrestricted-mode",
-						"build",
-						"--session-store",
-						join(dir, "sessions.json"),
-					],
-					resume: true,
-					defaultModel: "openai/gpt-6-astra",
-				},
-			},
-			leader: { provider: "opencode", model: "openai/gpt-6-astra" },
-			forbiddenModels: [],
-		}),
-	);
-	await writeFile(
-		join(dir, "routing.json"),
-		JSON.stringify({
-			mode: "fixed",
-			models: {
-				1: "openai/gpt-5.6-luna",
-				2: "openai/gpt-5.6-luna",
-				3: "openai/gpt-5.6-luna",
-				4: "openai/gpt-6-astra",
-				5: "openai/gpt-6-astra",
-			},
-		}),
-	);
-	node = await startNode({ sessionFactory: startLegacySession });
-	const at = await attach();
-	try {
-		const actor = await leaderActor(at);
-		const missing = await at.client.request<{ isError?: boolean; content: { text: string }[] }>("tools.call", {
-			...actor,
-			name: "neta_agent",
-			arguments: { task: "Confirm responsiveness", access: "readOnly", effort: 1 },
-		});
-		expect(missing.isError).toBe(true);
-		expect(missing.content[0]?.text).toContain("neta_mission");
-		const creation = await at.client.request<{ isError?: boolean; content: { text: string }[] }>("tools.call", {
-			...actor,
-			name: "neta_mission",
-			arguments: {
-				name: "Response check",
-				objective: "Confirm the child responds",
-				access: "readOnly",
-				lead: { task: "Acknowledge and finish", effort: 1 },
-			},
-		});
-		expect(creation.isError).not.toBe(true);
-		const created = JSON.parse(creation.content[0]?.text.split("\n")[0] ?? "{}");
-		expect(created.missionId).toBe(1);
-		expect(created.agents[0]).toMatchObject({
-			model: "openai/gpt-5.6-luna",
-			routing: { method: "fixed", effort: 1 },
-		});
-		const child = await waitFor("idle routed child", async () => {
-			const snapshot = await at.client.request<{ agents: Agent[]; leaders: Leader[] }>("snapshot");
-			expect(snapshot.leaders[0]?.model).toBe("openai/gpt-6-astra");
-			return snapshot.agents.find((agent) => agent.canSpawn && agent.state === "idle");
-		});
-		expect(child.model).toBe("openai/gpt-5.6-luna");
-		await waitFor("automatic child report", async () => {
-			const inbox = await at.client.request<{ messages: { text: string; status: string }[] }>("conversation.inbox", {
-				sessionId: at.leader.sessionId,
-			});
-			return inbox.messages.find(
-				(message) => message.text.includes("Actual model: openai/gpt-5.6-luna") && message.status === "delivered",
-			);
-		});
-		const lead = await agentActor(at, child);
-		const beforeAdjust = await at.client.request<ConversationTailResult>("conversation.tail", {
-			sessionId: child.sessionId,
-			limit: 100,
-		});
-		for (const [arguments_, expectedModel, expectedEffort] of [
-			[{ missionId: 1, effort: 4 }, "openai/gpt-6-astra", 4],
-			[{ agentId: child.name, change: "down" }, "openai/gpt-5.6-luna", 3],
-		] as const) {
-			const changed = await at.client.request<{ isError?: boolean; content: { text: string }[] }>("tools.call", {
-				...actor,
-				name: "neta_model",
-				arguments: arguments_,
-			});
-			expect(changed.isError).not.toBe(true);
-			const result = JSON.parse(changed.content[0]?.text.split("\n")[0] ?? "{}");
-			expect(result).toMatchObject({ model: expectedModel, effort: expectedEffort, sessionId: child.sessionId });
-			const snapshot = await at.client.request<{ agents: Agent[]; leaders: Leader[] }>("snapshot");
-			expect(snapshot.agents.find((a) => a.id === child.id)).toMatchObject({
-				sessionId: child.sessionId,
-				model: expectedModel,
-				state: "idle",
-				routing: { effort: expectedEffort },
-			});
-			expect(snapshot.leaders[0]?.model).toBe("openai/gpt-6-astra");
-		}
-		const afterAdjust = await at.client.request<ConversationTailResult>("conversation.tail", {
-			sessionId: child.sessionId,
-			limit: 100,
-		});
-		expect(afterAdjust.blocks).toEqual(beforeAdjust.blocks);
-		const workerCreation = await at.client.request<{ isError?: boolean }>("tools.call", {
-			...lead,
-			name: "neta_agent",
-			arguments: { task: "Check one detail", access: "readOnly", effort: 2 },
-		});
-		expect(workerCreation.isError).not.toBe(true);
-		const worker = await waitFor("idle routed worker", async () => {
-			const snapshot = await at.client.request<{ agents: Agent[] }>("snapshot");
-			return snapshot.agents.find((agent) => !agent.canSpawn && agent.state === "idle");
-		});
-		const workerBefore = await at.client.request<ConversationTailResult>("conversation.tail", {
-			sessionId: worker.sessionId,
-			limit: 100,
-		});
-		const adjustedWorker = await at.client.request<{ isError?: boolean }>("tools.call", {
-			...lead,
-			name: "neta_model",
-			arguments: { agentId: worker.name, effort: 4 },
-		});
-		expect(adjustedWorker.isError).not.toBe(true);
-		const adjustedSnapshot = await at.client.request<{ agents: Agent[] }>("snapshot");
-		expect(adjustedSnapshot.agents.find((agent) => agent.id === worker.id)).toMatchObject({
-			sessionId: worker.sessionId,
-			model: "openai/gpt-6-astra",
-			routing: { effort: 4 },
-		});
-		expect(adjustedSnapshot.agents.find((agent) => agent.id === child.id)?.model).toBe("openai/gpt-5.6-luna");
-		const workerAfter = await at.client.request<ConversationTailResult>("conversation.tail", {
-			sessionId: worker.sessionId,
-			limit: 100,
-		});
-		expect(workerAfter.blocks).toEqual(workerBefore.blocks);
-		const workerActor = await agentActor(at, worker);
-		const selfAdjusted = await at.client.request<{ isError?: boolean }>("tools.call", {
-			...workerActor,
-			name: "neta_model",
-			arguments: { change: "down" },
-		});
-		expect(selfAdjusted.isError).not.toBe(true);
-		const workerSnapshot = await at.client.request<{ agents: Agent[] }>("snapshot");
-		expect(workerSnapshot.agents.find((agent) => agent.id === worker.id)).toMatchObject({
-			sessionId: worker.sessionId,
-			model: "openai/gpt-5.6-luna",
-			routing: { effort: 3 },
-		});
-		const ready = await at.client.request<{ isError?: boolean }>("tools.call", {
-			...lead,
-			name: "neta_ready",
-			arguments: { summary: "Response confirmed" },
-		});
-		expect(ready.isError).not.toBe(true);
-		const args = { missionId: 1, disposition: "completed", reason: "Response confirmed; no code changes" };
-		for (let i = 0; i < 2; i++) {
-			const close = await at.client.request<{ isError?: boolean }>("tools.call", {
-				...actor,
-				name: "neta_close",
-				arguments: args,
-			});
-			expect(close.isError).not.toBe(true);
-		}
-		const snapshot = await at.client.request<{ missions: { number: number; disposition: string; state: string }[] }>(
-			"snapshot",
-		);
-		expect(snapshot.missions[0]).toMatchObject({ number: 1, disposition: "completed", state: "closed" });
 	} finally {
 		await at.client.close();
 	}

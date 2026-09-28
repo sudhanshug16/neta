@@ -20,9 +20,6 @@ function leader(sessionId: string): Leader {
 		sessionId,
 		provider: "fake",
 		model: "test-model",
-		mode: "lead",
-		modeSince: "2026-01-01T00:00:00.000Z",
-		modeActiveMs: 0,
 		state: "running",
 	};
 }
@@ -53,7 +50,6 @@ function mission(number: number, state: Mission["state"]): Mission {
 		machineId: "m",
 		name: `mission ${number}`,
 		objective: "o",
-		changes: [],
 		lead: { kind: "leader" },
 		agentIds: [],
 		access: "readOnly",
@@ -95,22 +91,15 @@ function stubHandlers(overrides?: Partial<ToolHandlers>): { handlers: ToolHandle
 	return {
 		calls,
 		handlers: {
-			neta_mission: (_ctx, _args) => ok("neta_mission"),
-			neta_agent: (_ctx, _args) => ok("neta_agent"),
-			neta_model: (_ctx, _args) => ok("neta_model"),
-			neta_send: (_ctx, _args) => ok("neta_send"),
-			neta_scope: (_ctx, _args) => ok("neta_scope"),
-			neta_ready: (_ctx, _args) => ok("neta_ready"),
-			neta_close: (_ctx, _args) => ok("neta_close"),
-			neta_mode: (_ctx, _args) => ok("neta_mode"),
-			neta_pin: (_ctx, _args) => ok("neta_pin"),
-			neta_status: (_ctx, _args) => ok("neta_status"),
-			neta_history: (_ctx, _args) => ok("neta_history"),
-			neta_progress: (_ctx, _args) => ok("neta_progress"),
-			neta_ask: (_ctx, _args) => ok("neta_ask"),
-			neta_superleader_answer: (_ctx, _args) => ok("neta_superleader_answer"),
-			neta_done: (_ctx, _args) => ok("neta_done"),
-			neta_artifacts: (_ctx, _args) => ok("neta_artifacts"),
+			dispatch_mission: (_ctx, _args) => ok("dispatch_mission"),
+			spawn_agent: (_ctx, _args) => ok("spawn_agent"),
+			change_model: (_ctx, _args) => ok("change_model"),
+			send_message: (_ctx, _args) => ok("send_message"),
+			close: (_ctx, _args) => ok("close"),
+			mission_state: (_ctx, _args) => ok("mission_state"),
+			list_models: (_ctx, _args) => ok("list_models"),
+			setup_diagnostic: (_ctx, _args) => ok("setup_diagnostic"),
+			artifacts: (_ctx, _args) => ok("artifacts"),
 			...overrides,
 		},
 	};
@@ -123,7 +112,7 @@ function setup() {
 	const missionId = ulid();
 	const leaders = [leader(leaderId)];
 	const agents = [agent(leadId, true, missionId), agent(agentId, false, missionId)];
-	const missions = [mission(14, "blocked"), mission(15, "running")];
+	const missions = [mission(14, "open"), mission(15, "open")];
 	const tokens = createTokenTable();
 	const leaderToken = tokens.mint(leaderId);
 	const leadToken = tokens.mint(leadId);
@@ -142,9 +131,45 @@ function textOf(response: { content: Array<{ text: string }> }): string {
 }
 
 describe("tool router authorisation", () => {
+	test("mission leads see only own-mission arguments and cannot submit a mission selector", async () => {
+		const { router, stub, leadId, leadToken, agentId, agentToken, leaderId, leaderToken } = setup();
+		const leadTools = router.list(leadId, leadToken);
+		if (!Array.isArray(leadTools)) throw new Error("lead tools were not listed");
+		for (const name of ["mission_state", "spawn_agent", "change_model"]) {
+			const tool = leadTools.find((item) => item.name === name);
+			expect(tool?.inputSchema.properties?.missionId).toBeUndefined();
+			expect(tool?.description).toContain("mission");
+		}
+		expect(leadTools.find((item) => item.name === "send_message")?.description).toContain("your mission");
+		const workerTools = router.list(agentId, agentToken);
+		if (!Array.isArray(workerTools)) throw new Error("worker tools were not listed");
+		expect(
+			workerTools.find((item) => item.name === "change_model")?.inputSchema.properties?.missionId,
+		).toBeUndefined();
+		expect(workerTools.find((item) => item.name === "change_model")?.inputSchema.properties?.agentId).toBeUndefined();
+		const leaderTools = router.list(leaderId, leaderToken);
+		if (!Array.isArray(leaderTools)) throw new Error("coordinator tools were not listed");
+		expect(
+			leaderTools.find((item) => item.name === "mission_state")?.inputSchema.properties?.missionId,
+		).toBeDefined();
+
+		const denied = await router.call(leadId, leadToken, "mission_state", { missionId: 65 });
+		expect(textOf(denied)).toContain("unknown property 'params.missionId'");
+		const deniedSpawn = await router.call(leadId, leadToken, "spawn_agent", {
+			task: "Check it",
+			access: "readOnly",
+			missionId: 65,
+		});
+		expect(textOf(deniedSpawn)).toContain("unknown property 'params.missionId'");
+		expect(stub.calls).toEqual([]);
+		const own = await router.call(leadId, leadToken, "mission_state", {});
+		expect(own.isError).toBe(false);
+		expect(stub.calls).toEqual(["mission_state"]);
+	});
+
 	test("a wrong token gives notAuthorised and never reaches a handler", async () => {
 		const { router, stub, leaderId } = setup();
-		const response = await router.call(leaderId, "wrong", "neta_status", {});
+		const response = await router.call(leaderId, "wrong", "mission_state", {});
 		expect(response.isError).toBe(true);
 		expect(textOf(response)).toStartWith("error notAuthorised:");
 		expect(stub.calls).toEqual([]);
@@ -153,7 +178,7 @@ describe("tool router authorisation", () => {
 	test("a stale token fails after a fresh mint", async () => {
 		const { router, tokens, stub, leaderId, leaderToken } = setup();
 		tokens.mint(leaderId);
-		const response = await router.call(leaderId, leaderToken, "neta_status", {});
+		const response = await router.call(leaderId, leaderToken, "mission_state", {});
 		expect(response.isError).toBe(true);
 		expect(textOf(response)).toStartWith("error notAuthorised:");
 		expect(stub.calls).toEqual([]);
@@ -162,29 +187,15 @@ describe("tool router authorisation", () => {
 	test("an unknown actor fails closed", async () => {
 		const { router, tokens, stub } = setup();
 		const nobody = ulid();
-		const response = await router.call(nobody, tokens.mint(nobody), "neta_status", {});
+		const response = await router.call(nobody, tokens.mint(nobody), "mission_state", {});
 		expect(response.isError).toBe(true);
 		expect(textOf(response)).toStartWith("error notAuthorised:");
 		expect(stub.calls).toEqual([]);
 	});
 
-	test("an ordinary agent cannot create agents but can ask its parent", async () => {
-		const { router, stub, agentId, agentToken } = setup();
-		const refused = await router.call(agentId, agentToken, "neta_agent", { task: "t", access: "readOnly" });
-		expect(refused.isError).toBe(true);
-		expect(textOf(refused)).toStartWith("error notAuthorised:");
-		expect((await router.call(agentId, agentToken, "neta_ask", { question: "Which version?" })).isError).toBe(false);
-		expect(stub.calls).toEqual(["neta_ask"]);
-		// A lead may call neta_agent.
-		const { router: leadRouter, tokens: leadTokens, leadId: lead, leadToken: leadTok } = setup();
-		const allowed = await leadRouter.call(lead, leadTok, "neta_agent", { task: "t", access: "readOnly" });
-		expect(allowed.isError).toBe(false);
-		void leadTokens;
-	});
-
 	test("bad params give badParams naming the failing property", async () => {
 		const { router, leaderId, leaderToken } = setup();
-		const response = await router.call(leaderId, leaderToken, "neta_send", {});
+		const response = await router.call(leaderId, leaderToken, "send_message", {});
 		expect(response.isError).toBe(true);
 		expect(textOf(response).startsWith("error badParams:")).toBe(true);
 		expect(textOf(response)).toContain("agentId");
@@ -203,10 +214,10 @@ describe("tool router authorisation", () => {
 		const tokens = createTokenTable();
 		const token = tokens.mint(leaderId);
 		const stub = stubHandlers({
-			neta_status: () => Promise.resolve({ ok: false, code: "refused", message: "no" }),
+			mission_state: () => Promise.resolve({ ok: false, code: "refused", message: "no" }),
 		});
 		const router = createRouter({ store: stubStore([leader(leaderId)], [], []) }, stub.handlers, tokens);
-		const response = await router.call(leaderId, token, "neta_status", {});
+		const response = await router.call(leaderId, token, "mission_state", {});
 		expect(response.isError).toBe(true);
 		expect(textOf(response).split("\n")[0]).toBe("error refused: no");
 	});
@@ -216,42 +227,17 @@ describe("tool router authorisation", () => {
 		const tokens = createTokenTable();
 		const token = tokens.mint(leaderId);
 		const stub = stubHandlers({
-			neta_status: () => Promise.reject(new Error("boom")),
+			mission_state: () => Promise.reject(new Error("boom")),
 		});
 		const router = createRouter({ store: stubStore([leader(leaderId)], [], []) }, stub.handlers, tokens);
-		const response = await router.call(leaderId, token, "neta_status", {});
+		const response = await router.call(leaderId, token, "mission_state", {});
 		expect(response.isError).toBe(true);
 		expect(textOf(response).split("\n")[0]).toBe("error unavailable: boom");
 	});
 });
 
 describe("tool router rendering", () => {
-	test("session-scoped Superleader bridge exposes only its bounded model tools and verifies actor token", async () => {
-		const actorId = ulid();
-		const lunaId = ulid();
-		const tokens = createTokenTable();
-		const token = tokens.mint(actorId);
-		const lunaToken = tokens.mint(lunaId);
-		let called = "";
-		const bridge: SessionToolBridge = {
-			actorId,
-			tools: [{ name: "superleader_feed", description: "Read feed", inputSchema: { type: "object" } }],
-			call: async (name) => {
-				called = name;
-				return { content: [{ type: "text", text: "feed" }], isError: false };
-			},
-		};
-		const router = createRouter({ store: stubStore([], [], []) }, stubHandlers().handlers, tokens, bridge);
-		expect(router.list(actorId, token)).toEqual(bridge.tools);
-		expect(router.list(actorId, "wrong")).toMatchObject({ ok: false, code: "notAuthorised" });
-		expect(router.list(lunaId, lunaToken)).toMatchObject({ ok: false, code: "notAuthorised" });
-		expect((await router.call(actorId, token, "neta_ready", {})).isError).toBe(true);
-		expect((await router.call(lunaId, lunaToken, "superleader_feed", {})).isError).toBe(true);
-		expect((await router.call(actorId, token, "superleader_feed", {})).isError).toBe(false);
-		expect(called).toBe("superleader_feed");
-	});
-
-	test("workspace Superleader bridges can register after the router starts", async () => {
+	test("workspace Neta bridges can register after the router starts", async () => {
 		const tokens = createTokenTable();
 		const bridges = new Map<string, SessionToolBridge>();
 		const router = createRouter({ store: stubStore([], [], []) }, stubHandlers().handlers, tokens, (actorId) =>
@@ -262,76 +248,28 @@ describe("tool router rendering", () => {
 		expect(router.list(actorId, token)).toMatchObject({ ok: false, code: "notAuthorised" });
 		bridges.set(actorId, {
 			actorId,
-			tools: [{ name: "superleader_missions", description: "This workspace", inputSchema: { type: "object" } }],
+			tools: [{ name: "missions", description: "This workspace", inputSchema: { type: "object" } }],
 			call: async () => ({ content: [{ type: "text", text: "scoped" }], isError: false }),
 		});
-		expect(router.list(actorId, token)).toMatchObject([{ name: "superleader_missions" }]);
-		expect(textOf(await router.call(actorId, token, "superleader_missions", {}))).toBe("scoped");
-	});
-
-	test("leader and lead responses carry the reminder, an agent's does not", async () => {
-		const { router, leaderId, leaderToken, leadId, leadToken, agentId, agentToken } = setup();
-		const leadCall = await router.call(leadId, leadToken, "neta_status", {});
-		const leaderCall = await router.call(leaderId, leaderToken, "neta_status", {});
-		const agentCall = await router.call(agentId, agentToken, "neta_progress", { text: "started" });
-		expect(leadCall.isError).toBe(false);
-		expect(textOf(leadCall)).toContain("[neta] needs you: #14 mission 14 — blocked");
-		expect(textOf(leadCall).split("\n")[0]).toBe(JSON.stringify({ called: "neta_status" }));
-		expect(textOf(leaderCall)).toContain("[neta] open: #15 mission 15");
-		expect(textOf(agentCall)).toBe(JSON.stringify({ called: "neta_progress" }));
+		expect(router.list(actorId, token)).toMatchObject([{ name: "missions" }]);
+		expect(textOf(await router.call(actorId, token, "missions", {}))).toBe("scoped");
 	});
 
 	test("revoke invalidates immediately", async () => {
 		const { router, tokens, leaderId, leaderToken } = setup();
 		tokens.revoke(leaderId);
-		const response = await router.call(leaderId, leaderToken, "neta_status", {});
+		const response = await router.call(leaderId, leaderToken, "mission_state", {});
 		expect(response.isError).toBe(true);
 		expect(textOf(response)).toStartWith("error notAuthorised:");
-	});
-
-	test("list returns the caller's tool set and refuses a bad token", () => {
-		const { router, leaderToken, leaderId, agentId, agentToken } = setup();
-		const leaderTools = router.list(leaderId, leaderToken);
-		const agentTools = router.list(agentId, agentToken);
-		const refused = router.list(leaderId, "wrong");
-		if (!Array.isArray(leaderTools) || !Array.isArray(agentTools)) {
-			throw new Error("expected tool lists");
-		}
-		const leaderNames = leaderTools.map((t) => t.name).sort();
-		expect(leaderNames).toEqual([
-			"neta_agent",
-			"neta_artifacts",
-			"neta_ask",
-			"neta_close",
-			"neta_history",
-			"neta_mission",
-			"neta_mode",
-			"neta_model",
-			"neta_pin",
-			"neta_ready",
-			"neta_scope",
-			"neta_send",
-			"neta_status",
-			"neta_superleader_answer",
-		]);
-		expect(agentTools.map((t) => t.name).sort()).toEqual([
-			"neta_artifacts",
-			"neta_ask",
-			"neta_done",
-			"neta_history",
-			"neta_model",
-			"neta_progress",
-		]);
-		expect(refused).toEqual({ ok: false, code: "notAuthorised", message: "bad token or unknown actor" });
 	});
 });
 
 test("successful MCP results remain objects even when reminder text follows the JSON", async () => {
 	const { router, leaderId, leaderToken } = setup();
-	const response = await router.call(leaderId, leaderToken, "neta_status", {});
-	expect(response.structuredContent).toEqual({ called: "neta_status" });
+	const response = await router.call(leaderId, leaderToken, "mission_state", {});
+	expect(response.structuredContent).toEqual({ called: "mission_state" });
 	expect(textOf(response)).toContain("[neta]");
 	expect(() => JSON.parse(textOf(response))).toThrow();
-	const denied = await router.call(leaderId, "invalid", "neta_status", {});
+	const denied = await router.call(leaderId, "invalid", "mission_state", {});
 	expect(denied.structuredContent).toBeUndefined();
 });

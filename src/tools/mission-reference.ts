@@ -4,13 +4,7 @@ import type { MissionRef } from "./schemas.ts";
 
 /** Public numbers are always scoped to the authenticated workspace. Storage keeps stable IDs. */
 export function resolveMission(ctx: ToolContext, reference?: MissionRef): Mission | undefined {
-	const ref =
-		reference ??
-		(ctx.actor.kind === "lead"
-			? ctx.actor.missionId
-			: ctx.actor.kind === "leader"
-				? ctx.deps.store.getLeader(ctx.actor.workspaceId)?.activeMissionId
-				: undefined);
+	const ref = reference ?? (ctx.actor.kind === "lead" ? ctx.actor.missionId : undefined);
 	const mission =
 		typeof ref === "number"
 			? ctx.deps.store

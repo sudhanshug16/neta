@@ -9,8 +9,9 @@ import { encodeWorkspaceId } from "../store/paths.ts";
 import type { WtError } from "./wt.ts";
 
 export const EXCERPT_BYTES = 4096;
+const STORED_OUTPUT_BYTES = 64 * 1024;
 const MAX_DIAGNOSTICS = 20;
-const MAX_DIRECTORY_BYTES = 128 * 1024;
+const MAX_DIRECTORY_BYTES = 4 * 1024 * 1024;
 
 export interface WorktreeSetupDiagnostic {
 	workspaceId: WorkspaceId;
@@ -30,8 +31,8 @@ export interface WorktreeSetupDiagnostic {
 	recoveredAt?: string;
 }
 
-export function safeExcerpt(text: string): string {
-	const cleaned = stripVTControlCharacters(text)
+function cleanOutput(text: string): string {
+	return stripVTControlCharacters(text)
 		.split("")
 		.filter((char) => char === "\t" || char === "\n" || (char >= " " && char <= "~"))
 		.join("")
@@ -39,8 +40,32 @@ export function safeExcerpt(text: string): string {
 		.replace(/("(?:api[_-]?key|token|password|secret)"\s*:\s*")[^"]+/gi, "$1[redacted]")
 		.replace(/(Bearer\s+)[^\s]+/gi, "$1[redacted]")
 		.replace(/([a-z][a-z0-9+.-]*:\/\/)[^/@\s]+@/gi, "$1[redacted]@");
-	const bounded = Buffer.from(cleaned, "utf8").subarray(0, EXCERPT_BYTES).toString("utf8");
-	return cleaned.length > bounded.length ? `${bounded}\n[truncated]` : bounded;
+}
+
+export function safeExcerpt(text: string): string {
+	const cleaned = cleanOutput(text);
+	if (cleaned.length <= EXCERPT_BYTES) return cleaned;
+	const errorLines = cleaned
+		.split("\n")
+		.filter((line) =>
+			/rake aborted!|(?:^|\s)[\w:]+(?:Error|Exception|Invalid):|Validation failed:|^error:|^fatal:/i.test(line),
+		)
+		.slice(-2)
+		.join("\n")
+		.slice(0, 768);
+	const marker = `\n[... middle omitted ...]${errorLines === "" ? "" : `\n[error lines]\n${errorLines}`}\n`;
+	const headLength = 512;
+	const tailLength = EXCERPT_BYTES - headLength - marker.length;
+	return `${cleaned.slice(0, headLength)}${marker}${cleaned.slice(-tailLength)}`;
+}
+
+function storedOutput(text: string): string {
+	const cleaned = cleanOutput(text);
+	if (Buffer.byteLength(cleaned, "utf8") <= STORED_OUTPUT_BYTES) return cleaned;
+	const bytes = Buffer.from(cleaned, "utf8");
+	const head = bytes.subarray(0, 8 * 1024).toString("utf8");
+	const tail = bytes.subarray(-(STORED_OUTPUT_BYTES - 9 * 1024)).toString("utf8");
+	return `${head}\n[output truncated before storage]\n${tail}`;
 }
 
 const writeMutexes = new Map<string, ReturnType<typeof createMutex>>();
@@ -75,8 +100,8 @@ export function buildSetupDiagnostic(
 	const wt = "stderr" in error ? (error as WtError) : undefined;
 	const saved: WorktreeSetupDiagnostic = {
 		...diagnostic,
-		stdout: safeExcerpt(wt === undefined ? "" : wt.stdout),
-		stderr: safeExcerpt(wt === undefined ? error.message : wt.stderr),
+		stdout: storedOutput(wt === undefined ? "" : wt.stdout),
+		stderr: storedOutput(wt === undefined ? error.message : wt.stderr),
 		exitCode: wt?.code,
 	};
 	delete (saved as WorktreeSetupDiagnostic & { error?: Error }).error;

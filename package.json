@@ -38,6 +38,10 @@
 		"access": "public"
 	},
 	"scripts": {
+		"start": "bun src/cli/main.ts node start --detach",
+		"stop": "bun src/cli/main.ts node stop",
+		"status": "bun src/cli/main.ts node status",
+		"tui": "bun src/cli/main.ts tui",
 		"setup:opencode": "bun scripts/setup-opencode.ts",
 		"build:opencode": "bun scripts/build-opencode.ts",
 		"test:opencode": "bun test test/opencode-gateway.test.ts test/opencode-v2-native.test.ts",

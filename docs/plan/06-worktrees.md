@@ -1,3 +1,5 @@
+> Historical plan. Superseded by [the current tools and communication contract](tools-and-communication.md). This document is not an active implementation requirement.
+
 # 06 — Worktrees, writer leases, merge detection, closeout
 
 `src/worktrees/` owns Git isolation and mission closeout. **Neta never runs `git
@@ -44,7 +46,7 @@ pure), `integration.ts` (merge detection over plain git), `driver.ts`
 - The base checkout is a lease of its own named `base`, so two closeouts can
   never merge into it concurrently.
 - Merge detection **never runs on a timer**: only on agent finish, `neta_ready`,
-  `neta_close` and `workspace.open`.
+  `close` and `workspace.open`.
 - There is no retained-but-closed state; a refused removal leaves the mission
   open with `attention` set to the refusal reason.
 
@@ -323,7 +325,7 @@ Node as a `state` notification so the canvas shows the agent queued.
 `mission.integration = {mergedAt: now(), commit, base}`, saves and emits
 `mission.merged` exactly once; a mission that already has `integration` is
 returned untouched. 4. A comment at the top names its only four callers: agent
-finish, `neta_ready`, `neta_close`, `workspace.open`. **No timer, interval or
+finish, `neta_ready`, `close`, `workspace.open`. **No timer, interval or
 watcher may call it.** 5. `close` delegates to `closeMission`.
 Tests: `test/worktrees-service.test.ts` — `prepare` creates a worktree for a
 read-only Git mission and none for a folder workspace; `refreshIntegration`

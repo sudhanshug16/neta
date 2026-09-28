@@ -39,11 +39,10 @@ async function fixture(state: Agent["state"]) {
 		number: 1,
 		name: "Test",
 		objective: "Test",
-		changes: [],
 		lead: { kind: "agent", agentId: "a" },
 		agentIds: ["a"],
 		access: "readWrite",
-		state: "readyToClose",
+		state: "open",
 		createdAt: new Date(0).toISOString(),
 	};
 	let resumes = 0;
@@ -126,7 +125,7 @@ test("queued writer saves a follow-up without bypassing its lease", async () => 
 	expect(f.resumes()).toBe(0);
 	expect(f.agent().state).toBe("queued");
 });
-test.each(["completed", "blocked"] as const)(
+test.each(["idle", "interrupted"] as const)(
 	"%s recipient resumes once; duplicate delivery does not clear the active turn",
 	async (state) => {
 		const f = await fixture(state);
@@ -134,7 +133,7 @@ test.each(["completed", "blocked"] as const)(
 		expect(receipts[0].id).toBe(receipts[1].id);
 		expect(f.resumes()).toBe(1);
 		expect(f.agent().state).toBe("running");
-		expect(f.mission().state).toBe("running");
+		expect(f.mission().state).toBe("open");
 	},
 );
 test("failed admission preserves the restart-visible message and retry identity", async () => {

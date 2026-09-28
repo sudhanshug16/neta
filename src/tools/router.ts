@@ -5,7 +5,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import type { SessionId, WorkspaceId } from "../core/types.ts";
 import type { NodeStore } from "../node/server.ts";
 import { reminder } from "./reminder.ts";
-import { type JsonSchema, TOOLS, type ToolName, type ToolParams, toolsFor, validate } from "./schemas.ts";
+import { type JsonSchema, type ToolName, type ToolParams, toolsFor, validate } from "./schemas.ts";
 
 export type Actor =
 	| { kind: "leader"; workspaceId: WorkspaceId; sessionId: SessionId }
@@ -27,15 +27,6 @@ export type ToolResult =
 
 export interface ToolDeps {
 	store: NodeStore;
-	history?: (
-		sessionId: SessionId,
-		query: { cursor?: string; limit: number },
-	) => Promise<{ messages: Array<{ turnId: string; role: "user" | "assistant"; text: string }>; nextCursor?: string }>;
-	// 07's `ModeService.decorate`: every leader and lead response passes
-	// through it, so a subject in Lead++ carries the banner and, when one
-	// falls due, the reminder saying why Lead++ is on. Unset (a stubbed
-	// Node) leaves the response as the reminder built it.
-	decorate?: (actor: Actor, response: string) => Promise<string>;
 }
 
 export interface ToolContext {
@@ -127,9 +118,6 @@ async function render(actor: Actor, deps: ToolDeps, head: string, isError: boole
 		if (extra !== "") {
 			text += `\n${extra}`;
 		}
-		if (deps.decorate !== undefined) {
-			text = await deps.decorate(actor, text);
-		}
 	}
 	return { content: [{ type: "text", text }], isError };
 }
@@ -211,11 +199,11 @@ export function createRouter(
 			if (actor === undefined) {
 				return refused(deps, undefined, "bad token or unknown actor");
 			}
-			const def = TOOLS.find((tool) => tool.name === name);
-			if (def === undefined || !toolsFor(actor.kind).some((tool) => tool.name === def.name)) {
+			const def = toolsFor(actor.kind).find((tool) => tool.name === name);
+			if (def === undefined) {
 				return refused(deps, actor, `no such tool for ${actor.kind}: ${name}`);
 			}
-			const checked = validate(def.name, args);
+			const checked = validate(def.name, args, actor.kind);
 			if (!checked.ok) {
 				return render(actor, deps, `error badParams: ${checked.message}`, true);
 			}

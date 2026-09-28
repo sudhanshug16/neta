@@ -2,8 +2,8 @@ import { expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { connectNode } from "../src/node/client.ts";
 import { managedOpenCodeDir } from "../scripts/opencode-pin.ts";
+import { connectNode } from "../src/node/client.ts";
 
 const fork = process.env.NETA_OPENCODE_DIR ?? managedOpenCodeDir();
 const available =
@@ -107,12 +107,12 @@ test.skipIf(!available)(
 			const deadline = Date.now() + 45000;
 			while (Date.now() < deadline) {
 				screen = await tmux("capture-pane", "-p", "-t", "cold");
-				if (screen.includes("Workspace leader")) break;
+				if (screen.includes("Coordinator")) break;
 				if ((await tmux("display-message", "-p", "-t", "cold", "#{pane_dead}")).trim() === "1")
 					throw new Error(`Cold-start command exited before opening the workspace:\n${screen}`);
 				await Bun.sleep(200);
 			}
-			expect(screen).toContain("Workspace leader");
+			expect(screen).toContain("Coordinator");
 			expect(screen).not.toContain("UnknownError");
 			const client = await connectNode();
 			try {
@@ -150,12 +150,14 @@ test.skipIf(!available)(
 				const reopenDeadline = Date.now() + 15000;
 				while (Date.now() < reopenDeadline) {
 					reopened = await tmux("capture-pane", "-p", "-t", "cold:reopened");
-					if (reopened.includes("Workspace leader") && reopened.includes("Packaged fixture reply")) break;
+					if (reopened.includes("Coordinator") && reopened.includes("Packaged fixture reply")) break;
 					if ((await tmux("display-message", "-p", "-t", "cold:reopened", "#{pane_dead}")).trim() === "1")
 						throw new Error(`Reopen command exited before restoring the workspace:\n${reopened}`);
 					await Bun.sleep(100);
 				}
-				expect(reopened).toContain("SPINE");
+				expect(reopened).toContain("Workspace leader");
+				expect(reopened).toContain("Filter");
+				expect(reopened).toContain("Coordinator");
 				expect(reopened).not.toContain("[ Chat ]");
 				expect(reopened).not.toContain("[ Updates");
 				expect(reopened).toContain("Packaged fixture reply");

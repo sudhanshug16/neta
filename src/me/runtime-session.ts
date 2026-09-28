@@ -3,7 +3,7 @@ import type { NodeRuntime, SessionRequest } from "../node/server.ts";
 /** Reserve one durable identity, creating it once and resuming only after successful initialization. */
 export async function openPersistedRuntimeSession(input: {
 	runtime: Pick<NodeRuntime, "createSession" | "ensureSession">;
-	request: SessionRequest & { sessionId: string };
+	request: SessionRequest & { sessionId: string; forceRelaunch?: boolean };
 	initialized: boolean;
 	markInitialized(): Promise<unknown>;
 }): ReturnType<NodeRuntime["createSession"]> {

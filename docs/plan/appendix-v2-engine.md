@@ -1,3 +1,5 @@
+> Historical plan. Superseded by [the current tools and communication contract](tools-and-communication.md). This document is not an active implementation requirement.
+
 # Appendix — the retired v2 engine
 
 Reference only. Paths and line numbers refer to tag `v2-final`. Nothing here
@@ -31,8 +33,8 @@ is imported into v3; read it for ideas and for the traps it recorded.
 
 ## Control plane
 - `neta mcp` owned the `WorkerManager` and exposed MCP tools to the leader:
-  `neta_goal, neta_delegate, neta_exec, neta_workers, neta_status,
-  neta_attach, neta_inspect, neta_wait, neta_send, neta_kill, neta_note`
+  `neta_goal, neta_delegate, neta_exec, neta_workers, mission_state,
+  neta_attach, neta_inspect, neta_wait, send_message, neta_kill, neta_note`
   (`src/mcp/leader.ts:301-670`).
 - A Unix socket channel (`src/channel/server.ts`, `protocol.ts`), one NDJSON
   request per connection; token-authorised leader requests and unauthenticated

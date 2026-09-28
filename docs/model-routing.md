@@ -40,6 +40,9 @@ one model; it is not a fallback sequence. If that model is disconnected,
 Neta refuses the launch and reports the selected model; use `/connect` only
 when the connection requires authentication.
 Fixed routing does not call Jev, PublicAI, or models.dev.
+An optional `variants` object can map effort levels to supported thinking-level
+names for their models, for example `"variants": { "3": "medium" }`. An absent
+entry uses the provider default. Neta rejects unsupported variants before launch.
 
 A workspace can supply `.neta/routing.json`. It replaces the entire user policy.
 The config is read on each new delegation, so mapping changes need no Node
@@ -49,8 +52,8 @@ an effort change.
 
 ## Changing an existing agent
 
-Ask the workspace leader to "bump mission #4 up", "use a smaller model for
-Cove", or "set Cove to effort 4". The leader calls `neta_model`:
+Ask the coordinator to "bump mission #4 up", "use a smaller model for
+Cove", or "set Cove to effort 4". The leader calls `change_model`:
 
 ```json
 { "missionId": 4, "change": "up" }
@@ -61,12 +64,23 @@ Cove", or "set Cove to effort 4". The leader calls `neta_model`:
 ```
 
 `change` moves the recorded task effort one level up or down, bounded at 1 and 5.
-Use either `change` or `effort`. If an older or explicitly selected agent has no
+Use one of `change`, `effort`, or an exact model with an optional thinking level:
+
+```json
+{ "missionId": 12, "model": "openai/gpt-6-sol", "variant": "medium" }
+```
+
+The leader takes the model ID and supported variants from `mission_state.modelCatalog`.
+An exact user choice bypasses Jev and is validated against that catalog; it does
+not change the recorded task difficulty. If an older or explicitly selected agent has no
 recorded effort, supply an explicit level. Names must be unique within the
 caller's scope; exact agent IDs also work. Mission leads can adjust themselves
 or their workers, and omitting the target selects their own lead session.
 You can also ask a worker directly in its chat. Ordinary workers omit target
 fields and can adjust only themselves; they cannot change their lead or peers.
+For a qualitative request such as "use something cheaper," the leader can pass
+the user's wording as `userInstruction` alongside `change` or `effort`; Jev
+receives that bounded preference when choosing a model and thinking level.
 
 A mission target changes only its lead. Other workers keep their models. Routing
 uses the agent's assignment, mission objective, new effort and previous model.
@@ -77,12 +91,14 @@ Routing failure leaves the existing choice in place.
 The session and transcript stay intact. The change applies at the next model
 call; an in-flight response is not cancelled or restarted. Queued workers use the
 new choice when launched, without being started by this tool. Archived agents
-and closed missions cannot be adjusted. Missions led by the workspace leader
+and closed missions cannot be adjusted. Missions led by the coordinator
 share its conversation; use `/models` there instead.
 
 This tool is for user-requested changes. Agents must not increase effort on their
 own to bypass a routing refusal. Task effort remains separate from the model's
-reasoning setting.
+reasoning setting. In Jev mode, the router chooses a supported model and thinking
+level together. Fixed routing uses its optional per-effort `variants` mapping or
+the provider default.
 
 ## Jev routing
 
@@ -161,7 +177,7 @@ may use different reasoning settings or agent harnesses. These are selection
 inputs, not guarantees. PublicAI public access does not establish an open-data
 license; no PublicAI dataset is bundled or redistributed with Neta.
 
-The TUI `/routing` command, creation tool results, `neta_status.agentDetails`,
+The TUI `/routing` command, creation tool results, `mission_state.agentDetails`,
 and persisted agent records expose the selected model,
 effort, policy, reason and warnings. Jev decisions additionally preserve the
 candidate IDs, classifier model/confidence and selected metadata. Runtime

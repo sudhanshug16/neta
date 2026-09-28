@@ -51,12 +51,10 @@ import {
 	replayMeEvents,
 	replayMeLeaderTurns,
 } from "../me/capture.ts";
+import { filterLeaderConversationUpdate } from "../me/context.ts";
 import { createMeCurator } from "../me/curator.ts";
-import { readMeEvidence } from "../me/evidence.ts";
 import { commitNoticeForTurn, deliverPendingNotices, reconcileNoticePresentations } from "../me/notice-delivery.ts";
-import { watchStalledQuestions, watchStalledRoutes } from "../me/route-watch.ts";
 import { createRuntimeMeClassifier } from "../me/runtime-curator.ts";
-import { openPersistedRuntimeSession } from "../me/runtime-session.ts";
 import { openMeStore } from "../me/store.ts";
 import { nativeEndpointReady } from "../opencode/attachment.ts";
 import { openCodeInvocation } from "../opencode/runtime.ts";
@@ -89,13 +87,15 @@ import {
 import { diagnosticsHandlers } from "./handlers-diagnostics.ts";
 import { glanceHandlers } from "./handlers-glance.ts";
 import {
-	createSuperleaderToolBridge,
+	createFilterToolBridge,
+	createWorkspaceLeaderToolBridge,
+	filterSessionIds,
 	meHandlers,
-	openSolSession,
-	reconcileRoutes,
-	registerSuperleaderSession,
-	unregisterSuperleaderSession,
-	workspaceForSuperleaderSession,
+	openFilterSession,
+	openWorkspaceLeaderSession,
+	registerWorkspaceLeaderSession,
+	unregisterWorkspaceLeaderSession,
+	workspaceForLeaderSession,
 } from "./handlers-me.ts";
 import { registryHandlers } from "./handlers-registry.ts";
 import { routingHandlers } from "./handlers-routing.ts";
@@ -175,12 +175,13 @@ async function loadLeaders(): Promise<Map<WorkspaceId, Leader>> {
 		if (!name.endsWith(".json")) {
 			continue;
 		}
-		const record = await readJson<Leader & { leadModes?: unknown }>(join(paths().root, "leaders", name));
+		const record = await readJson<Leader & Record<string, unknown>>(join(paths().root, "leaders", name));
 		if (record !== undefined) {
-			// The mirror holds the `Leader` alone: 07's lead modes share the
-			// file but not the record, and carrying them here would put them
-			// on every `state` broadcast.
-			const { leadModes: _leadModes, ...leader } = record;
+			// Normalize retired protocol fields once; keep the saved conversation.
+			const leader: Leader & Record<string, unknown> = { ...record, name: "Coordinator" };
+			for (const key of ["mode", "modeSince", "modeActiveMs", "leadModes", "activeMissionId"]) delete leader[key];
+			if (JSON.stringify(leader) !== JSON.stringify(record))
+				await writeJsonAtomic(join(paths().root, "leaders", name), leader);
 			leaders.set(leader.workspaceId, leader);
 		}
 	}
@@ -192,7 +193,14 @@ async function listAllMissions(real: Store, workspaceId: WorkspaceId): Promise<M
 	let cursor: string | undefined;
 	for (;;) {
 		const page = await real.missions.list(workspaceId, cursor === undefined ? {} : { cursor, limit: 1000 });
-		out.push(...page.missions);
+		for (const saved of page.missions) {
+			const mission = { ...saved } as Mission & Record<string, unknown>;
+			delete mission.changes;
+			if (String(mission.state) === "blocked") delete mission.attention;
+			mission.state = mission.closedAt || String(mission.state) === "closed" ? "closed" : "open";
+			if (JSON.stringify(mission) !== JSON.stringify(saved)) await real.missions.update(mission);
+			out.push(mission);
+		}
 		if (page.cursor === undefined) {
 			return out;
 		}
@@ -218,11 +226,7 @@ function checkBlockCursor(cursor: string): number {
 // The real 02/03 modules behind the ports. Reads are served from memory
 // loaded here (registries, workspaces, leaders, agents); events and
 // conversations read fresh from disk per call.
-export async function adaptStore(
-	real: Store,
-	onMeSource?: () => void,
-	onQuestionChange?: () => void,
-): Promise<AdaptedStore> {
+export async function adaptStore(real: Store, onMeSource?: () => void): Promise<AdaptedStore> {
 	const machine = await real.machine.load();
 	const workspaces = new Map((await real.workspaces.list()).map((workspace) => [workspace.id, workspace]));
 	const leaders = await loadLeaders();
@@ -232,7 +236,18 @@ export async function adaptStore(
 			missions.set(mission.id, mission);
 		}
 	}
-	const agents = new Map<AgentId, Agent>(Object.entries((await readJson<Record<AgentId, Agent>>(agentsPath())) ?? {}));
+	const savedAgents = (await readJson<Record<AgentId, Agent>>(agentsPath())) ?? {};
+	const agents = new Map<AgentId, Agent>(Object.entries(savedAgents));
+	for (const [id, saved] of agents) {
+		const agent = { ...saved } as Agent & Record<string, unknown>;
+		if (["blocked", "completed"].includes(String(agent.state))) agent.state = "idle";
+		if (["blocked", "completed"].includes(String(agent.stateBefore))) agent.stateBefore = "idle";
+		for (const key of ["pendingQuestion", "pendingQuestionId", "pendingQuestionAt", "activity", "outcome"])
+			delete agent[key];
+		agents.set(id, agent);
+	}
+	if (JSON.stringify(savedAgents) !== JSON.stringify(Object.fromEntries(agents)))
+		await writeJsonAtomic(agentsPath(), Object.fromEntries(agents));
 	const agentsMutex = createMutex();
 	const me = openMeStore();
 	const meContext = () => ({
@@ -249,7 +264,6 @@ export async function adaptStore(
 			workspaces: [{ workspaceId: event.workspaceId, eventSeq: event.seq, turns: [] }],
 		});
 		if (captured) onMeSource?.();
-		if (event.kind === "mission.blocked" || event.kind === "mission.unblocked") onQuestionChange?.();
 		return event;
 	};
 
@@ -427,6 +441,7 @@ export async function adaptStore(
 }
 
 export interface AdaptedRuntime extends NodeRuntime {
+	wakeInbox(id: SessionId): void;
 	send(
 		id: SessionId,
 		text: string,
@@ -468,7 +483,8 @@ interface PumpState {
 	// instead of appending the same block again with more text.
 	pending?: Block;
 	open?: Turn;
-	readerText?: Map<number, Block>;
+	completedText?: Map<number, Block>;
+	initialInboxIds?: string[];
 }
 
 // `conversations` is the real 02 store when the Node runs for real. With it,
@@ -481,7 +497,7 @@ export function adaptRuntime(
 	settings: Settings,
 	conversations?: ConversationStore,
 	settingsForCwd: (cwd: string) => Settings = () => settings,
-	onReaderTurn: (sessionId: SessionId, turn: Turn, blocks: Block[]) => Promise<void> = () => Promise.resolve(),
+	onCompletedTurn: (sessionId: SessionId, turn: Turn, blocks: Block[]) => Promise<void> = () => Promise.resolve(),
 	recoveryHandoff?: (sessionId: SessionId) => Promise<string>,
 	inboxStore?: Store["inbox"],
 	systemContext?: (sessionId: string) => string | Promise<string>,
@@ -495,9 +511,14 @@ export function adaptRuntime(
 		request: { id: string; action: string; resources: string[]; message?: string },
 		decision: "once" | "reject",
 	) => Promise<void>,
+	beforeTurn?: (sessionId: SessionId) => Promise<boolean>,
+	afterTurn?: (sessionId: SessionId) => Promise<void>,
 ): AdaptedRuntime {
 	const makeSession = sessionFactory;
 	const sessionLifecycle = new SessionLifecycle();
+	// Admission and final handoff need one ordering boundary. Keep it separate
+	// from binding operations, which may wait for the event pump to stop.
+	const handoffLifecycle = new SessionLifecycle();
 	let closing = false;
 	let pumpOperations = 0;
 	const pumpPromises = new Map<RuntimeSession, Promise<void>>();
@@ -513,6 +534,11 @@ export function adaptRuntime(
 	const table = new SessionTable({ settings, cwd: process.cwd(), access: "readOnly" });
 	const listeners = new Set<(notification: TurnNotification) => void>();
 	const drains = new Set<SessionId>();
+	const turnsProcessing = new Set<SessionId>();
+	const pausedContinuations = new Set<SessionId>();
+	const cancelling = new Set<SessionId>();
+	const resumeAfterInterruption = new Set<SessionId>();
+	const waitingForWriter = new Set<SessionId>();
 	const wakeTimers = new Map<SessionId, ReturnType<typeof setTimeout>>();
 	const minted = new Map<SessionId, string>();
 	// The actor id each live session's token was minted under: an agent's
@@ -572,6 +598,7 @@ export function adaptRuntime(
 			drains.has(sessionId) ||
 			switching.has(sessionId) ||
 			wakeTimers.has(sessionId) ||
+			pausedContinuations.has(sessionId) ||
 			closing
 		)
 			return;
@@ -579,19 +606,44 @@ export function adaptRuntime(
 		try {
 			for (;;) {
 				if (switching.has(sessionId)) return;
+				if (pausedContinuations.has(sessionId)) return;
 				const session = table.get(sessionId)?.session;
 				if (session === undefined) return;
-				const queued = (await inboxStore.list(sessionId)).filter((item) => item.status === "queued");
+				if (session.openTurnId === undefined && turnsProcessing.has(sessionId)) return;
+				const stored = await inboxStore.list(sessionId);
+				const recoverable: InboxMessage[] = [];
+				if (session.internalDeliveryState && session.openTurnId === undefined) {
+					for (const item of stored) {
+						if (item.status !== "delivered" || item.consumedAt || item.readerDirected !== false) continue;
+						try {
+							const native = await session.internalDeliveryState(item.id);
+							if (native === "admitted") recoverable.push(item);
+							if (native === "consumed") await publishInbox(await inboxStore.markConsumed(sessionId, item.id));
+							if (native === "missing") await publishInbox(await inboxStore.markUncertain(sessionId, item.id));
+						} catch {
+							// An uncertain native read never authorizes replay.
+							await publishInbox(await inboxStore.markUncertain(sessionId, item.id)).catch(() => undefined);
+						}
+					}
+				}
+				const queued = [...stored.filter((item) => item.status === "queued"), ...recoverable].sort((a, b) =>
+					a.createdAt.localeCompare(b.createdAt),
+				);
 				const next = queued[0];
 				if (switching.has(sessionId) || wakeTimers.has(sessionId) || table.get(sessionId)?.session !== session)
 					return;
 				if (next === undefined) return;
 				if (inboxGuard && !(await inboxGuard(next))) {
+					if (next.status === "delivered") return;
 					await publishInbox(await inboxStore.markDiscarded(sessionId, next.id));
 					continue;
 				}
 				if (session.openTurnId !== undefined) {
-					if (next.readerDirected === false) return;
+					// A Filter decision must own its turn; steering it into a context turn
+					// would give the model conflicting instructions and hide the decision.
+					if (filterSessionIds.has(sessionId)) return;
+					if (next.readerDirected !== false) return;
+					if (next.status === "delivered") return;
 					if (!session.steeringSupported) return;
 					const targetTurnId = session.openTurnId;
 					const delivering = await inboxStore.markDelivering(sessionId, next.id);
@@ -621,23 +673,36 @@ export function adaptRuntime(
 					}
 					continue;
 				}
+				if (beforeTurn && !(await beforeTurn(sessionId))) {
+					waitingForWriter.add(sessionId);
+					return;
+				}
+				waitingForWriter.delete(sessionId);
 				const batch: InboxMessage[] = [];
 				for (const item of queued) {
 					if (
 						batch.length &&
-						(next.readerDirected !== false || !next.sourceId || item.readerDirected !== false || !item.sourceId)
+						(filterSessionIds.has(sessionId) ||
+							next.readerDirected !== false ||
+							!next.sourceId ||
+							item.readerDirected !== false ||
+							!item.sourceId)
 					)
 						break;
 					if (inboxGuard && !(await inboxGuard(item))) break;
 					batch.push(item);
 				}
-				if (!batch.length) continue;
+				if (!batch.length) {
+					await afterTurn?.(sessionId);
+					continue;
+				}
 				const ids = batch.map((item) => item.id);
 				for (const message of await inboxStore.markMany(sessionId, ids, "delivering")) await publishInbox(message);
 				try {
 					if (switching.has(sessionId) || table.get(sessionId)?.session !== session) {
 						for (const message of await inboxStore.markMany(sessionId, ids, "queued"))
 							await publishInbox(message);
+						await afterTurn?.(sessionId);
 						return;
 					}
 					inboxPromptIds.set(sessionId, ids);
@@ -671,8 +736,10 @@ export function adaptRuntime(
 			const current = table.get(sessionId)?.session;
 			if (
 				pending &&
+				!waitingForWriter.has(sessionId) &&
 				!closing &&
 				!wakeTimers.has(sessionId) &&
+				!pausedContinuations.has(sessionId) &&
 				!switching.has(sessionId) &&
 				current !== undefined &&
 				current.openTurnId === undefined
@@ -737,33 +804,72 @@ export function adaptRuntime(
 		turnId: TurnId,
 		cancelled: boolean,
 		failed = false,
+		finalReply?: string,
 	): Promise<void> {
 		await flush(sessionId, state);
 		const open = state.open;
 		const closed: Turn = {
 			...(open?.id === turnId ? open : { id: turnId, sessionId, startedAt: nowIso(), role: "user" }),
 			endedAt: nowIso(),
+			finalReply,
 			...(cancelled ? { cancelled: true } : {}),
 			...(failed ? { failed: true } : {}),
 		};
-		state.open = undefined;
-		await durableTurn?.({ sessionId, bindingGeneration: closed.bindingGeneration, turn: closed });
-		await writeTurn(closed);
-		emit({ sessionId, bindingGeneration: closed.bindingGeneration, turn: closed });
-		const readerBlocks = [...(state.readerText?.values() ?? [])].sort((a, b) => a.seq - b.seq);
-		state.readerText = undefined;
-		if (closed.readerDirected === true && (readerBlocks.length > 0 || closed.failed === true)) {
+		await handoffLifecycle.run(sessionId, async () => {
 			try {
-				await onReaderTurn(sessionId, closed, readerBlocks);
-			} catch {
-				// Recap persistence is supplementary; never break the turn pump.
+				if (cancelled) {
+					if (resumeAfterInterruption.has(sessionId)) pausedContinuations.delete(sessionId);
+					else pausedContinuations.add(sessionId);
+				}
+				resumeAfterInterruption.delete(sessionId);
+				cancelling.delete(sessionId);
+				if (!cancelled && !failed && inboxStore) {
+					// A completed turn consumed the messages that opened it, even if the
+					// native provider missed their individual delivery events.
+					for (const id of state.initialInboxIds ?? []) {
+						await publishInbox(await inboxStore.markConsumed(sessionId, id));
+					}
+					closed.superseded = (await inboxStore.list(sessionId)).some(
+						(message) =>
+							message.readerDirected === false &&
+							message.consumedAt === undefined &&
+							(message.status === "queued" ||
+								message.status === "delivering" ||
+								message.status === "delivered"),
+					);
+				}
+				state.open = undefined;
+				state.initialInboxIds = undefined;
+				await durableTurn?.({ sessionId, bindingGeneration: closed.bindingGeneration, turn: closed });
+				await writeTurn(closed);
+				await afterTurn?.(sessionId);
+				emit({ sessionId, bindingGeneration: closed.bindingGeneration, turn: closed });
+				const completedBlocks = [...(state.completedText?.values() ?? [])].sort((a, b) => a.seq - b.seq);
+				state.completedText = undefined;
+				if (
+					!closed.superseded &&
+					(completedBlocks.length > 0 ||
+						closed.failed === true ||
+						closed.cancelled === true ||
+						closed.readerDirected === true)
+				) {
+					try {
+						await onCompletedTurn(sessionId, closed, completedBlocks);
+					} catch {
+						// Recap persistence is supplementary; never break the turn pump.
+					}
+				}
+			} finally {
+				turnsProcessing.delete(sessionId);
+				void drain(sessionId);
 			}
-		}
+		});
 	}
 
 	async function handle(session: RuntimeSession, state: PumpState, event: SessionEvent): Promise<void> {
 		const sessionId = session.sessionId;
 		if (event.type === "turn") {
+			turnsProcessing.add(sessionId);
 			// Claimed before any await. The desktop and the terminal are both
 			// attached to the same session by design, so a second
 			// `conversation.prompt` can land while this branch is awaiting a
@@ -780,7 +886,8 @@ export function adaptRuntime(
 				...(prompt?.readerDirected === true ? { readerDirected: true } : {}),
 			};
 			state.open = opened;
-			state.readerText = opened.readerDirected === true ? new Map() : undefined;
+			state.completedText = new Map();
+			state.initialInboxIds = prompt?.messageIds;
 			await durableTurn?.({ sessionId, bindingGeneration: opened.bindingGeneration, turn: opened });
 			await writeTurn(opened);
 			emit({ sessionId, bindingGeneration: opened.bindingGeneration, turn: opened });
@@ -788,7 +895,22 @@ export function adaptRuntime(
 				return;
 			}
 			const userBlocks: Array<Omit<Block, "seq">> = [];
-			if (prompt.text !== "") {
+			if (prompt.messageIds && inboxStore) {
+				const messages = await inboxStore.list(sessionId);
+				for (const id of prompt.messageIds) {
+					const message = messages.find((item) => item.id === id);
+					if (!message) continue;
+					userBlocks.push({
+						turnId: event.turn.id,
+						at: message.createdAt,
+						role: "user",
+						kind: "text",
+						text: message.text,
+						data: { messageId: id, origin: message.readerDirected === false ? "internal" : "human" },
+					});
+				}
+			}
+			if (prompt.text !== "" && !prompt.messageIds) {
 				userBlocks.push({
 					turnId: event.turn.id,
 					at: nowIso(),
@@ -845,15 +967,25 @@ export function adaptRuntime(
 				await flush(sessionId, state);
 			}
 			const block: Block = { ...event.block, seq };
-			if (state.readerText !== undefined && block.role === "agent" && block.kind === "text")
-				state.readerText.set(seq, block);
+			if (block.role === "agent" && block.kind === "text") state.completedText?.set(seq, block);
 			state.pending = block;
 			state.lastSeq = Math.max(state.lastSeq, event.block.seq);
 			emit({ sessionId, block });
 			return;
 		}
+		if (event.type === "inboxConsumed") {
+			if (inboxStore) await publishInbox(await inboxStore.markConsumed(sessionId, event.messageId));
+			return;
+		}
 		if (event.type === "turnEnd") {
-			await closeTurn(sessionId, state, event.turnId, event.cancelled, event.stopReason === "error");
+			await closeTurn(
+				sessionId,
+				state,
+				event.turnId,
+				event.cancelled,
+				["error", "max_tokens", "refusal"].includes(event.stopReason),
+				event.finalReply,
+			);
 			return;
 		}
 		if (event.type === "interrupted") {
@@ -917,7 +1049,12 @@ export function adaptRuntime(
 		if (!netaTools) {
 			return [];
 		}
-		return [netaMcpServer({ actorId, token, socketPath: join(netaDir(), "node.sock") })];
+		return [
+			{
+				...netaMcpServer({ actorId, token, socketPath: join(netaDir(), "node.sock") }),
+				...(filterSessionIds.has(actorId) ? { codemode: false } : {}),
+			},
+		];
 	}
 
 	async function register(
@@ -928,10 +1065,12 @@ export function adaptRuntime(
 		deferInbox = false,
 	): Promise<void> {
 		if (conversations !== undefined) {
+			const variant = session.configOptions.find((option) => option.id === "effort")?.currentValue;
 			await conversations.create({
 				sessionId: session.sessionId,
 				provider: session.provider,
 				model: session.model,
+				...(typeof variant === "string" && variant !== "default" ? { variant } : {}),
 				vendorSessionId: session.vendorSessionId,
 				bindingGeneration: session.bindingGeneration,
 				fallbackModels: session.fallbackModels === undefined ? undefined : [...session.fallbackModels],
@@ -943,6 +1082,7 @@ export function adaptRuntime(
 				.setMeta(session.sessionId, {
 					provider: session.provider,
 					model: session.model,
+					variant: typeof variant === "string" && variant !== "default" ? variant : undefined,
 					vendorSessionId: session.vendorSessionId,
 					bindingGeneration: session.bindingGeneration,
 					fallbackModels: session.fallbackModels === undefined ? undefined : [...session.fallbackModels],
@@ -954,10 +1094,27 @@ export function adaptRuntime(
 		if (inboxStore !== undefined && reconcileInbox) {
 			void (async () => {
 				for (const item of await inboxStore.list(session.sessionId)) {
-					if (item.status !== "delivering") continue;
-					// A local user block proves intent, not provider admission. Do not
-					// turn a crashed delivery into a false acknowledgment or replay.
-					await publishInbox(await inboxStore.markUncertain(session.sessionId, item.id));
+					if (!["delivering", "uncertain", "delivered"].includes(item.status) || item.consumedAt) continue;
+					if (!session.internalDeliveryState || item.readerDirected !== false) {
+						if (item.status === "delivering")
+							await publishInbox(await inboxStore.markUncertain(session.sessionId, item.id));
+						continue;
+					}
+					try {
+						const native = await session.internalDeliveryState(item.id);
+						if (native === "missing" && item.status === "delivered")
+							await publishInbox(await inboxStore.markUncertain(session.sessionId, item.id));
+						else if (native === "missing")
+							await publishInbox(await inboxStore.markQueued(session.sessionId, item.id));
+						else {
+							if (item.status !== "delivered")
+								await publishInbox(await inboxStore.markDelivered(session.sessionId, item.id, item.turnId));
+							if (native === "consumed")
+								await publishInbox(await inboxStore.markConsumed(session.sessionId, item.id));
+						}
+					} catch {
+						await publishInbox(await inboxStore.markUncertain(session.sessionId, item.id));
+					}
 				}
 				if (!deferInbox) await drain(session.sessionId);
 			})();
@@ -983,6 +1140,7 @@ export function adaptRuntime(
 		cwd: string;
 		provider: string;
 		model: string;
+		variant?: string;
 		access: Access;
 		unsandboxed?: boolean;
 		netaTools: boolean;
@@ -1022,6 +1180,15 @@ export function adaptRuntime(
 			tokens.revoke(actorId);
 			throw error;
 		}
+		if (o.variant !== undefined) {
+			try {
+				await session.setConfigOption("effort", o.variant);
+			} catch (error) {
+				await session.close().catch(() => undefined);
+				tokens.revoke(actorId);
+				throw error;
+			}
+		}
 		await register(session, o.provider, o.netaTools, true, o.deferInbox);
 		actors.set(session.sessionId, actorId);
 		return { sessionId: session.sessionId, provider: session.provider, model: session.model };
@@ -1045,6 +1212,9 @@ export function adaptRuntime(
 		}
 		actors.delete(id);
 		prompts.delete(id);
+		pausedContinuations.delete(id);
+		cancelling.delete(id);
+		resumeAfterInterruption.delete(id);
 	}
 
 	adapted = {
@@ -1067,24 +1237,32 @@ export function adaptRuntime(
 					turnId,
 				};
 			}
-			if (_provenance.readerDirected === false && _provenance.sourceId && !wakeTimers.has(id)) {
-				const timer = setTimeout(() => {
-					wakeTimers.delete(id);
-					void drain(id);
-				}, 100);
-				timer.unref();
-				wakeTimers.set(id, timer);
+			const item = await sessionLifecycle.run(id, () =>
+				handoffLifecycle.run(id, async () => {
+					const queued = await inboxStore.enqueue(id, text, attachments, _provenance);
+					await publishInbox(queued);
+					if (cancelling.has(id) && _provenance.readerDirected !== false) resumeAfterInterruption.add(id);
+					pausedContinuations.delete(id);
+					return queued;
+				}),
+			);
+			if (_provenance.readerDirected === false && _provenance.sourceId) {
+				if (table.get(id)?.session.openTurnId !== undefined) void drain(id);
+				else if (!wakeTimers.has(id)) {
+					const timer = setTimeout(() => {
+						wakeTimers.delete(id);
+						void drain(id);
+					}, 100);
+					timer.unref();
+					wakeTimers.set(id, timer);
+				}
+				return item;
 			}
-			const item = await sessionLifecycle.run(id, async () => {
-				const queued = await inboxStore.enqueue(id, text, attachments, _provenance);
-				await publishInbox(queued);
-				return queued;
-			});
-			if (_provenance.readerDirected === false && _provenance.sourceId) return item;
 			await drain(id);
 			return (await inboxStore.list(id)).find((candidate) => candidate.id === item.id) ?? item;
 		},
 		listInbox: (id) => inboxStore?.list(id) ?? Promise.resolve([]),
+		visibleMessages: async (id) => live(id).visibleMessages?.() ?? [],
 		createSession: async (o) => {
 			// Minted up front so the leader's tools entry carries the real
 			// session id; 03 reuses it. The token is node-minted per 05.
@@ -1098,12 +1276,13 @@ export function adaptRuntime(
 				if (record.session.access === o.access) {
 					return { sessionId: o.sessionId, provider: record.provider, model: record.session.model };
 				}
-				// 07: a mode change reaches the provider process only through
-				// a relaunch. 03 relaunches in place — same session id, same
-				// vendor session, same event pump — so a Lead++ grant lands on
-				// the next `workspace.open` instead of waiting for a restart.
 				try {
+					const currentVariant = record.session.configOptions.find(
+						(option) => option.id === "effort",
+					)?.currentValue;
 					await record.session.relaunch(o.access);
+					const variant = o.variant ?? currentVariant;
+					if (variant && variant !== "default") await record.session.setConfigOption("effort", variant);
 					// 03's `relaunch` reassigns `vendorSessionId` from the
 					// relaunch response, and this path does not go through
 					// `register`: without this patch the stored id goes stale
@@ -1135,6 +1314,7 @@ export function adaptRuntime(
 				try {
 					return await start({
 						...o,
+						variant: o.variant ?? meta?.variant,
 						fallbackModels: o.fallbackModels ?? meta?.fallbackModels,
 						resumeVendorSessionId: vendor,
 					});
@@ -1162,9 +1342,14 @@ export function adaptRuntime(
 			// session with no inbox keeps the established fresh-identity recovery.
 			return start({
 				...o,
+				variant: o.variant ?? meta?.variant,
 				fallbackModels: o.fallbackModels ?? meta?.fallbackModels,
 				sessionId: pendingInbox.length > 0 ? o.sessionId : ulid(),
 			});
+		},
+		wakeInbox: (id) => {
+			waitingForWriter.delete(id);
+			void drain(id);
 		},
 		prompt: async (id, text, attachments = [], provenance = { readerDirected: false }) => {
 			if (switching.has(id)) throw new NodeError("BUSY", "provider switch is in progress");
@@ -1186,6 +1371,18 @@ export function adaptRuntime(
 			// refused, so it neither overwrites that text nor deletes it on
 			// the way out.
 			if (prompts.has(id)) throw new NodeError("BUSY", "a prompt is already starting");
+			const internalIds = inboxPromptIds.get(id);
+			const candidateMessages =
+				internalIds && session.promptInternal && inboxStore
+					? (await inboxStore.list(id)).filter((message) => internalIds.includes(message.id))
+					: undefined;
+			const internalMessages =
+				candidateMessages &&
+				internalIds &&
+				candidateMessages.length === internalIds.length &&
+				candidateMessages.every((message) => message.readerDirected === false && message.attachments.length === 0)
+					? candidateMessages
+					: undefined;
 			const claimed: {
 				text: string;
 				attachments: PromptAttachment[];
@@ -1194,13 +1391,15 @@ export function adaptRuntime(
 				messageId?: string;
 				messageIds?: string[];
 			} = {
-				text,
+				text: internalMessages ? "" : text,
 				attachments,
 				readerDirected: provenance.readerDirected,
 				...(inboxPromptIds.get(id) === undefined
 					? {}
 					: { messageId: inboxPromptIds.get(id)?.[0], messageIds: inboxPromptIds.get(id) }),
 			};
+			if (session.openTurnId !== undefined) throw new NodeError("BUSY", "A turn is already running");
+			if (beforeTurn && !(await beforeTurn(id))) throw new NodeError("BUSY", "Writer admission is queued");
 			prompts.set(id, claimed);
 			let ownsRecoverySwitch = false;
 			try {
@@ -1221,11 +1420,24 @@ export function adaptRuntime(
 						const messages = await inboxStore.list(id);
 						for (const messageId of claimed.messageIds) {
 							const message = messages.find((item) => item.id === messageId);
-							if (!message || message.status !== "delivering" || (inboxGuard && !(await inboxGuard(message))))
+							if (
+								!message ||
+								(message.status !== "delivering" && !(message.status === "delivered" && !message.consumedAt)) ||
+								(inboxGuard && !(await inboxGuard(message)))
+							)
 								throw new SuppressedInboxError("Runtime result no longer belongs to this active conversation");
 						}
 					}
-					turnId = await session.prompt(delivered, attachments);
+					turnId =
+						internalMessages && session.promptInternal && !pendingHandoff && !pendingBrief
+							? session.promptInternal(
+									internalMessages.map((message) => ({
+										id: message.id,
+										text: message.text,
+										attachments: message.attachments,
+									})),
+								)
+							: await session.prompt(delivered, attachments);
 				} catch (error) {
 					if (!(error instanceof Error && error.name === SessionClosedError.name)) throw error;
 					// A provider may disappear while the Node and desktop remain
@@ -1255,6 +1467,8 @@ export function adaptRuntime(
 						sessionId: id,
 					};
 					const meta = conversations === undefined ? undefined : await conversations.meta(id);
+					const variant =
+						meta?.variant ?? session.configOptions.find((option) => option.id === "effort")?.currentValue;
 					let relaunched: RuntimeSession;
 					try {
 						relaunched = await makeSession({
@@ -1281,6 +1495,14 @@ export function adaptRuntime(
 								"Provider restarted; no earlier conversation text was available to restore.";
 						}
 					}
+					if (variant && variant !== "default") {
+						try {
+							await relaunched.setConfigOption("effort", variant);
+						} catch (error) {
+							await relaunched.close().catch(() => undefined);
+							throw error;
+						}
+					}
 					await register(relaunched, record.provider, record.netaTools === true, false);
 					if (relaunched.provider === "opencode" && systemContext) {
 						await writeSystemContext({
@@ -1301,11 +1523,13 @@ export function adaptRuntime(
 				if (pendingBrief !== undefined && pendingBrief !== "") {
 					await conversations?.setMeta(id, { pendingBrief: undefined }).catch(() => undefined);
 				}
+				if (!claimed.messageIds) pausedContinuations.delete(id);
 				return turnId;
 			} catch (error) {
 				if (prompts.get(id) === claimed) {
 					prompts.delete(id);
 				}
+				if (table.get(id)?.session.openTurnId === undefined) await afterTurn?.(id);
 				throw error;
 			} finally {
 				if (ownsRecoverySwitch) releaseSwitch(id);
@@ -1331,6 +1555,7 @@ export function adaptRuntime(
 				attached: false,
 				bindingGeneration: meta?.bindingGeneration,
 				model: meta?.model,
+				variant: meta?.variant,
 				provider: meta?.provider,
 			};
 		},
@@ -1374,6 +1599,7 @@ export function adaptRuntime(
 				throw new NodeError("PROVIDER_ERROR", "Native effort selection requires Neta OpenCode");
 			if (variant === undefined) await session.setConfigOption("neta_effort", "");
 			else await session.setConfigOption("effort", variant);
+			await conversations?.setMeta(id, { variant });
 		},
 		setNativeAgent: async (id, agent) => {
 			const session = live(id);
@@ -1386,7 +1612,7 @@ export function adaptRuntime(
 			const session = live(id);
 			await session.setModel(model);
 			if (session.model !== model) throw new NodeError("PROVIDER_ERROR", `provider did not select model ${model}`);
-			await conversations?.setMeta(id, { model: session.model }).catch(() => undefined);
+			await conversations?.setMeta(id, { model: session.model, variant: undefined }).catch(() => undefined);
 		},
 		setPendingHandoff: async (id, handoff) => {
 			await conversations?.setMeta(id, { pendingHandoff: handoff === "" ? undefined : handoff });
@@ -1506,7 +1732,8 @@ export function adaptRuntime(
 			const old = record.session;
 			const oldActor = actors.get(id) ?? id;
 			const newId = ulid();
-			const superleaderWorkspaceId = workspaceForSuperleaderSession(id);
+			const netaWorkspaceId = workspaceForLeaderSession(id);
+			const isFilter = filterSessionIds.has(id);
 			const workspaceLeader = oldActor === id;
 			const newActor = workspaceLeader ? newId : oldActor;
 			const token = workspaceLeader ? tokens.mint(newActor) : minted.get(oldActor);
@@ -1514,7 +1741,8 @@ export function adaptRuntime(
 				releaseSwitch(id);
 				throw new NodeError("UNAUTHORIZED", "session actor token is unavailable");
 			}
-			if (superleaderWorkspaceId) registerSuperleaderSession(newId, superleaderWorkspaceId);
+			if (netaWorkspaceId) registerWorkspaceLeaderSession(newId, netaWorkspaceId);
+			if (isFilter) filterSessionIds.add(newId);
 			let candidate: RuntimeSession;
 			try {
 				const resetLaunch = launchSettings(old.cwd, record.provider);
@@ -1533,7 +1761,8 @@ export function adaptRuntime(
 				});
 			} catch (error) {
 				if (workspaceLeader) tokens.revoke(newActor);
-				if (superleaderWorkspaceId) unregisterSuperleaderSession(newId);
+				if (netaWorkspaceId) unregisterWorkspaceLeaderSession(newId);
+				if (isFilter) filterSessionIds.delete(newId);
 				releaseSwitch(id);
 				throw new NodeError("PROVIDER_ERROR", `could not reset provider session: ${String(error)}`);
 			}
@@ -1566,7 +1795,8 @@ export function adaptRuntime(
 				actors.delete(id);
 				prompts.delete(id);
 				if (workspaceLeader) tokens.revoke(oldActor);
-				if (superleaderWorkspaceId) unregisterSuperleaderSession(id);
+				if (netaWorkspaceId) unregisterWorkspaceLeaderSession(id);
+				if (isFilter) filterSessionIds.delete(id);
 				releaseSwitch(id);
 				releaseSwitch(newId);
 				return selected;
@@ -1576,7 +1806,8 @@ export function adaptRuntime(
 				actors.delete(newId);
 				releaseSwitch(newId);
 				if (workspaceLeader) tokens.revoke(newActor);
-				if (superleaderWorkspaceId) unregisterSuperleaderSession(newId);
+				if (netaWorkspaceId) unregisterWorkspaceLeaderSession(newId);
+				if (isFilter) filterSessionIds.delete(newId);
 				releaseSwitch(id);
 				throw error;
 			}
@@ -1631,6 +1862,7 @@ export function adaptRuntime(
 					name: model.name,
 					provider: record.provider,
 					description: model.description,
+					variants: model.variants,
 				}));
 				if (listed.length > 0 || record.provider === "opencode") return listed;
 				const fallback = settingsForCwd(record.session.cwd).providers[record.provider]?.defaultModel;
@@ -1638,7 +1870,8 @@ export function adaptRuntime(
 					? []
 					: [{ id: fallback, name: fallback, provider: record.provider }];
 			}
-			const out: Array<{ id: string; name: string; provider: string; description?: string }> = [];
+			const out: Array<{ id: string; name: string; provider: string; description?: string; variants?: string[] }> =
+				[];
 			const seen = new Set<string>();
 			for (const record of table.values()) {
 				if (o.provider !== undefined && record.provider !== o.provider) {
@@ -1652,6 +1885,7 @@ export function adaptRuntime(
 							name: model.name,
 							provider: record.provider,
 							description: model.description,
+							variants: model.variants,
 						});
 					}
 				}
@@ -1668,7 +1902,15 @@ export function adaptRuntime(
 			return out;
 		},
 		cancel: async (id) => {
-			await live(id).cancel();
+			const session = live(id);
+			if (session.openTurnId === undefined) return;
+			cancelling.add(id);
+			try {
+				await session.cancel();
+			} catch (error) {
+				cancelling.delete(id);
+				throw error;
+			}
 		},
 		close: closeSession,
 		closeAll: async () => {
@@ -1772,7 +2014,7 @@ export async function markInterrupted(store: NodeStore): Promise<Array<{ workspa
 	const counts = new Map<WorkspaceId, number>();
 	for (const mission of store.listMissions()) {
 		for (const agent of store.listAgents(mission.id)) {
-			if (agent.state !== "starting" && agent.state !== "running" && agent.state !== "blocked") {
+			if (agent.state !== "starting" && agent.state !== "running") {
 				continue;
 			}
 			await store.putAgent({ ...agent, stateBefore: agent.state, state: "interrupted" });
@@ -1826,10 +2068,8 @@ export async function startNode(o?: {
 		let adapted: AdaptedStore | undefined;
 		let scheduleMeCurator: (delay?: number) => void = () => {};
 		let stopMeCurator: () => void = () => {};
-		let scheduleRouteWatch: () => void = () => {};
-		let stopRouteWatch: () => void = () => {};
-		const curatorSessionIds = new Set<SessionId>();
 		let notifyMeChanged: () => void = () => {};
+		let syncFilterLeaderContext: (workspaceId: string) => Promise<void> = async () => {};
 		const readNoticeTurn = async (
 			sessionId: string,
 			turnId: string,
@@ -1851,31 +2091,31 @@ export async function startNode(o?: {
 			storePort = o.store;
 		} else {
 			realStore = await openStore();
-			adapted = await adaptStore(
-				realStore,
-				() => scheduleMeCurator(),
-				() => scheduleRouteWatch(),
-			);
+			adapted = await adaptStore(realStore, () => scheduleMeCurator());
 			storePort = adapted;
 		}
 		const settings = loadSettings({ netaDir: netaDir() }).settings;
-		for (const sol of await openMeStore().listSolIdentities()) {
-			if (sol.workspaceId) registerSuperleaderSession(sol.sessionId, sol.workspaceId);
+		for (const neta of await openMeStore().listWorkspaceLeaderIdentities()) {
+			if (neta.workspaceId) registerWorkspaceLeaderSession(neta.sessionId, neta.workspaceId);
 		}
-		for (const filter of await openMeStore().listLunaIdentities()) curatorSessionIds.add(filter.sessionId);
+		for (const filter of await openMeStore().listFilterIdentities()) filterSessionIds.add(filter.sessionId);
 		let adaptedRuntime: AdaptedRuntime | undefined;
 		let runtimePort: NodeRuntime;
 		if (o?.runtime === undefined) {
 			const captureGlance = async (sessionId: SessionId, turn: Turn, blocks: Block[]): Promise<void> => {
 				if (realStore === undefined) return;
-				if (workspaceForSuperleaderSession(sessionId)) {
+				const leaderWorkspaceId = workspaceForLeaderSession(sessionId);
+				if (leaderWorkspaceId) {
 					if (
 						(await commitNoticeForTurn({ store: openMeStore(), runtime: runtimePort, sessionId, turn, blocks }))
 							.length
 					)
 						notifyMeChanged();
-					// Delivery can be marked after a very fast native turn ends.
-					scheduleMeCurator();
+					if (turn.endedAt && !turn.failed && !turn.cancelled)
+						await syncFilterLeaderContext(leaderWorkspaceId).catch((error) => {
+							hub.broadcast("error", { sessionId, message: `Filter context update failed: ${String(error)}` });
+						});
+
 					return;
 				}
 				const actor = glanceActorForSession(storePort, sessionId);
@@ -1894,9 +2134,7 @@ export async function startNode(o?: {
 						})
 					) {
 						// Source capture is durable even when inbox reconciliation is temporarily unavailable.
-						await reconcileRoutes({ runtime: runtimePort }, workspace.id).catch(() => undefined);
 						scheduleMeCurator();
-						scheduleRouteWatch();
 					}
 				}
 				const source = blocks
@@ -1935,8 +2173,8 @@ export async function startNode(o?: {
 					sessionSystemContext(
 						{
 							store: storePort,
-							superleaderWorkspaceId: workspaceForSuperleaderSession(sessionId),
-							lunaSessionIds: curatorSessionIds,
+							netaWorkspaceId: workspaceForLeaderSession(sessionId),
+							filterSessionIds: filterSessionIds,
 						},
 						sessionId,
 					),
@@ -1945,13 +2183,13 @@ export async function startNode(o?: {
 				(message) => mounted?.canDeliverInbox(message) ?? Promise.resolve(true),
 				o?.sessionFactory,
 				(sessionId) =>
-					workspaceForSuperleaderSession(sessionId)
+					workspaceForLeaderSession(sessionId)
 						? "orchestrator"
-						: curatorSessionIds.has(sessionId)
+						: filterSessionIds.has(sessionId)
 							? "curator"
 							: undefined,
 				async (sessionId, request, decision) => {
-					if (realStore === undefined) return;
+					if (realStore === undefined || decision !== "reject") return;
 					const actor = glanceActorForSession(storePort, sessionId);
 					const workspace = actor ? storePort.getWorkspace(actor.workspaceId) : undefined;
 					if (!actor || !workspace) return;
@@ -1967,19 +2205,18 @@ export async function startNode(o?: {
 					});
 					if (captured.id) scheduleMeCurator();
 				},
+				(sessionId) => mounted?.beforeTurn(sessionId) ?? Promise.resolve(true),
+				(sessionId) => mounted?.afterTurn(sessionId) ?? Promise.resolve(),
 			);
 			runtimePort = adaptedRuntime;
 		} else {
 			runtimePort = o.runtime;
 		}
 		const restartLeases = new LeaseManager(createFileLeaseStore(netaDir()));
+		for (const leader of storePort.listLeaders()) await restartLeases.interrupt(leader.workspaceId, leader.sessionId);
 		for (const mission of storePort.listMissions()) {
-			// A self-led Lead++ request acquires under the mission id before the
-			// provider is relaunched. If the Node died before the durable mode
-			// changed, that reservation cannot represent a live writer.
-			if (mission.lead.kind === "leader" && storePort.getLeader(mission.workspaceId)?.mode === "lead") {
-				await restartLeases.interrupt(mission.workspaceId, mission.id);
-			}
+			// Retired mode-based closeout reserved slots under the mission ID.
+			await restartLeases.release(mission.workspaceId, mission.id);
 			for (const agent of storePort.listAgents(mission.id)) {
 				if (agent.state !== "queued") {
 					await restartLeases.interrupt(agent.workspaceId, agent.id);
@@ -2021,7 +2258,6 @@ export async function startNode(o?: {
 					read: (cursor) => durableStore.conversations.tail({ sessionId: leader.sessionId, cursor, limit: 500 }),
 					getTurn: async (turnId) => (await durableStore.conversations.turnRange(leader.sessionId, turnId))?.turn,
 				});
-				await reconcileRoutes({ runtime: runtimePort }, workspace.id).catch(() => undefined);
 			}
 		}
 		const token = newToken();
@@ -2097,9 +2333,6 @@ export async function startNode(o?: {
 			stopping = (async (): Promise<void> => {
 				try {
 					stopMeCurator();
-					stopRouteWatch();
-					// 07's mode ticker first: it writes through the store,
-					// which is about to close.
 					mounted?.stop();
 					hub.broadcast("node", { phase: "stopping" });
 					await server.close();
@@ -2137,15 +2370,17 @@ export async function startNode(o?: {
 						settings,
 						runtimeAdmission,
 						hub: () => hub,
-						superleaderTools: (actorId) => {
-							const workspaceId = workspaceForSuperleaderSession(actorId);
-							return workspaceId
-								? createSuperleaderToolBridge({
-										actorId,
-										workspaceId,
-										context: () => ({ ...ctx, hub }),
-									})
-								: undefined;
+						netaTools: (actorId) => {
+							const workspaceId = workspaceForLeaderSession(actorId);
+							return filterSessionIds.has(actorId)
+								? createFilterToolBridge({ actorId, context: () => ({ ...ctx, hub }) })
+								: workspaceId
+									? createWorkspaceLeaderToolBridge({
+											actorId,
+											workspaceId,
+											context: () => ({ ...ctx, hub }),
+										})
+									: undefined;
 						},
 						...(pi === undefined
 							? {}
@@ -2170,41 +2405,6 @@ export async function startNode(o?: {
 		hub = server.hub;
 		notifyMeChanged = () => hub.broadcast("me.changed", { pending: true });
 		if (realStore !== undefined) {
-			let timer: ReturnType<typeof setTimeout> | undefined;
-			const run = async () => {
-				timer = undefined;
-				try {
-					const me = openMeStore();
-					const routes = await watchStalledRoutes({ store: me, node: storePort, runtime: runtimePort });
-					const questions = await watchStalledQuestions({ store: me, node: storePort, runtime: runtimePort });
-					if (routes.captured.length || questions.captured.length) scheduleMeCurator();
-					const nextAt = [routes.nextAt, questions.nextAt]
-						.filter((value): value is number => value !== undefined)
-						.reduce<number | undefined>(
-							(soonest, value) => (soonest === undefined ? value : Math.min(soonest, value)),
-							undefined,
-						);
-					if (nextAt !== undefined) {
-						timer = setTimeout(() => void run(), Math.max(250, nextAt - Date.now()));
-						timer.unref();
-					}
-				} catch {
-					timer = setTimeout(() => void run(), 60_000);
-					timer.unref();
-				}
-			};
-			scheduleRouteWatch = () => {
-				if (timer) clearTimeout(timer);
-				timer = setTimeout(() => void run(), 250);
-				timer.unref();
-			};
-			stopRouteWatch = () => {
-				if (timer) clearTimeout(timer);
-				timer = undefined;
-			};
-			scheduleRouteWatch();
-		}
-		if (realStore !== undefined) {
 			await reconcileNoticePresentations({
 				store: openMeStore(),
 				runtime: runtimePort,
@@ -2213,74 +2413,81 @@ export async function startNode(o?: {
 		}
 		if (realStore !== undefined && settings.meCurator?.enabled === true) {
 			const me = openMeStore();
-			const dispatchNotices = () =>
+			const dispatchNotices = (workspaceId?: string) =>
 				deliverPendingNotices({
 					store: me,
 					runtime: runtimePort,
-					openNeta: (workspaceId) => openSolSession({ ...ctx, hub }, workspaceId),
+					openNeta: (workspaceId) => openWorkspaceLeaderSession({ ...ctx, hub }, workspaceId),
+					readTurn: readNoticeTurn,
+					workspaceId,
 				});
-			const classifiers = new Map<string, ReturnType<typeof createRuntimeMeClassifier>>();
+			syncFilterLeaderContext = async (workspaceId) => {
+				if (!runtimePort.send || !runtimePort.visibleMessages)
+					throw new Error("Filter native context is unavailable");
+				const owner = await openWorkspaceLeaderSession({ ...ctx, hub }, workspaceId);
+				const filter = await openFilterSession({ ...ctx, hub }, workspaceId);
+				const messages = await runtimePort.visibleMessages(owner.sessionId);
+				const cursor = (await me.contextCursors(workspaceId))[owner.sessionId];
+				const update = filterLeaderConversationUpdate(messages, cursor);
+				if (!update) return;
+				await runtimePort.send(filter.sessionId, update.text, [], {
+					readerDirected: false,
+					sourceId: `filter-context:${owner.sessionId}:${update.lastId}`,
+				});
+				await me.advanceContextCursors(workspaceId, { [owner.sessionId]: update.lastId });
+			};
+			const classifiers = new Map<
+				string,
+				{ sessionId: string; classify: ReturnType<typeof createRuntimeMeClassifier> }
+			>();
+			let filterStopped = false;
 			let activeRun: Promise<void> | undefined;
 			let timer: ReturnType<typeof setTimeout> | undefined;
 			let rerunRequested = false;
 			let rerunDelay = 250;
 			let failureBackoff = 1_000;
-			const ensureLuna = async (sourceWorkspaceId: string): Promise<void> => {
+			const ensureFilter = async (sourceWorkspaceId: string): Promise<void> => {
 				const workspaceId = sourceWorkspaceId;
-				const saved = await me.lunaIdentity(workspaceId);
-				curatorSessionIds.add(saved.sessionId);
-				const workspace = storePort.getWorkspace(workspaceId);
-				const leader = storePort.getLeader(workspaceId);
-				const root = workspace?.roots.find((item) => item.machineId === storePort.machine().id)?.path;
-				if (!workspace || !leader || !root)
-					throw new Error("Luna needs a current workspace leader and local workspace root");
-				const provider = "opencode";
-				const model = "openai/gpt-6-luna";
-				if (!settings.providers[provider] || settings.forbiddenModels.includes(model))
-					throw new Error("GPT-6 Luna is unavailable in the configured OpenCode runtime");
-				const identity = await me.bindLunaRuntime({
-					workspaceId,
-					machineId: storePort.machine().id,
-					provider,
-					model,
-				});
-				const request = {
-					sessionId: identity.sessionId,
-					workspaceId,
-					cwd: root,
-					provider,
-					model,
-					access: "readOnly" as const,
-					unsandboxed: false,
-					netaTools: false,
-				};
-				await openPersistedRuntimeSession({
-					runtime: runtimePort,
-					request,
-					initialized: saved.runtimeInitialized === true,
-					markInitialized: () => me.markLunaRuntimeInitialized(workspaceId),
-				});
-				await runtimePort.setModel(identity.sessionId, model);
-				const diagnostics = await runtimePort.runtimeDiagnostics?.(identity.sessionId);
-				if (diagnostics?.model !== undefined && diagnostics.model !== model)
-					throw new Error("Luna model selection could not be verified");
-				if (!classifiers.has(workspaceId))
-					classifiers.set(
-						workspaceId,
-						createRuntimeMeClassifier({ runtime: runtimePort, store: storePort, sessionId: identity.sessionId }),
-					);
+				const identity = await openFilterSession({ ...ctx, hub }, workspaceId);
+				const previous = classifiers.get(workspaceId);
+				if (previous?.sessionId !== identity.sessionId) {
+					if (previous) {
+						try {
+							await runtimePort.close(previous.sessionId);
+						} catch (error) {
+							// Reset already retired the previous native session.
+							if (!(error instanceof NodeError && error.symbol === "NOT_FOUND")) throw error;
+						}
+						filterSessionIds.delete(previous.sessionId);
+					}
+					classifiers.set(workspaceId, {
+						sessionId: identity.sessionId,
+						classify: createRuntimeMeClassifier({
+							runtime: runtimePort,
+							sessionId: identity.sessionId,
+							store: me,
+							readTurn: readNoticeTurn,
+						}),
+					});
+				}
 			};
 			const curator = createMeCurator({
 				store: me,
-				loadDetail: (source) => readMeEvidence(storePort, source),
+				onFailure: (source, error) =>
+					hub.broadcast("error", { sessionId: source.sessionId, message: `Filter processing failed: ${error}` }),
+				onDecision: async (notice) => {
+					await dispatchNotices(notice.workspaceId);
+				},
 				classify: async (input) => {
-					await ensureLuna(input.source.workspaceId);
+					await syncFilterLeaderContext(input.source.workspaceId);
+					await ensureFilter(input.source.workspaceId);
 					const classifier = classifiers.get(input.source.workspaceId);
 					if (!classifier) throw new Error("workspace filter classifier is unavailable");
-					return classifier(input);
+					return classifier.classify(input);
 				},
 			});
 			scheduleMeCurator = (delay = 250) => {
+				if (filterStopped) return;
 				if (activeRun) {
 					rerunRequested = true;
 					rerunDelay = Math.min(rerunDelay, delay);
@@ -2293,7 +2500,8 @@ export async function startNode(o?: {
 					rerunDelay = 250;
 					let followupDelay: number | undefined;
 					activeRun = curator
-						.drain(20, 5)
+						// Keep a decision for each reply even when later conversation changes trigger a retry.
+						.drain(20, 1)
 						.then(async (result) => {
 							notifyMeChanged();
 							const notices = await dispatchNotices();
@@ -2340,6 +2548,7 @@ export async function startNode(o?: {
 				timer.unref();
 			};
 			stopMeCurator = () => {
+				filterStopped = true;
 				if (timer) clearTimeout(timer);
 				timer = undefined;
 				rerunRequested = false;

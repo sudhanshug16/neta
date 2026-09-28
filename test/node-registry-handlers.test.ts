@@ -20,14 +20,11 @@ function leader(workspaceId: string): Leader {
 		sessionId: ulid(),
 		provider: "test",
 		model: "m",
-		mode: "lead",
-		modeSince: "2026-01-01T00:00:00.000Z",
-		modeActiveMs: 0,
 		state: "idle",
 	};
 }
 
-function mission(id: string, workspaceId: string, createdAt: string, state: Mission["state"] = "running"): Mission {
+function mission(id: string, workspaceId: string, createdAt: string, state: Mission["state"] = "open"): Mission {
 	return {
 		id,
 		number: 1,
@@ -35,7 +32,6 @@ function mission(id: string, workspaceId: string, createdAt: string, state: Miss
 		machineId: ulid(),
 		name: "m",
 		objective: "o",
-		changes: [],
 		lead: { kind: "leader" },
 		agentIds: [],
 		access: "readOnly",
@@ -63,16 +59,16 @@ function agent(id: string, missionId: string, state: Agent["state"]): Agent {
 }
 
 const M1 = mission(ulid(), W1, "2026-02-01T00:00:00.000Z");
-const M2 = mission(ulid(), W1, "2026-02-02T00:00:00.000Z", "blocked");
+const M2 = mission(ulid(), W1, "2026-02-02T00:00:00.000Z", "open");
 const M3 = mission(ulid(), W1, "2026-02-03T00:00:00.000Z");
-const M4 = mission(ulid(), W1, "2026-02-04T00:00:00.000Z");
+const M4 = mission(ulid(), W1, "2026-02-04T00:00:00.000Z", "closed");
 const M5 = mission(ulid(), W1, "2026-02-05T00:00:00.000Z");
 const M6 = mission(ulid(), W2, "2026-02-06T00:00:00.000Z");
 const MISSIONS = [M1, M2, M3, M4, M5, M6];
 
 const RUNNER = agent(ulid(), M1.id, "running");
 const STARTER = agent(ulid(), M1.id, "starting");
-const DONE = agent(ulid(), M1.id, "completed");
+const DONE = agent(ulid(), M1.id, "idle");
 const AGENTS = [RUNNER, STARTER, DONE];
 
 interface World {
@@ -237,10 +233,10 @@ describe("missions.list", () => {
 
 	test("state and time filters narrow, unknown cursors fail", async () => {
 		const world = freshWorld();
-		const blocked = (await call(world, "missions.list", { workspaceId: W1, state: "blocked" })) as {
+		const closed = (await call(world, "missions.list", { workspaceId: W1, state: "closed" })) as {
 			missions: Mission[];
 		};
-		expect(blocked.missions.map((m) => m.id)).toEqual([M2.id]);
+		expect(closed.missions.map((m) => m.id)).toEqual([M4.id]);
 		const ranged = (await call(world, "missions.list", {
 			workspaceId: W1,
 			from: "2026-02-02T00:00:00.000Z",
@@ -284,39 +280,6 @@ describe("missions.get and events.list", () => {
 	});
 });
 
-describe("mission.pin", () => {
-	test("appends user.pinned, changes no Mission field, and broadcasts the event", async () => {
-		const world = freshWorld();
-		const result = (await call(world, "mission.pin", { missionId: M1.id, pinned: true })) as {
-			missionId: string;
-			pinned: boolean;
-		};
-		expect(result).toEqual({ missionId: M1.id, pinned: true });
-		expect(world.events).toEqual([
-			{ workspaceId: W1, kind: "user.pinned", missionId: M1.id, data: { pinned: true } },
-		]);
-		expect(world.broadcasts).toEqual([
-			{
-				method: "event",
-				params: {
-					event: {
-						workspaceId: W1,
-						kind: "user.pinned",
-						missionId: M1.id,
-						data: { pinned: true },
-						seq: 1,
-						at: "2026-03-01T00:00:00.000Z",
-					},
-				},
-			},
-		]);
-		expect(MISSIONS.find((m) => m.id === M1.id)).toEqual(M1);
-		expect((await failsWith(call(world, "mission.pin", { missionId: ulid(), pinned: false }))).symbol).toBe(
-			"NOT_FOUND",
-		);
-	});
-});
-
 describe("agent.archive", () => {
 	test("a running agent without confirm fails and touches nothing", async () => {
 		const world = freshWorld();
@@ -346,50 +309,5 @@ describe("agent.archive", () => {
 		expect(result.agent.state).toBe("archived");
 		expect(world.closedSessions).toEqual([DONE.sessionId]);
 		expect((await failsWith(call(world, "agent.archive", { agentId: ulid() }))).symbol).toBe("NOT_FOUND");
-	});
-});
-
-describe("leader.setMode and node.stop", () => {
-	test("setMode writes mode and modeSince, appends the event, broadcasts", async () => {
-		const world = freshWorld();
-		const before = new Date().toISOString();
-		const result = (await call(world, "leader.setMode", { workspaceId: W1, mode: "leadPlus" })) as { leader: Leader };
-		expect(result.leader.mode).toBe("leadPlus");
-		expect(result.leader.modeSince >= before).toBe(true);
-		expect(world.leaders.get(W1)?.mode).toBe("leadPlus");
-		expect(world.events).toEqual([{ workspaceId: W1, kind: "leader.modeChanged", data: { mode: "leadPlus" } }]);
-		expect(world.broadcasts).toEqual([{ method: "state", params: { kind: "leader", record: result.leader } }]);
-		const badMode = await failsWith(call(world, "leader.setMode", { workspaceId: W1, mode: "turbo" }));
-		expect(badMode.symbol).toBe("INVALID_PARAMS");
-		expect((await failsWith(call(world, "leader.setMode", { workspaceId: W2, mode: "lead" }))).symbol).toBe(
-			"NOT_FOUND",
-		);
-	});
-
-	test("workspace.list returns workspaces and leaders", async () => {
-		const world = freshWorld();
-		const result = (await call(world, "workspace.list", {})) as { workspaces: Workspace[]; leaders: Leader[] };
-		expect(result.workspaces).toHaveLength(2);
-		expect(result.leaders).toHaveLength(2);
-	});
-
-	test("node.stop replies before stopping", async () => {
-		const world = freshWorld();
-		const ctx = testCtx(world);
-		let stopped = false;
-		ctx.stop = () => {
-			stopped = true;
-			return Promise.resolve();
-		};
-		const method: string = "node.stop";
-		const handler = registryHandlers[method];
-		if (handler === undefined) {
-			throw new Error("node.stop handler is missing");
-		}
-		const result = await handler(ctx, {}, undefined as never);
-		expect(result).toEqual({ stopping: true });
-		expect(stopped).toBe(false);
-		await new Promise((done) => setTimeout(done, 10));
-		expect(stopped).toBe(true);
 	});
 });

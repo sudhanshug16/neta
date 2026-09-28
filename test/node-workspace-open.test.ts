@@ -4,7 +4,6 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { ulid } from "../src/core/ids.ts";
-import { NAME_POOL } from "../src/core/names.ts";
 import type { Leader, Workspace } from "../src/core/types.ts";
 import { canonicalRemote } from "../src/core/workspace-id.ts";
 import { adaptStore } from "../src/node/lifecycle.ts";
@@ -203,36 +202,32 @@ describe("detectWorkspace", () => {
 		expect((thrown as { symbol?: string }).symbol).toBe("NOT_FOUND");
 	});
 
-	test("leader creation draws a personal name from the pool, not the workspace name", async () => {
+	test("the coordinator has a fixed name across workspaces", async () => {
 		const repo = join(dir, "widget");
 		await initRepo(repo, "git@github.com:acme/widget.git");
 		const world = emptyWorld();
 		const opened = await openWorkspace(testCtx(world), repo);
-		expect(NAME_POOL).toContain(opened.leader.name);
-		expect(opened.leader.name).not.toBe(opened.workspace.name);
-		expect(opened.leader.name).not.toBe(opened.workspace.id);
-		// Seeded by the workspace id: a second checkout of the same repo,
-		// opened into a fresh world, draws the same name.
+		expect(opened.leader.name).toBe("Coordinator");
 		const other = join(dir, "widget-clone");
 		await initRepo(other, "https://github.com/acme/widget.git");
 		const fresh = await openWorkspace(testCtx(emptyWorld()), other);
 		expect(fresh.leader.name).toBe(opened.leader.name);
 	});
 
-	test("settings leader.name overrides the pool, blank falls back to it", async () => {
+	test("old name settings do not rename the coordinator", async () => {
 		const repo = join(dir, "repo");
 		await initRepo(repo, "git@github.com:acme/widget.git");
 		const neta = process.env.NETA_DIR ?? "";
 		await mkdir(neta, { recursive: true });
 		await writeFile(join(neta, "settings.json"), JSON.stringify({ leader: { provider: "claude", name: "Halden" } }));
 		const named = await openWorkspace(testCtx(emptyWorld()), repo);
-		expect(named.leader.name).toBe("Halden");
+		expect(named.leader.name).toBe("Coordinator");
 		await writeFile(join(neta, "settings.json"), JSON.stringify({ leader: { provider: "claude", name: "  " } }));
 		const blank = await openWorkspace(testCtx(emptyWorld()), repo);
-		expect(NAME_POOL).toContain(blank.leader.name);
+		expect(blank.leader.name).toBe("Coordinator");
 	});
 
-	test("the workspace's own settings layer names the leader", async () => {
+	test("workspace settings cannot rename the coordinator", async () => {
 		const repo = join(dir, "repo");
 		await initRepo(repo, "git@github.com:acme/widget.git");
 		const neta = process.env.NETA_DIR ?? "";
@@ -241,7 +236,7 @@ describe("detectWorkspace", () => {
 		await mkdir(join(repo, ".neta"), { recursive: true });
 		await writeFile(join(repo, ".neta", "settings.json"), JSON.stringify({ leader: { name: "Wren" } }));
 		const opened = await openWorkspace(testCtx(emptyWorld()), repo);
-		expect(opened.leader.name).toBe("Wren");
+		expect(opened.leader.name).toBe("Coordinator");
 	});
 
 	test("an existing leader whose session is gone is revived and announced", async () => {
@@ -300,31 +295,34 @@ describe("detectWorkspace", () => {
 		}
 	});
 
-	test("a stored leader written before the field gains a name on open", async () => {
-		const repo = join(dir, "repo");
-		await initRepo(repo, "git@github.com:acme/widget.git");
-		const world = emptyWorld();
-		const real = await openStore();
-		try {
-			const first = await openWorkspace(await realCtx(real, world), repo);
-			// The record as it was written before `name` existed.
-			const legacy: Record<string, unknown> = { ...first.leader };
-			delete legacy.name;
-			await writeFile(paths().leader(first.workspace.id), JSON.stringify(legacy));
-			world.broadcasts.length = 0;
-			const reopened = await openWorkspace(await realCtx(real, world), repo);
-			expect(NAME_POOL).toContain(reopened.leader.name);
-			// Backfilled, not re-created: the session and mode survive.
-			expect(reopened.leader.sessionId).toBe(first.leader.sessionId);
-			expect(reopened.leader.modeSince).toBe(first.leader.modeSince);
-			expect(world.sessions).toHaveLength(1);
-			// Persisted and announced, so the next reader never sees it missing.
-			expect((await readJson<Leader>(paths().leader(first.workspace.id)))?.name).toBe(reopened.leader.name);
-			expect(world.broadcasts).toEqual([{ method: "state", params: { kind: "leader", record: reopened.leader } }]);
-		} finally {
-			await real.close();
-		}
-	});
+	test.each([undefined, "Mace"])(
+		"a stored coordinator name %p is normalized without replacing its session",
+		async (oldName) => {
+			const repo = join(dir, "repo");
+			await initRepo(repo, "git@github.com:acme/widget.git");
+			const world = emptyWorld();
+			const real = await openStore();
+			try {
+				const first = await openWorkspace(await realCtx(real, world), repo);
+				// An older record may have a personal name or no name at all.
+				const legacy: Record<string, unknown> = { ...first.leader };
+				if (oldName === undefined) delete legacy.name;
+				else legacy.name = oldName;
+				await writeFile(paths().leader(first.workspace.id), JSON.stringify(legacy));
+				world.broadcasts.length = 0;
+				const reopened = await openWorkspace(await realCtx(real, world), repo);
+				expect(reopened.leader.name).toBe("Coordinator");
+				// Normalized, not re-created: the session survives.
+				expect(reopened.leader.sessionId).toBe(first.leader.sessionId);
+				expect(world.sessions).toHaveLength(1);
+				// Persisted at load, so the next reader never sees the old label.
+				expect((await readJson<Leader>(paths().leader(first.workspace.id)))?.name).toBe(reopened.leader.name);
+				expect(world.broadcasts).toEqual([]);
+			} finally {
+				await real.close();
+			}
+		},
+	);
 });
 
 describe("openWorkspace", () => {
@@ -389,7 +387,6 @@ describe("openWorkspace", () => {
 		// Defaults from an empty temp NETA_DIR: OpenCode with its model selected at launch.
 		expect(first.leader.provider).toBe("opencode");
 		expect(first.leader.model).toBe("");
-		expect(first.leader.mode).toBe("lead");
 		const session = world.sessions[0];
 		if (session === undefined) {
 			throw new Error("expected one runtime session");

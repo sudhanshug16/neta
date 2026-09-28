@@ -33,11 +33,10 @@ test("closing an inactive Lead++ mission does not restore its stale native sessi
 			machineId: machine.id,
 			name: "Historical closeout",
 			objective: "close without reviving an inactive conversation",
-			changes: [],
 			lead: { kind: "agent", agentId: "mission-lead" },
 			agentIds: ["mission-lead"],
 			access: "readWrite",
-			state: "readyToClose",
+			state: "open",
 			createdAt: new Date(0).toISOString(),
 		};
 		await real.missions.create(mission);
@@ -53,27 +52,21 @@ test("closing an inactive Lead++ mission does not restore its stale native sessi
 			skills: [],
 			sessionId: "stale-native-session",
 			canSpawn: true,
-			state: "completed",
+			state: "idle",
 			startedAt: new Date(0).toISOString(),
 		};
 		const leader = {
 			workspaceId,
 			machineId: machine.id,
-			sessionId: "workspace-leader-session",
+			sessionId: "coordinator-session",
 			name: "Hazel",
 			provider: "fake",
 			model: "fake",
-			mode: "lead" as const,
-			modeSince: new Date(0).toISOString(),
-			modeActiveMs: 0,
 			state: "idle" as const,
 			leadModes: {
 				[lead.id]: {
 					agentId: lead.id,
 					missionId: mission.id,
-					mode: "leadPlus" as const,
-					modeSince: new Date(0).toISOString(),
-					modeActiveMs: 0,
 				},
 			},
 		};
@@ -107,7 +100,7 @@ test("closing an inactive Lead++ mission does not restore its stale native sessi
 			if (mount === undefined) throw new Error("tool mount is unavailable");
 			return mount.handlers["tools.call"](
 				{} as never,
-				{ actorId: leader.sessionId, token, name: "neta_close", arguments: args },
+				{ actorId: leader.sessionId, token, name: "close", arguments: args },
 				{} as never,
 			) as Promise<McpToolResponse>;
 		};
@@ -121,7 +114,6 @@ test("closing an inactive Lead++ mission does not restore its stale native sessi
 		expect(result.isError).toBe(false);
 		expect(ensureCalls).toBe(0);
 		expect(store.getMission(mission.id)?.state).toBe("closed");
-		expect((await real.leaders.load(workspaceId, () => leader)).leadModes?.[lead.id]?.mode).toBe("lead");
 	} finally {
 		mount?.stop();
 		await real.close();

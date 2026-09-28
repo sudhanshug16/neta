@@ -13,7 +13,6 @@ import type { ActorKind } from "./schemas.ts";
 
 export const BANNED_WORDS: readonly string[] = [
 	"scout",
-	"worker",
 	"reviewer",
 	"debater",
 	"apprentice",
@@ -152,9 +151,7 @@ function missionBrief(mission: Mission): string {
 	if (mission.worktree !== undefined) {
 		lines.push(`Worktree: ${mission.worktree.path}`);
 	}
-	for (const change of mission.changes) {
-		lines.push(`Accepted: ${change.text}`);
-	}
+
 	return lines.join("\n");
 }
 
@@ -162,11 +159,11 @@ export function composeContext(input: ContextInput): string {
 	const parts = [agreement(input.kind)];
 	if (input.self) {
 		parts.push(
-			`# Your identity\nYou are ${input.self.name}. Your actor ID is ${input.self.id}. This is your own session, not a delegated worker. Do not send messages to yourself. Only a successful neta_agent call creates a separate worker; use the returned agent ID to address it.`,
+			`# Your identity\nYou are ${input.self.name}. Your actor ID is ${input.self.id}. This is your own session, not a delegated worker. Do not send messages to yourself. Only a successful spawn_agent call creates a separate worker; use the returned agent ID to address it.`,
 		);
 	}
 	parts.push(
-		`# Current assignment\nActor: ${input.kind}\nAssigned access: ${input.access ?? "readOnly"}. ${input.kind === "agent" ? "Honor this access and your bounded task." : "Leadership shell access is not sandboxed. Lead means inspect and coordinate; direct implementation requires the existing Lead++ decision and writer lease. The mission access ceiling does not itself grant write ownership."}`,
+		`# Current assignment\nActor: ${input.kind}\nAssigned access: ${input.access ?? "readOnly"}. ${input.kind === "agent" ? "Honor this access and your bounded task." : "Honor your assigned access. Node acquires writer ownership before writing turns and releases it after execution stops. Delegate bounded work and finish your turn to let queued writers run."}`,
 	);
 	parts.push(
 		"# Verification\nKeep test and migration databases disposable and isolated from shared development or production data unless that exact mutation is authorized. A command that fails inside a pipeline is a failed check; preserve its exit status and inspect errors. State what you actually ran and distinguish scratch checks from live results.",

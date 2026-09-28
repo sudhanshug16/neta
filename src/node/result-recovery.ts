@@ -20,8 +20,7 @@ export async function recoverActorResults(
 			? await conversations.turnRange(actor.sessionId, actor.currentTurnId)
 			: undefined;
 		const interruptedLaunch =
-			actor.state === "interrupted" &&
-			(actor.stateBefore === "starting" || actor.stateBefore === "running" || actor.stateBefore === "blocked");
+			actor.state === "interrupted" && (actor.stateBefore === "starting" || actor.stateBefore === "running");
 		if (!range && !interruptedLaunch) continue;
 		const meta = await conversations.meta(actor.sessionId);
 		const turn: Turn = range?.turn.endedAt

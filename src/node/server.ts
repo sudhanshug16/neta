@@ -24,6 +24,7 @@ import type {
 import type { OpenCodeAttachment } from "../opencode/attachment.ts";
 import type { OpenCodeExecutionContract } from "../opencode/contract.ts";
 import type { PiTerminalManager } from "../pi/manager.ts";
+import type { NativeVisibleMessage } from "../session/runtime.ts";
 import type { GlanceResult } from "../store/glance.ts";
 import {
 	type ClientKind,
@@ -81,6 +82,7 @@ export interface SessionRequest {
 	cwd: string;
 	provider: string;
 	model: string;
+	variant?: string;
 	access: Access;
 	unsandboxed?: boolean;
 	netaTools: boolean;
@@ -114,6 +116,7 @@ export interface NodeRuntime {
 		provenance: { readerDirected: boolean; sourceId?: string; sourceHash?: string },
 	): Promise<InboxMessage>;
 	listInbox?(id: SessionId): Promise<InboxMessage[]>;
+	visibleMessages?(id: SessionId): Promise<NativeVisibleMessage[]>;
 	runtimeDiagnostics?(id: SessionId): Promise<{
 		attached?: boolean;
 		bindingGeneration?: string;

@@ -40,13 +40,13 @@ async function seed(dir: string, workspace: string): Promise<void> {
 				{
 					name: "lens port",
 					objective: OBJECTIVE,
-					state: "running",
+					state: "open",
 					createdAt: new Date(now - 2 * 3600000).toISOString(),
 				},
 				{
 					name: LONG_NAME,
 					objective: "Pick the widget API.",
-					state: "blocked",
+					state: "open",
 					attention: ATTENTION,
 					createdAt: new Date(now - 3600000).toISOString(),
 				},
@@ -68,7 +68,6 @@ async function seed(dir: string, workspace: string): Promise<void> {
 					machineId,
 					name: spec.name,
 					objective: spec.objective,
-					changes: [],
 					lead: { kind: "agent", agentId: `fixture-lead-${ulid()}` },
 					agentIds: [],
 					access: "readOnly",
@@ -183,7 +182,7 @@ describe("missions list", () => {
 			const parsed = JSON.parse(result.stdout) as Array<{ number: number; state: string; name: string }>;
 			expect(Array.isArray(parsed)).toBe(true);
 			expect(parsed).toHaveLength(2);
-			expect(parsed[0]).toMatchObject({ number: 2, state: "blocked", name: LONG_NAME });
+			expect(parsed[0]).toMatchObject({ number: 2, state: "open", name: LONG_NAME });
 			expect(typeof parsed[1]?.number).toBe("number");
 			expect(typeof parsed[1]?.state).toBe("string");
 			expect(typeof parsed[1]?.name).toBe("string");
@@ -230,7 +229,7 @@ describe("mission detail", () => {
 			expect(result.code).toBe(0);
 			expect(result.stdout).toContain("Mission 1 · lens port");
 			expect(result.stdout).toContain(`Objective: ${OBJECTIVE}`);
-			expect(result.stdout).toContain("State: running");
+			expect(result.stdout).toContain("State: open");
 			expect(result.stdout).toContain("bruno");
 			expect(result.stdout).toContain("cassia");
 			expect(result.stdout).toContain("Draft the port plan.");

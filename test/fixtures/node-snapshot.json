@@ -24,29 +24,27 @@
       "workspaceId": "git:github.com/acme/widget",
       "machineId": "01KT1GW6G03YY7WR8A6BBMKV89",
       "name": "Halden",
-      "sessionId": "01KT1GW6G03YY7WR8A6BBMKV8E",
+      "sessionId": "01KT1GW6G03YY7WR8A6BBMKV8D",
       "provider": "fake",
       "model": "test-model",
-      "mode": "lead",
-      "modeSince": "2026-06-01T12:00:00.000Z",
-      "modeActiveMs": 0,
-      "state": "idle"
+      "state": "failed",
+      "startupError": "Provider fake is retired; use OpenCode"
     }
   ],
   "missions": [
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKVAF",
+      "id": "01KT1GW6G03YY7WR8A6BBMKVAE",
       "number": 13,
       "workspaceId": "git:github.com/acme/widget",
       "machineId": "01KT1GW6G03YY7WR8A6BBMKV89",
       "name": "mission 13",
       "objective": "Objective 13.",
-      "changes": [],
       "lead": {
-        "kind": "leader"
+        "kind": "agent",
+        "agentId": "01KT1GW6G03YY7WR8A6BBMKVAF"
       },
       "agentIds": [
-        "01KT1GW6G03YY7WR8A6BBMKVAG"
+        "01KT1GW6G03YY7WR8A6BBMKVAF"
       ],
       "access": "readOnly",
       "state": "closed",
@@ -56,19 +54,19 @@
       "closeReason": "superseded"
     },
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKV90",
+      "id": "01KT1GW6G03YY7WR8A6BBMKV8Z",
       "number": 6,
       "workspaceId": "git:github.com/acme/widget",
       "machineId": "01KT1GW6G03YY7WR8A6BBMKV89",
       "name": "mission 6",
       "objective": "Objective 6.",
-      "changes": [],
       "lead": {
-        "kind": "leader"
+        "kind": "agent",
+        "agentId": "01KT1GW6G03YY7WR8A6BBMKV90"
       },
       "agentIds": [
-        "01KT1GW6G03YY7WR8A6BBMKV91",
-        "01KT1GW6G03YY7WR8A6BBMKV93"
+        "01KT1GW6G03YY7WR8A6BBMKV90",
+        "01KT1GW6G03YY7WR8A6BBMKV92"
       ],
       "access": "readOnly",
       "state": "closed",
@@ -83,58 +81,58 @@
       }
     },
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKVA0",
+      "id": "01KT1GW6G03YY7WR8A6BBMKV9Z",
       "number": 8,
       "workspaceId": "git:github.com/acme/widget",
       "machineId": "01KT1GW6G03YY7WR8A6BBMKV89",
       "name": "mission 8",
       "objective": "Objective 8.",
-      "changes": [],
       "lead": {
-        "kind": "leader"
+        "kind": "agent",
+        "agentId": "01KT1GW6G03YY7WR8A6BBMKVA0"
       },
       "agentIds": [
-        "01KT1GW6G03YY7WR8A6BBMKVA1"
+        "01KT1GW6G03YY7WR8A6BBMKVA0"
       ],
       "access": "readOnly",
-      "state": "running",
+      "state": "open",
       "createdAt": "2026-05-30T05:00:00.000Z"
     },
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKV8F",
+      "id": "01KT1GW6G03YY7WR8A6BBMKV8E",
       "number": 1,
       "workspaceId": "git:github.com/acme/widget",
       "machineId": "01KT1GW6G03YY7WR8A6BBMKV89",
       "name": "mission 1",
       "objective": "Objective 1.",
-      "changes": [],
       "lead": {
-        "kind": "leader"
+        "kind": "agent",
+        "agentId": "01KT1GW6G03YY7WR8A6BBMKV8F"
       },
       "agentIds": [
-        "01KT1GW6G03YY7WR8A6BBMKV8G",
-        "01KT1GW6G03YY7WR8A6BBMKV8J"
+        "01KT1GW6G03YY7WR8A6BBMKV8F",
+        "01KT1GW6G03YY7WR8A6BBMKV8H"
       ],
       "access": "readOnly",
-      "state": "running",
+      "state": "open",
       "createdAt": "2026-05-30T10:00:00.000Z"
     },
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKVAC",
+      "id": "01KT1GW6G03YY7WR8A6BBMKVAB",
       "number": 12,
       "workspaceId": "git:github.com/acme/widget",
       "machineId": "01KT1GW6G03YY7WR8A6BBMKV89",
       "name": "mission 12",
       "objective": "Objective 12.",
-      "changes": [],
       "lead": {
-        "kind": "leader"
+        "kind": "agent",
+        "agentId": "01KT1GW6G03YY7WR8A6BBMKVAC"
       },
       "agentIds": [
-        "01KT1GW6G03YY7WR8A6BBMKVAD"
+        "01KT1GW6G03YY7WR8A6BBMKVAC"
       ],
       "access": "readOnly",
-      "state": "mergedNotClosed",
+      "state": "open",
       "createdAt": "2026-05-30T15:00:00.000Z",
       "integration": {
         "mergedAt": "2026-06-01T00:00:00.000Z",
@@ -143,21 +141,21 @@
       }
     },
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKV8T",
+      "id": "01KT1GW6G03YY7WR8A6BBMKV8S",
       "number": 4,
       "workspaceId": "git:github.com/acme/widget",
       "machineId": "01KT1GW6G03YY7WR8A6BBMKV89",
       "name": "mission 4",
       "objective": "Objective 4.",
-      "changes": [],
       "lead": {
-        "kind": "leader"
+        "kind": "agent",
+        "agentId": "01KT1GW6G03YY7WR8A6BBMKV8T"
       },
       "agentIds": [
-        "01KT1GW6G03YY7WR8A6BBMKV8V"
+        "01KT1GW6G03YY7WR8A6BBMKV8T"
       ],
       "access": "readOnly",
-      "state": "mergedNotClosed",
+      "state": "open",
       "createdAt": "2026-05-30T20:00:00.000Z",
       "integration": {
         "mergedAt": "2026-06-01T00:00:00.000Z",
@@ -166,143 +164,143 @@
       }
     },
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKVA9",
+      "id": "01KT1GW6G03YY7WR8A6BBMKVA8",
       "number": 11,
       "workspaceId": "git:github.com/acme/widget",
       "machineId": "01KT1GW6G03YY7WR8A6BBMKV89",
       "name": "mission 11",
       "objective": "Objective 11.",
-      "changes": [],
       "lead": {
-        "kind": "leader"
+        "kind": "agent",
+        "agentId": "01KT1GW6G03YY7WR8A6BBMKVA9"
       },
       "agentIds": [
-        "01KT1GW6G03YY7WR8A6BBMKVAA"
+        "01KT1GW6G03YY7WR8A6BBMKVA9"
       ],
       "access": "readOnly",
-      "state": "readyToClose",
+      "state": "open",
       "createdAt": "2026-05-31T01:00:00.000Z"
     },
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKV8Q",
+      "id": "01KT1GW6G03YY7WR8A6BBMKV8P",
       "number": 3,
       "workspaceId": "git:github.com/acme/widget",
       "machineId": "01KT1GW6G03YY7WR8A6BBMKV89",
       "name": "mission 3",
       "objective": "Objective 3.",
-      "changes": [],
       "lead": {
-        "kind": "leader"
+        "kind": "agent",
+        "agentId": "01KT1GW6G03YY7WR8A6BBMKV8Q"
       },
       "agentIds": [
-        "01KT1GW6G03YY7WR8A6BBMKV8R"
+        "01KT1GW6G03YY7WR8A6BBMKV8Q"
       ],
       "access": "readOnly",
-      "state": "readyToClose",
+      "state": "open",
       "createdAt": "2026-05-31T06:00:00.000Z"
     },
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKVA6",
+      "id": "01KT1GW6G03YY7WR8A6BBMKVA5",
       "number": 10,
       "workspaceId": "git:github.com/acme/widget",
       "machineId": "01KT1GW6G03YY7WR8A6BBMKV89",
       "name": "mission 10",
       "objective": "Objective 10.",
-      "changes": [],
       "lead": {
-        "kind": "leader"
+        "kind": "agent",
+        "agentId": "01KT1GW6G03YY7WR8A6BBMKVA6"
       },
       "agentIds": [
-        "01KT1GW6G03YY7WR8A6BBMKVA7"
+        "01KT1GW6G03YY7WR8A6BBMKVA6"
       ],
       "access": "readOnly",
-      "state": "failed",
+      "state": "open",
       "createdAt": "2026-05-31T11:00:00.000Z"
     },
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKV8X",
+      "id": "01KT1GW6G03YY7WR8A6BBMKV8W",
       "number": 5,
       "workspaceId": "git:github.com/acme/widget",
       "machineId": "01KT1GW6G03YY7WR8A6BBMKV89",
       "name": "mission 5",
       "objective": "Objective 5.",
-      "changes": [],
       "lead": {
-        "kind": "leader"
+        "kind": "agent",
+        "agentId": "01KT1GW6G03YY7WR8A6BBMKV8X"
       },
       "agentIds": [
-        "01KT1GW6G03YY7WR8A6BBMKV8Y"
+        "01KT1GW6G03YY7WR8A6BBMKV8X"
       ],
       "access": "readOnly",
-      "state": "failed",
+      "state": "open",
       "createdAt": "2026-05-31T16:00:00.000Z",
       "attention": "Provider quota exhausted, retry?"
     },
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKV95",
+      "id": "01KT1GW6G03YY7WR8A6BBMKV94",
       "number": 7,
       "workspaceId": "git:github.com/acme/widget",
       "machineId": "01KT1GW6G03YY7WR8A6BBMKV89",
       "name": "mission 7",
       "objective": "Objective 7.",
-      "changes": [],
       "lead": {
-        "kind": "leader"
+        "kind": "agent",
+        "agentId": "01KT1GW6G03YY7WR8A6BBMKV95"
       },
       "agentIds": [
-        "01KT1GW6G03YY7WR8A6BBMKV96",
-        "01KT1GW6G03YY7WR8A6BBMKV98",
-        "01KT1GW6G03YY7WR8A6BBMKV9A",
-        "01KT1GW6G03YY7WR8A6BBMKV9C",
-        "01KT1GW6G03YY7WR8A6BBMKV9E",
-        "01KT1GW6G03YY7WR8A6BBMKV9G",
-        "01KT1GW6G03YY7WR8A6BBMKV9J",
-        "01KT1GW6G03YY7WR8A6BBMKV9M",
-        "01KT1GW6G03YY7WR8A6BBMKV9P",
-        "01KT1GW6G03YY7WR8A6BBMKV9R",
-        "01KT1GW6G03YY7WR8A6BBMKV9T",
-        "01KT1GW6G03YY7WR8A6BBMKV9W",
-        "01KT1GW6G03YY7WR8A6BBMKV9Y"
+        "01KT1GW6G03YY7WR8A6BBMKV95",
+        "01KT1GW6G03YY7WR8A6BBMKV97",
+        "01KT1GW6G03YY7WR8A6BBMKV99",
+        "01KT1GW6G03YY7WR8A6BBMKV9B",
+        "01KT1GW6G03YY7WR8A6BBMKV9D",
+        "01KT1GW6G03YY7WR8A6BBMKV9F",
+        "01KT1GW6G03YY7WR8A6BBMKV9H",
+        "01KT1GW6G03YY7WR8A6BBMKV9K",
+        "01KT1GW6G03YY7WR8A6BBMKV9N",
+        "01KT1GW6G03YY7WR8A6BBMKV9Q",
+        "01KT1GW6G03YY7WR8A6BBMKV9S",
+        "01KT1GW6G03YY7WR8A6BBMKV9V",
+        "01KT1GW6G03YY7WR8A6BBMKV9X"
       ],
       "access": "readOnly",
-      "state": "running",
+      "state": "open",
       "createdAt": "2026-06-01T02:00:00.000Z"
     },
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKVA3",
+      "id": "01KT1GW6G03YY7WR8A6BBMKVA2",
       "number": 9,
       "workspaceId": "git:github.com/acme/widget",
       "machineId": "01KT1GW6G03YY7WR8A6BBMKV89",
       "name": "mission 9",
       "objective": "Objective 9.",
-      "changes": [],
       "lead": {
-        "kind": "leader"
+        "kind": "agent",
+        "agentId": "01KT1GW6G03YY7WR8A6BBMKVA3"
       },
       "agentIds": [
-        "01KT1GW6G03YY7WR8A6BBMKVA4"
+        "01KT1GW6G03YY7WR8A6BBMKVA3"
       ],
       "access": "readOnly",
-      "state": "blocked",
+      "state": "open",
       "createdAt": "2026-06-01T04:00:00.000Z",
       "attention": "Waiting on design review."
     },
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKV8M",
+      "id": "01KT1GW6G03YY7WR8A6BBMKV8K",
       "number": 2,
       "workspaceId": "git:github.com/acme/widget",
       "machineId": "01KT1GW6G03YY7WR8A6BBMKV89",
       "name": "mission 2",
       "objective": "Objective 2.",
-      "changes": [],
       "lead": {
-        "kind": "leader"
+        "kind": "agent",
+        "agentId": "01KT1GW6G03YY7WR8A6BBMKV8M"
       },
       "agentIds": [
-        "01KT1GW6G03YY7WR8A6BBMKV8N"
+        "01KT1GW6G03YY7WR8A6BBMKV8M"
       ],
       "access": "readOnly",
-      "state": "blocked",
+      "state": "open",
       "createdAt": "2026-06-01T07:00:00.000Z",
       "attention": "Which API should the widget use?"
     }
@@ -310,8 +308,8 @@
   "hasOlder": true,
   "agents": [
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKVAG",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKVAF",
+      "id": "01KT1GW6G03YY7WR8A6BBMKVAF",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKVAE",
       "workspaceId": "git:github.com/acme/widget",
       "name": "Tern",
       "task": "Fixture task 27.",
@@ -319,16 +317,16 @@
       "provider": "fake",
       "model": "test-model",
       "skills": [],
-      "sessionId": "01KT1GW6G03YY7WR8A6BBMKVAH",
-      "canSpawn": false,
+      "sessionId": "01KT1GW6G03YY7WR8A6BBMKVAG",
+      "canSpawn": true,
       "state": "failed",
       "startedAt": "2026-05-29T15:00:00.000Z",
       "endedAt": "2026-05-29T16:00:00.000Z",
-      "outcome": "Failed: provider quota exhausted."
+      "runtimeError": "Provider quota exhausted"
     },
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKV93",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV90",
+      "id": "01KT1GW6G03YY7WR8A6BBMKV92",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8Z",
       "workspaceId": "git:github.com/acme/widget",
       "name": "Bay",
       "task": "Fixture task 8.",
@@ -336,16 +334,15 @@
       "provider": "fake",
       "model": "test-model",
       "skills": [],
-      "sessionId": "01KT1GW6G03YY7WR8A6BBMKV94",
+      "sessionId": "01KT1GW6G03YY7WR8A6BBMKV93",
       "canSpawn": false,
-      "state": "completed",
+      "state": "idle",
       "startedAt": "2026-05-30T01:00:00.000Z",
-      "endedAt": "2026-05-30T03:00:00.000Z",
-      "outcome": "Done: the objective is met."
+      "endedAt": "2026-05-30T03:00:00.000Z"
     },
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKV91",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV90",
+      "id": "01KT1GW6G03YY7WR8A6BBMKV90",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8Z",
       "workspaceId": "git:github.com/acme/widget",
       "name": "Wick",
       "task": "Fixture task 7.",
@@ -353,16 +350,15 @@
       "provider": "fake",
       "model": "test-model",
       "skills": [],
-      "sessionId": "01KT1GW6G03YY7WR8A6BBMKV92",
-      "canSpawn": false,
-      "state": "completed",
+      "sessionId": "01KT1GW6G03YY7WR8A6BBMKV91",
+      "canSpawn": true,
+      "state": "idle",
       "startedAt": "2026-05-30T01:00:00.000Z",
-      "endedAt": "2026-05-30T02:00:00.000Z",
-      "outcome": "Done: the objective is met."
+      "endedAt": "2026-05-30T02:00:00.000Z"
     },
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKVA1",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKVA0",
+      "id": "01KT1GW6G03YY7WR8A6BBMKVA0",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV9Z",
       "workspaceId": "git:github.com/acme/widget",
       "name": "Hazel",
       "task": "Fixture task 22.",
@@ -370,14 +366,14 @@
       "provider": "fake",
       "model": "test-model",
       "skills": [],
-      "sessionId": "01KT1GW6G03YY7WR8A6BBMKVA2",
-      "canSpawn": false,
+      "sessionId": "01KT1GW6G03YY7WR8A6BBMKVA1",
+      "canSpawn": true,
       "state": "running",
       "startedAt": "2026-05-30T06:00:00.000Z"
     },
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKV8G",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8F",
+      "id": "01KT1GW6G03YY7WR8A6BBMKV8F",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8E",
       "workspaceId": "git:github.com/acme/widget",
       "name": "Tess",
       "task": "Fixture task 1.",
@@ -385,14 +381,14 @@
       "provider": "fake",
       "model": "test-model",
       "skills": [],
-      "sessionId": "01KT1GW6G03YY7WR8A6BBMKV8H",
-      "canSpawn": false,
+      "sessionId": "01KT1GW6G03YY7WR8A6BBMKV8G",
+      "canSpawn": true,
       "state": "running",
       "startedAt": "2026-05-30T11:00:00.000Z"
     },
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKV8J",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8F",
+      "id": "01KT1GW6G03YY7WR8A6BBMKV8H",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8E",
       "workspaceId": "git:github.com/acme/widget",
       "name": "Sunna",
       "task": "Fixture task 2.",
@@ -400,14 +396,14 @@
       "provider": "fake",
       "model": "test-model",
       "skills": [],
-      "sessionId": "01KT1GW6G03YY7WR8A6BBMKV8K",
+      "sessionId": "01KT1GW6G03YY7WR8A6BBMKV8J",
       "canSpawn": false,
       "state": "running",
       "startedAt": "2026-05-30T11:00:00.000Z"
     },
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKVAD",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKVAC",
+      "id": "01KT1GW6G03YY7WR8A6BBMKVAC",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKVAB",
       "workspaceId": "git:github.com/acme/widget",
       "name": "Pell",
       "task": "Fixture task 26.",
@@ -415,14 +411,14 @@
       "provider": "fake",
       "model": "test-model",
       "skills": [],
-      "sessionId": "01KT1GW6G03YY7WR8A6BBMKVAE",
-      "canSpawn": false,
+      "sessionId": "01KT1GW6G03YY7WR8A6BBMKVAD",
+      "canSpawn": true,
       "state": "running",
       "startedAt": "2026-05-30T16:00:00.000Z"
     },
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKV8V",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8T",
+      "id": "01KT1GW6G03YY7WR8A6BBMKV8T",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8S",
       "workspaceId": "git:github.com/acme/widget",
       "name": "Bo",
       "task": "Fixture task 5.",
@@ -430,14 +426,14 @@
       "provider": "fake",
       "model": "test-model",
       "skills": [],
-      "sessionId": "01KT1GW6G03YY7WR8A6BBMKV8W",
-      "canSpawn": false,
+      "sessionId": "01KT1GW6G03YY7WR8A6BBMKV8V",
+      "canSpawn": true,
       "state": "running",
       "startedAt": "2026-05-30T21:00:00.000Z"
     },
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKVAA",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKVA9",
+      "id": "01KT1GW6G03YY7WR8A6BBMKVA9",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKVA8",
       "workspaceId": "git:github.com/acme/widget",
       "name": "Gale",
       "task": "Fixture task 25.",
@@ -445,16 +441,15 @@
       "provider": "fake",
       "model": "test-model",
       "skills": [],
-      "sessionId": "01KT1GW6G03YY7WR8A6BBMKVAB",
-      "canSpawn": false,
-      "state": "completed",
+      "sessionId": "01KT1GW6G03YY7WR8A6BBMKVAA",
+      "canSpawn": true,
+      "state": "idle",
       "startedAt": "2026-05-31T02:00:00.000Z",
-      "endedAt": "2026-05-31T03:00:00.000Z",
-      "outcome": "Done: the objective is met."
+      "endedAt": "2026-05-31T03:00:00.000Z"
     },
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKV8R",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8Q",
+      "id": "01KT1GW6G03YY7WR8A6BBMKV8Q",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8P",
       "workspaceId": "git:github.com/acme/widget",
       "name": "Harbor",
       "task": "Fixture task 4.",
@@ -462,16 +457,15 @@
       "provider": "fake",
       "model": "test-model",
       "skills": [],
-      "sessionId": "01KT1GW6G03YY7WR8A6BBMKV8S",
-      "canSpawn": false,
-      "state": "completed",
+      "sessionId": "01KT1GW6G03YY7WR8A6BBMKV8R",
+      "canSpawn": true,
+      "state": "idle",
       "startedAt": "2026-05-31T07:00:00.000Z",
-      "endedAt": "2026-05-31T08:00:00.000Z",
-      "outcome": "Done: the objective is met."
+      "endedAt": "2026-05-31T08:00:00.000Z"
     },
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKVA7",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKVA6",
+      "id": "01KT1GW6G03YY7WR8A6BBMKVA6",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKVA5",
       "workspaceId": "git:github.com/acme/widget",
       "name": "Stone",
       "task": "Fixture task 24.",
@@ -479,16 +473,16 @@
       "provider": "fake",
       "model": "test-model",
       "skills": [],
-      "sessionId": "01KT1GW6G03YY7WR8A6BBMKVA8",
-      "canSpawn": false,
+      "sessionId": "01KT1GW6G03YY7WR8A6BBMKVA7",
+      "canSpawn": true,
       "state": "failed",
       "startedAt": "2026-05-31T12:00:00.000Z",
       "endedAt": "2026-05-31T13:00:00.000Z",
-      "outcome": "Failed: provider quota exhausted."
+      "runtimeError": "Provider quota exhausted"
     },
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKV8Y",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8X",
+      "id": "01KT1GW6G03YY7WR8A6BBMKV8X",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8W",
       "workspaceId": "git:github.com/acme/widget",
       "name": "Elsa",
       "task": "Fixture task 6.",
@@ -496,16 +490,16 @@
       "provider": "fake",
       "model": "test-model",
       "skills": [],
-      "sessionId": "01KT1GW6G03YY7WR8A6BBMKV8Z",
-      "canSpawn": false,
+      "sessionId": "01KT1GW6G03YY7WR8A6BBMKV8Y",
+      "canSpawn": true,
       "state": "failed",
       "startedAt": "2026-05-31T17:00:00.000Z",
       "endedAt": "2026-05-31T18:00:00.000Z",
-      "outcome": "Failed: provider quota exhausted."
+      "runtimeError": "Provider quota exhausted"
     },
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKV9Y",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV95",
+      "id": "01KT1GW6G03YY7WR8A6BBMKV9X",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV94",
       "workspaceId": "git:github.com/acme/widget",
       "name": "Glen",
       "task": "Fixture task 21.",
@@ -513,14 +507,14 @@
       "provider": "fake",
       "model": "test-model",
       "skills": [],
-      "sessionId": "01KT1GW6G03YY7WR8A6BBMKV9Z",
+      "sessionId": "01KT1GW6G03YY7WR8A6BBMKV9Y",
       "canSpawn": false,
       "state": "running",
       "startedAt": "2026-06-01T03:00:00.000Z"
     },
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKV9W",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV95",
+      "id": "01KT1GW6G03YY7WR8A6BBMKV9V",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV94",
       "workspaceId": "git:github.com/acme/widget",
       "name": "Ivo",
       "task": "Fixture task 20.",
@@ -528,16 +522,15 @@
       "provider": "fake",
       "model": "test-model",
       "skills": [],
-      "sessionId": "01KT1GW6G03YY7WR8A6BBMKV9X",
+      "sessionId": "01KT1GW6G03YY7WR8A6BBMKV9W",
       "canSpawn": false,
-      "state": "completed",
+      "state": "idle",
       "startedAt": "2026-06-01T03:00:00.000Z",
-      "endedAt": "2026-06-01T15:00:00.000Z",
-      "outcome": "Done: the objective is met."
+      "endedAt": "2026-06-01T15:00:00.000Z"
     },
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKV9T",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV95",
+      "id": "01KT1GW6G03YY7WR8A6BBMKV9S",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV94",
       "workspaceId": "git:github.com/acme/widget",
       "name": "Zora",
       "task": "Fixture task 19.",
@@ -545,16 +538,15 @@
       "provider": "fake",
       "model": "test-model",
       "skills": [],
-      "sessionId": "01KT1GW6G03YY7WR8A6BBMKV9V",
+      "sessionId": "01KT1GW6G03YY7WR8A6BBMKV9T",
       "canSpawn": false,
-      "state": "completed",
+      "state": "idle",
       "startedAt": "2026-06-01T03:00:00.000Z",
-      "endedAt": "2026-06-01T14:00:00.000Z",
-      "outcome": "Done: the objective is met."
+      "endedAt": "2026-06-01T14:00:00.000Z"
     },
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKV9R",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV95",
+      "id": "01KT1GW6G03YY7WR8A6BBMKV9Q",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV94",
       "workspaceId": "git:github.com/acme/widget",
       "name": "Arlo",
       "task": "Fixture task 18.",
@@ -562,16 +554,15 @@
       "provider": "fake",
       "model": "test-model",
       "skills": [],
-      "sessionId": "01KT1GW6G03YY7WR8A6BBMKV9S",
+      "sessionId": "01KT1GW6G03YY7WR8A6BBMKV9R",
       "canSpawn": false,
-      "state": "completed",
+      "state": "idle",
       "startedAt": "2026-06-01T03:00:00.000Z",
-      "endedAt": "2026-06-01T13:00:00.000Z",
-      "outcome": "Done: the objective is met."
+      "endedAt": "2026-06-01T13:00:00.000Z"
     },
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKV9P",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV95",
+      "id": "01KT1GW6G03YY7WR8A6BBMKV9N",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV94",
       "workspaceId": "git:github.com/acme/widget",
       "name": "Maren",
       "task": "Fixture task 17.",
@@ -579,16 +570,15 @@
       "provider": "fake",
       "model": "test-model",
       "skills": [],
-      "sessionId": "01KT1GW6G03YY7WR8A6BBMKV9Q",
+      "sessionId": "01KT1GW6G03YY7WR8A6BBMKV9P",
       "canSpawn": false,
-      "state": "completed",
+      "state": "idle",
       "startedAt": "2026-06-01T03:00:00.000Z",
-      "endedAt": "2026-06-01T12:00:00.000Z",
-      "outcome": "Done: the objective is met."
+      "endedAt": "2026-06-01T12:00:00.000Z"
     },
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKV9M",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV95",
+      "id": "01KT1GW6G03YY7WR8A6BBMKV9K",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV94",
       "workspaceId": "git:github.com/acme/widget",
       "name": "Wes",
       "task": "Fixture task 16.",
@@ -596,16 +586,15 @@
       "provider": "fake",
       "model": "test-model",
       "skills": [],
-      "sessionId": "01KT1GW6G03YY7WR8A6BBMKV9N",
+      "sessionId": "01KT1GW6G03YY7WR8A6BBMKV9M",
       "canSpawn": false,
-      "state": "completed",
+      "state": "idle",
       "startedAt": "2026-06-01T03:00:00.000Z",
-      "endedAt": "2026-06-01T11:00:00.000Z",
-      "outcome": "Done: the objective is met."
+      "endedAt": "2026-06-01T11:00:00.000Z"
     },
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKV9J",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV95",
+      "id": "01KT1GW6G03YY7WR8A6BBMKV9H",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV94",
       "workspaceId": "git:github.com/acme/widget",
       "name": "Juniper",
       "task": "Fixture task 15.",
@@ -613,16 +602,15 @@
       "provider": "fake",
       "model": "test-model",
       "skills": [],
-      "sessionId": "01KT1GW6G03YY7WR8A6BBMKV9K",
+      "sessionId": "01KT1GW6G03YY7WR8A6BBMKV9J",
       "canSpawn": false,
-      "state": "completed",
+      "state": "idle",
       "startedAt": "2026-06-01T03:00:00.000Z",
-      "endedAt": "2026-06-01T10:00:00.000Z",
-      "outcome": "Done: the objective is met."
+      "endedAt": "2026-06-01T10:00:00.000Z"
     },
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKV9G",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV95",
+      "id": "01KT1GW6G03YY7WR8A6BBMKV9F",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV94",
       "workspaceId": "git:github.com/acme/widget",
       "name": "Lumen",
       "task": "Fixture task 14.",
@@ -630,16 +618,15 @@
       "provider": "fake",
       "model": "test-model",
       "skills": [],
-      "sessionId": "01KT1GW6G03YY7WR8A6BBMKV9H",
+      "sessionId": "01KT1GW6G03YY7WR8A6BBMKV9G",
       "canSpawn": false,
-      "state": "completed",
+      "state": "idle",
       "startedAt": "2026-06-01T03:00:00.000Z",
-      "endedAt": "2026-06-01T09:00:00.000Z",
-      "outcome": "Done: the objective is met."
+      "endedAt": "2026-06-01T09:00:00.000Z"
     },
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKV9E",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV95",
+      "id": "01KT1GW6G03YY7WR8A6BBMKV9D",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV94",
       "workspaceId": "git:github.com/acme/widget",
       "name": "Bower",
       "task": "Fixture task 13.",
@@ -647,16 +634,15 @@
       "provider": "fake",
       "model": "test-model",
       "skills": [],
-      "sessionId": "01KT1GW6G03YY7WR8A6BBMKV9F",
+      "sessionId": "01KT1GW6G03YY7WR8A6BBMKV9E",
       "canSpawn": false,
-      "state": "completed",
+      "state": "idle",
       "startedAt": "2026-06-01T03:00:00.000Z",
-      "endedAt": "2026-06-01T08:00:00.000Z",
-      "outcome": "Done: the objective is met."
+      "endedAt": "2026-06-01T08:00:00.000Z"
     },
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKVA4",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKVA3",
+      "id": "01KT1GW6G03YY7WR8A6BBMKVA3",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKVA2",
       "workspaceId": "git:github.com/acme/widget",
       "name": "Spruce",
       "task": "Fixture task 23.",
@@ -664,14 +650,15 @@
       "provider": "fake",
       "model": "test-model",
       "skills": [],
-      "sessionId": "01KT1GW6G03YY7WR8A6BBMKVA5",
-      "canSpawn": false,
-      "state": "blocked",
-      "startedAt": "2026-06-01T05:00:00.000Z"
+      "sessionId": "01KT1GW6G03YY7WR8A6BBMKVA4",
+      "canSpawn": true,
+      "state": "idle",
+      "startedAt": "2026-06-01T05:00:00.000Z",
+      "endedAt": "2026-06-01T06:00:00.000Z"
     },
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKV8N",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8M",
+      "id": "01KT1GW6G03YY7WR8A6BBMKV8M",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8K",
       "workspaceId": "git:github.com/acme/widget",
       "name": "Topaz",
       "task": "Fixture task 3.",
@@ -679,23 +666,26 @@
       "provider": "fake",
       "model": "test-model",
       "skills": [],
-      "sessionId": "01KT1GW6G03YY7WR8A6BBMKV8P",
-      "canSpawn": false,
-      "state": "blocked",
-      "startedAt": "2026-06-01T08:00:00.000Z"
+      "sessionId": "01KT1GW6G03YY7WR8A6BBMKV8N",
+      "canSpawn": true,
+      "state": "idle",
+      "startedAt": "2026-06-01T08:00:00.000Z",
+      "endedAt": "2026-06-01T09:00:00.000Z"
     }
   ],
-  "completedCounts": {
-    "01KT1GW6G03YY7WR8A6BBMKV90": 2,
-    "01KT1GW6G03YY7WR8A6BBMKVA9": 1,
-    "01KT1GW6G03YY7WR8A6BBMKV8Q": 1,
-    "01KT1GW6G03YY7WR8A6BBMKV95": 12
+  "stoppedCounts": {
+    "01KT1GW6G03YY7WR8A6BBMKV8Z": 2,
+    "01KT1GW6G03YY7WR8A6BBMKVA8": 1,
+    "01KT1GW6G03YY7WR8A6BBMKV8P": 1,
+    "01KT1GW6G03YY7WR8A6BBMKV94": 12,
+    "01KT1GW6G03YY7WR8A6BBMKVA2": 1,
+    "01KT1GW6G03YY7WR8A6BBMKV8K": 1
   },
   "events": [
     {
       "workspaceId": "git:github.com/acme/widget",
       "kind": "mission.created",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8F",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8E",
       "data": {},
       "seq": 1,
       "at": "2026-06-01T12:00:00.000Z"
@@ -703,8 +693,8 @@
     {
       "workspaceId": "git:github.com/acme/widget",
       "kind": "agent.spawned",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8F",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKV8G",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8E",
+      "agentId": "01KT1GW6G03YY7WR8A6BBMKV8F",
       "data": {},
       "seq": 2,
       "at": "2026-06-01T12:00:00.000Z"
@@ -712,8 +702,8 @@
     {
       "workspaceId": "git:github.com/acme/widget",
       "kind": "agent.spawned",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8F",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKV8J",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8E",
+      "agentId": "01KT1GW6G03YY7WR8A6BBMKV8H",
       "data": {},
       "seq": 3,
       "at": "2026-06-01T12:00:00.000Z"
@@ -721,7 +711,7 @@
     {
       "workspaceId": "git:github.com/acme/widget",
       "kind": "mission.created",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8M",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8K",
       "data": {},
       "seq": 4,
       "at": "2026-06-01T12:00:00.000Z"
@@ -729,83 +719,85 @@
     {
       "workspaceId": "git:github.com/acme/widget",
       "kind": "agent.spawned",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8M",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKV8N",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8K",
+      "agentId": "01KT1GW6G03YY7WR8A6BBMKV8M",
       "data": {},
       "seq": 5,
       "at": "2026-06-01T12:00:00.000Z"
     },
     {
       "workspaceId": "git:github.com/acme/widget",
-      "kind": "mission.blocked",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8M",
+      "kind": "mission.created",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8P",
       "data": {},
       "seq": 6,
       "at": "2026-06-01T12:00:00.000Z"
     },
     {
       "workspaceId": "git:github.com/acme/widget",
-      "kind": "mission.created",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8Q",
+      "kind": "agent.spawned",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8P",
+      "agentId": "01KT1GW6G03YY7WR8A6BBMKV8Q",
       "data": {},
       "seq": 7,
       "at": "2026-06-01T12:00:00.000Z"
     },
     {
       "workspaceId": "git:github.com/acme/widget",
-      "kind": "agent.spawned",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8Q",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKV8R",
+      "kind": "mission.created",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8S",
       "data": {},
       "seq": 8,
       "at": "2026-06-01T12:00:00.000Z"
     },
     {
       "workspaceId": "git:github.com/acme/widget",
-      "kind": "agent.finished",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8Q",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKV8R",
+      "kind": "agent.spawned",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8S",
+      "agentId": "01KT1GW6G03YY7WR8A6BBMKV8T",
       "data": {},
       "seq": 9,
       "at": "2026-06-01T12:00:00.000Z"
     },
     {
       "workspaceId": "git:github.com/acme/widget",
-      "kind": "mission.readyToClose",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8Q",
+      "kind": "mission.created",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8W",
       "data": {},
       "seq": 10,
       "at": "2026-06-01T12:00:00.000Z"
     },
     {
       "workspaceId": "git:github.com/acme/widget",
-      "kind": "mission.created",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8T",
+      "kind": "agent.spawned",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8W",
+      "agentId": "01KT1GW6G03YY7WR8A6BBMKV8X",
       "data": {},
       "seq": 11,
       "at": "2026-06-01T12:00:00.000Z"
     },
     {
       "workspaceId": "git:github.com/acme/widget",
-      "kind": "agent.spawned",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8T",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKV8V",
+      "kind": "mission.failed",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8W",
+      "agentId": "01KT1GW6G03YY7WR8A6BBMKV8X",
       "data": {},
       "seq": 12,
       "at": "2026-06-01T12:00:00.000Z"
     },
     {
       "workspaceId": "git:github.com/acme/widget",
-      "kind": "mission.merged",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8T",
+      "kind": "mission.created",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8Z",
       "data": {},
       "seq": 13,
       "at": "2026-06-01T12:00:00.000Z"
     },
     {
       "workspaceId": "git:github.com/acme/widget",
-      "kind": "mission.created",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8X",
+      "kind": "agent.spawned",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8Z",
+      "agentId": "01KT1GW6G03YY7WR8A6BBMKV90",
       "data": {},
       "seq": 14,
       "at": "2026-06-01T12:00:00.000Z"
@@ -813,33 +805,33 @@
     {
       "workspaceId": "git:github.com/acme/widget",
       "kind": "agent.spawned",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8X",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKV8Y",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8Z",
+      "agentId": "01KT1GW6G03YY7WR8A6BBMKV92",
       "data": {},
       "seq": 15,
       "at": "2026-06-01T12:00:00.000Z"
     },
     {
       "workspaceId": "git:github.com/acme/widget",
-      "kind": "agent.finished",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8X",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKV8Y",
+      "kind": "mission.closed",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8Z",
       "data": {},
       "seq": 16,
       "at": "2026-06-01T12:00:00.000Z"
     },
     {
       "workspaceId": "git:github.com/acme/widget",
-      "kind": "mission.failed",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV8X",
+      "kind": "mission.created",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV94",
       "data": {},
       "seq": 17,
       "at": "2026-06-01T12:00:00.000Z"
     },
     {
       "workspaceId": "git:github.com/acme/widget",
-      "kind": "mission.created",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV90",
+      "kind": "agent.spawned",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV94",
+      "agentId": "01KT1GW6G03YY7WR8A6BBMKV95",
       "data": {},
       "seq": 18,
       "at": "2026-06-01T12:00:00.000Z"
@@ -847,17 +839,17 @@
     {
       "workspaceId": "git:github.com/acme/widget",
       "kind": "agent.spawned",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV90",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKV91",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV94",
+      "agentId": "01KT1GW6G03YY7WR8A6BBMKV97",
       "data": {},
       "seq": 19,
       "at": "2026-06-01T12:00:00.000Z"
     },
     {
       "workspaceId": "git:github.com/acme/widget",
-      "kind": "agent.finished",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV90",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKV91",
+      "kind": "agent.spawned",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV94",
+      "agentId": "01KT1GW6G03YY7WR8A6BBMKV99",
       "data": {},
       "seq": 20,
       "at": "2026-06-01T12:00:00.000Z"
@@ -865,33 +857,35 @@
     {
       "workspaceId": "git:github.com/acme/widget",
       "kind": "agent.spawned",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV90",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKV93",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV94",
+      "agentId": "01KT1GW6G03YY7WR8A6BBMKV9B",
       "data": {},
       "seq": 21,
       "at": "2026-06-01T12:00:00.000Z"
     },
     {
       "workspaceId": "git:github.com/acme/widget",
-      "kind": "agent.finished",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV90",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKV93",
+      "kind": "agent.spawned",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV94",
+      "agentId": "01KT1GW6G03YY7WR8A6BBMKV9D",
       "data": {},
       "seq": 22,
       "at": "2026-06-01T12:00:00.000Z"
     },
     {
       "workspaceId": "git:github.com/acme/widget",
-      "kind": "mission.closed",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV90",
+      "kind": "agent.spawned",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV94",
+      "agentId": "01KT1GW6G03YY7WR8A6BBMKV9F",
       "data": {},
       "seq": 23,
       "at": "2026-06-01T12:00:00.000Z"
     },
     {
       "workspaceId": "git:github.com/acme/widget",
-      "kind": "mission.created",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV95",
+      "kind": "agent.spawned",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV94",
+      "agentId": "01KT1GW6G03YY7WR8A6BBMKV9H",
       "data": {},
       "seq": 24,
       "at": "2026-06-01T12:00:00.000Z"
@@ -899,17 +893,17 @@
     {
       "workspaceId": "git:github.com/acme/widget",
       "kind": "agent.spawned",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV95",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKV96",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV94",
+      "agentId": "01KT1GW6G03YY7WR8A6BBMKV9K",
       "data": {},
       "seq": 25,
       "at": "2026-06-01T12:00:00.000Z"
     },
     {
       "workspaceId": "git:github.com/acme/widget",
-      "kind": "agent.finished",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV95",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKV96",
+      "kind": "agent.spawned",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV94",
+      "agentId": "01KT1GW6G03YY7WR8A6BBMKV9N",
       "data": {},
       "seq": 26,
       "at": "2026-06-01T12:00:00.000Z"
@@ -917,17 +911,17 @@
     {
       "workspaceId": "git:github.com/acme/widget",
       "kind": "agent.spawned",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV95",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKV98",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV94",
+      "agentId": "01KT1GW6G03YY7WR8A6BBMKV9Q",
       "data": {},
       "seq": 27,
       "at": "2026-06-01T12:00:00.000Z"
     },
     {
       "workspaceId": "git:github.com/acme/widget",
-      "kind": "agent.finished",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV95",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKV98",
+      "kind": "agent.spawned",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV94",
+      "agentId": "01KT1GW6G03YY7WR8A6BBMKV9S",
       "data": {},
       "seq": 28,
       "at": "2026-06-01T12:00:00.000Z"
@@ -935,89 +929,85 @@
     {
       "workspaceId": "git:github.com/acme/widget",
       "kind": "agent.spawned",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV95",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKV9A",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV94",
+      "agentId": "01KT1GW6G03YY7WR8A6BBMKV9V",
       "data": {},
       "seq": 29,
       "at": "2026-06-01T12:00:00.000Z"
     },
     {
       "workspaceId": "git:github.com/acme/widget",
-      "kind": "agent.finished",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV95",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKV9A",
+      "kind": "agent.spawned",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV94",
+      "agentId": "01KT1GW6G03YY7WR8A6BBMKV9X",
       "data": {},
       "seq": 30,
       "at": "2026-06-01T12:00:00.000Z"
     },
     {
       "workspaceId": "git:github.com/acme/widget",
-      "kind": "agent.spawned",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV95",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKV9C",
+      "kind": "mission.created",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV9Z",
       "data": {},
       "seq": 31,
       "at": "2026-06-01T12:00:00.000Z"
     },
     {
       "workspaceId": "git:github.com/acme/widget",
-      "kind": "agent.finished",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV95",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKV9C",
+      "kind": "agent.spawned",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKV9Z",
+      "agentId": "01KT1GW6G03YY7WR8A6BBMKVA0",
       "data": {},
       "seq": 32,
       "at": "2026-06-01T12:00:00.000Z"
     },
     {
       "workspaceId": "git:github.com/acme/widget",
-      "kind": "agent.spawned",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV95",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKV9E",
+      "kind": "mission.created",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKVA2",
       "data": {},
       "seq": 33,
       "at": "2026-06-01T12:00:00.000Z"
     },
     {
       "workspaceId": "git:github.com/acme/widget",
-      "kind": "agent.finished",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV95",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKV9E",
+      "kind": "agent.spawned",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKVA2",
+      "agentId": "01KT1GW6G03YY7WR8A6BBMKVA3",
       "data": {},
       "seq": 34,
       "at": "2026-06-01T12:00:00.000Z"
     },
     {
       "workspaceId": "git:github.com/acme/widget",
-      "kind": "agent.spawned",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV95",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKV9G",
+      "kind": "mission.created",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKVA5",
       "data": {},
       "seq": 35,
       "at": "2026-06-01T12:00:00.000Z"
     },
     {
       "workspaceId": "git:github.com/acme/widget",
-      "kind": "agent.finished",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV95",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKV9G",
+      "kind": "agent.spawned",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKVA5",
+      "agentId": "01KT1GW6G03YY7WR8A6BBMKVA6",
       "data": {},
       "seq": 36,
       "at": "2026-06-01T12:00:00.000Z"
     },
     {
       "workspaceId": "git:github.com/acme/widget",
-      "kind": "agent.spawned",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV95",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKV9J",
+      "kind": "mission.failed",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKVA5",
+      "agentId": "01KT1GW6G03YY7WR8A6BBMKVA6",
       "data": {},
       "seq": 37,
       "at": "2026-06-01T12:00:00.000Z"
     },
     {
       "workspaceId": "git:github.com/acme/widget",
-      "kind": "agent.finished",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV95",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKV9J",
+      "kind": "mission.created",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKVA8",
       "data": {},
       "seq": 38,
       "at": "2026-06-01T12:00:00.000Z"
@@ -1025,17 +1015,16 @@
     {
       "workspaceId": "git:github.com/acme/widget",
       "kind": "agent.spawned",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV95",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKV9M",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKVA8",
+      "agentId": "01KT1GW6G03YY7WR8A6BBMKVA9",
       "data": {},
       "seq": 39,
       "at": "2026-06-01T12:00:00.000Z"
     },
     {
       "workspaceId": "git:github.com/acme/widget",
-      "kind": "agent.finished",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV95",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKV9M",
+      "kind": "mission.created",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKVAB",
       "data": {},
       "seq": 40,
       "at": "2026-06-01T12:00:00.000Z"
@@ -1043,17 +1032,16 @@
     {
       "workspaceId": "git:github.com/acme/widget",
       "kind": "agent.spawned",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV95",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKV9P",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKVAB",
+      "agentId": "01KT1GW6G03YY7WR8A6BBMKVAC",
       "data": {},
       "seq": 41,
       "at": "2026-06-01T12:00:00.000Z"
     },
     {
       "workspaceId": "git:github.com/acme/widget",
-      "kind": "agent.finished",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV95",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKV9P",
+      "kind": "mission.created",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKVAE",
       "data": {},
       "seq": 42,
       "at": "2026-06-01T12:00:00.000Z"
@@ -1061,35 +1049,33 @@
     {
       "workspaceId": "git:github.com/acme/widget",
       "kind": "agent.spawned",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV95",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKV9R",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKVAE",
+      "agentId": "01KT1GW6G03YY7WR8A6BBMKVAF",
       "data": {},
       "seq": 43,
       "at": "2026-06-01T12:00:00.000Z"
     },
     {
       "workspaceId": "git:github.com/acme/widget",
-      "kind": "agent.finished",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV95",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKV9R",
+      "kind": "mission.failed",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKVAE",
+      "agentId": "01KT1GW6G03YY7WR8A6BBMKVAF",
       "data": {},
       "seq": 44,
       "at": "2026-06-01T12:00:00.000Z"
     },
     {
       "workspaceId": "git:github.com/acme/widget",
-      "kind": "agent.spawned",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV95",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKV9T",
+      "kind": "mission.closed",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKVAE",
       "data": {},
       "seq": 45,
       "at": "2026-06-01T12:00:00.000Z"
     },
     {
       "workspaceId": "git:github.com/acme/widget",
-      "kind": "agent.finished",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV95",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKV9T",
+      "kind": "mission.created",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKVAH",
       "data": {},
       "seq": 46,
       "at": "2026-06-01T12:00:00.000Z"
@@ -1097,376 +1083,81 @@
     {
       "workspaceId": "git:github.com/acme/widget",
       "kind": "agent.spawned",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV95",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKV9W",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKVAH",
+      "agentId": "01KT1GW6G03YY7WR8A6BBMKVAJ",
       "data": {},
       "seq": 47,
       "at": "2026-06-01T12:00:00.000Z"
     },
     {
       "workspaceId": "git:github.com/acme/widget",
-      "kind": "agent.finished",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV95",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKV9W",
+      "kind": "mission.closed",
+      "missionId": "01KT1GW6G03YY7WR8A6BBMKVAH",
       "data": {},
       "seq": 48,
-      "at": "2026-06-01T12:00:00.000Z"
-    },
-    {
-      "workspaceId": "git:github.com/acme/widget",
-      "kind": "agent.spawned",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKV95",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKV9Y",
-      "data": {},
-      "seq": 49,
-      "at": "2026-06-01T12:00:00.000Z"
-    },
-    {
-      "workspaceId": "git:github.com/acme/widget",
-      "kind": "mission.created",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKVA0",
-      "data": {},
-      "seq": 50,
-      "at": "2026-06-01T12:00:00.000Z"
-    },
-    {
-      "workspaceId": "git:github.com/acme/widget",
-      "kind": "agent.spawned",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKVA0",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKVA1",
-      "data": {},
-      "seq": 51,
-      "at": "2026-06-01T12:00:00.000Z"
-    },
-    {
-      "workspaceId": "git:github.com/acme/widget",
-      "kind": "mission.created",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKVA3",
-      "data": {},
-      "seq": 52,
-      "at": "2026-06-01T12:00:00.000Z"
-    },
-    {
-      "workspaceId": "git:github.com/acme/widget",
-      "kind": "agent.spawned",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKVA3",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKVA4",
-      "data": {},
-      "seq": 53,
-      "at": "2026-06-01T12:00:00.000Z"
-    },
-    {
-      "workspaceId": "git:github.com/acme/widget",
-      "kind": "mission.blocked",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKVA3",
-      "data": {},
-      "seq": 54,
-      "at": "2026-06-01T12:00:00.000Z"
-    },
-    {
-      "workspaceId": "git:github.com/acme/widget",
-      "kind": "mission.created",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKVA6",
-      "data": {},
-      "seq": 55,
-      "at": "2026-06-01T12:00:00.000Z"
-    },
-    {
-      "workspaceId": "git:github.com/acme/widget",
-      "kind": "agent.spawned",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKVA6",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKVA7",
-      "data": {},
-      "seq": 56,
-      "at": "2026-06-01T12:00:00.000Z"
-    },
-    {
-      "workspaceId": "git:github.com/acme/widget",
-      "kind": "agent.finished",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKVA6",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKVA7",
-      "data": {},
-      "seq": 57,
-      "at": "2026-06-01T12:00:00.000Z"
-    },
-    {
-      "workspaceId": "git:github.com/acme/widget",
-      "kind": "mission.failed",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKVA6",
-      "data": {},
-      "seq": 58,
-      "at": "2026-06-01T12:00:00.000Z"
-    },
-    {
-      "workspaceId": "git:github.com/acme/widget",
-      "kind": "mission.created",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKVA9",
-      "data": {},
-      "seq": 59,
-      "at": "2026-06-01T12:00:00.000Z"
-    },
-    {
-      "workspaceId": "git:github.com/acme/widget",
-      "kind": "agent.spawned",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKVA9",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKVAA",
-      "data": {},
-      "seq": 60,
-      "at": "2026-06-01T12:00:00.000Z"
-    },
-    {
-      "workspaceId": "git:github.com/acme/widget",
-      "kind": "agent.finished",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKVA9",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKVAA",
-      "data": {},
-      "seq": 61,
-      "at": "2026-06-01T12:00:00.000Z"
-    },
-    {
-      "workspaceId": "git:github.com/acme/widget",
-      "kind": "mission.readyToClose",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKVA9",
-      "data": {},
-      "seq": 62,
-      "at": "2026-06-01T12:00:00.000Z"
-    },
-    {
-      "workspaceId": "git:github.com/acme/widget",
-      "kind": "mission.created",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKVAC",
-      "data": {},
-      "seq": 63,
-      "at": "2026-06-01T12:00:00.000Z"
-    },
-    {
-      "workspaceId": "git:github.com/acme/widget",
-      "kind": "agent.spawned",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKVAC",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKVAD",
-      "data": {},
-      "seq": 64,
-      "at": "2026-06-01T12:00:00.000Z"
-    },
-    {
-      "workspaceId": "git:github.com/acme/widget",
-      "kind": "mission.merged",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKVAC",
-      "data": {},
-      "seq": 65,
-      "at": "2026-06-01T12:00:00.000Z"
-    },
-    {
-      "workspaceId": "git:github.com/acme/widget",
-      "kind": "mission.created",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKVAF",
-      "data": {},
-      "seq": 66,
-      "at": "2026-06-01T12:00:00.000Z"
-    },
-    {
-      "workspaceId": "git:github.com/acme/widget",
-      "kind": "agent.spawned",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKVAF",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKVAG",
-      "data": {},
-      "seq": 67,
-      "at": "2026-06-01T12:00:00.000Z"
-    },
-    {
-      "workspaceId": "git:github.com/acme/widget",
-      "kind": "agent.finished",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKVAF",
-      "agentId": "01KT1GW6G03YY7WR8A6BBMKVAG",
-      "data": {},
-      "seq": 68,
-      "at": "2026-06-01T12:00:00.000Z"
-    },
-    {
-      "workspaceId": "git:github.com/acme/widget",
-      "kind": "mission.closed",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKVAF",
-      "data": {},
-      "seq": 69,
-      "at": "2026-06-01T12:00:00.000Z"
-    },
-    {
-      "workspaceId": "git:github.com/acme/widget",
-      "kind": "mission.created",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKVAJ",
-      "data": {},
-      "seq": 70,
-      "at": "2026-06-01T12:00:00.000Z"
-    },
-    {
-      "workspaceId": "git:github.com/acme/widget",
-      "kind": "mission.closed",
-      "missionId": "01KT1GW6G03YY7WR8A6BBMKVAJ",
-      "data": {},
-      "seq": 71,
       "at": "2026-06-01T12:00:00.000Z"
     }
   ],
   "attention": [
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKV8M",
+      "id": "01KT1GW6G03YY7WR8A6BBMKV8K",
       "number": 2,
       "workspaceId": "git:github.com/acme/widget",
       "machineId": "01KT1GW6G03YY7WR8A6BBMKV89",
       "name": "mission 2",
       "objective": "Objective 2.",
-      "changes": [],
       "lead": {
-        "kind": "leader"
+        "kind": "agent",
+        "agentId": "01KT1GW6G03YY7WR8A6BBMKV8M"
       },
       "agentIds": [
-        "01KT1GW6G03YY7WR8A6BBMKV8N"
+        "01KT1GW6G03YY7WR8A6BBMKV8M"
       ],
       "access": "readOnly",
-      "state": "blocked",
+      "state": "open",
       "createdAt": "2026-06-01T07:00:00.000Z",
       "attention": "Which API should the widget use?"
     },
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKVA3",
+      "id": "01KT1GW6G03YY7WR8A6BBMKVA2",
       "number": 9,
       "workspaceId": "git:github.com/acme/widget",
       "machineId": "01KT1GW6G03YY7WR8A6BBMKV89",
       "name": "mission 9",
       "objective": "Objective 9.",
-      "changes": [],
       "lead": {
-        "kind": "leader"
+        "kind": "agent",
+        "agentId": "01KT1GW6G03YY7WR8A6BBMKVA3"
       },
       "agentIds": [
-        "01KT1GW6G03YY7WR8A6BBMKVA4"
+        "01KT1GW6G03YY7WR8A6BBMKVA3"
       ],
       "access": "readOnly",
-      "state": "blocked",
+      "state": "open",
       "createdAt": "2026-06-01T04:00:00.000Z",
       "attention": "Waiting on design review."
     },
     {
-      "id": "01KT1GW6G03YY7WR8A6BBMKV8X",
+      "id": "01KT1GW6G03YY7WR8A6BBMKV8W",
       "number": 5,
       "workspaceId": "git:github.com/acme/widget",
       "machineId": "01KT1GW6G03YY7WR8A6BBMKV89",
       "name": "mission 5",
       "objective": "Objective 5.",
-      "changes": [],
       "lead": {
-        "kind": "leader"
+        "kind": "agent",
+        "agentId": "01KT1GW6G03YY7WR8A6BBMKV8X"
       },
       "agentIds": [
-        "01KT1GW6G03YY7WR8A6BBMKV8Y"
+        "01KT1GW6G03YY7WR8A6BBMKV8X"
       ],
       "access": "readOnly",
-      "state": "failed",
+      "state": "open",
       "createdAt": "2026-05-31T16:00:00.000Z",
       "attention": "Provider quota exhausted, retry?"
-    },
-    {
-      "id": "01KT1GW6G03YY7WR8A6BBMKVA6",
-      "number": 10,
-      "workspaceId": "git:github.com/acme/widget",
-      "machineId": "01KT1GW6G03YY7WR8A6BBMKV89",
-      "name": "mission 10",
-      "objective": "Objective 10.",
-      "changes": [],
-      "lead": {
-        "kind": "leader"
-      },
-      "agentIds": [
-        "01KT1GW6G03YY7WR8A6BBMKVA7"
-      ],
-      "access": "readOnly",
-      "state": "failed",
-      "createdAt": "2026-05-31T11:00:00.000Z"
-    },
-    {
-      "id": "01KT1GW6G03YY7WR8A6BBMKV8Q",
-      "number": 3,
-      "workspaceId": "git:github.com/acme/widget",
-      "machineId": "01KT1GW6G03YY7WR8A6BBMKV89",
-      "name": "mission 3",
-      "objective": "Objective 3.",
-      "changes": [],
-      "lead": {
-        "kind": "leader"
-      },
-      "agentIds": [
-        "01KT1GW6G03YY7WR8A6BBMKV8R"
-      ],
-      "access": "readOnly",
-      "state": "readyToClose",
-      "createdAt": "2026-05-31T06:00:00.000Z"
-    },
-    {
-      "id": "01KT1GW6G03YY7WR8A6BBMKVA9",
-      "number": 11,
-      "workspaceId": "git:github.com/acme/widget",
-      "machineId": "01KT1GW6G03YY7WR8A6BBMKV89",
-      "name": "mission 11",
-      "objective": "Objective 11.",
-      "changes": [],
-      "lead": {
-        "kind": "leader"
-      },
-      "agentIds": [
-        "01KT1GW6G03YY7WR8A6BBMKVAA"
-      ],
-      "access": "readOnly",
-      "state": "readyToClose",
-      "createdAt": "2026-05-31T01:00:00.000Z"
-    },
-    {
-      "id": "01KT1GW6G03YY7WR8A6BBMKV8T",
-      "number": 4,
-      "workspaceId": "git:github.com/acme/widget",
-      "machineId": "01KT1GW6G03YY7WR8A6BBMKV89",
-      "name": "mission 4",
-      "objective": "Objective 4.",
-      "changes": [],
-      "lead": {
-        "kind": "leader"
-      },
-      "agentIds": [
-        "01KT1GW6G03YY7WR8A6BBMKV8V"
-      ],
-      "access": "readOnly",
-      "state": "mergedNotClosed",
-      "createdAt": "2026-05-30T20:00:00.000Z",
-      "integration": {
-        "mergedAt": "2026-06-01T00:00:00.000Z",
-        "commit": "abc1234",
-        "base": "main"
-      }
-    },
-    {
-      "id": "01KT1GW6G03YY7WR8A6BBMKVAC",
-      "number": 12,
-      "workspaceId": "git:github.com/acme/widget",
-      "machineId": "01KT1GW6G03YY7WR8A6BBMKV89",
-      "name": "mission 12",
-      "objective": "Objective 12.",
-      "changes": [],
-      "lead": {
-        "kind": "leader"
-      },
-      "agentIds": [
-        "01KT1GW6G03YY7WR8A6BBMKVAD"
-      ],
-      "access": "readOnly",
-      "state": "mergedNotClosed",
-      "createdAt": "2026-05-30T15:00:00.000Z",
-      "integration": {
-        "mergedAt": "2026-06-01T00:00:00.000Z",
-        "commit": "abc1234",
-        "base": "main"
-      }
     }
   ],
   "windowDays": 14,
-  "protocolVersion": 1,
+  "protocolVersion": 4,
   "at": "2026-06-01T12:00:00.000Z"
 }

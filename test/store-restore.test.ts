@@ -32,11 +32,10 @@ function mission(workspaceId: string, number: number): Mission {
 		machineId: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
 		name: `mission ${number}`,
 		objective: "Do it.",
-		changes: [],
-		lead: { kind: "leader" },
+		lead: { kind: "agent", agentId: "fixture-lead" },
 		agentIds: [],
 		access: "readOnly",
-		state: "running",
+		state: "open",
 		createdAt: new Date(Date.parse("2026-09-03T17:00:00.000Z") + number * 1000).toISOString(),
 	};
 }
@@ -160,7 +159,7 @@ describe("store crash consistency", () => {
 });
 
 describe("store restore", () => {
-	test("5000 missions across two workspaces restore fast, numbering continues, modes hold", async () => {
+	test("5000 missions across two workspaces restore fast, numbering continues", async () => {
 		const dir = useTempDir();
 		const big = "git:github.com/org/big";
 		const small = "git:github.com/org/small";

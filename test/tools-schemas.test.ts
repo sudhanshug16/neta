@@ -1,17 +1,17 @@
 import { describe, expect, test } from "bun:test";
-import { TOOLS, type ToolName, toolsFor, validate } from "../src/tools/schemas.ts";
+import { TOOLS, type ToolName, validate } from "../src/tools/schemas.ts";
 
 const ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
 
 test("old clients receive actionable validation for lead: self", () => {
-	const result = validate("neta_mission", {
+	const result = validate("dispatch_mission", {
 		name: "legacy",
 		objective: "work",
 		access: "readOnly",
 		lead: "self",
 	});
 	expect(result).toMatchObject({ ok: false, message: expect.stringContaining("separate mission lead") });
-	const schema = TOOLS.find((tool) => tool.name === "neta_mission")?.inputSchema.properties?.lead;
+	const schema = TOOLS.find((tool) => tool.name === "dispatch_mission")?.inputSchema.properties?.lead;
 	expect(schema?.oneOf).toBeUndefined();
 	expect(schema?.type).toBe("object");
 });
@@ -26,7 +26,7 @@ interface SchemaCase {
 
 const CASES: SchemaCase[] = [
 	{
-		name: "neta_mission",
+		name: "dispatch_mission",
 		valid: {
 			name: "payments retry",
 			objective: "Retry failed payments.",
@@ -37,96 +37,55 @@ const CASES: SchemaCase[] = [
 		wrongType: { name: "x", objective: "y", access: "readOnly", lead: 42 },
 	},
 	{
-		name: "neta_agent",
+		name: "spawn_agent",
 		valid: { task: "Write the retry.", access: "readOnly", missionId: ID },
 		missing: { task: "x" },
 		wrongType: { task: "x", access: "everything" },
 	},
 	{
-		name: "neta_model",
+		name: "change_model",
 		valid: { missionId: 4, change: "up" },
 		missing: { agentId: "Cove" },
 		wrongType: { agentId: "Cove", effort: 2.5 },
 	},
 	{
-		name: "neta_send",
+		name: "send_message",
 		valid: { agentId: ID, text: "go on" },
 		missing: { agentId: ID },
 		wrongType: { agentId: ID, text: "" },
 	},
 	{
-		name: "neta_scope",
-		valid: { missionId: ID, text: "Also cover refunds." },
-		missing: { missionId: ID },
-		wrongType: { missionId: "nope", text: "x" },
-	},
-	{
-		name: "neta_ready",
-		valid: { missionId: ID, summary: "All green." },
-		missing: { missionId: ID },
-		wrongType: { missionId: ID, summary: 7 },
-	},
-	{
-		name: "neta_close",
+		name: "close",
 		valid: { missionId: ID, disposition: "merged", reason: "Landed." },
 		missing: { missionId: ID, disposition: "merged" },
 		wrongType: { missionId: ID, disposition: "vaporized", reason: "x" },
 	},
 	{
-		name: "neta_mode",
-		valid: { mode: "leadPlus" },
-		missing: {},
-		wrongType: { mode: "turbo" },
-	},
-	{
-		name: "neta_pin",
-		valid: { turnId: ID, text: "Remember this." },
-		missing: { turnId: ID },
-		wrongType: { turnId: ID, text: "" },
-	},
-	{
-		name: "neta_status",
+		name: "mission_state",
 		valid: {},
 		wrongType: "everything",
-	},
-	{
-		name: "neta_progress",
-		valid: { text: "First green run." },
-		missing: {},
-		wrongType: { text: "" },
-	},
-	{
-		name: "neta_ask",
-		valid: { question: "Which API?" },
-		missing: {},
-		wrongType: { question: 42 },
-	},
-	{
-		name: "neta_superleader_answer",
-		valid: { inquiryId: "inquiry-123", answer: "Mission 2 needs an API key." },
-		missing: { inquiryId: "inquiry-123" },
-		wrongType: { inquiryId: 42, answer: "Answer" },
-	},
-	{
-		name: "neta_done",
-		valid: { outcome: "Shipped." },
-		missing: {},
-		wrongType: {},
 	},
 ];
 
 describe("tool schemas", () => {
-	test("artifacts rejects the removed review action and fields", () => {
-		expect(validate("neta_artifacts", { action: "inspect", id: ID }).ok).toBe(true);
+	test("artifacts publish without audience or review fields", () => {
+		expect(validate("artifacts", { action: "inspect", id: ID }).ok).toBe(true);
+		expect(
+			validate("artifacts", { action: "publish", text: "Report", title: "Report", mimeType: "text/plain" }).ok,
+		).toBe(true);
 		for (const args of [
 			{ action: "review", id: ID, verdict: "accepted", note: "checked" },
 			{ action: "inspect", id: ID, verdict: "accepted" },
 			{ action: "inspect", id: ID, note: "checked" },
-		]) expect(validate("neta_artifacts", args).ok).toBe(false);
+			{ action: "publish", text: "Report", title: "Report", mimeType: "text/plain", audience: "parent" },
+		]) {
+			expect(validate("artifacts", args).ok).toBe(false);
+		}
 	});
+
 	test("tools have unique names and standalone schemas", () => {
-		expect(TOOLS).toHaveLength(16);
-		expect(new Set(TOOLS.map((tool) => tool.name)).size).toBe(16);
+		expect(TOOLS).toHaveLength(9);
+		expect(new Set(TOOLS.map((tool) => tool.name)).size).toBe(9);
 		for (const tool of TOOLS) {
 			expect(typeof tool.description).toBe("string");
 			expect(JSON.stringify(tool.inputSchema).includes("$ref")).toBe(false);
@@ -134,7 +93,7 @@ describe("tool schemas", () => {
 	});
 
 	test("the live mission tool tells existing leaders to delegate sustained work promptly", () => {
-		const mission = TOOLS.find((tool) => tool.name === "neta_mission");
+		const mission = TOOLS.find((tool) => tool.name === "dispatch_mission");
 		expect(mission?.description).toContain("before broad exploration or repeated reads");
 	});
 
@@ -162,73 +121,15 @@ describe("tool schemas", () => {
 			}
 		});
 	}
-
-	test("expanded forms validate: agents, lead objects, decision records", () => {
-		const mission = validate("neta_mission", {
-			name: "n",
-			objective: "o",
-			access: "readWrite",
-			lead: { task: "Lead it.", skills: ["a", "b"] },
-			agents: [{ task: "Do it.", access: "readOnly" }],
-			continues: ID,
-		});
-		expect(mission.ok).toBe(true);
-		const record = {
-			objective: "o",
-			whyLeadInsufficient: "w",
-			missionId: ID,
-			mutationKind: "m",
-			estimatedFiles: 3,
-			validation: "v",
-			estimatedMinutes: 30,
-			externalEffects: "none",
-		};
-		expect(validate("neta_mode", { mode: "leadPlus", record }).ok).toBe(true);
-		expect(
-			validate("neta_mode", { mode: "leadPlus", record: { ...record, worktreePath: "/tmp/x", estimatedFiles: 1.5 } })
-				.ok,
-		).toBe(false);
-		expect(
-			validate("neta_mission", {
-				name: "n",
-				objective: "o",
-				access: "readWrite",
-				lead: { task: "x", access: "readOnly", bogus: 1 },
-			}).ok,
-		).toBe(false);
-	});
 });
 
-describe("actor tool sets", () => {
-	test("agents see reporting, parent questions, artifacts and their own model adjustment", () => {
-		expect(
-			toolsFor("agent")
-				.map((tool) => tool.name)
-				.sort(),
-		).toEqual(["neta_artifacts", "neta_ask", "neta_done", "neta_history", "neta_model", "neta_progress"]);
-	});
-
-	test("leads see everything but mission, close and pin", () => {
-		const names = toolsFor("lead").map((tool) => tool.name);
-		expect(names).toHaveLength(12);
-		for (const excluded of ["neta_mission", "neta_close", "neta_pin", "neta_superleader_answer"]) {
-			expect(names).not.toContain(excluded);
-		}
-	});
-
-	test("leaders see everything but progress and done", () => {
-		const names = toolsFor("leader").map((tool) => tool.name);
-		expect(names).toHaveLength(14);
-		expect(names).not.toContain("neta_progress");
-		expect(names).not.toContain("neta_done");
-	});
-});
+describe("actor tool sets", () => {});
 
 test("task difficulty accepts only integer effort levels 1 through 5 independently of model override", () => {
 	for (const effort of [1, 2, 3, 4, 5]) {
-		expect(validate("neta_agent", { task: "check", access: "readOnly", effort }).ok).toBe(true);
+		expect(validate("spawn_agent", { task: "check", access: "readOnly", effort }).ok).toBe(true);
 		expect(
-			validate("neta_mission", {
+			validate("dispatch_mission", {
 				name: "check",
 				objective: "check",
 				access: "readOnly",
@@ -237,40 +138,31 @@ test("task difficulty accepts only integer effort levels 1 through 5 independent
 		).toBe(true);
 	}
 	for (const effort of [0, 6, 1.5, "high", null])
-		expect(validate("neta_agent", { task: "check", access: "readOnly", effort }).ok).toBe(false);
-	expect(validate("neta_agent", { task: "check", access: "readOnly", model: "openai/luna" }).ok).toBe(true);
+		expect(validate("spawn_agent", { task: "check", access: "readOnly", effort }).ok).toBe(false);
+	expect(validate("spawn_agent", { task: "check", access: "readOnly", model: "openai/luna" }).ok).toBe(true);
 });
 
-test("model adjustments require exactly one bounded effort or direction", () => {
-	for (const params of [{ missionId: 4, effort: 3 }, { agentId: "Cove", change: "down" }, { change: "up" }])
-		expect(validate("neta_model", params).ok).toBe(true);
-	for (const params of [{ effort: 3, change: "up" }, {}, { effort: 6 }, { effort: 0 }, { change: "sideways" }])
-		expect(validate("neta_model", params).ok).toBe(false);
-});
-
-test("public mission numbers and lead-local references work without guessing internal IDs", () => {
-	for (const missionId of [12, ID]) {
-		expect(validate("neta_agent", { missionId, task: "check", access: "readOnly", effort: 1 }).ok).toBe(true);
-		expect(validate("neta_ready", { missionId, summary: "checked" }).ok).toBe(true);
-		expect(validate("neta_close", { missionId, disposition: "completed", reason: "checked" }).ok).toBe(true);
-		expect(
-			validate("neta_close", { missionId, disposition: "abandoned", reason: "done", discardUncommitted: true }).ok,
-		).toBe(true);
-		expect(
-			validate("neta_close", { missionId, disposition: "abandoned", reason: "done", discardUncommitted: "yes" }).ok,
-		).toBe(false);
-	}
-	for (const missionId of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, "12"]) {
-		expect(validate("neta_ready", { missionId, summary: "checked" }).ok).toBe(false);
-	}
-	for (const name of ["neta_agent", "neta_ready", "neta_scope"]) {
-		expect(toolsFor("leader").find((tool) => tool.name === name)?.inputSchema.required).toContain("missionId");
-		expect(toolsFor("lead").find((tool) => tool.name === name)?.inputSchema.required).not.toContain("missionId");
-	}
-	expect(validate("neta_ready", { summary: "checked" }).ok).toBe(true);
+test("model adjustments require one effort, direction, or exact model with optional thinking level", () => {
+	for (const params of [
+		{ missionId: 4, effort: 3 },
+		{ agentId: "Cove", change: "down", userInstruction: "Use something cheaper" },
+		{ change: "up" },
+		{ missionId: 12, model: "openai/gpt-6-sol", variant: "medium" },
+	])
+		expect(validate("change_model", params).ok).toBe(true);
+	for (const params of [
+		{ effort: 3, change: "up" },
+		{ effort: 3, model: "openai/gpt-6-sol" },
+		{ variant: "medium" },
+		{},
+		{ effort: 6 },
+		{ effort: 0 },
+		{ change: "sideways" },
+	])
+		expect(validate("change_model", params).ok).toBe(false);
 });
 
 test("delegation accepts detailed briefs while keeping bounded payloads", () => {
-	expect(validate("neta_agent", { task: "x".repeat(16000), access: "readOnly", missionId: ID }).ok).toBe(true);
-	expect(validate("neta_agent", { task: "x".repeat(16001), access: "readOnly", missionId: ID }).ok).toBe(false);
+	expect(validate("spawn_agent", { task: "x".repeat(16000), access: "readOnly", missionId: ID }).ok).toBe(true);
+	expect(validate("spawn_agent", { task: "x".repeat(16001), access: "readOnly", missionId: ID }).ok).toBe(false);
 });

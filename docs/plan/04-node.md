@@ -1,3 +1,5 @@
+> Historical plan. Superseded by [the current tools and communication contract](tools-and-communication.md). This document is not an active implementation requirement.
+
 # 04 — Node
 
 `src/node/` is the Neta Node: one long-lived process per machine owning

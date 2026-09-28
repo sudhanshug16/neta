@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { git, sha256, sourcePathAllowed, verifyCheckout, type OpenCodePin } from "../scripts/opencode-pin.ts";
+import { join } from "node:path";
+import { git, type OpenCodePin, sha256, sourcePathAllowed, verifyCheckout } from "../scripts/opencode-pin.ts";
 
 test("release overlays reject configuration, build output, and path traversal", () => {
 	for (const path of [

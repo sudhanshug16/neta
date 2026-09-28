@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Event, Mission } from "../src/core/types.ts";
-import type { SnapshotResult } from "../src/node/protocol.ts";
+import { PROTOCOL_VERSION, type SnapshotResult } from "../src/node/protocol.ts";
 
 const SNAPSHOT = JSON.parse(
 	readFileSync(join(import.meta.dir, "fixtures", "node-snapshot.json"), "utf8"),
@@ -20,36 +20,33 @@ describe("recorded node fixture", () => {
 		expect(SNAPSHOT.workspaces).toHaveLength(1);
 		expect(SNAPSHOT.workspaces[0]?.kind).toBe("git");
 		expect(SNAPSHOT.leaders).toHaveLength(1);
-		expect(SNAPSHOT.leaders[0]?.mode).toBe("lead");
-		// The leader's personal name, not the workspace's ("repo").
+		// Historical fixtures retain their recorded labels; runtime hydration normalizes them.
 		expect(SNAPSHOT.leaders[0]?.name).toBe("Halden");
 		expect(SNAPSHOT.leaders[0]?.name).not.toBe(SNAPSHOT.workspaces[0]?.name);
 		expect(SNAPSHOT.missions).toHaveLength(13);
-		expect(new Set(SNAPSHOT.missions.map((m: Mission) => m.state))).toEqual(
-			new Set(["running", "blocked", "failed", "readyToClose", "mergedNotClosed", "closed"]),
-		);
+		expect(new Set(SNAPSHOT.missions.map((m: Mission) => m.state))).toEqual(new Set(["open", "closed"]));
 		expect(SNAPSHOT.hasOlder).toBe(true);
 		for (const agent of SNAPSHOT.agents) {
 			expect(agent.state === "archived").toBe(false);
 		}
-		expect(typeof SNAPSHOT.completedCounts).toBe("object");
+		expect(typeof SNAPSHOT.stoppedCounts).toBe("object");
 		expect(SNAPSHOT.events.length).toBeGreaterThan(0);
 		expect(SNAPSHOT.windowDays).toBe(14);
-		expect(SNAPSHOT.protocolVersion).toBe(1);
+		expect(SNAPSHOT.protocolVersion).toBe(PROTOCOL_VERSION);
 		expect(typeof SNAPSHOT.at).toBe("string");
 	});
 
 	test("attention is non-empty and newest first", () => {
 		expect(SNAPSHOT.attention.length).toBeGreaterThan(0);
 		for (const mission of SNAPSHOT.attention) {
-			expect(["blocked", "failed", "readyToClose", "mergedNotClosed"].includes(mission.state)).toBe(true);
+			expect(mission.attention).toBeTruthy();
 		}
 		const created = SNAPSHOT.attention.map((m: Mission) => m.createdAt);
 		expect([...created].sort().reverse()).toEqual(created);
 	});
 
-	test("completedCounts has an entry over 8", () => {
-		expect(Math.max(...Object.values(SNAPSHOT.completedCounts))).toBe(12);
+	test("stoppedCounts has an entry over 8", () => {
+		expect(Math.max(...Object.values(SNAPSHOT.stoppedCounts))).toBe(12);
 	});
 
 	test("the NDJSON carries every event once, seq monotonic per workspace", () => {

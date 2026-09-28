@@ -22,7 +22,7 @@ function stream(model: Model<Api>, context: Context, _options?: SimpleStreamOpti
 	const result = createAssistantMessageEventStream();
 	queueMicrotask(() => {
 		const afterTool = context.messages.some(
-			(message) => message.role === "toolResult" && message.toolName === "neta_mission",
+			(message) => message.role === "toolResult" && message.toolName === "dispatch_mission",
 		);
 		const isMissionLead = JSON.stringify(context.messages).includes("Verify the Pi mission bridge");
 		const output: AssistantMessage = {
@@ -40,7 +40,7 @@ function stream(model: Model<Api>, context: Context, _options?: SimpleStreamOpti
 			const call: ToolCall = {
 				type: "toolCall",
 				id: "fixture-mission",
-				name: "neta_mission",
+				name: "dispatch_mission",
 				arguments: {
 					name: "Pi fixture mission",
 					objective: "Verify the Pi mission bridge",

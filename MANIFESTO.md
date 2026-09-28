@@ -1,9 +1,9 @@
 # Neta
 
-Neta is the interface, engine, and machine service for running persistent agent
-teams across workspaces. The user talks to Neta in one native OpenCode
-conversation per workspace copy on a machine. Neta sends work to that copy's
-workspace leader, who retains execution ownership. The user can also open the
+Neta connects the user to persistent agent teams across workspaces. The user
+talks to the workspace leader in one native OpenCode conversation per workspace copy on a
+machine. Neta Node is the machine service. The workspace leader sends work to that copy's
+coordinator, who retains execution ownership. The user can also open the
 OpenCode conversation of any mission lead or agent beneath the leader.
 
 This manifesto defines the target product. The current implementation is still
@@ -13,19 +13,23 @@ direction and `docs/how-it-works.md` is the description of what ships today.
 
 ## Vocabulary
 
-- **Neta** — the user-facing native OpenCode conversation for one workspace
-  copy, plus the client and engine that connect it to leaders and agents.
-  **Neta Node** names the opt-in machine service. There is no global Neta chat.
+- **Neta** — the product and machine service.
+- **Workspace leader** — the assistant the user talks to in a native OpenCode
+  conversation for one workspace copy. It sends work to the coordinator.
+- **Neta Node** — the machine service that stores work, routes messages, and
+  keeps OpenCode sessions running. It is not another assistant.
 - **Workspace** — a Git repository or an ordinary folder in which work happens.
 - **Machine** — a physical host, virtual machine, or isolated runtime that owns
 one copy of a workspace and runs its complete agent tree.
-- **Leader** — the persistent assistant for one workspace on one machine. It has
+- **Coordinator** — the persistent assistant for one workspace on one machine, with a fixed role name. It has
   its own OpenCode conversation and decides whether to work directly or create a
   mission.
-- **Attention filter** — an internal, workspace-scoped OpenCode session that
-  decides which captured work updates need Neta's attention. It cannot execute
-  work, grant permission, or speak in the user's chat. Neta Node validates its
-  decisions and keeps delivery and presentation receipts.
+- **Filter** — an internal, workspace-scoped OpenCode session that decides which
+  captured results, failures, and questions need the workspace leader's attention. It cannot
+  execute work, grant permission, or speak in the user's chat.
+- **Update notice** — a durable message from the filter to the workspace leader. Delivery means
+  it reached the workspace leader's native OpenCode session; presentation means the workspace leader used it in
+  a completed reply to the user. Neither means the work itself is complete.
 - **Mission** — one bounded objective. A Git mission receives its own Worktrunk
   worktree by default. Every mission has a permanent number assigned at
   creation that never changes.
@@ -35,27 +39,29 @@ one copy of a workspace and runs its complete agent tree.
   create children.
 - **Spine** — the canvas's time axis. Every mission anchors to it at its start
   time and stays there permanently.
-- **Now** — the live end of the spine, where the workspace leader sits.
+- **Now** — the live end of the spine, where the coordinator sits.
 - **Checkpoint** — a marker on the spine for an event that changed the state of
   work.
 - **Mission bar** — the compact bar reserved along the bottom of the window. It
-  holds the workspace leader, the Now control, and every open mission that is
+  holds the coordinator, the Now control, and every open mission that is
   running or waiting on a person.
 
-The hierarchy is fixed:
+Each workspace copy has this fixed ownership tree:
 
 ```text
-Neta
-└── Workspace
-    └── Machine
-        └── Leader
-            └── Mission
-                └── Mission lead
-                    └── Agents
+Workspace copy on one machine
+├── Workspace leader (the user's chat)
+├── Filter (native chat)
+└── Coordinator
+    └── Mission
+        └── Mission lead
+            └── Agents
 ```
 
-The machine level is hidden in the UI when a workspace exists on only one
-machine.
+The workspace leader sends work down to the coordinator. Results travel back through the
+filter to the workspace leader. Neta Node stores the evidence, routes messages, and records
+delivery and presentation. The machine level is hidden in the UI when a
+workspace exists on only one machine.
 
 ## Principles
 
@@ -69,9 +75,8 @@ machine.
 4. **Isolation before ceremony.** Git missions use Worktrunk worktrees. Neta
    does not require a scout, writer, reviewer, or full test suite for every
    change.
-5. **Access is visible and reversible.** Leaders move between Lead and Lead++;
-   agents receive read-only or read-write access. The current state is always
-   visible and durably recorded.
+5. **Access follows assignments.** Mission leads inherit mission access; workers
+   retain assigned read-only or read-write access. Node owns writer admission.
 6. **Every conversation is a real OpenCode session.** Native and future clients
    open the same exact OpenCode sessions. There are no dummy chat surfaces and no
    keystroke injection.
@@ -117,27 +122,37 @@ and runtime state.
 Non-Git folders are not grouped across machines. Each folder is a standalone
 workspace on its machine.
 
-The user chooses a workspace and, when necessary, a machine. Neta's conversation
+The user chooses a workspace and, when necessary, a machine. The workspace leader's conversation
 for that exact workspace copy is the default chat. Its leader, missions, and
-agents remain on that machine. There is no global Neta chat above workspace
+agents remain on that machine. There is no global workspace leader chat above workspace
 copies.
 
-Neta may answer from verified current state or route the user's exact request
-to that workspace leader. Neta does not create missions, hire agents, take writer
+The workspace leader may answer from verified current state or route the user's exact request
+to that coordinator. The workspace leader does not create missions, hire agents, take writer
 authority, or approve access. The leader owns mission creation; mission leads
-own their workers. Work results and failures enter a durable attention filter.
-Only a committed Neta chat turn with cited evidence counts as presented to the
-user. A delivery receipt alone does not count as work progress or presentation.
+own their workers. Work results and failures enter the durable filter.
+Only a completed workspace leader chat turn tied by Node to a delivered notice counts as
+presented to the user. The notice keeps its source references inside Node; the workspace leader
+does not have to repeat them. A delivery receipt alone does not count as work
+progress or presentation.
+
+The filter has one tool to send a message to the workspace leader. After a
+workspace leader turn, Node sends its conversation update to the filter for
+context only. After a coordinator turn, Node sends the completed reply and the
+filter either calls the tool once or sends nothing. Node owns delivery,
+internal transcript references and deduplication. Models supply no evidence
+IDs or acknowledgments. Filter errors are visible processing failures with
+bounded retry. The workspace leader's own reply never starts another
+notification cycle.
 
 ## Leaders and missions
 
 A leader stays available for conversation and routes sustained work into
 missions. It may handle a small bounded task itself. Any task that writes is
 still represented by a mission so its isolation, access, and closeout remain
-visible; it requires a separate mission lead. The workspace leader may use
-Lead++ to review and integrate that mission's work.
+visible; it requires a separate mission lead. The coordinator can review and integrate that mission's work.
 
-The workspace leader's conversation is continuous by default per workspace and
+The coordinator's conversation is continuous by default per workspace and
 machine. A person may explicitly reset the selected chat to a fresh provider
 conversation when its direction is no longer useful. Reset preserves the old
 transcript as history and retains the owner, project, mission, provider, model,
@@ -149,71 +164,27 @@ record serves as memory, is not yet designed.
 
 A mission contains:
 
-- one immutable original objective and an append-only record of accepted
-  changes;
+- one original objective, with scope changes recorded in conversation;
 - one owning workspace and machine;
 - one Worktrunk worktree for a Git workspace;
-- one mission lead with an actor and conversation distinct from the workspace leader;
+- one mission lead with an actor and conversation distinct from the coordinator;
 - its agents and exact OpenCode conversation identifiers;
-- assigned models, skills, access state, progress, blockers, and terminal
-  outcomes;
+- assigned models, skills, access and factual runtime activity;
 - its integration and closeout state.
 
 A mission lead may create read-only or read-write agents. Ordinary agents
 cannot create children, so the hierarchy cannot grow without bound.
 
-## Lead and Lead++
+## Assigned access and activity
 
-Only workspace leaders and mission leads use leadership modes:
+Coordinators have read-write access for review and integration. Mission leads
+inherit their mission's assigned access; workers retain their assigned access.
+Node acquires the write slot before every writing turn, including parent wakeups
+and follow-ups, and releases it only after execution stops. Resuming reacquires it.
+A writing lead finishes its turn to let queued workers run.
 
-- **Lead** — coordination authority. The leader may reason, inspect, talk to the
-  user, create missions, and create agents, but it does not take Neta's writer
-  lease or mutate the workspace.
-- **Lead++** — everything in Lead plus Neta's build and writer authority. A
-  Lead++ leader may still create and direct agents.
-
-Workspace leaders and mission leads run their provider process unsandboxed in
-both modes. They need machine, network, and MCP access to coordinate the whole
-mission. Lead versus Lead++ still controls Neta's mutation authority and writer
-lease; it is not a provider-process sandbox. Ordinary agents remain sandboxed
-according to the read-only or read-write access their lead assigned.
-
-Leaders begin in Lead. The user may change the selected leader's mode from chat
-or the UI. A leader may also request Lead++ automatically by submitting a
-concise justification:
-
-- objective;
-- why Lead is insufficient;
-- target mission and worktree;
-- expected kind of mutation;
-- estimated number of files affected;
-- planned validation;
-- estimated Lead++ duration;
-- destructive or external effects.
-
-This is a decision record, not private chain-of-thought. Neta may provide hints
-for completing it. Automatic approval applies only within the authority already
-granted to that leader and charter. Writer exclusion and other mechanical
-boundaries still apply.
-
-Lead++ is durable across client and Node restarts. Its duration counts active
-connected time, not offline time. After ten active minutes:
-
-- the canvas shows a persistent warning and elapsed time;
-- every subsequent Neta tool response reminds the leader why Lead++ is active;
-- a reminder becomes eligible every two active minutes and is delivered at a
-  safe tool or turn boundary;
-- repeated reminders coalesce rather than repeatedly cancelling active work.
-
-Lead++ does not expire automatically. The leader should return to Lead when
-mutation work ends. Completing or abandoning a mission returns its mission lead
-to Lead.
-
-A manual mode change affects only the selected leader. If it occurs during an
-OpenCode turn, Neta uses its existing steering boundary: cancel the active turn and
-re-prompt the same exact session with the mode-change event. The UI must show
-mode with text and an icon as well as color. The compact labels are **Lead** and
-**Lead++**; Lead++ is described as "build access" for accessibility.
+Activity means Running or Not running. Questions, failures and integration details
+remain conversation or runtime facts, not tool-authored activity states.
 
 ## Agents, skills, providers, and models
 
@@ -266,22 +237,13 @@ Non-Git workspaces have no worktree isolation:
 ## Mission lifecycle and closeout
 
 Finishing implementation or merging a branch does not close a mission. Every
-non-closed mission remains in the workspace leader's mission inbox until the
+non-closed mission remains in the coordinator's mission inbox until the
 leader records its disposition.
 
-The lifecycle is:
+The lifecycle is **open → closed**, with completed, merged or abandoned disposition.
+A final reply can be a result, question or explanation of remaining work.
 
-```text
-active or blocked
-        ↓
-ready to close
-        ↓
-completed, merged, or abandoned
-        ↓
-closed and archived
-```
-
-The workspace leader owns closeout. It reviews the handoff, integrates or
+The coordinator owns closeout. It reviews the handoff, integrates or
 records completed non-code work, or abandons the work, and calls the mission-close tool. Closeout requires:
 
 - disposition: **completed**, **merged**, or **abandoned**;
@@ -292,9 +254,8 @@ records completed non-code work, or abandons the work, and calls the mission-clo
 **Completed** records successful checks, research, and other work with nothing
 to merge. It requires a clean worktree with no unmerged changes; it never
 forces removal. Normal agent turn completion means **Idle**, not Interrupted
-or proof that the mission is complete. Its parent receives an automatic report
-and decides whether to continue, mark ready, or close. Mission leads can call
-`neta_ready` without an ID; public mission references use the permanent number.
+or proof that the mission is complete. Its parent receives the final reply
+and decides whether to continue or close. No completion-registration tool is required.
 
 There is no "retained but closed" disposition. If the worktree must remain, the
 mission remains open and visible. Removal of a dirty or unmerged worktree is
@@ -309,19 +270,19 @@ while one of the two is selected.
 
 ## The mission inbox
 
-The workspace leader must not forget active work or unanswered questions. The
-mission bar is the inbox. It holds the workspace leader, the Now control, and
-every open mission that is running or waiting on a person — Blocked, Failed,
-Ready to close, and merged but not closed — each with its name and identity
-mark, and an attention mark on the ones that are waiting.
+The coordinator must not forget active work or unanswered questions. The
+mission bar is the inbox. It holds the coordinator, the Now control, and
+every open mission that is running or waiting on a person. Its activity mark
+says only Running or Not running. Questions, failures, and closeout needs appear
+in native chat and mission details, separate from runtime activity.
 
 The bar is a strip of names and marks. It is never counts, cards, or status
 tiles. Clicking a mission in the bar pans the spine to that mission and opens
 its lead's conversation.
 
 - every open mission remains visible in the UI;
-- blocked questions, failures, ready-to-close missions, and merged-but-unclosed
-  missions receive explicit attention states;
+- questions stay in conversation; failures and integration details remain visible
+  without changing the activity label;
 - Neta tool responses carry a compact open-mission reminder and spell out
   items requiring action;
 - a new leader turn begins with the current mission state;
@@ -333,9 +294,10 @@ disappear.
 
 ## Agent archive
 
-Within a mission, all running, blocked, and failed agents remain
-visible. Up to eight recent completed, non-archived agents are shown directly;
-additional completed agents are grouped behind an expandable count.
+Within a mission, executing agents remain visible. Delivery failures remain
+inspectable through `/delivery` instead of appearing in the spine.
+Up to eight recently stopped agents are shown directly; older stopped agents
+remain accessible in history.
 
 Every agent has an Archive action:
 
@@ -350,10 +312,11 @@ The Node controls private OpenCode V2 servers through their native APIs. Clickin
 any agent node opens that exact saved OpenCode session. Neta owns mission
 identity, writer authority, message admission, and tool authentication.
 
-Neta does not inject text into the middle of a prompt turn. Immediate steering and
-manual mode changes cancel the active turn, wait for that cancellation boundary,
-and send the replacement prompt to the same exact session. Passive reminders
-wait for a safe tool or turn boundary and coalesce.
+Neta delivers internal reports as separate native synthetic messages at the next
+safe model step without cancelling the running execution. Human steering keeps
+its native behavior; an explicit queue choice waits for later. Before a completed
+reply travels to a parent, Node checks for unread reports. If any remain, the
+agent resumes with them and its later final reply travels upward.
 
 Durable state and process liveness are separate. Restart restores the exact
 recorded conversations and marks interrupted work honestly. It does not replay
@@ -389,7 +352,7 @@ Do not reintroduce the Swift app or its build/test/release jobs.
 ### Historical canvas
 
 The desktop client is a SwiftUI canvas over the Node state. The canvas is the
-spine. The workspace leader is the stable focal node at Now, the right end of
+spine. The coordinator is the stable focal node at Now, the right end of
 the spine. Missions anchor to the spine at their start time and branch above
 and below it. Agents stack away from the spine beneath their mission lead. A
 mission's position never changes after it is placed; finishing a mission
@@ -411,12 +374,13 @@ remain usable at 100,000 missions; only the visible range is materialised, and
 rendering is virtualised.
 
 The Now control has two states: lit when the view is at the live edge, and
-showing how far back the view is when it is not. When the workspace leader is
+showing how far back the view is when it is not. When the coordinator is
 off-screen, a small marker inside the canvas, left of the chat surface, jumps
 to it.
 
-Missions that are closed or idle fade. Blocked and Failed keep full emphasis
-regardless of age. Faded text keeps a legible contrast floor.
+Missions that are closed or not running may fade. Unanswered questions and
+failures remain visible in native chat regardless of age. Faded text keeps a
+legible contrast floor.
 
 Checkpoints sit on the spine itself. They record events that changed the state
 of work, not things that were said:
@@ -454,16 +418,16 @@ omitted.
 
 The mission bar is reserved along the bottom of the window.
 
-The chat header shows the path from the workspace leader to the selected agent,
+The chat header shows the path from the coordinator to the selected agent,
 so one click returns to the leader.
 
-The workspace leader is selected by default. Selecting a mission lead or agent
+The coordinator is selected by default. Selecting a mission lead or agent
 opens that exact OpenCode conversation in the same chat surface. Chat is primary;
 secondary session information is opened with a **Details** action that either
 changes the right-hand view or adds a secondary inspector. It is not a
 permanent Chat/Details tab bar.
 
-Mission creation happens through the workspace leader's judgment. There is no
+Mission creation happens through the coordinator's judgment. There is no
 global **New mission** button in the canvas toolbar or navigator. The toolbar is
 limited to workspace, machine when needed, Fit, and zoom.
 
@@ -480,22 +444,23 @@ Use the vocabulary in this manifesto literally in product copy:
   directory represented in Neta.
 - **Machine** for the host that owns the workspace copy and its entire agent
   tree.
-- **Workspace leader**, **mission**, **mission lead**, and **agent** for the
-  three execution levels.
-- **Lead** and **Lead++** for leader access; describe Lead++ as **build access**
-  where a plain-language explanation is needed.
-- **Running**, **Idle**, **Blocked**, **Ready to close**, **Failed**, **Offline**, and
-  **Archived** for visible lifecycle states.
+- **Workspace leader** for the user-facing assistant.
+- **Coordinator**, **mission**, **mission lead**, and **agent** for the
+  execution hierarchy.
+- **Read-only** and **Read-write** for assigned access.
+- **Running** and **Not running** for current execution activity. Keep
+  questions, failures, closeout, offline state, and archives as separate facts.
 - **Archived** as a state and **Archive agent** as the action.
 
 Do not expose scout, worker, reviewer, apprentice, journeyman, expert,
 architect, model tier, trust tier, or debate role as the identity of an agent.
 An ordinary agent may be described by its task, model, access, and skills. Avoid
-calling Neta itself a leader or an agent: Neta is the client, engine, and machine
-service.
+calling the product Neta an agent: Neta is the client, engine, and machine
+service. The user-facing assistant is the workspace leader.
 
-UI copy should be direct and operational. Prefer `Payments regression ·
-Blocked` over invented job titles, character classes, or playful status prose.
+UI copy should be direct and operational. Prefer `Payments regression · Not running`
+with its pending question in native chat over a status that guesses why
+execution stopped.
 Agent character may come from name, activity, and restrained visual identity;
 it must not require a role taxonomy.
 
@@ -507,7 +472,7 @@ time. The rejection of one-direction org charts still stands for hierarchy: a
 mission and its agents branch off the spine rather than descending in a single
 column.
 
-- The workspace leader is a stable, immediately recognizable focal node at Now.
+- The coordinator is a stable, immediately recognizable focal node at Now.
 - Missions anchor to the spine at their start time. They branch above and below
   it; they do not sit on one line.
 - A mission lead and its agents are connected with simple edges. Do not wrap
@@ -603,7 +568,7 @@ through prose alone.
 A user-authored `CHARTER.md` defines decision authority: what a leader may do
 alone, what requires the user, and when to interrupt. Workspace and user
 charters are presented to leaders as session context. The charter governs
-authority, including automatic Lead++ approval; provider and model
+authority and reserved user decisions; provider and model
 configuration belongs in settings.
 
 ## Non-goals

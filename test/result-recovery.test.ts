@@ -46,11 +46,10 @@ async function fixture() {
 		machineId: "host",
 		name: "Review",
 		objective: "inspect",
-		changes: [],
 		lead: { kind: "leader" },
 		agentIds: ["a"],
 		access: "readOnly",
-		state: "running",
+		state: "open",
 		createdAt: "2026-01-01",
 	};
 	await real.conversations.create({
@@ -120,7 +119,7 @@ test("a process lost mid-turn produces one interrupted result before closing its
 	});
 	await recoverActorResults(f.store, f.real.conversations, f.record);
 	expect((await f.real.conversations.turnRange("s", "t"))?.turn.cancelled).toBe(true);
-	expect((await f.reports.pending())[0]?.text).toContain("interrupted or failed");
+	expect((await f.reports.pending())[0]?.text).toContain("Turn interrupted.");
 	await recoverActorResults(f.store, f.real.conversations, f.record);
 	expect(await f.reports.pending()).toHaveLength(1);
 });

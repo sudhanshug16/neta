@@ -35,16 +35,6 @@ export function createFollowupSender(ports: {
 				if (["running", "starting"].includes(agent.state))
 					return await ports.admit(agent.sessionId, text, sourceId);
 				const live = await ports.resume(agent);
-				if (["completed", "failed", "blocked"].includes(agent.state)) {
-					await ports.putAgent({
-						...live,
-						state: "idle",
-						outcome: undefined,
-						endedAt: undefined,
-						pendingQuestion: undefined,
-					});
-					await ports.saveMission({ ...mission, state: "running", attention: undefined });
-				}
 				return await ports.admit(live.sessionId, text, sourceId);
 			} catch (error) {
 				ports.failed(receipt, error);

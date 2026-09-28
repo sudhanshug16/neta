@@ -3,7 +3,6 @@ import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ulid } from "../src/core/ids.ts";
-import { NAME_POOL } from "../src/core/names.ts";
 import type { Agent, EventKind, Leader, Mission, Workspace } from "../src/core/types.ts";
 import type { NodeStore } from "../src/node/server.ts";
 import type { Settings } from "../src/session/settings.ts";
@@ -32,9 +31,6 @@ function leader(workspaceId: string, sessionId: string): Leader {
 		sessionId,
 		provider: "fake",
 		model: "test-model",
-		mode: "lead",
-		modeSince: new Date(0).toISOString(),
-		modeActiveMs: 0,
 		state: "running",
 	};
 }
@@ -155,7 +151,7 @@ function ctx(f: Fixture, actor: Actor): MissionToolContext {
 	return { actor, deps: { store: f.store, ...f.ports } };
 }
 
-describe("neta_mission", () => {
+describe("dispatch_mission", () => {
 	test("old-client self assignment is refused before routing, worktree, number, reservation or launch", async () => {
 		const f = fixture("git");
 		let routed = 0;
@@ -173,11 +169,11 @@ describe("neta_mission", () => {
 			leased++;
 			return "active";
 		};
-		const result = await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+		const result = await missionHandlers.dispatch_mission(ctx(f, f.leaderActor), {
 			name: "old client",
 			objective: "reject self",
 			access: "readWrite",
-			lead: "self",
+			lead: "self" as never,
 		});
 		expect(result).toMatchObject({ ok: false, code: "refused" });
 		expect([routed, numbered, leased]).toEqual([0, 0, 0]);
@@ -187,7 +183,7 @@ describe("neta_mission", () => {
 	});
 	test("delegation persists a distinct lead from its first save", async () => {
 		const f = fixture("folder");
-		const result = await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+		const result = await missionHandlers.dispatch_mission(ctx(f, f.leaderActor), {
 			name: "delegated",
 			objective: "work",
 			access: "readOnly",
@@ -199,7 +195,7 @@ describe("neta_mission", () => {
 		expect(f.launches[0]?.sessionId).not.toBe(leaderSession);
 		expect(f.saved[0]?.lead).toEqual({ kind: "agent", agentId: f.launches[0]?.agentId });
 	});
-	test("a runtime returning the workspace leader session is refused without close, brief or rebind", async () => {
+	test("a runtime returning the coordinator session is refused without close, brief or rebind", async () => {
 		const f = fixture("folder");
 		const leaderSession = f.store.getLeader("folder-w")?.sessionId;
 		if (!leaderSession) throw new Error("missing leader session");
@@ -211,7 +207,7 @@ describe("neta_mission", () => {
 		f.ports.sessions.close = async (sessionId) => {
 			closed.push(sessionId);
 		};
-		const result = await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+		const result = await missionHandlers.dispatch_mission(ctx(f, f.leaderActor), {
 			name: "alias attempt",
 			objective: "reject runtime alias",
 			access: "readOnly",
@@ -220,7 +216,7 @@ describe("neta_mission", () => {
 		expect(result).toMatchObject({ ok: false, code: "refused", message: expect.stringContaining("aliases") });
 		expect(closed).toEqual([]);
 		expect(f.briefs).toEqual([]);
-		expect(f.saved.at(-1)?.state).toBe("failed");
+		expect(f.saved.at(-1)?.state).toBe("open");
 		expect(f.store.getAgent(f.launches[0]?.agentId ?? "")?.sessionId).not.toBe(leaderSession);
 		expect(f.store.getLeader("folder-w")?.sessionId).toBe(leaderSession);
 	});
@@ -278,7 +274,7 @@ describe("neta_mission", () => {
 				return { sessionId: session.sessionId };
 			};
 
-			const created = await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+			const created = await missionHandlers.dispatch_mission(ctx(f, f.leaderActor), {
 				name: "setup cwd",
 				objective: "verify actual setup cwd",
 				access: "readOnly",
@@ -288,21 +284,30 @@ describe("neta_mission", () => {
 			if (!created.ok) throw new Error("expected mission creation");
 			const worktree = created.data.worktree;
 			if (typeof worktree !== "string") throw new Error("expected worktree");
-			const setupCwd = (await Bun.file(audit).text()).trim();
-			expect(await realpath(setupCwd)).toBe(await realpath(worktree));
+			expect(await Bun.file(audit).exists()).toBe(false);
 			expect(f.launches[0]?.worktreePath).toBe(worktree);
 			expect(sessions[0]?.cwd).toBe(worktree);
+			const writable = await missionHandlers.dispatch_mission(ctx(f, f.leaderActor), {
+				name: "setup hook",
+				objective: "verify read write setup",
+				access: "readWrite",
+				lead: { task: "launch fake ACP" },
+			});
+			expect(writable.ok).toBe(true);
+			if (!writable.ok) throw new Error("expected writable mission");
+			const setupCwd = (await Bun.file(audit).text()).trim();
+			expect(await realpath(setupCwd)).toBe(await realpath(String(writable.data.worktree)));
 
 			await writeFile(hook, "#!/bin/sh\necho intentional setup failure >&2\nexit 23\n");
-			const failed = await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+			const failed = await missionHandlers.dispatch_mission(ctx(f, f.leaderActor), {
 				name: "setup failure",
 				objective: "do not launch fake ACP",
-				access: "readOnly",
+				access: "readWrite",
 				lead: { task: "must not start" },
 			});
 			expect(failed).toMatchObject({ ok: false, code: "setupFailed" });
-			expect(f.launches).toHaveLength(1);
-			expect(sessions).toHaveLength(1);
+			expect(f.launches).toHaveLength(2);
+			expect(sessions).toHaveLength(2);
 		} finally {
 			for (const session of sessions) await session.close();
 			await rm(temp, { recursive: true, force: true });
@@ -341,11 +346,11 @@ describe("neta_mission", () => {
 			const params = {
 				name: "lens port",
 				objective: "recover setup",
-				access: "readOnly",
+				access: "readWrite",
 				lead: { task: "work" },
 			} as const;
 			const context = ctx(f, f.leaderActor);
-			const failed = await missionHandlers.neta_mission(context, params);
+			const failed = await missionHandlers.dispatch_mission(context, params);
 			expect(failed.ok).toBe(false);
 			if (failed.ok) throw new Error("unexpected success");
 			expect(failed.code).toBe("setupFailed");
@@ -353,7 +358,7 @@ describe("neta_mission", () => {
 			expect(detail).toMatchObject({ exitCode: 1, missionRegistered: false, agentsLaunched: false });
 			expect(detail.persistenceError).toBeString();
 			expect(detail.diagnostic).toBeUndefined();
-			expect(detail.stderr).toContain("intentional fixture failure");
+			expect(detail.error).toContain("intentional fixture failure");
 			expect(f.launches).toHaveLength(0);
 			expect(f.saved).toHaveLength(0);
 			const partial = await driver.findExisting({ repoRoot: repo.root, number: 1, slug: "lens-port" });
@@ -380,7 +385,7 @@ describe("neta_mission", () => {
 				setupDisposition: "waived",
 			} as const;
 			for (const mismatch of [{ path: repo.root }, { branch: "main" }, { base: "other" }, { number: 999 }]) {
-				const refused = await missionHandlers.neta_mission(recoveryContext, {
+				const refused = await missionHandlers.dispatch_mission(recoveryContext, {
 					...params,
 					recoverWorktree: { ...recovery, ...mismatch },
 				});
@@ -388,7 +393,9 @@ describe("neta_mission", () => {
 			}
 			expect(f.saved).toHaveLength(0);
 			const results = await Promise.all(
-				[1, 2].map(() => missionHandlers.neta_mission(recoveryContext, { ...params, recoverWorktree: recovery })),
+				[1, 2].map(() =>
+					missionHandlers.dispatch_mission(recoveryContext, { ...params, recoverWorktree: recovery }),
+				),
 			);
 			expect(results.filter((r) => r.ok)).toHaveLength(1);
 			expect(f.launches).toHaveLength(1);
@@ -406,7 +413,7 @@ describe("neta_mission", () => {
 	});
 	test("a git workspace creates a worktree and a folder one does not", async () => {
 		const git = fixture("git");
-		const gitResult = await missionHandlers.neta_mission(ctx(git, git.leaderActor), {
+		const gitResult = await missionHandlers.dispatch_mission(ctx(git, git.leaderActor), {
 			name: "lens port",
 			objective: "port the lens",
 			access: "readOnly",
@@ -420,7 +427,7 @@ describe("neta_mission", () => {
 		}
 
 		const folder = fixture("folder");
-		const folderResult = await missionHandlers.neta_mission(ctx(folder, folder.leaderActor), {
+		const folderResult = await missionHandlers.dispatch_mission(ctx(folder, folder.leaderActor), {
 			name: "docs pass",
 			objective: "pass over docs",
 			access: "readOnly",
@@ -457,7 +464,7 @@ describe("neta_mission", () => {
 				},
 			});
 		};
-		const result = await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+		const result = await missionHandlers.dispatch_mission(ctx(f, f.leaderActor), {
 			name: "broken setup",
 			objective: "prove no provider starts",
 			access: "readOnly",
@@ -470,11 +477,12 @@ describe("neta_mission", () => {
 		}
 		expect(f.launches).toHaveLength(0);
 		expect(f.saved).toHaveLength(0);
+		expect(f.events).toContain("worktree.setupFailed");
 	});
 
 	test("recovery rejects folders and passes explicit disposition without re-running setup", async () => {
 		const folder = fixture("folder");
-		const rejected = await missionHandlers.neta_mission(ctx(folder, folder.leaderActor), {
+		const rejected = await missionHandlers.dispatch_mission(ctx(folder, folder.leaderActor), {
 			name: "legacy",
 			objective: "o",
 			access: "readOnly",
@@ -498,7 +506,7 @@ describe("neta_mission", () => {
 				worktree: { provider: "worktrunk", path: "/x", branch: "mission/4-legacy", base: "main" },
 			};
 		};
-		const recovered = await missionHandlers.neta_mission(ctx(git, git.leaderActor), {
+		const recovered = await missionHandlers.dispatch_mission(ctx(git, git.leaderActor), {
 			name: "legacy",
 			objective: "o",
 			access: "readOnly",
@@ -518,7 +526,7 @@ describe("neta_mission", () => {
 	test("numbers are monotonic and never reused", async () => {
 		const f = fixture("folder");
 		for (const name of ["one", "two"]) {
-			const result = await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+			const result = await missionHandlers.dispatch_mission(ctx(f, f.leaderActor), {
 				name,
 				objective: "o",
 				access: "readOnly",
@@ -531,7 +539,7 @@ describe("neta_mission", () => {
 
 	test("mission.created precedes every agent.spawned", async () => {
 		const f = fixture("folder");
-		const result = await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+		const result = await missionHandlers.dispatch_mission(ctx(f, f.leaderActor), {
 			name: "team work",
 			objective: "o",
 			access: "readWrite",
@@ -552,15 +560,14 @@ describe("neta_mission", () => {
 
 	test("old self assignment never sets the leader's active mission", async () => {
 		const f = fixture("folder");
-		const result = await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+		const result = await missionHandlers.dispatch_mission(ctx(f, f.leaderActor), {
 			name: "solo",
 			objective: "o",
 			access: "readOnly",
-			lead: "self",
+			lead: "self" as never,
 		});
 		expect(result.ok).toBe(false);
 		expect(f.launches).toHaveLength(0);
-		expect(f.store.getLeader("folder-w")?.activeMissionId).toBeUndefined();
 		expect(f.saved).toHaveLength(0);
 	});
 
@@ -570,7 +577,7 @@ describe("neta_mission", () => {
 		if (leader === undefined) throw new Error("missing leader fixture");
 		await f.store.putLeader({ ...leader, provider: "pi" });
 		f.ports.sessions.pi = true;
-		const result = await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+		const result = await missionHandlers.dispatch_mission(ctx(f, f.leaderActor), {
 			name: "pi solo",
 			objective: "run the mission objective",
 			access: "readOnly",
@@ -588,7 +595,7 @@ describe("neta_mission", () => {
 
 	test("a readWrite agent in a readOnly mission is refused", async () => {
 		const f = fixture("folder");
-		const result = await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+		const result = await missionHandlers.dispatch_mission(ctx(f, f.leaderActor), {
 			name: "bad mix",
 			objective: "o",
 			access: "readOnly",
@@ -602,7 +609,7 @@ describe("neta_mission", () => {
 
 	test("a missing skill refuses and spawns nothing", async () => {
 		const f = fixture("folder");
-		const result = await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+		const result = await missionHandlers.dispatch_mission(ctx(f, f.leaderActor), {
 			name: "skilled",
 			objective: "o",
 			access: "readOnly",
@@ -619,7 +626,7 @@ describe("neta_mission", () => {
 
 	test("an unknown continues mission is notFound", async () => {
 		const f = fixture("folder");
-		const result = await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+		const result = await missionHandlers.dispatch_mission(ctx(f, f.leaderActor), {
 			name: " sequel",
 			objective: "o",
 			access: "readOnly",
@@ -633,9 +640,9 @@ describe("neta_mission", () => {
 		expect(f.saved).toHaveLength(0);
 	});
 
-	test("a delegated mission lead does not take writer access before Lead++", async () => {
+	test("a writing mission lead waits for writer admission", async () => {
 		const f = fixture("folder", { lease: "queued" });
-		const result = await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+		const result = await missionHandlers.dispatch_mission(ctx(f, f.leaderActor), {
 			name: "queued work",
 			objective: "o",
 			access: "readWrite",
@@ -643,32 +650,32 @@ describe("neta_mission", () => {
 		});
 		expect(result.ok).toBe(true);
 		if (result.ok) {
-			expect(result.data.queued).toBeUndefined();
+			expect(result.data.queued).toBe(true);
 			expect(result.data.worktree).toBeNull();
 		}
 		expect(f.saved).toHaveLength(2);
 		expect(f.events).toEqual(["mission.created", "agent.spawned"]);
 	});
 
-	test("a delegated lead begins readOnly and does not consume the writer lease", async () => {
+	test("a writing lead stays queued without launching a runtime", async () => {
 		const f = fixture("git", { lease: "queued" });
-		const result = await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+		const result = await missionHandlers.dispatch_mission(ctx(f, f.leaderActor), {
 			name: "serialized writer",
 			objective: "wait for the worktree",
 			access: "readWrite",
 			lead: { task: "write only after admission" },
 		});
 		expect(result.ok).toBe(true);
-		if (result.ok) expect(result.data.queued).toBeUndefined();
-		expect(f.launches).toHaveLength(1);
-		expect(f.launches[0]?.access).toBe("readOnly");
-		expect(f.briefs).toHaveLength(1);
+		if (result.ok) expect(result.data.queued).toBe(true);
+		expect(f.launches).toHaveLength(0);
+		expect(f.store.listAgents(f.saved[0]?.id)[0]?.access).toBe("readWrite");
+		expect(f.briefs).toHaveLength(0);
 	});
 });
 
-describe("neta_agent", () => {
+describe("spawn_agent", () => {
 	async function withMission(f: Fixture): Promise<string> {
-		const result = await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+		const result = await missionHandlers.dispatch_mission(ctx(f, f.leaderActor), {
 			name: "host mission",
 			objective: "o",
 			access: "readWrite",
@@ -680,36 +687,6 @@ describe("neta_agent", () => {
 		return result.data.id as string;
 	}
 
-	test("agents never take the workspace leader's own name", async () => {
-		const f = fixture("folder");
-		const current = f.store.getLeader("folder-w");
-		if (current === undefined) {
-			throw new Error("no leader");
-		}
-		// The fixture leader is named off-pool; give it a pool name, since
-		// the question is what happens when it competes for one.
-		const leaderName = NAME_POOL[0];
-		await f.store.putLeader({ ...current, name: leaderName });
-		const missionId = await withMission(f);
-		// One agent for every other name in the pool. With the leader's name
-		// spoken for exactly 199 are free, so the names drawn must be the
-		// pool minus it; were the leader not counted, its name would appear
-		// here and one other name would be missing.
-		for (let i = 0; i < NAME_POOL.length - 2; i++) {
-			const result = await missionHandlers.neta_agent(ctx(f, f.leaderActor), {
-				task: `job ${i}`,
-				access: "readWrite",
-				missionId,
-			});
-			if (!result.ok) {
-				throw new Error(`spawn ${i} refused: ${result.message}`);
-			}
-		}
-		const names = f.store.listAgents(missionId).map((agent) => agent.name);
-		expect(names).toHaveLength(NAME_POOL.length - 1);
-		expect(new Set(names)).toEqual(new Set(NAME_POOL.filter((name) => name !== leaderName)));
-	});
-
 	test("a lead adding to its own mission may omit missionId", async () => {
 		const f = fixture("folder");
 		const missionId = await withMission(f);
@@ -718,7 +695,7 @@ describe("neta_agent", () => {
 		if (lead === undefined) {
 			throw new Error("no lead");
 		}
-		const result = await missionHandlers.neta_agent(
+		const result = await missionHandlers.spawn_agent(
 			ctx(f, { kind: "lead", workspaceId: "folder-w", missionId, agentId: lead.id, sessionId: lead.sessionId }),
 			{ task: "extra", access: "readOnly" },
 		);
@@ -740,7 +717,7 @@ describe("neta_agent", () => {
 		if (lead === undefined) {
 			throw new Error("no lead");
 		}
-		const result = await missionHandlers.neta_agent(
+		const result = await missionHandlers.spawn_agent(
 			ctx(f, { kind: "lead", workspaceId: "folder-w", missionId, agentId: lead.id, sessionId: lead.sessionId }),
 			{ task: "roaming", access: "readOnly", missionId: other },
 		);
@@ -749,7 +726,7 @@ describe("neta_agent", () => {
 
 	test("a readWrite agent in a readOnly mission is refused", async () => {
 		const f = fixture("folder");
-		const created = await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+		const created = await missionHandlers.dispatch_mission(ctx(f, f.leaderActor), {
 			name: "read only",
 			objective: "o",
 			access: "readOnly",
@@ -759,7 +736,7 @@ describe("neta_agent", () => {
 			throw new Error("setup failed");
 		}
 		const missionId = created.data.id as string;
-		const result = await missionHandlers.neta_agent(ctx(f, f.leaderActor), {
+		const result = await missionHandlers.spawn_agent(ctx(f, f.leaderActor), {
 			task: "sneaky",
 			access: "readWrite",
 			missionId,
@@ -771,7 +748,7 @@ describe("neta_agent", () => {
 		const f = fixture("folder");
 		const missionId = await withMission(f);
 		const before = f.launches.length;
-		const result = await missionHandlers.neta_agent(ctx(f, f.leaderActor), {
+		const result = await missionHandlers.spawn_agent(ctx(f, f.leaderActor), {
 			task: "skilled",
 			access: "readOnly",
 			missionId,
@@ -786,7 +763,7 @@ describe("neta_agent", () => {
 
 	test("an unknown mission is notFound", async () => {
 		const f = fixture("folder");
-		const result = await missionHandlers.neta_agent(ctx(f, f.leaderActor), {
+		const result = await missionHandlers.spawn_agent(ctx(f, f.leaderActor), {
 			task: "lost",
 			access: "readOnly",
 			missionId: ulid(),
@@ -802,7 +779,7 @@ test("worker model selection is persisted before launch and before writer queue 
 	for (const lease of ["active", "queued"] as const) {
 		const f = fixture("folder", { lease });
 		f.ports.sessions.selectModel = async () => ({ provider: "opencode", model: "openai/connected" });
-		const result = await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+		const result = await missionHandlers.dispatch_mission(ctx(f, f.leaderActor), {
 			name: "connected workers",
 			objective: "inspect",
 			access: "readWrite",
@@ -816,7 +793,7 @@ test("worker model selection is persisted before launch and before writer queue 
 		expect(agent?.provider).toBe("opencode");
 		expect(agent?.model).toBe("openai/connected");
 		if (lease === "active") expect(f.launches.at(-1)?.model).toBe("openai/connected");
-		else expect(f.launches).toHaveLength(1);
+		else expect(f.launches).toHaveLength(0);
 	}
 });
 
@@ -826,7 +803,7 @@ test("unavailable staffing model leaves no mission or agent behind", async () =>
 		throw new Error("requested model unavailable");
 	};
 	await expect(
-		missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+		missionHandlers.dispatch_mission(ctx(f, f.leaderActor), {
 			name: "light worker",
 			objective: "inspect branch",
 			access: "readOnly",
@@ -840,7 +817,7 @@ test("unavailable staffing model leaves no mission or agent behind", async () =>
 
 test("nonempty legacy fallback lists are rejected before reservation; empty lists cannot switch models", async () => {
 	const f = fixture("folder");
-	const denied = await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+	const denied = await missionHandlers.dispatch_mission(ctx(f, f.leaderActor), {
 		name: "invalid plan",
 		objective: "inspect",
 		access: "readOnly",
@@ -849,7 +826,7 @@ test("nonempty legacy fallback lists are rejected before reservation; empty list
 	});
 	expect(denied).toMatchObject({ ok: false, message: expect.stringContaining("fallbackModels is deprecated") });
 	expect(f.store.listMissions(f.leaderActor.workspaceId)).toHaveLength(0);
-	const result = await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+	const result = await missionHandlers.dispatch_mission(ctx(f, f.leaderActor), {
 		name: "small models",
 		objective: "inspect",
 		access: "readOnly",
@@ -865,7 +842,7 @@ test("nonempty legacy fallback lists are rejected before reservation; empty list
 		requestedModel: "small",
 		fallbackModels: [],
 	});
-	const deniedAgent = await missionHandlers.neta_agent(ctx(f, f.leaderActor), {
+	const deniedAgent = await missionHandlers.spawn_agent(ctx(f, f.leaderActor), {
 		missionId: mission.number,
 		task: "inspect",
 		access: "readOnly",
@@ -887,10 +864,12 @@ test("effort routing happens once per child before mission side effects and pers
 			return {
 				provider: "opencode",
 				model: "openai/luna",
+				variant: "medium",
 				routing: {
 					effort: 1,
 					method: "fixed",
 					selectedModel: "openai/luna",
+					selectedVariant: "medium",
 					candidates: ["openai/luna"],
 					reason: "Configured effort 1",
 					warnings: [],
@@ -898,7 +877,7 @@ test("effort routing happens once per child before mission side effects and pers
 			};
 		};
 		f.ports.sessions.selectModel = async ({ provider, model }) => ({ provider, model });
-		const response = await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+		const response = await missionHandlers.dispatch_mission(ctx(f, f.leaderActor), {
 			name: "response check",
 			objective: "Confirm startup",
 			access: "readWrite",
@@ -912,14 +891,29 @@ test("effort routing happens once per child before mission side effects and pers
 		expect(agents).toHaveLength(2);
 		for (const agent of agents) {
 			expect(agent.model).toBe("openai/luna");
+			expect(agent.variant).toBe("medium");
 			expect(agent.routing?.effort).toBe(1);
 		}
+		expect(f.launches.every((launch) => launch.variant === "medium")).toBe(true);
 		expect(agents.find((a) => !a.canSpawn)?.state).toBe(lease === "queued" ? "queued" : "starting");
 		if (response.ok)
 			expect(response.data.agents).toEqual(
-				agents.map((a) => ({ id: a.id, name: a.name, model: a.model, routing: a.routing })),
+				agents.map((a) => ({ id: a.id, name: a.name, model: a.model, variant: a.variant, routing: a.routing })),
 			);
 	}
+});
+
+test("unsupported thinking levels refuse delegation before creating a mission", async () => {
+	const f = fixture("folder");
+	const result = await missionHandlers.dispatch_mission(ctx(f, f.leaderActor), {
+		name: "unsupported variant",
+		objective: "inspect",
+		access: "readOnly",
+		lead: { task: "inspect", model: "test-model", variant: "medium" },
+	});
+	expect(result).toMatchObject({ ok: false, message: expect.stringContaining("OpenCode") });
+	expect(f.saved).toEqual([]);
+	expect(f.launches).toEqual([]);
 });
 
 test("a routing failure leaves no mission, worktree, agents or launches behind", async () => {
@@ -930,7 +924,7 @@ test("a routing failure leaves no mission, worktree, agents or launches behind",
 		throw new Error("Jev abstained");
 	};
 	await expect(
-		missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+		missionHandlers.dispatch_mission(ctx(f, f.leaderActor), {
 			name: "response check",
 			objective: "Confirm startup",
 			access: "readOnly",
@@ -945,7 +939,7 @@ test("a routing failure leaves no mission, worktree, agents or launches behind",
 
 test("adding an agent passes mission context and effort to routing exactly once", async () => {
 	const f = fixture("folder");
-	await missionHandlers.neta_mission(ctx(f, f.leaderActor), {
+	await missionHandlers.dispatch_mission(ctx(f, f.leaderActor), {
 		name: "check",
 		objective: "Read repository status",
 		access: "readOnly",
@@ -957,7 +951,7 @@ test("adding an agent passes mission context and effort to routing exactly once"
 		expect(input).toMatchObject({ task: "inspect branch", objective: "Read repository status", effort: 2 });
 		return { provider: "opencode", model: "openai/luna" };
 	};
-	const response = await missionHandlers.neta_agent(ctx(f, f.leaderActor), {
+	const response = await missionHandlers.spawn_agent(ctx(f, f.leaderActor), {
 		task: "inspect branch",
 		access: "readOnly",
 		effort: 2,

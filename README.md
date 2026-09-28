@@ -4,7 +4,7 @@
 [![npm](https://img.shields.io/npm/v/@intervene/neta)](https://www.npmjs.com/package/@intervene/neta)
 
 Neta is the interface, engine, and machine service for running persistent agent
-teams across workspaces. You talk to the leader belonging to a workspace on a
+teams across workspaces. You talk to the workspace leader for a workspace on a
 machine; sustained work becomes missions with mission leads and agents,
 isolated in worktrees, visible on a spine canvas.
 
@@ -30,7 +30,7 @@ is deferred. This development migration is not an npm release.
 ## Documentation
 
 - [MANIFESTO.md](MANIFESTO.md) — the product: workspaces, leaders, missions,
-  agents, Lead and Lead++, the spine.
+  agents, assigned access, the spine.
 - [How it works](docs/how-it-works.md) — the architecture as it ships today.
 - [Settings](docs/settings.md) — providers, leader defaults, models.
 
@@ -46,7 +46,8 @@ bun run build       # dist/main.js — one file, targets Node
 ```
 
 The supported interactive client is the OpenCode/OpenTUI terminal. Navigate its
-Neta conversations from the left spine; **Help · actions** contains workspace,
+workspace leader, filter, coordinator and mission conversations from the left
+spine. **Help · actions** contains workspace,
 machine, archive, delivery, and reset actions.
 See [model routing](docs/model-routing.md) for Jev or fixed effort-based models.
 
